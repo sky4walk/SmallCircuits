@@ -9,27 +9,30 @@ bottomThickness=2;
 lidThickness=2;
 lidClearance=0.2;
 lidEdgeThickness=0.5;
-dLoch = 7.6;
-dLochStrom = 8;
+dLoch = 8;
+dLochStrom = 9;
 dLochKabel = 4;
 // Notch in the lid
 withNotch=true;
 $fn = 128;
 
-difference() 
-{
-    showBox();
-    rotate([90,0,90]){
+showLid();
+showBoxAll();
 
-        translate([boxWidth/4,boxHeight/1.3,-0.5])
-            cylinder(10+1,dLoch/2,dLoch/2);
+module showBoxAll() {
+    difference() 
+    {
+        showBox();
+        rotate([90,0,90]){
 
-        translate([boxWidth/4,boxHeight/1.3,boxLength-0.5-wallThickness])
-            cylinder(10+1,dLochStrom/2,dLochStrom/2);
+            translate([boxWidth/4,boxHeight/1.3,-0.5])
+                cylinder(10+1,dLoch/2,dLoch/2);
+
+            translate([boxWidth/4,boxHeight/1.3,boxLength-0.5-wallThickness])
+                cylinder(10+1,dLochStrom/2,dLochStrom/2);
+        }
     }
 }
-showLid();
-
 module showLid(){
 	translate ([0, -2*wallThickness, 0]) 
 	roundBoxLid(l=boxLength-wallThickness,
