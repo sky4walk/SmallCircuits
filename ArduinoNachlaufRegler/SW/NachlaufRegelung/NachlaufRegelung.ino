@@ -10,12 +10,13 @@
 // defines
 ///////////////////////////////////////////////
 #define PINSWITCH           11  //D11
-#define PINKEY              12  //D12
+#define PINKEY              10  //D12
+#define PINPOTI             A0
 #define STATE_START         1
 #define STATE_PRESSED       2
 #define STATE_WAIT          3
 #define TIMESWITCHSND       1000
-#define TIMENACHLAUF        3000
+#define TIMENACHLAUF        10 //sekunden
 #define SWITCH_ON           1631343
 #define SWITCH_OFF          1631342
 #define SWITCH_PROT         1
@@ -60,10 +61,15 @@ void setup() {
   mySwitch.setRepeatTransmit(SWITCH_REPEAT);
   // timer
   sendSwitch.setTime(TIMESWITCHSND);
-  switchOb.setTime(TIMENACHLAUF);
+  switchOb.setTime(TIMENACHLAUF*1000);
 }
 
 void loop() {
+  // interval wert lesen
+  int potiVal = analogRead(PINPOTI);
+  int timeVal = map(potiVal, 0, 1023, 0, TIMENACHLAUF*1000);
+  switchOb.setTime(timeVal);
+  
   // schalter abfragen
   if ( LOW == digitalRead(PINKEY) ) {
     swimKey = true;
@@ -80,8 +86,9 @@ void loop() {
         switchState = true;
         switchChg   = true;
         actState = STATE_PRESSED;
-        CONSOLELN(F("STATE_PRESSED"));
-      }
+        CONSOLE(F("STATE_PRESSED: "));
+        CONSOLELN(timeVal);
+    }
       break;
     case STATE_PRESSED:
       if ( false == swimKey ) {
