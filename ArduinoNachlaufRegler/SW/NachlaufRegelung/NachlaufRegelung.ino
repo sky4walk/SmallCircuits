@@ -68,7 +68,7 @@ void loop() {
   // interval wert lesen
   int potiVal = analogRead(PINPOTI);
   int timeVal = map(potiVal, 0, 1023, 0, TIMENACHLAUF*1000);
-  switchOb.setTime(timeVal);
+  switchOb.setTimeNoRestart(timeVal);
   
   // schalter abfragen
   if ( LOW == digitalRead(PINKEY) ) {

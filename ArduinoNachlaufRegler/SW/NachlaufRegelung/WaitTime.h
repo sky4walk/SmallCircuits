@@ -21,6 +21,10 @@ class WaitTime
       mWaitTime = interval;
       init();
     }
+    void setTimeNoRestart(unsigned long interval)
+    {
+      mWaitTime = interval;
+    }
     void init()
     {
       mStartTime = 0;
