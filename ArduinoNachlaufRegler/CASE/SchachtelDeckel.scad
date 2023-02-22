@@ -12,6 +12,7 @@ lidEdgeThickness=0.5;
 dLoch = 8;
 dLochStrom = 9;
 dLochKabel = 4;
+dLochPoti  = 9;
 // Notch in the lid
 withNotch=true;
 $fn = 128;
@@ -30,7 +31,11 @@ module showBoxAll() {
 
             translate([boxWidth/4,boxHeight/1.3,boxLength-0.5-wallThickness])
                 cylinder(10+1,dLochStrom/2,dLochStrom/2);
+            
         }
+        rotate([90,0,0])
+            translate([boxLength/2,boxHeight/1.3,-.5-wallThickness])
+                cylinder(wallThickness+1,dLochPoti/2,dLochPoti/2);
     }
 }
 module showLid(){
