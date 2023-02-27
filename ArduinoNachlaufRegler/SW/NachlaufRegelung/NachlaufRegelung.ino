@@ -16,7 +16,7 @@
 #define STATE_PRESSED       2
 #define STATE_WAIT          3
 #define TIMESWITCHSND       1000
-#define TIMENACHLAUF        10 //sekunden
+#define TIMENACHLAUF        20 //sekunden
 #define SWITCH_ON           1631343
 #define SWITCH_OFF          1631342
 #define SWITCH_PROT         1

@@ -5,11 +5,11 @@ $fn=100;
 
 sa                = 0.1;
 DeckelDurchmesser = 325;
-DeckelRand        = 10;
 DeckelDicke       = 6;
-DeckelNutD        = 2;
+DeckelNutD        = 5;
 DeckelNutH        = 3;
-MillOutL          = 155;
+DeckelRand        = DeckelNutD*2;
+MillOutL          = 156;
 MillOutB          = 50;
 MillMountScrew    = 8.6;
 MillScrewMidX     = 12.6;
@@ -21,25 +21,26 @@ MillPodest        = 24.8;
 MotorScrewDist    = 44;
 MotorM6           = 6;
 MotorRotMount     = 20;
-MotorMountThick   = 5;//20;
+MotorMountThick   = 18;
 MotorScrewGround  = 37;
-
+MotorMillPosY     = 80;
+MotorMillPosX     = 41;
 
 module Nut()
 {
   difference()
   {  
-    cylinder(d=DeckelDurchmesser+2*DeckelNutD,h=DeckelNutH+sa);
+    cylinder(d=DeckelDurchmesser+2*DeckelNutD,h=DeckelNutH);
     translate([0,0,-sa])
         cylinder(d=DeckelDurchmesser,h=DeckelNutH+2*sa);   
   }
 }  
 
-module MillMount(posx, posy,dicke)
+module MillMount(posx, posy, posZ, dicke)
 {
     moveX = (MillL - MillOutL) / 2;
     moveY = (MillB - MillOutB) / 2;
-    translate([posx+moveX ,posy+moveY,-sa])
+    translate([posx+moveX ,posy+moveY,posZ-sa])
     {
         cube([MillOutL,MillOutB,dicke+2*sa]);
         // links
@@ -99,27 +100,53 @@ module MillMountPodest(posX,posY)
   difference()
   { 
       translate([posX,posY,0])
-      cube([MillL,MillB,MillPodest]);      
-      MillMount(posX,posY,MillPodest);
+        cube([MillL,MillB,MillPodest]);      
+      MillMount(posX,posY,0,MillPodest);
   }
 }  
 
-module Deckel()
+module MotorMillCombiPlate(posX,posY)
 {
-  pX = -100;
-  pY = 0;  
+    MillMountPodest(posX,posY);
+    MotorMountScrews(MotorMillPosX,-MotorMillPosY);
+    translate([posX,posY-MotorMillPosY,0])
+    {
+        difference()
+        {
+            cube([MillL,MotorMountThick,MillPodest]);
+            translate([MillMountScrew,MillMountScrew,-sa])
+                cylinder(d=MillMountScrew,h=MillPodest+2*sa);
+            translate([MillL-MillMountScrew,MillMountScrew,-sa])
+                cylinder(d=MillMountScrew,h=MillPodest+2*sa);
+        }
+    }
+    translate([posX,posY-MotorMillPosY+MotorMountThick,0])
+        cube([MotorMountThick,MotorMillPosY-MotorMountThick,MillPodest]);
+    translate([posX+MillL-MotorMountThick,posY-MotorMillPosY+MotorMountThick,0])
+        cube([MotorMountThick,MotorMillPosY-MotorMountThick,MillPodest]);
+    translate([posX+(MillL-MotorMountThick)/2,posY-MotorMillPosY+MotorMountThick,0])
+        cube([MotorMountThick,MotorMillPosY-MotorMountThick,MillPodest]);    
+}
+
+module Deckel(posX,posY)
+{  
   difference()
-  {  
-    cylinder(d=DeckelDurchmesser+2*DeckelRand,h=DeckelDicke);
-    translate([0,0,0])
+  {
+    translate([posX,posY,-DeckelDicke])
+        cylinder(d=DeckelDurchmesser+2*DeckelRand,h=DeckelDicke);
+    translate([posX,posY,-DeckelDicke-sa])
         Nut();
-    MillMount(pX,pY,DeckelDicke);
+    MillMount(0,0,-DeckelDicke,DeckelDicke);
+    translate([0,-MotorMillPosY,-DeckelDicke-sa])
+    {  
+        translate([MillMountScrew,MillMountScrew,-sa])
+            cylinder(d=MillMountScrew,h=MillPodest+2*sa);
+        translate([MillL-MillMountScrew,MillMountScrew,-sa])
+            cylinder(d=MillMountScrew,h=MillPodest+2*sa);
+    }
   }
-  translate([0,0,DeckelDicke])
-    MillMountPodest(pX,pY);
 }  
 
 
-MillMountPodest(0,0);
-//MotorMountScrews(0,0);
-//Deckel();
+MotorMillCombiPlate(0,0);
+//Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
