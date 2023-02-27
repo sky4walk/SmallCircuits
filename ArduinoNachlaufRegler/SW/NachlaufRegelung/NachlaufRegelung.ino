@@ -17,8 +17,8 @@
 #define STATE_WAIT          3
 #define TIMESWITCHSND       1000
 #define TIMENACHLAUF        20 //sekunden
-#define SWITCH_ON           1631343
-#define SWITCH_OFF          1631342
+#define SWITCH_ON           1631341 // 1631343 1631341 1631339 1631335 
+#define SWITCH_OFF          1631340 // 1631342 1631340 1631338 1631334 
 #define SWITCH_PROT         1
 #define SWITCH_PULSELENGTH  315
 #define SWITCH_BITS         24
