@@ -107,7 +107,7 @@ module MillMountPodest(posX,posY)
 
 module MotorMillCombiPlate(posX,posY)
 {
-    MillMountPodest(posX,posY);
+    //MillMountPodest(posX,posY);
     MotorMountScrews(MotorMillPosX,-MotorMillPosY);
     translate([posX,posY-MotorMillPosY,0])
     {
@@ -147,6 +147,6 @@ module Deckel(posX,posY)
   }
 }  
 
-
+MillMountPodest(0,0);
 MotorMillCombiPlate(0,0);
-//Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
+Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
