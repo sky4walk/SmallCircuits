@@ -24,7 +24,7 @@ MotorRotMount     = 20;
 MotorMountThick   = 18;
 MotorScrewGround  = 37;
 MotorMillPosY     = 80;
-MotorMillPosX     = 41;
+MotorMillPosX     = 35;
 
 module Nut()
 {
@@ -149,4 +149,4 @@ module Deckel(posX,posY)
 
 MillMountPodest(0,0);
 MotorMillCombiPlate(0,0);
-Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
+//Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
