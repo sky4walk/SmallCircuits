@@ -17,7 +17,7 @@ MillScrewSideY    = 3.1;
 MillScrewSideD    = 101.1;
 MillB             = 80;
 MillL             = 152+2*28;
-MillPodest        = 23;
+MillPodest        = 26.5;
 MotorScrewDist    = 44;
 MotorM6           = 6;
 MotorRotMount     = 20;
@@ -148,5 +148,5 @@ module Deckel(posX,posY)
 }  
 
 MillMountPodest(0,0);
-//MotorMillCombiPlate(0,0);
+MotorMillCombiPlate(0,0);
 //Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
