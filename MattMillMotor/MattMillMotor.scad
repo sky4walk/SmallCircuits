@@ -17,7 +17,7 @@ MillScrewSideY    = 3.1;
 MillScrewSideD    = 101.1;
 MillB             = 80;
 MillL             = 152+2*28;
-MillPodest        = 24.8;
+MillPodest        = 23;
 MotorScrewDist    = 44;
 MotorM6           = 6;
 MotorRotMount     = 20;
@@ -80,6 +80,7 @@ module MotorMountScrews(posx, posy)
             {
                 translate([-MotorMountThick/2,-MotorScrewGround,0])
                     cube([MotorScrewDist+MotorM6+MotorMountThick,hight+MotorM6+MotorMountThick/2+MotorScrewGround,MotorMountThick]);
+                //translate([MotorM6/2,MotorM6/2,-sa])
                 translate([MotorM6/2,MotorM6/2,-sa])
                 {
                     translate([0,hight,0])
@@ -107,7 +108,6 @@ module MillMountPodest(posX,posY)
 
 module MotorMillCombiPlate(posX,posY)
 {
-    //MillMountPodest(posX,posY);
     MotorMountScrews(MotorMillPosX,-MotorMillPosY);
     translate([posX,posY-MotorMillPosY,0])
     {
@@ -148,5 +148,5 @@ module Deckel(posX,posY)
 }  
 
 MillMountPodest(0,0);
-MotorMillCombiPlate(0,0);
+//MotorMillCombiPlate(0,0);
 //Deckel((DeckelDurchmesser+DeckelRand)/3,-(DeckelDurchmesser+DeckelRand)/10);
