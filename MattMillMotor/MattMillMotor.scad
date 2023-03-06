@@ -23,7 +23,7 @@ MotorM6           = 6;
 MotorRotMount     = 20;
 MotorMountThick   = 18;
 MotorScrewGround  = 37;
-MotorMillPosY     = 80;
+MotorMillPosY     = 85;
 MotorMillPosX     = 35;
 
 module Nut()
