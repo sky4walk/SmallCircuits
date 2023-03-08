@@ -1,6 +1,6 @@
 
 itemsShown="both"; // [both,box,lid]
-boxLength=70;
+boxLength=80;
 boxWidth=40;
 boxHeight=40;
 cornerRadius=5;
@@ -13,8 +13,8 @@ dLoch = 8;
 dLochStrom = 9;
 dLochKabel = 4;
 dLochPoti  = 9;
-switchL = 14;
-switchH = 9;
+switchL = 20;
+switchH = 14;
 // Notch in the lid
 withNotch=true;
 $fn = 128;
@@ -31,13 +31,13 @@ module showBoxAll() {
             translate([boxWidth/4,boxHeight/1.3,-0.5])
                 cylinder(10+1,dLoch/2,dLoch/2);
 
-            translate([boxWidth/2,10,boxLength-0.5-wallThickness])
+            translate([boxWidth/2,12,boxLength-0.5-wallThickness])
                 cylinder(10+1,dLochStrom/2,dLochStrom/2);
             
         }
         //seite
         rotate([90,0,0])
-            translate([(boxLength-switchL)/2,boxHeight-2*switchH,-.5-wallThickness])
+            translate([(boxLength-switchL)/2,boxHeight-1.5*switchH,-.5-wallThickness])
                 cube([switchL,switchH,wallThickness+1]);
     }
 }
