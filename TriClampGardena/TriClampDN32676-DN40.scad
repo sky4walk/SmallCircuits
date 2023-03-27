@@ -1,6 +1,12 @@
 // DN40 1,5Zoll DIN 32676
+// 1 : schweisstutzen
+// 2 : gardena adapter
+// 3 : IG1/2 
+// 4 : AG1/2
+type = 4;
+draft = false;
 
-printtype = 1;
+use <threadlib/threadlib.scad>;
 
 d1 = 38;
 d2 = 41;
@@ -12,20 +18,17 @@ a1 = 20.0;
 r1 = 1.2;
 r2 = 0.8;
 r3 = 3.0;
+r4 = 8.8;
 
-draft = false;
 $fs = draft ? 3 : 0.25;
 $fa = 2;
 $fn = 128;
 
-// 1 : schweisstutzen
-// 2 : gardena adapter
-type = 2;
 
-module GardenaConnector ()
+
+module GardenaConnector (inner_dia)
 {
-    inner_radius = 8.80 / 2;
-    plate_radius = d2 / 2;
+    inner_radius = inner_dia / 2;
     plate_thickness = 1;
 
     root_radius = 19.60 / 2;
@@ -74,8 +77,8 @@ module GardenaConnector ()
     {
         polygon ([
           [inner_radius,    -plate_thickness],
-          [plate_radius,    -plate_thickness],
-          [plate_radius,    0],
+          [inner_radius,    -plate_thickness],
+          [inner_radius,    0],
           [root_radius,     0],
           [root_radius,     neck_y],
           [neck_radius,     neck_y],
@@ -108,34 +111,56 @@ module GardenaConnector ()
         profile ();
 }
 
-module clamp(hoehe)
+module clamp_raw(opener)
 {
+    h1 = d3/2 / tan(90-a1);
     difference() {
         union() {
             cylinder(h=l4,r1=d3/2,r2=d3/2);
-            translate ([0, 0, l4])
-                cylinder(h=hoehe-l4,r1=d2/2,r2=d2/2);
-            translate ([0, 0, l4])
-                cylinder(h=hoehe-l4,r1=d2/2,r2=d2/2);
-            h1 = d3/2 / tan(90-a1);
             translate ([0, 0, l4]) cylinder(h=h1,r1=d3/2,r2=0);
         }
-        translate ([0, 0, -0.1]) 
-            cylinder(h=l3+0.2,r1=d1/2,r2=d1/2);
-        rotate_extrude(){
-            translate([d4/2, 0, 0])
-                circle(r1); 
-        }
+        translate ([0, 0, -0.1]) cylinder(h=l3+0.2,r1=opener,r2=opener);
+        rotate_extrude() translate([d4/2, 0, 0]) circle(r1); 
+        
     }
+}
+module clamp_flansch()
+{
+    clamp_raw(d1/2);
+    difference() {
+        cylinder(h=l3+l4,r1=d2/2,r2=d2/2);
+        translate ([0, 0, -0.1]) cylinder(h=l3+l4+.2,r1=d1/2,r2=d1/2);
+    }    
 }
 
 if ( 1 == type )
 {
-    clamp(l3);
+    clamp_flansch();
 } 
 else if ( 2 == type )
 {
     posGardena=6;
-    translate ([0, 0,posGardena])GardenaConnector ();
-    clamp(posGardena);
+    translate ([0, 0,posGardena])GardenaConnector (r4);
+    clamp_raw(r4/2);
+}
+else if ( 3 == type )
+{
+    posGardena=6;
+    translate ([0, 0,posGardena])
+        nut("G1/2", turns=10, Douter=25);
+    clamp_raw(r4);
+}
+else if ( 4 == type )
+{
+    infill=6;
+    difference() 
+    {
+        union()
+        {
+            translate ([0, 0,infill])
+                bolt("G1/2", turns=10);
+            clamp_raw(infill);
+        }
+        translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
+    }    
 }
