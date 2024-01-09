@@ -3,7 +3,7 @@
 // 2 : gardena adapter
 // 3 : IG1/2 
 // 4 : AG1/2
-type = 4;
+type = 5;
 draft = false;
 
 use <threadlib/threadlib.scad>;
@@ -163,4 +163,44 @@ else if ( 4 == type )
         }
         translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
     }    
+} else if ( 5 == type ) {
+    dInnen      = 13;
+    dAussen1    = 16;
+    dAussen2    = 18;
+    lUnten      = 4;
+    lSteig      = 1;
+    lKugeln     = 3;
+    lLang       = 11;
+    lNose       = 2.5;
+    lRest       = 0.5;
+    StartPos    = 8.8;
+    hoehe = lUnten+lSteig+lKugeln+lSteig+lLang+lSteig+lNose+lRest; 
+    echo(hoehe);
+    translate([0,0,StartPos]) {
+        difference()
+        { 
+            union() 
+            {
+                translate([0,0,0])
+                    cylinder(h = lUnten, r1 = dAussen2/2,r2 = dAussen2/2, $fn=100);
+                translate([0,0,lUnten])
+                    cylinder(h = lSteig, r1 = dAussen2/2, r2 = dAussen1/2, $fn=100);
+                translate([0,0,lUnten+lSteig])
+                    cylinder(h = lKugeln, r1 = dAussen1/2, r2 = dAussen1/2, $fn=100);
+                translate([0,0,lUnten+lSteig+lKugeln])
+                    cylinder(h = lSteig, r1 = dAussen1/2, r2 = dAussen2/2, $fn=100);
+                translate([0,0,lUnten+lSteig+lKugeln+lSteig])
+                    cylinder(h = lLang, r1 = dAussen2/2, r2 = dAussen2/2, $fn=100);
+                translate([0,0,lUnten+lSteig+lKugeln+lSteig+lLang])
+                    cylinder(h = lSteig, r1 = dAussen2/2, r2 = dAussen1/2, $fn=100);
+                translate([0,0,lUnten+lSteig+lKugeln+lSteig+lLang+lSteig])
+                    cylinder(h = lNose, r1 = dAussen1/2, r2 = dAussen1/2, $fn=100);
+                translate([0,0,lUnten+lSteig+lKugeln+lSteig+lLang+lSteig+lNose])
+                    cylinder(h = lRest, r1 = dAussen1/2, r2 = dInnen/2, $fn=100);
+            }
+            translate([0,0,-.1])
+                cylinder(h = hoehe+.2, r = dInnen/2, $fn=100);
+        }
+    }
+    clamp_raw(dInnen/2);
 }
