@@ -3,7 +3,7 @@
 // 2 : gardena adapter
 // 3 : IG1/2 
 // 4 : AG1/2
-type = 5;
+type = 6;
 draft = false;
 
 use <threadlib/threadlib.scad>;
@@ -203,4 +203,18 @@ else if ( 4 == type )
         }
     }
     clamp_raw(dInnen/2);
+} else if ( 6 == type ) {
+    posGardena=6;
+    dInnen      = 13;
+    difference()
+    {         
+        union() 
+        {
+            translate ([0, 0,posGardena])
+                bolt("G3/4", turns=10);
+            clamp_raw(r4);
+        }
+        translate([0,0,-.1])
+            cylinder(h = 100+.2, r = r4+1, $fn=100);
+    }
 }
