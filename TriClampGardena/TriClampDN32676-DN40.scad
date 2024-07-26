@@ -3,7 +3,8 @@
 // 2 : gardena adapter
 // 3 : IG1/2 
 // 4 : AG1/2
-type = 6;
+// 7 : Tauchrohr
+type = 7;
 draft = false;
 
 use <threadlib/threadlib.scad>;
@@ -19,10 +20,11 @@ r1 = 1.2;
 r2 = 0.8;
 r3 = 3.0;
 r4 = 8.8;
+add_l = 0.1;
 
 $fs = draft ? 3 : 0.25;
 $fa = 2;
-$fn = 128;
+$fn = draft ? 50 : 128;
 
 
 
@@ -133,6 +135,71 @@ module clamp_flansch()
     }    
 }
 
+module pie(r, a)  
+{
+    extra = 5;
+    module halfcircle(r)  
+    {
+        difference()  
+        { 
+            circle(r);
+            translate([-r, -r])
+            {
+                square([r, 2*r+extra]);
+            }
+        }
+    }
+    angle = a % 180;
+    half  = a % 360 - angle;
+    if (half) 
+    {
+        halfcircle(r);
+    }
+    rotate([0, 0, half])
+    {
+        difference()  
+        {  
+            halfcircle(r);
+            rotate([0, 0, angle])      
+                halfcircle(r+extra); 
+        }
+    }
+}      
+
+module torus(innen_r1, aussen_r2)  
+{
+    x = (aussen_r2 + innen_r1) / 2;
+	y = (aussen_r2 - innen_r1) / 2;
+    rotate_extrude(convexity = 16)
+    {
+        translate([x, y])
+        {
+            circle(r = y);
+        }
+    }
+}
+
+module pipe(aussen_r1, pipe_r2, wall_thick, bend_angle)  
+{
+    pipe_dia = 2 * min(aussen_r1, pipe_r2/2);
+    inner = pipe_r2 - pipe_dia;
+    intersection()  
+    {
+        difference()  
+        {
+            torus(inner, pipe_r2);
+            translate([0, 0, wall_thick])
+            {
+                torus(inner+wall_thick, pipe_r2-wall_thick);
+            }
+        }
+        linear_extrude(pipe_dia)
+        {
+            pie(pipe_r2, bend_angle);
+        }
+    }
+}
+
 if ( 1 == type )
 {
     clamp_flansch();
@@ -216,5 +283,40 @@ else if ( 4 == type )
         }
         translate([0,0,-.1])
             cylinder(h = 100+.2, r = r4+1, $fn=100);
+    }
+} else if ( 7 == type ) {
+    outer_radius = 55;
+    pipe_radius  = 18/2;	
+    wall         = 3/2;
+    angle        = 90;
+    tube_length1 = 11;
+    tube_length2 = 26;
+
+    pipe(pipe_radius , outer_radius, wall, angle);
+    
+    translate([outer_radius-pipe_radius,tube_length1+tube_length2,pipe_radius])
+    {
+        rotate([90, 0, 0])
+        {
+            union()
+            {
+                clamp_raw( pipe_radius );
+                difference()
+                {
+                    cylinder (r=pipe_radius ,h=tube_length1+tube_length2);
+                    translate([0,0,-add_l])
+                    {
+                        cylinder (r=pipe_radius -wall,h=tube_length1+tube_length2+2*add_l);
+                    }
+                }
+            }
+        }
+    }
+    translate([outer_radius-pipe_radius,tube_length1,pipe_radius])
+    {
+        rotate([-90, 0, 0])
+        {
+            clamp_raw( pipe_radius );
+        }
     }
 }
