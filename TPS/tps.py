@@ -30,6 +30,30 @@ def parse_hex_file_with_address(filename):
 def is_bit_set(number, position):
     mask = 1 << position  # Verschiebe 1 um die angegebene Bit-Position
     return (number & mask) != 0  # Prüfe, ob das Bit gesetzt ist
+    
+def convertNr2Bits(number):
+    bit1 = False
+    bit2 = False
+    bit3 = False
+    bit4 = False
+
+    if is_bit_set( number,0 ) :
+        bit1 = True
+    if is_bit_set( number,1 ) :
+        bit2 = True
+    if is_bit_set( number,2 ) :
+        bit3 = True
+    if is_bit_set( number,3 ) :
+        bit4 = True
+    return bit4,bit3,bit2,bit1
+
+def convertBits2Nr(bit4, bit3, bit2, bit1):
+    result = 0
+    result  = int(bit1) << 3  # bit1 wird in die höchste Position (2^3) verschoben
+    result |= int(bit2) << 2  # bit2 wird um 2 Positionen verschoben
+    result |= int(bit3) << 1  # bit3 wird um 1 Position verschoben
+    result |= int(bit4)       # bit4 bleibt in der niedrigsten Position
+    return result
 
 class cpu_HT46F47E:
     def __init__(self,startAdr):
@@ -79,30 +103,6 @@ class cpu_HT46F47E:
         print("Pin6_SW2_PB2:    ",self.Pin6_SW2_PB2)
         print("Command:         ",self.command)
         print("Param:           ",self.param)
-
-def convertNr2Bits(number):
-    bit1 = False
-    bit2 = False
-    bit3 = False
-    bit4 = False
-
-    if is_bit_set( number,0 ) :
-        bit1 = True
-    if is_bit_set( number,1 ) :
-        bit2 = True
-    if is_bit_set( number,2 ) :
-        bit3 = True
-    if is_bit_set( number,3 ) :
-        bit4 = True
-    return bit4,bit3,bit2,bit1
-
-def convertBits2Nr(bit4, bit3, bit2, bit1):
-    result = 0
-    result  = int(bit1) << 3  # bit1 wird in die höchste Position (2^3) verschoben
-    result |= int(bit2) << 2  # bit2 wird um 2 Positionen verschoben
-    result |= int(bit3) << 1  # bit3 wird um 1 Position verschoben
-    result |= int(bit4)       # bit4 bleibt in der niedrigsten Position
-    return result
 
 def simulateTPS_Step(cpuDef,commands):
     command = commands[cpuDef.PC]
@@ -300,6 +300,57 @@ def simulateTPS_Step(cpuDef,commands):
 
     return cpuDef
 
+def setButton1(pressed): #Input button
+    if True == pressed: 
+        print("S1 1")
+    else:
+        print("S1 0")
+
+def setButton2(pressed): #store button
+    if True == pressed: 
+        print("S2 1")
+    else:
+        print("S2 0")
+
+def setButton3(pressed): #reset button
+    if True == pressed: 
+        print("S3 1")
+    else:
+        print("S3 0")
+
+def sendDigit(number):
+    for x in range(number):
+        setButton1(False)
+        time.sleep(0.5)
+        setButton1(True)
+        time.sleep(0.5)
+    setButton2(False)
+    time.sleep(0.5)
+    setButton2(True)
+    
+def sendCommandsToTPS(commands):
+    setButton1(True)
+    setButton2(True)
+    setButton3(True)
+
+    #switch to programming mode
+    setButton2(False)
+    setButton3(False)
+    time.sleep(0.5)
+    setButton3(True)
+    time.sleep(1)
+    setButton2(True)
+    
+    for cmd in commands:        
+        command = int(cmd[1][0],16)
+        param   = int(cmd[1][1],16)
+        sendDigit(command)
+        sendDigit(param)
+    
+    setButton1(True)
+    setButton2(True)
+    setButton3(True)
+
 commands = parse_hex_file_with_address("test.tps")
 cpuDef =  cpu_HT46F47E(0)
 cpuDef.print()
@@ -313,3 +364,4 @@ print("---------------------------------")
 cpuDef = simulateTPS_Step(cpuDef,commands)
 cpuDef.print()
 print("---------------------------------")
+sendCommandsToTPS(commands)
