@@ -1,7 +1,7 @@
-inner_width_of_collars = 60;
+inner_width_of_collars = 61;
 height_of_holder       = 200; 
 depth_of_hook          = 40;
-height_of_hook         = 30;
+height_of_hook         = 40;
 height_of_collars      = 30; 
 thickness_of_holder    = 8;
 thickness_of_collars   = 5;
