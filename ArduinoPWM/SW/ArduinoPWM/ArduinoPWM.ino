@@ -6,7 +6,7 @@ void setup() {
   Serial.begin(9600);
   pinMode(PWM_Pin, OUTPUT);
   pinMode(analogPin, INPUT);
-  analogWriteResolution(8);
+  //analogWriteResolution(8);
 }
 
 void loop() {
