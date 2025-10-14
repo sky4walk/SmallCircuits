@@ -1,5 +1,6 @@
 schlauchD = 22;
 schlauchT =  2;
+schlauchE = 10;
 halterL   = 50;
 halterB   = 10;
 halterNr  =  5;
@@ -24,9 +25,9 @@ module prism(l, w, h) {
                );}
 
 module Halter() {
-    prism(halterB, schlauchD+schlauchT, 5);
+    prism(halterB, schlauchD+schlauchE+schlauchT, 5);
     translate([0,0,-halterL])
-        cube([halterB,schlauchD+schlauchT,halterL]);
+        cube([halterB,schlauchD+schlauchE+schlauchT,halterL]);
 }
 
 for ( i = [0:halterNr] ) {
