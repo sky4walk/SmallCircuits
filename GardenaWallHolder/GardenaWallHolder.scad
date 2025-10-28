@@ -7,7 +7,7 @@ halterR   = 10;
 halterNr  =  5;
 wallMntD  = 10;
 screwM    = 5;
-
+new = true;
 
 
 module prism(l, w, h) {
@@ -26,9 +26,14 @@ module prism(l, w, h) {
                );}
 
 module Halter() {
-    prism(halterB, schlauchD+schlauchE+schlauchT, halterR);
-    translate([0,0,-halterL])
+    translate([0,0,-halterL]) 
         cube([halterB,schlauchD+schlauchE+schlauchT,halterL]);
+    if ( true == new ) {
+        translate([0,schlauchD+schlauchE,-halterL]) 
+            cube([halterB,halterR,halterR+halterL]);   
+    } else {
+        prism(halterB, schlauchD+schlauchE+schlauchT, halterR);
+    }
 }
 
 for ( i = [0:halterNr] ) {
