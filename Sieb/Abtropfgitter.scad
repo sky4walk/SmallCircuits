@@ -12,20 +12,23 @@ radSteps = 5;
 PRESSDECKEL = false;
 FUESSE      = false;
 RAND        = true;
+SIEB        = true;
 
 stepsX = ( breite - loecherD ) / (loecherD * 2);
 stepsY = ( laenge - loecherD ) / (loecherD * 2);
 stepsZ = korbH / (loecherD * 2);
 
 
-difference() {
-    cube([laenge,breite,dicke]);
-       
-    for ( j = [0:1:stepsY-1] ) {
-        for ( i = [0:1:stepsX-1] ) {
-            translate([loecherD*2*(1+i),loecherD*2*(1+j),-.1])
-                cylinder(h=dicke+0.2,d=loecherD,$fn=50);    
-            
+if ( SIEB ) {
+    difference() {
+        cube([laenge,breite,dicke]);
+           
+        for ( j = [0:1:stepsY-1] ) {
+            for ( i = [0:1:stepsX-1] ) {
+                translate([loecherD*2*(1+i),loecherD*2*(1+j),-.1])
+                    cylinder(h=dicke+0.2,d=loecherD,$fn=50);    
+                
+            }
         }
     }
 }
