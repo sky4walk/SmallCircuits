@@ -4,7 +4,8 @@
 // 3 : IG1/2 
 // 4 : AG1/2
 // 7 : Tauchrohr
-type = 7;
+// 8 : IG5/8
+type = 8;
 draft = false;
 
 use <threadlib/threadlib.scad>;
@@ -320,3 +321,11 @@ else if ( 4 == type )
         }
     }
 }
+else if ( 8 == type )
+{
+    posGardena=6;
+    translate ([0, 0,posGardena])
+        nut("G5/8", turns=10, Douter=25);
+    clamp_raw(r4);
+}
+
