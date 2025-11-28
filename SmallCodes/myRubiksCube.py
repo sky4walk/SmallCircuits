@@ -1,256 +1,470 @@
-import matplotlib.pyplot as plt
 import numpy as np
-import random
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-def draw_rubiks_cube(state):
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_xlim(0, 12)
-    ax.set_ylim(0, 9)
-    ax.set_frame_on(False)
-    
-    # Positionen für die 6 Flächen
-    face_positions = {
-        'U': (3, 6), 'L': (0, 3), 'F': (3, 3), 'R': (6, 3), 'B': (9, 3), 'D': (3, 0)
-    }
-    
-    # Farben für die Flächen (Weiß, Rot, Blau, Orange, Grün, Gelb)
-    face_colors = {'W': 'white', 'R': 'red', 'B': 'blue', 'O': 'orange', 'G': 'green', 'Y': 'yellow'}
-    
-    for face, (x_offset, y_offset) in face_positions.items():
-        for i in range(3):
-            for j in range(3):
-                color = face_colors[state[face][i][j]]
-                rect = plt.Rectangle((x_offset + j, y_offset + (2 - i)), 1, 1, edgecolor='black', facecolor=color)
-                ax.add_patch(rect)
-                
-    plt.show()
+class RubiksCube:
+    def __init__(self):
+        # Define colors for each face: Front, Back, Left, Right, Up, Down
+        self.colors = {
+            'F': 'red',      # Front
+            'B': 'orange',   # Back
+            'L': 'green',    # Left
+            'R': 'blue',     # Right
+            'U': 'white',    # Up
+            'D': 'yellow'    # Down
+        }
 
-def copy_cube_state(state):
-    return {face: [row[:] for row in state[face]] for face in state}
+        # Initialize cube state (3x3x3 array of colors)
+        self.state = self.initialize_cube()
 
-def rotate_face(face, counterclockwise=False, double=False):
-    if double:
-        return rotate_face(rotate_face(face))
-    if counterclockwise:
-        return [list(row) for row in zip(*face[::-1])]
-    return [list(row) for row in zip(*face)][::-1]
+    def initialize_cube(self):
+        """Initialize a solved cube"""
+        cube = np.empty((3, 3, 3), dtype=object)
 
-def rotate_cube(outer_state, moves):
-    if isinstance(moves, str):
-        moves = [moves]
-    
-    state = copy_cube_state(outer_state)
+        # Each small cube has 6 faces, we'll store which face colors are visible
+        for x in range(3):
+            for y in range(3):
+                for z in range(3):
+                    cube[x, y, z] = {
+                        'front': 'red' if z == 2 else 'black',
+                        'back': 'orange' if z == 0 else 'black',
+                        'left': 'green' if x == 0 else 'black',
+                        'right': 'blue' if x == 2 else 'black',
+                        'up': 'white' if y == 2 else 'black',
+                        'down': 'yellow' if y == 0 else 'black'
+                    }
 
-    for move in moves:
-        counterclockwise = "'" in move
-        double = "2" in move
-        move = move.replace("'", "").replace("2", "")
-        
-        if move in ['U', 'D', 'F', 'B', 'L', 'R']:
-            state[move] = rotate_face(state[move], counterclockwise, double)
-        
-        for _ in range(2 if double else 1):
-            
-            if move == 'U': #up
-                state['F'][0], state['R'][0], state['B'][0], state['L'][0] = state['R'][0], state['B'][0], state['L'][0], state['F'][0]
-            elif move == 'D': #down
-                state['F'][2], state['L'][2], state['B'][2], state['R'][2] = state['L'][2], state['B'][2], state['R'][2], state['F'][2]
-            elif move == 'F':  # Front
-                temp = state['U'][2].copy()
-                for i in range(3):
-                    state['U'][2][i]     = state['L'][2 - i][2]
-                    state['L'][2 - i][2] = state['D'][0][2 - i]
-                    state['D'][0][2 - i] = state['R'][i][0]
-                    state['R'][i][0]     = temp[i]
-            elif move == 'B': #back
-                for i in range(3):
-                    state['U'][0][i], state['L'][2 - i][0], state['D'][2][2 - i], state['R'][i][2] = state['R'][i][2], state['U'][0][i], state['L'][2 - i][0], state['D'][2][2 - i]
-            elif move == 'L': #left
-                for i in range(3):
-                    state['U'][i][0], state['B'][2 - i][2], state['D'][i][0], state['F'][i][0] = state['F'][i][0], state['U'][i][0], state['B'][2 - i][2], state['D'][i][0]
-            elif move == 'R': #right
-                for i in range(3):
-                    state['U'][i][2], state['F'][i][2], state['D'][i][2], state['B'][2 - i][0] = state['B'][2 - i][0], state['U'][i][2], state['F'][i][2], state['D'][i][2]
-    
-    return state
+        return cube
 
+    def draw_cube(self, ax):
+        """Draw the Rubik's Cube"""
+        ax.clear()
 
-def generate_random_moves(num_moves=20):
-    possible_moves = ['U', 'D', 'F', 'B', 'L', 'R']
-    modifiers = ['', "'", '2']
-    return [random.choice(possible_moves) + random.choice(modifiers) for _ in range(num_moves)]
+        size = 1
+        gap = 0.05
 
-def find_edges_color(state, color):
-    color_edges = []
-    edge_positions = {
-        'U': [(0, 1), (1, 0), (1, 2), (2, 1)],
-        'D': [(0, 1), (1, 0), (1, 2), (2, 1)],
-        'F': [(0, 1), (1, 0), (1, 2), (2, 1)],
-        'B': [(0, 1), (1, 0), (1, 2), (2, 1)],
-        'L': [(0, 1), (1, 0), (1, 2), (2, 1)],
-        'R': [(0, 1), (1, 0), (1, 2), (2, 1)]
-    }
-    
-    for face, positions in edge_positions.items():
-        for pos in positions:
-            if state[face][pos[0]][pos[1]] == color:
-                color_edges.append((face, pos))
-    
-    return color_edges
+        for x in range(3):
+            for y in range(3):
+                for z in range(3):
+                    center = np.array([x * (size + gap), y * (size + gap), z * (size + gap)])
+                    colors = self.state[x, y, z]
+                    self.draw_cubie(ax, center, size, colors)
 
-def find_corners_color(state, color):
-    color_corners = []
-    corner_positions = {
-        'U': [(0, 0), (0, 2), (2, 0), (2, 2)],
-        'D': [(0, 0), (0, 2), (2, 0), (2, 2)],
-        'F': [(0, 0), (0, 2), (2, 0), (2, 2)],
-        'B': [(0, 0), (0, 2), (2, 0), (2, 2)],
-        'L': [(0, 0), (0, 2), (2, 0), (2, 2)],
-        'R': [(0, 0), (0, 2), (2, 0), (2, 2)]
-    }
-    
-    for face, positions in corner_positions.items():
-        for pos in positions:
-            if state[face][pos[0]][pos[1]] == color:
-                color_corners.append((face, pos))
-    
-    return color_corners
+        ax.set_xlim([-0.5, 3])
+        ax.set_ylim([-0.5, 3])
+        ax.set_zlim([-0.5, 3])
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.set_title('Rubik\'s Cube - Buttons zum Drehen verwenden')
 
-def find_center_color(state, color):
-    color_corners = []
-    corner_positions = {
-        'U': [(1, 1)],
-        'D': [(1, 1)],
-        'F': [(1, 1)],
-        'B': [(1, 1)],
-        'L': [(1, 1)],
-        'R': [(1, 1)]
-    }
-    
-    for face, positions in corner_positions.items():
-        for pos in positions:
-            if state[face][pos[0]][pos[1]] == color:
-                color_corners.append((face, pos))
-    
-    return color_corners
+    def draw_cubie(self, ax, center, size, colors):
+        """Draw a single cubie (small cube)"""
+        s = size / 2
 
-def print_rubiks_cube(state):
-    for face in ['U', 'L', 'F', 'R', 'B', 'D']:
-        print(face + ':')
-        for row in state[face]:
-            print(' '.join(row))
-        print()
+        # Define the 6 faces of the cube
+        faces = [
+            # Front face (z+)
+            [center + np.array([-s, -s, s]), center + np.array([s, -s, s]),
+             center + np.array([s, s, s]), center + np.array([-s, s, s])],
+            # Back face (z-)
+            [center + np.array([-s, -s, -s]), center + np.array([-s, s, -s]),
+             center + np.array([s, s, -s]), center + np.array([s, -s, -s])],
+            # Left face (x-)
+            [center + np.array([-s, -s, -s]), center + np.array([-s, -s, s]),
+             center + np.array([-s, s, s]), center + np.array([-s, s, -s])],
+            # Right face (x+)
+            [center + np.array([s, -s, -s]), center + np.array([s, s, -s]),
+             center + np.array([s, s, s]), center + np.array([s, -s, s])],
+            # Up face (y+)
+            [center + np.array([-s, s, -s]), center + np.array([-s, s, s]),
+             center + np.array([s, s, s]), center + np.array([s, s, -s])],
+            # Down face (y-)
+            [center + np.array([-s, -s, -s]), center + np.array([s, -s, -s]),
+             center + np.array([s, -s, s]), center + np.array([-s, -s, s])]
+        ]
 
-def print_rubiks_cube_2D(state):
-    net = [[' ']*12 for _ in range(9)]
-    
-    positions = {
-        'U': (0, 3), 'L': (3, 0), 'F': (3, 3), 'R': (3, 6), 'B': (3, 9), 'D': (6, 3)
-    }
-    
-    for face, (x_offset, y_offset) in positions.items():
-        for i in range(3):
-            for j in range(3):
-                net[x_offset + i][y_offset + j] = state[face][i][j]
-    
-    for row in net:
-        print(' '.join(row))
+        face_colors = [colors['front'], colors['back'], colors['left'],
+                      colors['right'], colors['up'], colors['down']]
 
-def generate_initial_state():
-    # Initialer Zustand des Rubik's Cubes
-    initial_state = {
-        'U': [['W', 'W', 'W'], ['W', 'W', 'W'], ['W', 'W', 'W']], 
-        'L': [['O', 'O', 'O'], ['O', 'O', 'O'], ['O', 'O', 'O']], 
-        'F': [['G', 'G', 'G'], ['G', 'G', 'G'], ['G', 'G', 'G']],
-        'R': [['R', 'R', 'R'], ['R', 'R', 'R'], ['R', 'R', 'R']],
-        'B': [['B', 'B', 'B'], ['B', 'B', 'B'], ['B', 'B', 'B']],
-        'D': [['Y', 'Y', 'Y'], ['Y', 'Y', 'Y'], ['Y', 'Y', 'Y']]
-    }
-    return initial_state
+        for face, color in zip(faces, face_colors):
+            poly = Poly3DCollection([face], alpha=0.9, facecolor=color,
+                                   edgecolor='black', linewidth=1.5)
+            ax.add_collection3d(poly)
 
-def get_corresponding_corner_positions(face, pos):
-    corner_map = {
-        'U': {(0, 0): [('L', (0, 0)), ('B', (0, 2))],
-              (0, 2): [('B', (0, 0)), ('R', (0, 2))],
-              (2, 0): [('L', (0, 2)), ('F', (0, 0))],
-              (2, 2): [('F', (0, 2)), ('R', (0, 0))]},
-        
-        'D': {(0, 0): [('L', (2, 0)), ('F', (2, 0))],
-              (0, 2): [('F', (2, 2)), ('R', (2, 0))],
-              (2, 0): [('L', (2, 2)), ('B', (2, 2))],
-              (2, 2): [('B', (2, 0)), ('R', (2, 2))]},
-        
-        'F': {(0, 0): [('U', (2, 0)), ('L', (0, 2))],
-              (0, 2): [('U', (2, 2)), ('R', (0, 0))],
-              (2, 0): [('D', (0, 0)), ('L', (2, 2))],
-              (2, 2): [('D', (0, 2)), ('R', (2, 0))]},
-        
-        'B': {(0, 0): [('U', (0, 2)), ('R', (0, 2))],
-              (0, 2): [('U', (0, 0)), ('L', (0, 0))],
-              (2, 0): [('D', (2, 2)), ('R', (2, 2))],
-              (2, 2): [('D', (2, 0)), ('L', (2, 0))]},
-        
-        'L': {(0, 0): [('U', (0, 0)), ('B', (0, 2))],
-              (0, 2): [('U', (2, 0)), ('F', (0, 0))],
-              (2, 0): [('D', (2, 0)), ('B', (2, 2))],
-              (2, 2): [('D', (0, 0)), ('F', (2, 0))]},
-        
-        'R': {(0, 0): [('U', (2, 2)), ('F', (0, 2))],
-              (0, 2): [('U', (0, 2)), ('B', (0, 0))],
-              (2, 0): [('D', (0, 2)), ('F', (2, 2))],
-              (2, 2): [('D', (2, 2)), ('B', (2, 0))]}
-    }
-    
-    return corner_map.get(face, {}).get(pos, [])
-    
-def get_corresponding_edge_positions(face, pos):
-    edge_map = {
-        'U': {(0, 1): ('B', (0, 1)), (1, 0): ('L', (0, 1)), (1, 2): ('R', (0, 1)), (2, 1): ('F', (0, 1))},
-        'D': {(0, 1): ('F', (2, 1)), (1, 0): ('L', (2, 1)), (1, 2): ('R', (2, 1)), (2, 1): ('B', (2, 1))},
-        'F': {(0, 1): ('U', (2, 1)), (1, 0): ('L', (1, 2)), (1, 2): ('R', (1, 0)), (2, 1): ('D', (0, 1))},
-        'B': {(0, 1): ('U', (0, 1)), (1, 0): ('R', (1, 2)), (1, 2): ('L', (1, 0)), (2, 1): ('D', (2, 1))},
-        'L': {(0, 1): ('U', (1, 0)), (1, 0): ('B', (1, 2)), (1, 2): ('F', (1, 0)), (2, 1): ('D', (1, 0))},
-        'R': {(0, 1): ('U', (1, 2)), (1, 0): ('F', (1, 2)), (1, 2): ('B', (1, 0)), (2, 1): ('D', (1, 2))}
-    }
-    
-    return edge_map.get(face, {}).get(pos, None)
+    def rotate_face(self, face, clockwise=True):
+        """Rotate a face of the cube"""
+        if face == 'F':  # Front face (z=2)
+            self.rotate_front(clockwise)
+        elif face == 'B':  # Back face (z=0)
+            self.rotate_back(clockwise)
+        elif face == 'R':  # Right face (x=2)
+            self.rotate_right(clockwise)
+        elif face == 'L':  # Left face (x=0)
+            self.rotate_left(clockwise)
+        elif face == 'U':  # Up face (y=2)
+            self.rotate_up(clockwise)
+        elif face == 'D':  # Down face (y=0)
+            self.rotate_down(clockwise)
 
-def get_color_of_position(state, face, pos):
-    """Gibt die Farbe einer bestimmten Position auf dem Rubik's Cube zurück."""
-    if face in state and 0 <= pos[0] < 3 and 0 <= pos[1] < 3:
-        return state[face][pos[0]][pos[1]]
-    return None  # Falls eine ungültige Eingabe gemacht wurde
+    def rotate_front(self, clockwise=True):
+        """Rotate front face (z=2)"""
+        # Extract the layer
+        old_layer = [[self.state[x, y, 2].copy() for y in range(3)] for x in range(3)]
 
-initial_state = generate_initial_state()
+        # Rotate positions clockwise: (0,0)->(2,0)->(2,2)->(0,2)->(0,0)
+        if clockwise:
+            # New positions after clockwise rotation
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+        else:
+            # Counter-clockwise
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
 
-state1 = rotate_cube(initial_state,"U")
-draw_rubiks_cube(state1)
+        # Apply rotation
+        for (old_x, old_y), (new_x, new_y) in positions:
+            old_colors = old_layer[old_x][old_y]
+            new_colors = old_colors.copy()
 
-state2 = rotate_cube(state1,"R")
-draw_rubiks_cube(state2)
+            # Rotate the stickers on the front face
+            if clockwise:
+                new_colors['up'] = old_colors['left']
+                new_colors['right'] = old_colors['up']
+                new_colors['down'] = old_colors['right']
+                new_colors['left'] = old_colors['down']
+            else:
+                new_colors['up'] = old_colors['right']
+                new_colors['right'] = old_colors['down']
+                new_colors['down'] = old_colors['left']
+                new_colors['left'] = old_colors['up']
 
-state3 = rotate_cube(state2,"U")
-draw_rubiks_cube(state3)
+            self.state[new_x, new_y, 2] = new_colors
 
+    def rotate_right(self, clockwise=True):
+        """Rotate right face (x=2)"""
+        old_layer = [[self.state[2, y, z].copy() for z in range(3)] for y in range(3)]
 
-random_moves = generate_random_moves()
-print("Random Moves:", random_moves)
+        if clockwise:
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+        else:
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
 
-positions = find_edges_color(initial_state,'W')
-print("positions w:",positions)
-cornercolors = find_corners_color(initial_state,'W')
-print("corners w:",cornercolors)
+        for (old_y, old_z), (new_y, new_z) in positions:
+            old_colors = old_layer[old_y][old_z]
+            new_colors = old_colors.copy()
 
-retState = get_color_of_position(initial_state,'U',(0,2))
-print("farbe ",retState)
+            if clockwise:
+                new_colors['front'] = old_colors['down']
+                new_colors['up'] = old_colors['front']
+                new_colors['back'] = old_colors['up']
+                new_colors['down'] = old_colors['back']
+            else:
+                new_colors['front'] = old_colors['up']
+                new_colors['up'] = old_colors['back']
+                new_colors['back'] = old_colors['down']
+                new_colors['down'] = old_colors['front']
 
-cntrpos = find_center_color(initial_state,'R')
-print("center r:",cntrpos)
+            self.state[2, new_y, new_z] = new_colors
 
-corresponding_corners = get_corresponding_corner_positions('U', (2,2))
-print(f"Die angrenzenden Ecken sind: {corresponding_corners}")
+    def rotate_up(self, clockwise=True):
+        """Rotate up face (y=2)"""
+        old_layer = [[self.state[x, 2, z].copy() for z in range(3)] for x in range(3)]
 
-corresponding_edge = get_corresponding_edge_positions('U', (2,1))
-print(f"Die angrenzende Kante von ist: {corresponding_edge}")
+        if clockwise:
+            # Clockwise rotation when viewed from above (looking down at y=2)
+            # In x-z plane: (x,z) -> (z, 2-x)
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+        else:
+            # Counter-clockwise rotation
+            # In x-z plane: (x,z) -> (2-z, x)
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
+
+        for (old_x, old_z), (new_x, new_z) in positions:
+            old_colors = old_layer[old_x][old_z]
+            new_colors = {}
+
+            # Copy all colors first
+            for key in old_colors:
+                new_colors[key] = old_colors[key]
+
+            if clockwise:
+                # When rotating clockwise around y-axis (viewed from above):
+                # front -> right, right -> back, back -> left, left -> front
+                new_colors['front'] = old_colors['left']
+                new_colors['right'] = old_colors['front']
+                new_colors['back'] = old_colors['right']
+                new_colors['left'] = old_colors['back']
+            else:
+                # Counter-clockwise rotation
+                # front -> left, left -> back, back -> right, right -> front
+                new_colors['front'] = old_colors['right']
+                new_colors['left'] = old_colors['front']
+                new_colors['back'] = old_colors['left']
+                new_colors['right'] = old_colors['back']
+
+            self.state[new_x, 2, new_z] = new_colors
+
+    def rotate_back(self, clockwise=True):
+        """Rotate back face (z=0)"""
+        old_layer = [[self.state[x, y, 0].copy() for y in range(3)] for x in range(3)]
+
+        # For back face, viewing from front means we see it mirrored
+        # So clockwise from the back perspective is counter-clockwise from front
+        if clockwise:
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
+            # Rotate stickers: when viewing from back, clockwise means
+            # up -> left, left -> down, down -> right, right -> up
+            sticker_rotation = lambda old: {
+                'front': old['front'],
+                'back': old['back'],
+                'left': old['up'],
+                'right': old['down'],
+                'up': old['right'],
+                'down': old['left']
+            }
+        else:
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+            sticker_rotation = lambda old: {
+                'front': old['front'],
+                'back': old['back'],
+                'left': old['down'],
+                'right': old['up'],
+                'up': old['left'],
+                'down': old['right']
+            }
+
+        for (old_x, old_y), (new_x, new_y) in positions:
+            old_colors = old_layer[old_x][old_y]
+            new_colors = sticker_rotation(old_colors)
+            self.state[new_x, new_y, 0] = new_colors
+
+    def rotate_left(self, clockwise=True):
+        """Rotate left face (x=0)"""
+        old_layer = [[self.state[0, y, z].copy() for z in range(3)] for y in range(3)]
+
+        if clockwise:
+            # Clockwise when viewed from the left
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+        else:
+            # Counter-clockwise
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
+
+        for (old_y, old_z), (new_y, new_z) in positions:
+            old_colors = old_layer[old_y][old_z]
+            new_colors = {}
+
+            for key in old_colors:
+                new_colors[key] = old_colors[key]
+
+            if clockwise:
+                # When rotating left face clockwise (viewed from left):
+                # front -> up, up -> back, back -> down, down -> front
+                new_colors['up'] = old_colors['front']
+                new_colors['back'] = old_colors['up']
+                new_colors['down'] = old_colors['back']
+                new_colors['front'] = old_colors['down']
+            else:
+                # Counter-clockwise
+                new_colors['front'] = old_colors['up']
+                new_colors['up'] = old_colors['back']
+                new_colors['back'] = old_colors['down']
+                new_colors['down'] = old_colors['front']
+
+            self.state[0, new_y, new_z] = new_colors
+
+    def rotate_down(self, clockwise=True):
+        """Rotate down face (y=0)"""
+        old_layer = [[self.state[x, 0, z].copy() for z in range(3)] for x in range(3)]
+
+        # For down face, when viewed from below, rotation is opposite
+        if clockwise:
+            positions = [
+                ((0, 0), (2, 0)),
+                ((1, 0), (2, 1)),
+                ((2, 0), (2, 2)),
+                ((0, 1), (1, 0)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 2)),
+                ((0, 2), (0, 0)),
+                ((1, 2), (0, 1)),
+                ((2, 2), (0, 2))
+            ]
+            # When rotating down face clockwise (viewed from below):
+            # right -> front, front -> left, left -> back, back -> right
+            sticker_rotation = lambda old: {
+                'front': old['right'],
+                'back': old['left'],
+                'left': old['front'],
+                'right': old['back'],
+                'up': old['up'],
+                'down': old['down']
+            }
+        else:
+            positions = [
+                ((0, 0), (0, 2)),
+                ((1, 0), (0, 1)),
+                ((2, 0), (0, 0)),
+                ((0, 1), (1, 2)),
+                ((1, 1), (1, 1)),
+                ((2, 1), (1, 0)),
+                ((0, 2), (2, 2)),
+                ((1, 2), (2, 1)),
+                ((2, 2), (2, 0))
+            ]
+            sticker_rotation = lambda old: {
+                'front': old['left'],
+                'back': old['right'],
+                'left': old['back'],
+                'right': old['front'],
+                'up': old['up'],
+                'down': old['down']
+            }
+
+        for (old_x, old_z), (new_x, new_z) in positions:
+            old_colors = old_layer[old_x][old_z]
+            new_colors = sticker_rotation(old_colors)
+            self.state[new_x, 0, new_z] = new_colors
+
+# Create interactive visualization
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+cube = RubiksCube()
+cube.draw_cube(ax)
+
+# Add rotation buttons
+def on_button_click(event, face, clockwise):
+    cube.rotate_face(face, clockwise)
+    cube.draw_cube(ax)
+    plt.draw()
+
+# Create button panel
+button_ax = []
+buttons = []
+button_labels = [
+    ('F', True, 'Front CW'),
+    ('F', False, 'Front CCW'),
+    ('B', True, 'Back CW'),
+    ('B', False, 'Back CCW'),
+    ('R', True, 'Right CW'),
+    ('R', False, 'Right CCW'),
+    ('L', True, 'Left CW'),
+    ('L', False, 'Left CCW'),
+    ('U', True, 'Up CW'),
+    ('U', False, 'Up CCW'),
+    ('D', True, 'Down CW'),
+    ('D', False, 'Down CCW')
+]
+
+from matplotlib.widgets import Button
+
+for i, (face, clockwise, label) in enumerate(button_labels):
+    row = i // 4
+    col = i % 4
+    ax_button = plt.axes([0.05 + col * 0.23, 0.08 - row * 0.045, 0.18, 0.035])
+    button = Button(ax_button, label)
+    button.on_clicked(lambda event, f=face, cw=clockwise: on_button_click(event, f, cw))
+    button_ax.append(ax_button)
+    buttons.append(button)
+
+plt.show()
