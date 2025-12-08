@@ -1,16 +1,16 @@
 schlauchD = 22;
 schlauchT =  2;
 schlauchE = 15;
+clampH    = 45;
 halterL   = 40;
 halterB   = 10;
 halterR   = 10;
 halterNr  =  5;
 wallMntD  = 10;
-screwM    = 5;
-new = true;
+screwM    =  5;
 
 
-module prism(l, w, h) {
+module Keil(l, w, h) {
     polyhedron(// pt      0        1        2        3        4        5
                points=[[0,0,0], [0,w,h], [l,w,h], [l,0,0], [0,w,0], [l,w,0]],
                // top sloping face (A)
@@ -28,37 +28,41 @@ module prism(l, w, h) {
 module Halter() {
     translate([0,0,-halterL]) 
         cube([halterB,schlauchD+schlauchE+schlauchT,halterL]);
-    if ( true == new ) {
-        translate([0,schlauchD+schlauchE,-halterL]) 
-            cube([halterB,halterR,halterR+halterL]);   
-    } else {
-        prism(halterB, schlauchD+schlauchE+schlauchT, halterR);
-    }
+    // Zacken
+    translate([0,schlauchD+schlauchE,0])
+        Keil(halterB,halterR,halterR);
+    translate([0,schlauchD+schlauchE,-halterL]) 
+        cube([halterB,halterR,halterL]);
 }
 
 for ( i = [0:halterNr] ) {
     translate([(halterB+schlauchD+schlauchT)*i,0,0]) Halter();
 }
 
-translate([0,-halterB,-halterL])
-difference() 
-{
-    cube([halterNr*(halterB+schlauchD+schlauchT)+halterB,wallMntD,halterL]);
-    rotate([90,0,0]){
-        d2 = (halterB+schlauchD+schlauchT)*(halterNr-1);
-        translate([schlauchD/2+halterB,halterL*3/4,-wallMntD-schlauchT/2])
-            cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
-        translate([schlauchD/2+halterB,halterL/4,-wallMntD-schlauchT/2])
-            cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
-        translate([schlauchD/2+halterB+d2,halterL*3/4,-wallMntD-schlauchT/2])
-            cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
-        translate([schlauchD/2+halterB+d2,halterL/4,-wallMntD-schlauchT/2])
-            cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
+// Bohrungen
+translate([0,-halterB,-halterL]) {
+    difference() 
+    {
+        cube([halterNr*(halterB+schlauchD+schlauchT)+halterB,wallMntD,halterL]);
+        rotate([90,0,0]){
+            d2 = (halterB+schlauchD+schlauchT)*(halterNr-1);
+            translate([schlauchD/2+halterB,halterL*3/4,-wallMntD-schlauchT/2])
+                cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
+            translate([schlauchD/2+halterB,halterL/4,-wallMntD-schlauchT/2])
+                cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
+            translate([schlauchD/2+halterB+d2,halterL*3/4,-wallMntD-schlauchT/2])
+                cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
+            translate([schlauchD/2+halterB+d2,halterL/4,-wallMntD-schlauchT/2])
+                cylinder(wallMntD+schlauchT,screwM/2,screwM/2,$fn=50);
+        }
     }
 }
 
+// Dach
+tiefeHalter = halterB+schlauchD+schlauchE+halterR;
+translate([0,-halterB,0])     
+    cube([halterNr*(halterB+schlauchD+schlauchT)+halterB,wallMntD/2,clampH+halterR]);
+translate([0,-halterB,clampH+halterR])
+     cube([halterNr*(halterB+schlauchD+schlauchT)+halterB,schlauchD+schlauchE+halterB+halterR,wallMntD/2]);
+
 echo( "Laenge:",(halterB+schlauchD+schlauchT)*(halterNr) );
-
-
-
-
