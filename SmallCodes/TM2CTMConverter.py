@@ -217,7 +217,7 @@ class CTMSimulator:
         tape_str = ''.join([str(s) if len(str(s)) <= 3 else str(s)[:3] for s in self.tape])
 
         # Markiere Kopfposition
-        pointer = ' ' * (self.head_pos * 3) + '↓'
+        pointer = ' ' * (self.head_pos * 1) + '↓'
 
         print(f"\nSchritt {self.steps:3d}  |  Zustand: {self.current_state}")
         print(f"Tape:      {tape_str}")
@@ -240,7 +240,7 @@ def print_ctm_details(ctm):
     print(f"\nÜbergänge ({len(ctm.transitions)} gesamt):")
     for i, ((state, symbol), (write, next_state)) in enumerate(ctm.transitions.items()):
         if i < 15:  # Zeige erste 15 Übergänge
-            print(f"  ({state}, {symbol}) -> ({write}, {next_state})")
+            print(f"  ({state}; {symbol}) -> ({write}; {next_state})")
         elif i == 15:
             print(f"  ... und {len(ctm.transitions) - 15} weitere")
             break
