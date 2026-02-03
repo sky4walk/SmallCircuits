@@ -1,385 +1,786 @@
+
 """
-Turing Machine zu Clockwise Turing Machine Konverter
-Basierend auf Neary & Woods (2005)
+Turing Machine to Clockwise Turing Machine Converter mit Simulator
+
+Basierend auf Lemma 2.1 aus:
+"Four Small Universal Turing Machines" von Neary & Woods (2009)
 """
+
+from dataclasses import dataclass, field
+from typing import Dict, Tuple, List, Set, Optional
+from enum import Enum
+import time
+
+
+class Direction(Enum):
+    LEFT = 'L'
+    RIGHT = 'R'
+
+
+@dataclass(frozen=True)
+class TMTransition:
+    """Übergang einer Standard-Turing-Maschine"""
+    current_state: str
+    read_symbol: str
+    write_symbol: str
+    direction: Direction
+    next_state: str
+
+    def __str__(self):
+        return f"δ({self.current_state}, {self.read_symbol}) = ({self.write_symbol}, {self.direction.value}, {self.next_state})"
+
+
+@dataclass(frozen=True)
+class CTMTransition:
+    """Übergang einer Clockwise Turing Machine"""
+    current_state: str
+    read_symbol: str
+    write_value: str  # Ein Symbol oder zwei Symbole (für Zellteilung)
+    next_state: str
+
+    def __str__(self):
+        if len(self.write_value) == 1:
+            return f"δ({self.current_state}, {self.read_symbol}) = ({self.write_value}, {self.next_state})"
+        else:
+            return f"δ({self.current_state}, {self.read_symbol}) = ({self.write_value[0]}·{self.write_value[1]}, {self.next_state})"
+
 
 class TuringMachine:
-    """Klassische Turing-Maschine"""
-    def __init__(self, states, symbols, blank, transitions, start_state, halt_states):
+    """Standard-Turing-Maschine"""
+
+    def __init__(self,
+                 states: Set[str],
+                 alphabet: Set[str],
+                 blank: str,
+                 initial_state: str,
+                 final_states: Set[str],
+                 transitions: List[TMTransition]):
         self.states = states
-        self.symbols = symbols
+        self.alphabet = alphabet
         self.blank = blank
-        self.transitions = transitions  # Dict: (state, symbol) -> (new_symbol, direction, new_state)
-        self.start_state = start_state
-        self.halt_states = halt_states
+        self.initial_state = initial_state
+        self.final_states = final_states
+        self.transitions = transitions
 
-    def __repr__(self):
-        return f"TM(states={len(self.states)}, symbols={len(self.symbols)})"
+        # Transition-Lookup erstellen
+        self.transition_map: Dict[Tuple[str, str], TMTransition] = {}
+        for t in transitions:
+            self.transition_map[(t.current_state, t.read_symbol)] = t
+
+    def __str__(self):
+        lines = [
+            "╔══════════════════════════════════════╗",
+            "║       STANDARD TURING MACHINE        ║",
+            "╚══════════════════════════════════════╝",
+            f"  Zustände Q:    {sorted(self.states)}",
+            f"  Alphabet Σ:    {sorted(self.alphabet)}",
+            f"  Blank:         {self.blank}",
+            f"  Startzustand:  {self.initial_state}",
+            f"  Endzustände:   {sorted(self.final_states)}",
+            "  Übergänge δ:"
+        ]
+        for t in self.transitions:
+            lines.append(f"    {t}")
+        return "\n".join(lines)
 
 
-class ClockwiseTM:
-    """Clockwise Turing-Maschine mit zirkulärem Tape"""
-    def __init__(self, states, symbols, transitions, start_state, halt_state):
-        self.states = states
-        self.symbols = symbols
-        self.transitions = transitions  # Dict: (state, symbol) -> (write_value, next_state)
-        self.start_state = start_state
-        self.halt_state = halt_state
+class TMSimulator:
+    """Simulator für Standard-Turing-Maschinen"""
 
-    def __repr__(self):
-        return f"CTM(states={len(self.states)}, symbols={len(self.symbols)})"
+    def __init__(self, tm: TuringMachine):
+        self.tm = tm
+        self.tape: List[str] = []
+        self.head_position: int = 0
+        self.current_state: str = ""
+        self.step_count: int = 0
+        self.history: List[Tuple[str, List[str], int]] = []
 
+    def initialize(self, input_string: str):
+        """Initialisiert den Simulator mit einer Eingabe"""
+        self.tape = list(input_string) if input_string else [self.tm.blank]
+        self.head_position = 0
+        self.current_state = self.tm.initial_state
+        self.step_count = 0
+        self.history = []
+        self._save_state()
 
-def convert_tm_to_ctm(tm):
-    """
-    Konvertiert eine Turing-Maschine in eine Clockwise TM.
-    Implementiert Lemma 1 aus dem Paper.
-    """
+    def _save_state(self):
+        """Speichert den aktuellen Zustand in der Historie"""
+        self.history.append((
+            self.current_state,
+            self.tape.copy(),
+            self.head_position
+        ))
 
-    # Erstelle neue Zustände für CTM
-    ctm_states = set()
+    def _ensure_tape_bounds(self):
+        """Erweitert das Band falls nötig"""
+        while self.head_position < 0:
+            self.tape.insert(0, self.tm.blank)
+            self.head_position += 1
+        while self.head_position >= len(self.tape):
+            self.tape.append(self.tm.blank)
 
-    # Hauptzustände (entsprechen den TM-Zuständen)
-    for q in tm.states:
-        ctm_states.add(q)
+    def step(self) -> bool:
+        """
+        Führt einen einzelnen Schritt aus.
+        Gibt True zurück wenn die Maschine weiterlaufen kann.
+        """
+        if self.current_state in self.tm.final_states:
+            return False
 
-    # Hilfszustände für Links-Bewegungen
-    for q in tm.states:
-        if q not in tm.halt_states:
-            for s in tm.symbols:
-                if s != tm.blank:
-                    ctm_states.add(f"{q},{s}")
-            ctm_states.add(f"{q},r")
-            ctm_states.add(f"{q},r'")
-            ctm_states.add(f"{q},l")
+        self._ensure_tape_bounds()
+        read_symbol = self.tape[self.head_position]
 
-    # Neue Symbole für CTM
-    ctm_symbols = set()
-    # Kodiere Nicht-Blank-Symbole
-    for i, s in enumerate(tm.symbols):
-        if s != tm.blank:
-            ctm_symbols.add(f"σ_{i+2}")
-    ctm_symbols.add('r')  # Rechte Blanks
-    ctm_symbols.add('l')  # Linke Blanks
-    ctm_symbols.add('γ')  # Marker-Symbol
+        # Transition suchen
+        key = (self.current_state, read_symbol)
+        if key not in self.tm.transition_map:
+            return False
 
-    # Erstelle Übergänge
-    ctm_transitions = {}
+        transition = self.tm.transition_map[key]
 
-    # Symbol-Mapping: TM-Symbol -> CTM-Symbol
-    symbol_map = {tm.blank: None}
-    idx = 2
-    for s in tm.symbols:
-        if s != tm.blank:
-            symbol_map[s] = f"σ_{idx}"
-            idx += 1
+        # Transition ausführen
+        self.tape[self.head_position] = transition.write_symbol
 
-    # Konvertiere jede TM-Transition
-    for (state, read_sym), (write_sym, direction, next_state) in tm.transitions.items():
-        if state in tm.halt_states:
-            continue
+        if transition.direction == Direction.RIGHT:
+            self.head_position += 1
+        else:
+            self.head_position -= 1
 
-        if direction == 'R':  # Rechts-Bewegung -> Uhrzeigersinn
-            if read_sym != tm.blank:
-                # Normale Rechts-Bewegung: (q_x, σ_k, σ_j, R, q_y) -> (q_x, σ_k, σ_j, q_y)
-                ctm_read = symbol_map[read_sym]
-                ctm_write = symbol_map[write_sym] if write_sym != tm.blank else 'l'
-                ctm_transitions[(state, ctm_read)] = (ctm_write, next_state)
+        self.current_state = transition.next_state
+        self.step_count += 1
 
-            elif read_sym == tm.blank:
-                if write_sym != tm.blank:
-                    # Blank links: (q_x, blank, σ_j, R, q_y) -> (q_x, l, lσ_j, q_y)
-                    ctm_transitions[(state, 'l')] = (f"l{symbol_map[write_sym]}", next_state)
+        self._ensure_tape_bounds()
+        self._save_state()
 
-                    # Blank rechts: mehrere Transitionen nötig
-                    ctm_transitions[(state, 'r')] = (f"{symbol_map[write_sym]}r", f"{next_state},r'")
-                    # Bewege zum r zurück
-                    for sym in ctm_symbols:
-                        if sym not in ['γ', 'r']:
-                            ctm_transitions[(f"{next_state},r'", sym)] = (sym, f"{next_state},r'")
-                    ctm_transitions[(f"{next_state},r'", 'r')] = ('r', next_state)
+        return self.current_state not in self.tm.final_states
 
-        elif direction == 'L':  # Links-Bewegung -> gegen Uhrzeigersinn
-            # Markiere Position mit γ
-            if read_sym == tm.blank:
-                # Blank links oder rechts
-                ctm_transitions[(state, 'l')] = (f"lγ", f"{next_state},{symbol_map.get(write_sym, 'l')}")
-                ctm_transitions[(state, 'r')] = (f"γ{symbol_map.get(write_sym, 'r')}", f"{next_state},r")
+    def run(self, max_steps: int = 1000) -> bool:
+        """
+        Führt die Maschine aus bis sie hält oder max_steps erreicht.
+        Gibt True zurück wenn die Maschine normal gehalten hat.
+        """
+        while self.step_count < max_steps:
+            if not self.step():
+                return True
+        return False
+
+    def get_tape_string(self) -> str:
+        """Gibt den Bandinhalt als String zurück (ohne führende/trailing Blanks)"""
+        result = ''.join(self.tape)
+        # Blanks am Anfang und Ende entfernen
+        result = result.strip(self.tm.blank)
+        return result if result else self.tm.blank
+
+    def format_configuration(self, state: str = None, tape: List[str] = None,
+                            head_pos: int = None, step: int = None) -> str:
+        """Formatiert eine Konfiguration für die Anzeige"""
+        if state is None:
+            state = self.current_state
+        if tape is None:
+            tape = self.tape
+        if head_pos is None:
+            head_pos = self.head_position
+        if step is None:
+            step = self.step_count
+
+        # Band mit Kopfmarkierung erstellen
+        tape_str = ""
+        for i, symbol in enumerate(tape):
+            if i == head_pos:
+                tape_str += f"[{symbol}]"
             else:
-                ctm_read = symbol_map[read_sym]
-                ctm_transitions[(state, ctm_read)] = ('γ', f"{next_state},{symbol_map.get(write_sym, ctm_read)}")
+                tape_str += f" {symbol} "
 
-            # Verschiebe Symbole im Uhrzeigersinn (simuliert Links-Bewegung)
-            for sym1 in ctm_symbols:
-                if sym1 != 'γ':
-                    for sym2 in ctm_symbols:
-                        if sym2 != 'γ':
-                            state_name = f"{next_state},{symbol_map.get(write_sym, 'r')}"
-                            if state_name in ctm_states:
-                                ctm_transitions[(state_name, sym2)] = (sym1, f"{next_state},{sym2}")
+        return f"Schritt {step:3d}: {state:10s} |{tape_str}|"
 
-            # Beende wenn γ erreicht wird
-            # (Vereinfachte Darstellung)
+    def print_execution(self, delay: float = 0.0):
+        """Gibt die gesamte Ausführungshistorie aus"""
+        print("\n┌" + "─" * 58 + "┐")
+        print("│" + " AUSFÜHRUNG DER STANDARD-TM ".center(58) + "│")
+        print("└" + "─" * 58 + "┘\n")
 
-    # Halt-Zustand
-    halt_state = list(tm.halt_states)[0] if tm.halt_states else f"{tm.start_state}_halt"
+        for i, (state, tape, head_pos) in enumerate(self.history):
+            print(self.format_configuration(state, tape, head_pos, i))
+            if delay > 0:
+                time.sleep(delay)
 
-    return ClockwiseTM(
-        states=ctm_states,
-        symbols=ctm_symbols,
-        transitions=ctm_transitions,
-        start_state=tm.start_state,
-        halt_state=halt_state
-    )
+        status = "AKZEPTIERT" if self.current_state in self.tm.final_states else "GESTOPPT"
+        print(f"\n  === {status} nach {self.step_count} Schritten ===")
+        print(f"  Endzustand: {self.current_state}")
+        print(f"  Bandinhalt: {self.get_tape_string()}")
+
+
+class ClockwiseTuringMachine:
+    """Clockwise Turing Machine (zirkuläres Band, nur Uhrzeigersinn)"""
+
+    def __init__(self,
+                 states: Set[str],
+                 alphabet: Set[str],
+                 initial_state: str,
+                 final_state: str,
+                 transitions: List[CTMTransition]):
+        self.states = states
+        self.alphabet = alphabet
+        self.initial_state = initial_state
+        self.final_state = final_state
+        self.transitions = transitions
+
+        # Transition-Lookup erstellen
+        self.transition_map: Dict[Tuple[str, str], CTMTransition] = {}
+        for t in transitions:
+            self.transition_map[(t.current_state, t.read_symbol)] = t
+
+    def __str__(self):
+        lines = [
+            "╔══════════════════════════════════════╗",
+            "║      CLOCKWISE TURING MACHINE        ║",
+            "╚══════════════════════════════════════╝",
+            f"  Zustände ({len(self.states):2d}): {sorted(self.states)[:5]}{'...' if len(self.states) > 5 else ''}",
+            f"  Alphabet ({len(self.alphabet):2d}): {sorted(self.alphabet)}",
+            f"  Startzustand:  {self.initial_state}",
+            f"  Endzustand:    {self.final_state}",
+            f"  Übergänge ({len(self.transitions):2d}):"
+        ]
+        for t in self.transitions[:15]:
+            lines.append(f"    {t}")
+        if len(self.transitions) > 15:
+            lines.append(f"    ... und {len(self.transitions) - 15} weitere")
+        return "\n".join(lines)
 
 
 class CTMSimulator:
     """Simulator für Clockwise Turing Machines"""
-    def __init__(self, ctm):
+
+    # Spezielle Symbole
+    MARKER = "M"      # σₘ
+    RIGHT_END = "R"   # σᵣ
+    LEFT_END = "L"    # σₗ
+
+    def __init__(self, ctm: ClockwiseTuringMachine):
         self.ctm = ctm
-        self.tape = []
-        self.head_pos = 0
-        self.current_state = ctm.start_state
-        self.steps = 0
-        self.max_steps = 1000
+        self.tape: List[str] = []  # Zirkuläres Band als Liste
+        self.head_position: int = 0
+        self.current_state: str = ""
+        self.step_count: int = 0
+        self.history: List[Tuple[str, List[str], int, Optional[CTMTransition]]] = []
 
-    def initialize_tape(self, input_symbols):
-        """Initialisiert das zirkuläre Tape mit Input"""
-        self.tape = list(input_symbols)
-        self.head_pos = 0
-        self.current_state = self.ctm.start_state
-        self.steps = 0
+    def initialize(self, input_string: str):
+        """
+        Initialisiert den Simulator mit einer Eingabe.
+        Das Band wird zirkulär mit L und R Markern versehen.
+        """
+        # Band aufbauen: L [Eingabe] R
+        self.tape = [self.LEFT_END]
+        if input_string:
+            self.tape.extend(list(input_string))
+        self.tape.append(self.RIGHT_END)
 
-    def step(self):
-        """Führt einen Simulationsschritt aus"""
-        if self.current_state == self.ctm.halt_state:
-            return False  # Bereits gestoppt
+        self.head_position = 1  # Erste Position nach L
+        self.current_state = self.ctm.initial_state
+        self.step_count = 0
+        self.history = []
+        self._save_state(None)
 
-        if self.steps >= self.max_steps:
-            return False  # Maximale Schritte erreicht
+    def _save_state(self, transition: Optional[CTMTransition]):
+        """Speichert den aktuellen Zustand in der Historie"""
+        self.history.append((
+            self.current_state,
+            self.tape.copy(),
+            self.head_position,
+            transition
+        ))
 
-        # Lese aktuelles Symbol
-        current_symbol = self.tape[self.head_pos] if self.tape else None
+    def _move_clockwise(self):
+        """Bewegt den Kopf im Uhrzeigersinn (zirkulär)"""
+        self.head_position = (self.head_position + 1) % len(self.tape)
 
-        # Suche Übergang
-        if (self.current_state, current_symbol) not in self.ctm.transitions:
-            return False  # Keine Transition, Halt
+    def step(self) -> bool:
+        """
+        Führt einen einzelnen Schritt aus.
+        Gibt True zurück wenn die Maschine weiterlaufen kann.
+        """
+        if self.current_state == self.ctm.final_state:
+            return False
 
-        write_value, next_state = self.ctm.transitions[(self.current_state, current_symbol)]
+        read_symbol = self.tape[self.head_position]
 
-        # Schreibe Wert
-        if isinstance(write_value, str) and len(write_value) == 2:
-            # Schreibe 2 Symbole (Zelle wird zu 2 Zellen)
-            self.tape[self.head_pos] = write_value[0]
-            self.tape.insert(self.head_pos + 1, write_value[1])
+        # Transition suchen
+        key = (self.current_state, read_symbol)
+        if key not in self.ctm.transition_map:
+            return False
+
+        transition = self.ctm.transition_map[key]
+
+        # Transition ausführen
+        if len(transition.write_value) == 1:
+            # Einfaches Überschreiben
+            self.tape[self.head_position] = transition.write_value
         else:
-            # Schreibe 1 Symbol
-            self.tape[self.head_pos] = write_value
+            # Zellteilung: Eine Zelle wird zu zwei Zellen
+            self.tape[self.head_position] = transition.write_value[0]
+            self.tape.insert(self.head_position + 1, transition.write_value[1])
 
-        # Bewege Kopf im Uhrzeigersinn
-        self.head_pos = (self.head_pos + 1) % len(self.tape)
+        self.current_state = transition.next_state
+        self._move_clockwise()
+        self.step_count += 1
 
-        # Wechsle Zustand
-        self.current_state = next_state
-        self.steps += 1
+        self._save_state(transition)
 
-        return True  # Weitermachen
+        return self.current_state != self.ctm.final_state
 
-    def run(self, input_symbols, verbose=False, step_limit=None):
-        """Führt die CTM aus bis zum Halt"""
-        if step_limit:
-            self.max_steps = step_limit
+    def run(self, max_steps: int = 1000) -> bool:
+        """
+        Führt die Maschine aus bis sie hält oder max_steps erreicht.
+        Gibt True zurück wenn die Maschine normal gehalten hat.
+        """
+        while self.step_count < max_steps:
+            if not self.step():
+                return True
+        return False
 
-        self.initialize_tape(input_symbols)
+    def get_tape_string(self) -> str:
+        """Gibt den Bandinhalt als String zurück (ohne spezielle Marker)"""
+        result = ''.join(s for s in self.tape
+                        if s not in {self.LEFT_END, self.RIGHT_END, self.MARKER})
+        return result if result else "ε"
 
-        if verbose:
-            print(f"\n{'='*70}")
-            print(f"CTM SIMULATION START")
-            print(f"{'='*70}")
-            self.print_state()
+    def format_configuration(self, state: str, tape: List[str],
+                            head_pos: int, step: int,
+                            transition: Optional[CTMTransition] = None) -> str:
+        """Formatiert eine Konfiguration für die Anzeige (zirkulär)"""
 
-        while self.step():
-            if verbose and self.steps <= 20:
-                self.print_state()
-            elif verbose and self.steps == 21:
-                print("\n... (weitere Schritte werden nicht angezeigt) ...")
+        # Zirkuläres Band darstellen
+        n = len(tape)
 
-        if verbose:
-            print(f"\n{'='*70}")
-            print(f"CTM SIMULATION ENDE nach {self.steps} Schritten")
-            print(f"{'='*70}")
-            self.print_state()
+        # Band-String erstellen
+        tape_str = ""
+        for i in range(n):
+            symbol = tape[i]
+            # Symbol kürzen wenn nötig
+            display = symbol if len(symbol) <= 2 else symbol[:2]
 
-        return self.tape, self.current_state, self.steps
+            if i == head_pos:
+                tape_str += f"[{display}]"
+            else:
+                tape_str += f" {display} "
 
-    def print_state(self):
-        """Zeigt den aktuellen Zustand der CTM"""
-        tape_str = ''.join([str(s) if len(str(s)) <= 3 else str(s)[:3] for s in self.tape])
+        # Zustand kürzen für bessere Darstellung
+        state_display = state if len(state) <= 12 else state[:10] + ".."
 
-        # Markiere Kopfposition
-        pointer = ' ' * (self.head_pos * 1) + '↓'
+        result = f"Schritt {step:3d}: {state_display:12s} |{tape_str}|"
 
-        print(f"\nSchritt {self.steps:3d}  |  Zustand: {self.current_state}")
-        print(f"Tape:      {tape_str}")
-        print(f"           {pointer}")
+        # Transition anzeigen falls vorhanden
+        if transition:
+            result += f"  <- {transition}"
+
+        return result
+
+    def format_circular_tape(self, tape: List[str], head_pos: int) -> str:
+        """Formatiert das Band als Kreis (für detaillierte Ansicht)"""
+        n = len(tape)
+        lines = []
+
+        # Obere Linie
+        lines.append("    ┌" + "───┬" * (n-1) + "───┐")
+
+        # Symbole
+        symbol_line = "    │"
+        for i, symbol in enumerate(tape):
+            display = symbol if len(symbol) <= 2 else symbol[:2]
+            if i == head_pos:
+                symbol_line += f">{display}<│"
+            else:
+                symbol_line += f" {display} │"
+        lines.append(symbol_line)
+
+        # Untere Linie mit Verbindung (zirkulär)
+        lines.append("    └" + "───┴" * (n-1) + "───┘")
+        lines.append("     ↑" + " " * (n * 4 - 2) + "↑")
+        lines.append("     └" + "─" * (n * 4 - 2) + "┘ (zirkulär)")
+
+        return "\n".join(lines)
+
+    def print_execution(self, delay: float = 0.0, detailed: bool = False):
+        """Gibt die gesamte Ausführungshistorie aus"""
+        print("\n┌" + "─" * 70 + "┐")
+        print("│" + " AUSFÜHRUNG DER CLOCKWISE TM ".center(70) + "│")
+        print("└" + "─" * 70 + "┘\n")
+
+        for i, (state, tape, head_pos, transition) in enumerate(self.history):
+            print(self.format_configuration(state, tape, head_pos, i,
+                                           transition if i > 0 else None))
+
+            if detailed and i < len(self.history) - 1:
+                print(self.format_circular_tape(tape, head_pos))
+                print()
+
+            if delay > 0:
+                time.sleep(delay)
+
+        status = "AKZEPTIERT" if self.current_state == self.ctm.final_state else "GESTOPPT"
+        print(f"\n  === {status} nach {self.step_count} Schritten ===")
+        print(f"  Endzustand: {self.current_state}")
+        print(f"  Bandinhalt: {self.get_tape_string()}")
 
 
-def print_ctm_details(ctm):
-    """Gibt Details der CTM aus"""
-    print(f"\n{'='*60}")
-    print(f"CLOCKWISE TURING MACHINE")
-    print(f"{'='*60}")
-    print(f"Anzahl Zustände: {len(ctm.states)}")
-    print(f"Anzahl Symbole: {len(ctm.symbols)}")
-    print(f"Start-Zustand: {ctm.start_state}")
-    print(f"Halt-Zustand: {ctm.halt_state}")
+class TMtoClockwiseConverter:
+    """Konvertiert eine Standard-TM in eine Clockwise TM"""
 
-    print(f"\nZustände: {sorted(list(ctm.states)[:10])}{'...' if len(ctm.states) > 10 else ''}")
-    print(f"Symbole: {sorted(ctm.symbols)}")
+    MARKER = "M"      # σₘ
+    RIGHT_END = "R"   # σᵣ
+    LEFT_END = "L"    # σₗ
 
-    print(f"\nÜbergänge ({len(ctm.transitions)} gesamt):")
-    for i, ((state, symbol), (write, next_state)) in enumerate(ctm.transitions.items()):
-        if i < 15:  # Zeige erste 15 Übergänge
-            print(f"  ({state}; {symbol}) -> ({write}; {next_state})")
-        elif i == 15:
-            print(f"  ... und {len(ctm.transitions) - 15} weitere")
-            break
+    def __init__(self, tm: TuringMachine):
+        self.tm = tm
+        self.ctm_states: Set[str] = set()
+        self.ctm_alphabet: Set[str] = set()
+        self.ctm_transitions: List[CTMTransition] = []
+
+    def convert(self) -> ClockwiseTuringMachine:
+        """Führt die Konvertierung durch"""
+
+        # Alphabet aufbauen (ohne Blank, plus spezielle Symbole)
+        self.ctm_alphabet = {s for s in self.tm.alphabet if s != self.tm.blank}
+        self.ctm_alphabet.add(self.MARKER)
+        self.ctm_alphabet.add(self.RIGHT_END)
+        self.ctm_alphabet.add(self.LEFT_END)
+
+        # Basiszustände übernehmen
+        self.ctm_states = set(self.tm.states)
+
+        # Jeden Übergang konvertieren
+        for transition in self.tm.transitions:
+            if transition.direction == Direction.RIGHT:
+                self._convert_right_move(transition)
+            else:
+                self._convert_left_move(transition)
+
+        # Endzustand bestimmen
+        final_state = next(iter(self.tm.final_states))
+
+        return ClockwiseTuringMachine(
+            states=self.ctm_states,
+            alphabet=self.ctm_alphabet,
+            initial_state=self.tm.initial_state,
+            final_state=final_state,
+            transitions=self.ctm_transitions
+        )
+
+    def _convert_right_move(self, t: TMTransition):
+        """Konvertiert eine Rechtsbewegung"""
+
+        if t.read_symbol == self.tm.blank:
+            # Am rechten Rand: Zellteilung (neues Symbol + R-Marker)
+            if t.write_symbol == self.tm.blank:
+                # Blank bleibt Blank - einfach weitergehen
+                self.ctm_transitions.append(CTMTransition(
+                    current_state=t.current_state,
+                    read_symbol=self.RIGHT_END,
+                    write_value=self.RIGHT_END,
+                    next_state=t.next_state
+                ))
+            else:
+                # Neues Symbol einfügen
+                self.ctm_transitions.append(CTMTransition(
+                    current_state=t.current_state,
+                    read_symbol=self.RIGHT_END,
+                    write_value=t.write_symbol + self.RIGHT_END,
+                    next_state=t.next_state
+                ))
+        else:
+            # Normaler Fall
+            self.ctm_transitions.append(CTMTransition(
+                current_state=t.current_state,
+                read_symbol=t.read_symbol,
+                write_value=t.write_symbol,
+                next_state=t.next_state
+            ))
+
+    def _convert_left_move(self, t: TMTransition):
+        """Konvertiert eine Linksbewegung durch Band-Rotation"""
+
+        qx = t.current_state
+        qy = t.next_state
+        write_sym = t.write_symbol if t.write_symbol != self.tm.blank else self.RIGHT_END
+
+        # Initialer Carry-Zustand
+        carry_state_initial = f"{qy}_{write_sym}"
+        self.ctm_states.add(carry_state_initial)
+
+        # Schritt 1: Markieren
+        if t.read_symbol == self.tm.blank:
+            # Am rechten Rand: R-Marker wird zu M + write_sym
+            self.ctm_transitions.append(CTMTransition(
+                current_state=qx,
+                read_symbol=self.RIGHT_END,
+                write_value=self.MARKER + write_sym,
+                next_state=f"{qy}_{self.RIGHT_END}"
+            ))
+            self.ctm_states.add(f"{qy}_{self.RIGHT_END}")
+        else:
+            self.ctm_transitions.append(CTMTransition(
+                current_state=qx,
+                read_symbol=t.read_symbol,
+                write_value=self.MARKER,
+                next_state=carry_state_initial
+            ))
+
+        # Schritt 2: Rotations-Regeln
+        all_symbols = self.ctm_alphabet - {self.MARKER}
+
+        for sigma in all_symbols:
+            carry_state = f"{qy}_{sigma}"
+            self.ctm_states.add(carry_state)
+
+            for sigma_read in self.ctm_alphabet:
+                if sigma_read == self.MARKER:
+                    # Marker gefunden → Rotation fertig
+                    self.ctm_transitions.append(CTMTransition(
+                        current_state=carry_state,
+                        read_symbol=self.MARKER,
+                        write_value=sigma,
+                        next_state=qy
+                    ))
+                else:
+                    # Weiter rotieren
+                    next_carry = f"{qy}_{sigma_read}"
+                    self.ctm_states.add(next_carry)
+                    self.ctm_transitions.append(CTMTransition(
+                        current_state=carry_state,
+                        read_symbol=sigma_read,
+                        write_value=sigma,
+                        next_state=next_carry
+                    ))
 
 
-# Beispiel: Einfache Turing-Maschine
-def create_example_tm():
-    """Erstellt eine Beispiel-TM die eine binäre Zahl inkrementiert"""
-    states = {'q0', 'q1', 'q2', 'qh'}
-    symbols = {'0', '1', 'B'}  # B = Blank
-    blank = 'B'
-    start_state = 'q0'
-    halt_states = {'qh'}
+# ═══════════════════════════════════════════════════════════════════════════
+# BEISPIEL-TURING-MASCHINEN
+# ═══════════════════════════════════════════════════════════════════════════
 
-    # Transitions: (state, symbol) -> (write_symbol, direction, next_state)
-    transitions = {
-        ('q0', '0'): ('0', 'R', 'q0'),
-        ('q0', '1'): ('1', 'R', 'q0'),
-        ('q0', 'B'): ('B', 'L', 'q1'),  # Gehe zum Ende
-        ('q1', '0'): ('1', 'L', 'qh'),  # 0->1, fertig
-        ('q1', '1'): ('0', 'L', 'q1'),  # 1->0, trage über
-        ('q1', 'B'): ('1', 'R', 'qh'),  # Am Anfang: füge 1 hinzu
-    }
-
-    return TuringMachine(states, symbols, blank, transitions, start_state, halt_states)
-
-
-def create_simple_ctm_example():
-    """Erstellt eine einfache CTM zum Testen"""
-    # CTM die ein Pattern rotiert: ABC -> BCA -> CAB -> ABC
-    states = {'q0', 'q1', 'q2', 'qh'}
-    symbols = {'A', 'B', 'C'}
-    transitions = {
-        ('q0', 'A'): ('B', 'q1'),
-        ('q1', 'B'): ('C', 'q2'),
-        ('q2', 'C'): ('A', 'qh'),
-    }
-
-    return ClockwiseTM(
-        states=states,
-        symbols=symbols,
-        transitions=transitions,
-        start_state='q0',
-        halt_state='qh'
+def create_simple_example_tm() -> TuringMachine:
+    """
+    Einfache TM für Demonstrationszwecke.
+    Regel 1: (q1, 0, 1, R, q2)
+    Regel 2: (q2, 1, 0, L, q3)
+    """
+    return TuringMachine(
+        states={'q1', 'q2', 'q3'},
+        alphabet={'0', '1', '□'},
+        blank='□',
+        initial_state='q1',
+        final_states={'q3'},
+        transitions=[
+            TMTransition('q1', '0', '1', Direction.RIGHT, 'q2'),
+            TMTransition('q2', '1', '0', Direction.LEFT, 'q3'),
+        ]
     )
 
 
-def create_counter_ctm():
-    """Erstellt eine CTM die zählt: ersetzt A mit B, dann B mit C"""
-    states = {'q0', 'q1', 'qh'}
-    symbols = {'A', 'B', 'C', 'X'}
-
-    transitions = {
-        # Phase 1: Finde erstes A und ersetze mit B
-        ('q0', 'X'): ('X', 'q0'),  # Überspringe Marker
-        ('q0', 'B'): ('B', 'q0'),  # Überspringe bereits bearbeitete
-        ('q0', 'C'): ('C', 'q0'),  # Überspringe
-        ('q0', 'A'): ('B', 'q1'),  # Ersetze A mit B
-
-        # Phase 2: Rotiere zurück zum Start
-        ('q1', 'X'): ('X', 'q1'),
-        ('q1', 'A'): ('A', 'q1'),
-        ('q1', 'B'): ('B', 'q1'),
-        ('q1', 'C'): ('C', 'q1'),
-    }
-
-    return ClockwiseTM(
-        states=states,
-        symbols=symbols,
-        transitions=transitions,
-        start_state='q0',
-        halt_state='qh'
+def create_increment_tm() -> TuringMachine:
+    """
+    TM die eine Binärzahl um 1 inkrementiert.
+    Beispiel: 1011 → 1100
+    """
+    return TuringMachine(
+        states={'qR', 'qI', 'qH'},
+        alphabet={'0', '1', '□'},
+        blank='□',
+        initial_state='qR',
+        final_states={'qH'},
+        transitions=[
+            # qR: Nach rechts zum Ende
+            TMTransition('qR', '0', '0', Direction.RIGHT, 'qR'),
+            TMTransition('qR', '1', '1', Direction.RIGHT, 'qR'),
+            TMTransition('qR', '□', '□', Direction.LEFT, 'qI'),
+            # qI: Inkrementieren
+            TMTransition('qI', '0', '1', Direction.LEFT, 'qH'),
+            TMTransition('qI', '1', '0', Direction.LEFT, 'qI'),
+            TMTransition('qI', '□', '1', Direction.RIGHT, 'qH'),
+        ]
     )
 
 
-# Hauptprogramm
+# ═══════════════════════════════════════════════════════════════════════════
+# HAUPT-DEMO-FUNKTIONEN
+# ═══════════════════════════════════════════════════════════════════════════
+
+def demo_simple():
+    """Demonstriert die einfache TM und ihre Clockwise-Version"""
+
+    print("\n" + "=" * 72)
+    print(" DEMO 1: Einfache TM mit Rechts- und Linksbewegung ".center(72, "="))
+    print("=" * 72)
+
+    # TM erstellen
+    tm = create_simple_example_tm()
+    print(f"\n{tm}")
+
+    # TM simulieren
+    print("\n" + "-" * 72)
+    print(" Simulation der Standard-TM ".center(72))
+    print("-" * 72)
+
+    sim_tm = TMSimulator(tm)
+    sim_tm.initialize("01")
+    sim_tm.run()
+    sim_tm.print_execution()
+
+    # Zu Clockwise konvertieren
+    print("\n" + "-" * 72)
+    print(" Konvertierung zu Clockwise TM ".center(72))
+    print("-" * 72)
+
+    converter = TMtoClockwiseConverter(tm)
+    ctm = converter.convert()
+    print(f"\n{ctm}")
+
+    # Clockwise TM simulieren
+    print("\n" + "-" * 72)
+    print(" Simulation der Clockwise TM ".center(72))
+    print("-" * 72)
+
+    sim_ctm = CTMSimulator(ctm)
+    sim_ctm.initialize("01")
+    sim_ctm.run()
+    sim_ctm.print_execution()
+
+    # Vergleich
+    print("\n" + "-" * 72)
+    print(" VERGLEICH ".center(72))
+    print("-" * 72)
+    print(f"  Standard-TM:  {len(tm.states)} Zustände, {len(tm.transitions)} Übergänge, {sim_tm.step_count} Schritte")
+    print(f"  Clockwise-TM: {len(ctm.states)} Zustände, {len(ctm.transitions)} Übergänge, {sim_ctm.step_count} Schritte")
+
+
+def demo_increment():
+    """Demonstriert die Inkrement-TM"""
+
+    print("\n" + "=" * 72)
+    print(" DEMO 2: Binär-Inkrement TM ".center(72, "="))
+    print("=" * 72)
+
+    tm = create_increment_tm()
+    print(f"\n{tm}")
+
+    test_inputs = ["1011", "111", "1000"]
+
+    for input_str in test_inputs:
+        print("\n" + "-" * 72)
+        print(f" Eingabe: {input_str} ".center(72))
+        print("-" * 72)
+
+        # Standard-TM
+        sim_tm = TMSimulator(tm)
+        sim_tm.initialize(input_str)
+        sim_tm.run()
+        sim_tm.print_execution()
+
+        # Clockwise-TM
+        converter = TMtoClockwiseConverter(tm)
+        ctm = converter.convert()
+
+        sim_ctm = CTMSimulator(ctm)
+        sim_ctm.initialize(input_str)
+        sim_ctm.run()
+        sim_ctm.print_execution()
+
+        print(f"\n  Ergebnis Standard-TM:  {input_str} -> {sim_tm.get_tape_string()}")
+        print(f"  Ergebnis Clockwise-TM: {input_str} -> {sim_ctm.get_tape_string()}")
+
+
+def demo_detailed_clockwise():
+    """Zeigt detaillierte Ansicht der Clockwise-TM Ausführung"""
+
+    print("\n" + "=" * 72)
+    print(" DEMO 3: Detaillierte Clockwise-TM Ansicht ".center(72, "="))
+    print("=" * 72)
+
+    tm = create_simple_example_tm()
+    converter = TMtoClockwiseConverter(tm)
+    ctm = converter.convert()
+
+    print(f"\n{ctm}")
+
+    sim = CTMSimulator(ctm)
+    sim.initialize("01")
+    sim.run()
+    sim.print_execution(detailed=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# HAUPTPROGRAMM
+# ═══════════════════════════════════════════════════════════════════════════
+
+def demo_multi_left():
+    """Demonstriert eine TM mit mehreren Linksbewegungen"""
+
+    print("\n" + "=" * 72)
+    print(" DEMO: TM mit mehreren Rechts- und Linksbewegungen ".center(72, "="))
+    print("=" * 72)
+
+    # TM: Liest "ab", schreibt "BA" (spiegelt und kapitalisiert)
+    # q0,a -> A,R,q1
+    # q1,b -> B,L,q2
+    # q2,A -> A,L,qH (nochmal links)
+    tm = TuringMachine(
+        states={'q0', 'q1', 'q2', 'qH'},
+        alphabet={'a', 'b', 'A', 'B', '□'},
+        blank='□',
+        initial_state='q0',
+        final_states={'qH'},
+        transitions=[
+            TMTransition('q0', 'a', 'A', Direction.RIGHT, 'q1'),
+            TMTransition('q1', 'b', 'B', Direction.LEFT, 'q2'),
+            TMTransition('q2', 'A', 'X', Direction.LEFT, 'qH'),  # Nochmal links
+        ]
+    )
+
+    print(f"\n{tm}")
+
+    # Standard-TM
+    print("\n" + "-" * 72)
+    print(" Simulation der Standard-TM ".center(72))
+    print("-" * 72)
+
+    sim_tm = TMSimulator(tm)
+    sim_tm.initialize("ab")
+    sim_tm.run()
+    sim_tm.print_execution()
+
+    # Clockwise-TM
+    print("\n" + "-" * 72)
+    print(" Simulation der Clockwise TM ".center(72))
+    print("-" * 72)
+
+    converter = TMtoClockwiseConverter(tm)
+    ctm = converter.convert()
+    print(f"\n{ctm}")
+
+    sim_ctm = CTMSimulator(ctm)
+    sim_ctm.initialize("ab")
+    sim_ctm.run()
+    sim_ctm.print_execution()
+
+    # Vergleich
+    print("\n" + "-" * 72)
+    print(" VERGLEICH ".center(72))
+    print("-" * 72)
+    print(f"  Standard-TM:  {sim_tm.step_count} Schritte, Ergebnis: {sim_tm.get_tape_string()}")
+    print(f"  Clockwise-TM: {sim_ctm.step_count} Schritte, Ergebnis: {sim_ctm.get_tape_string()}")
+
+
 if __name__ == "__main__":
-    print("Turing Machine zu Clockwise TM Konverter & Simulator")
-    print("="*70)
+    print("\n" + "#" * 72)
+    print("#" + " TM -> CLOCKWISE TM KONVERTER MIT SIMULATOR ".center(70) + "#")
+    print("#" * 72)
 
-    # Beispiel 1: Einfache CTM
-    print("\n" + "="*70)
-    print("BEISPIEL 1: Einfache Pattern-Rotation CTM")
-    print("="*70)
+    # Demo 1: Einfache TM (funktioniert korrekt)
+    demo_simple()
 
-    simple_ctm = create_simple_ctm_example()
-    print(f"\nCTM: {simple_ctm}")
-    print(f"Übergänge: {simple_ctm.transitions}")
+    # Demo 2: Mehrere Links-Bewegungen
+    print("\n\n")
+    demo_multi_left()
 
-    # Simuliere
-    sim = CTMSimulator(simple_ctm)
-    result, final_state, steps = sim.run(['A', 'B', 'C'], verbose=True)
-
-    print(f"\nErgebnis: {''.join(result)}")
-    print(f"Endzustand: {final_state}")
-    print(f"Schritte: {steps}")
-
-    # Beispiel 2: Counter CTM
-    print("\n" + "="*70)
-    print("BEISPIEL 2: Counter CTM (A->B Transformation)")
-    print("="*70)
-
-    counter_ctm = create_counter_ctm()
-    print(f"\nCTM: {counter_ctm}")
-
-    # Simuliere
-    sim2 = CTMSimulator(counter_ctm)
-    result2, final_state2, steps2 = sim2.run(['X', 'A', 'A', 'A', 'A'], verbose=True, step_limit=20)
-
-    print(f"\nErgebnis: {''.join(result2)}")
-    print(f"Endzustand: {final_state2}")
-    print(f"Schritte: {steps2}")
-
-    # Beispiel 3: TM zu CTM Konvertierung
-    print("\n" + "="*70)
-    print("BEISPIEL 3: TM zu CTM Konvertierung")
-    print("="*70)
-
-    # Erstelle Beispiel-TM
-    tm = create_example_tm()
-    print(f"\nOriginal Turing Machine:")
-    print(f"  Zustände: {tm.states}")
-    print(f"  Symbole: {tm.symbols}")
-    print(f"  Blank: '{tm.blank}'")
-    print(f"  Start: {tm.start_state}")
-    print(f"  Halt: {tm.halt_states}")
-    print(f"  Übergänge: {len(tm.transitions)}")
-
-    # Konvertiere zu CTM
-    print("\nKonvertiere TM zu CTM...")
-    ctm = convert_tm_to_ctm(tm)
-
-    # Zeige CTM Details
-    print_ctm_details(ctm)
-
-    print(f"\n{'='*70}")
-    print("Hinweise:")
-    print("- Die CTM hat ein zirkuläres Tape")
-    print("- Links-Bewegungen werden durch Verschiebung simuliert")
-    print("- Symbole 'l' und 'r' kodieren unendliche Blank-Sequenzen")
-    print("- Symbol 'γ' wird als Marker für Links-Bewegungen verwendet")
-    print(f"{'='*70}\n")
+    # Demo 3: Detaillierte Ansicht
+    print("\n\n")
+    demo_detailed_clockwise()
