@@ -26,8 +26,6 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 
-include <../Technic.scad>;
+include <Technic.scad>;
 
 color( "yellow" ) technic_bush( height = 1 / 2 );
-color( "gray" ) translate( [ 0, 15, 0 ] ) technic_bush( height = 1, stud_cutouts = false );
-color( "red" ) translate( [ 0, 30, 0 ] ) technic_bush( height = 1 );
