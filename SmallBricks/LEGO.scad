@@ -193,7 +193,7 @@ stud_top_roundness = 0; // [0:0.01:1]
 
 //demo_block(); 
 //angle_plate();
-demo_parts();
+//demo_parts();
 
 module demo_parts() {
 rotate([0, 0, 180]) union() {
