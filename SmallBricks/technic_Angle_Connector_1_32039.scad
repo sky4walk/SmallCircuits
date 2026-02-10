@@ -28,9 +28,7 @@
 
 include <Technic.scad>;
 
-//color( "yellow" ) 
-
-
-technic_beam( length = 3, height = 1 );
-translate([0,4,4]) rotate([90,0,0]) technic_bush( height = 1, stud_cutouts = false );
-
+union() {
+technic_connector_hub( spoke_angles = [ 0 ], spoke_lengths = [ 1 ], spoke_heights = [ 1 ], spoke_types = [ "axle connector" ] );
+technic_bush( height = 1, stud_cutouts = false );
+}
