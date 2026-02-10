@@ -28,6 +28,5 @@
 
 include <Technic.scad>;
 
-color( "red" )    translate( [ 0, 0, 0 ] )                           technic_beam( length = 2, axle_holes = [1], height = 1 );
-color( "white" )  translate( [ 0, -15, 0 ] )                         technic_beam( length = 3, axle_holes = [1,3], height = 1/2  );
-color( "green" )  translate( [ 0, -30, 0 ] )                         technic_beam( length = 4, height = 1/2, axle_holes = [1,4] );
+
+translate([10,0,0]) technic_axle( length = 3 );
