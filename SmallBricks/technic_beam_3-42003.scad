@@ -30,7 +30,13 @@ include <Technic.scad>;
 
 //color( "yellow" ) 
 
+difference() {
 
-technic_beam( length = 3, height = 1 );
-translate([0,4,4]) rotate([90,0,0]) technic_bush( height = 1, stud_cutouts = false );
+    difference() {
+        technic_beam( length = 3, height = 1 );
+        translate([-7.1,-3.1,-1]) cube([10,6.2,10]);
+    }
+    translate([-10,-5,-1]) cube([10,10,10]);
+}
+//translate([0,3.9,4]) rotate([90,0,0]) technic_bush( height = 1, stud_cutouts = false );
 
