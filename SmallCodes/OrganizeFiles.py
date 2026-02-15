@@ -178,7 +178,7 @@ def main():
     SOURCE_DIRECTORY = os.getcwd()
     
     print("=" * 60)
-    print("Datei-Organizer gestartet")
+    print("Datei-Organizer gestartet",SOURCE_DIRECTORY)
     print("=" * 60)
     
     # Schritt 1: Dateien organisieren
@@ -221,10 +221,13 @@ if __name__ == "__main__":
             print("""
 Datei-Organizer - Verwendung:
 
-  python file_organizer.py           Einmalige Ausführung
-  python file_organizer.py -d        Daemon-Modus (täglich um 2:00 Uhr)
-  python file_organizer.py -d 14:30  Daemon-Modus (täglich um 14:30 Uhr)
-  python file_organizer.py --help    Diese Hilfe anzeigen
+  python3 OrganizeFile.py           Einmalige Ausführung
+  python3 OrganizeFile.py -d        Daemon-Modus (täglich um 2:00 Uhr)
+  python3 OrganizeFile.py -d 14:30  Daemon-Modus (täglich um 14:30 Uhr)
+  python3 OrganizeFile.py --help    Diese Hilfe anzeigen
+  
+  Idee:
+  python3 nohup OrganizeFile.py -d  Laesst das Programm auch nach dem Ausloggen laufen
 
 Funktionen:
   - Verschiebt Dateien in Unterverzeichnisse nach Datum (YYYY-MM-DD)
