@@ -66,7 +66,7 @@ def organize_files_by_date(source_dir, target_base_dir=None):
 
 def delete_old_directories(base_dir, days_old=7):
     """
-    Löscht Unterverzeichnisse, die älter als die angegebene Anzahl von Tagen sind.
+    Löscht Unterverzeichnisse basierend auf dem Datum im Verzeichnisnamen (YYYY-MM-DD).
     
     Args:
         base_dir: Basisverzeichnis, in dem nach alten Ordnern gesucht wird
@@ -86,16 +86,26 @@ def delete_old_directories(base_dir, days_old=7):
         if not item.is_dir():
             continue
         
-        # Hole das Änderungsdatum des Verzeichnisses
-        dir_modification_time = datetime.fromtimestamp(item.stat().st_mtime)
-        
-        # Prüfe, ob das Verzeichnis älter als das Grenzatum ist
-        if dir_modification_time < cutoff_date:
-            try:
-                shutil.rmtree(item)
-                print(f"Gelöscht: {item.name} (Alter: {(datetime.now() - dir_modification_time).days} Tage)")
-            except Exception as e:
-                print(f"Fehler beim Löschen von {item.name}: {e}")
+        # Versuche, das Datum aus dem Verzeichnisnamen zu parsen (Format: YYYY-MM-DD)
+        try:
+            dir_date = datetime.strptime(item.name, "%Y-%m-%d")
+            
+            # Prüfe, ob das Verzeichnis älter als das Grenzdatum ist
+            if dir_date < cutoff_date:
+                age_days = (datetime.now() - dir_date).days
+                try:
+                    shutil.rmtree(item)
+                    print(f"Gelöscht: {item.name} (Alter: {age_days} Tage)")
+                except Exception as e:
+                    print(f"Fehler beim Löschen von {item.name}: {e}")
+            else:
+                # Optional: Zeige an, welche Verzeichnisse behalten werden
+                # print(f"Behalten: {item.name} (Alter: {(datetime.now() - dir_date).days} Tage)")
+                pass
+        except ValueError:
+            # Verzeichnisname entspricht nicht dem Format YYYY-MM-DD, überspringen
+            print(f"Übersprungen: {item.name} (kein gültiges Datumsformat YYYY-MM-DD)")
+            continue
 
 
 def run_once():
