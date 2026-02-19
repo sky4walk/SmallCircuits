@@ -30,7 +30,7 @@ jacket_height = 700;
 leg_od        = 89;
 leg_r         = leg_od / 2;
 leg_wall      = 5;
-leg_count     = 3;
+leg_count     = 4;
 leg_foot_r    = inner_r * 0.60;
 clamp_width   = 12;
 clamp_thk     = 6;
@@ -313,8 +313,8 @@ module pressure_gauge(pipe_r) {
 
 module tank_body() {
 
-    // Standbeine
-    for (i=[0:leg_count-1]) leg(i*120);
+    // Standbeine – 4 Stück an den Ecken eines Quadrats (45°, 135°, 225°, 315°)
+    for (i=[0:leg_count-1]) leg(45 + i*90);
 
     // Konus
     color("Silver", 0.88)
