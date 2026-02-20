@@ -268,7 +268,7 @@ model = SimpleLLM(
 
 # 3. Training
 trainer = LLMTrainer(model, tokenizer, learning_rate=0.001)
-trainer.train_on_texts(training_texts, epochs=50, context_window=8)
+trainer.train_on_texts(training_texts, epochs=500, context_window=8)
 
 # 4. Interaktive Text-Generierung
 while True:
