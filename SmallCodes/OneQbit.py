@@ -59,14 +59,14 @@ def apply_z_gate(qubit):
 
 # Qubit im Zustand |0>
 print("Initialer Zustand des Qubits (|0>):", qubit)
-#plot_bloch_vector(qubit)
+plot_bloch_vector(qubit)
 
 # Anwenden des Hadamard-Gates auf das Qubit (setzt es in eine Ueberlagerung)
-#qubit = apply_hadamard(qubit)
-#print("Zustand nach Hadamard-Operation:", qubit)
-#plot_bloch_vector(qubit)
+qubit = apply_hadamard(qubit)
+print("Zustand nach Hadamard-Operation:", qubit)
+plot_bloch_vector(qubit)
 
 # Anwenden eines X-Gates auf das Qubit
 qubit = apply_y_gate(qubit)
 print("Zustand nach X-Gate:", qubit)
-#plot_bloch_vector(qubit)
+plot_bloch_vector(qubit)
