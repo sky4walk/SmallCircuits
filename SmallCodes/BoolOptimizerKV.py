@@ -13,33 +13,65 @@ Usage:
 """
 
 import sys
-import re
-import argparse
-import itertools
-from collections import defaultdict
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. PARSER  –  converts infix string to a callable truth function
 # ─────────────────────────────────────────────────────────────────────────────
 
-TOKEN_RE = re.compile(
-    r'\bNOT\b|\bAND\b|\bOR\b'
-    r'|[A-Za-z][A-Za-z0-9_]*|[01]|[()!&|~]',
-    re.IGNORECASE
-)
-
 PRECEDENCE = {'OR': 1, 'AND': 2, 'NOT': 3}
+
+ALIAS = {'!': 'NOT', '~': 'NOT', '&': 'AND', '|': 'OR'}
 
 
 def tokenize(expr: str) -> list[str]:
-    """Lex the expression into normalised uppercase tokens."""
-    alias = {'!': 'NOT', '~': 'NOT', '&': 'AND', '|': 'OR'}
+    """Lex the expression into normalised uppercase tokens (no regex)."""
     tokens = []
-    for m in TOKEN_RE.finditer(expr):
-        t = m.group()
-        t = alias.get(t, t.upper() if t.upper() in PRECEDENCE else t)
-        tokens.append(t)
+    i = 0
+    while i < len(expr):
+        c = expr[i]
+
+        # Skip whitespace
+        if c == ' ' or c == '\t':
+            i += 1
+            continue
+
+        # Parentheses
+        if c in '()':
+            tokens.append(c)
+            i += 1
+            continue
+
+        # Single-char aliases  (! ~ & |)
+        if c in ALIAS:
+            tokens.append(ALIAS[c])
+            i += 1
+            continue
+
+        # Literals 0 / 1
+        if c in '01':
+            tokens.append(c)
+            i += 1
+            continue
+
+        # Word token: operator keyword or variable name
+        if c.isalpha() or c == '_':
+            j = i
+            while j < len(expr) and (expr[j].isalnum() or expr[j] == '_'):
+                j += 1
+            word = expr[i:j].upper()
+            # Normalise known operators; keep variable names as-is (original case)
+            if word in ('AND', 'OR', 'NOT'):
+                tokens.append(word)
+            else:
+                tokens.append(expr[i:j])   # preserve original casing for variables
+            i = j
+            continue
+
+        # Unknown character – skip with warning
+        print(f"  Warnung: unbekanntes Zeichen '{c}' wird ignoriert", file=sys.stderr)
+        i += 1
+
     return tokens
 
 
@@ -187,9 +219,12 @@ def quine_mccluskey(minterms: list[int], dontcares: list[int], n_vars: int) -> l
     prime_implicants: set[str] = set()
 
     while implicants:
-        groups: dict[int, list[str]] = defaultdict(list)
+        groups: dict[int, list[str]] = {}
         for imp in implicants:
-            groups[imp.count('1')].append(imp)
+            key = imp.count('1')
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(imp)
 
         new_implicants: dict[str, set[int]] = {}
         used: set[str] = set()
@@ -435,12 +470,12 @@ def print_header():
     print("╚══════════════════════════════════════════════╝")
 
 
-def run(args):
+def run(args: dict):
     print_header()
 
     # ── Determine minterms + variables ──────────────────────────────────────
-    if args.expression:
-        expr = args.expression
+    if args['expression']:
+        expr = args['expression']
         print(f"\n  Ausdruck : {expr}")
         try:
             variables, minterms, maxterms = build_truth_table(expr)
@@ -449,9 +484,9 @@ def run(args):
             sys.exit(1)
         dontcares = []
     else:
-        variables = args.vars
-        minterms  = list(args.minterms)
-        dontcares = list(args.dontcares) if args.dontcares else []
+        variables = args['vars']
+        minterms  = list(args['minterms'])
+        dontcares = list(args['dontcares'])
         n = len(variables)
         max_idx = 2 ** n - 1
         for m in minterms + dontcares:
@@ -469,59 +504,120 @@ def run(args):
     print(print_truth_table(variables, minterms, dontcares))
 
     # ── KV map ───────────────────────────────────────────────────────────────
-    if not args.no_kv:
+    if not args['no_kv']:
         print(kv_map(minterms, dontcares, variables))
 
     # ── Minimization ─────────────────────────────────────────────────────────
     print("\n  ── Quine-McCluskey Minimierung ──────────────")
     result = minimize(minterms, dontcares, variables)
 
-    # Pretty-print with proper notation
-    display = result.replace("'", "̄")  # overline alternative – or keep apostrophe
     print(f"\n  Minimierter Ausdruck:\n")
     print(f"      F = {result}\n")
     print(f"  Legende: A' = NOT A,  ·  = AND,  +  = OR")
     print()
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Boolean minimizer: Quine-McCluskey + Karnaugh map',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Beispiele:
-  # Ausdruck direkt angeben
+def print_usage():
+    print("""
+Verwendung:
   python bool_minimize.py "A AND (B OR NOT C)"
   python bool_minimize.py "(A OR B) AND (NOT A OR C)"
-
-  # Minterme manuell (Variablennamen werden benötigt)
   python bool_minimize.py --minterms 0 1 3 5 7 --vars A B C
   python bool_minimize.py --minterms 1 3 7 --dontcares 0 5 --vars A B C
+  python bool_minimize.py "A AND B OR C AND D" --no-kv
 
-  # KV-Diagramm deaktivieren
-  python bool_minimize.py "A AND B OR C AND D OR E" --no-kv
+Optionen:
+  --minterms N ...    Minterme als Dezimalzahlen
+  --dontcares N ...   Don't-care-Terme
+  --vars VAR ...      Variablennamen (bei --minterms erforderlich)
+  --no-kv             KV-Diagramm nicht anzeigen
+  --help              Diese Hilfe anzeigen
 
-Operatoren:
-  AND, OR, NOT
-  Kurzformen: & | ! ~
-        """
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('expression', nargs='?', help='Boolescher Ausdruck als String')
-    group.add_argument('--minterms', nargs='+', type=int, metavar='N',
-                       help='Minterme als Dezimalzahlen')
-    parser.add_argument('--dontcares', nargs='+', type=int, metavar='N',
-                        help="Don't-care-Terme")
-    parser.add_argument('--vars', nargs='+', metavar='VAR',
-                        help='Variablennamen (bei --minterms erforderlich)')
-    parser.add_argument('--no-kv', action='store_true',
-                        help='KV-Diagramm nicht anzeigen')
+Operatoren:  AND  OR  NOT   (Kurzformen: & | ! ~)
+Klammern:    ( )  werden vollständig unterstützt
+""")
 
-    args = parser.parse_args()
 
-    if args.minterms is not None and not args.vars:
-        parser.error("--minterms benötigt --vars")
+def parse_args(argv: list[str]) -> dict:
+    """Minimal sys.argv parser – replaces argparse."""
+    args = {
+        'expression': None,
+        'minterms': None,
+        'dontcares': [],
+        'vars': [],
+        'no_kv': False,
+    }
 
+    if not argv or '--help' in argv or '-h' in argv:
+        print_usage()
+        sys.exit(0)
+
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+
+        if tok == '--no-kv':
+            args['no_kv'] = True
+
+        elif tok == '--minterms':
+            args['minterms'] = []
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                try:
+                    args['minterms'].append(int(argv[i]))
+                except ValueError:
+                    print(f"  ✗ Kein gültiger Minterm: '{argv[i]}'")
+                    sys.exit(1)
+                i += 1
+            continue
+
+        elif tok == '--dontcares':
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                try:
+                    args['dontcares'].append(int(argv[i]))
+                except ValueError:
+                    print(f"  ✗ Kein gültiger Don't-care-Term: '{argv[i]}'")
+                    sys.exit(1)
+                i += 1
+            continue
+
+        elif tok == '--vars':
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                args['vars'].append(argv[i])
+                i += 1
+            continue
+
+        elif not tok.startswith('--'):
+            if args['expression'] is None:
+                args['expression'] = tok
+            else:
+                print(f"  ✗ Unerwartetes Argument: '{tok}'")
+                sys.exit(1)
+
+        else:
+            print(f"  ✗ Unbekannte Option: '{tok}'")
+            print_usage()
+            sys.exit(1)
+
+        i += 1
+
+    # Validation
+    if args['expression'] is None and args['minterms'] is None:
+        print("  ✗ Entweder Ausdruck oder --minterms angeben.")
+        print_usage()
+        sys.exit(1)
+
+    if args['minterms'] is not None and not args['vars']:
+        print("  ✗ --minterms benötigt --vars")
+        sys.exit(1)
+
+    return args
+
+
+def main():
+    args = parse_args(sys.argv[1:])
     run(args)
 
 
