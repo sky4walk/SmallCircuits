@@ -23,6 +23,8 @@ PRECEDENCE = {'OR': 1, 'AND': 2, 'NOT': 3}
 
 ALIAS = {'!': 'NOT', '~': 'NOT', '&': 'AND', '|': 'OR'}
 
+SKIP_CHARS = set()   # commas are handled by rewrite_functional, not stripped here
+
 
 def tokenize(expr: str) -> list[str]:
     """Lex the expression into normalised uppercase tokens (no regex)."""
@@ -33,6 +35,12 @@ def tokenize(expr: str) -> list[str]:
 
         # Skip whitespace
         if c == ' ' or c == '\t':
+            i += 1
+            continue
+
+        # Comma – keep as token for rewrite_functional
+        if c == ',':
+            tokens.append(',')
             i += 1
             continue
 
@@ -75,9 +83,66 @@ def tokenize(expr: str) -> list[str]:
     return tokens
 
 
+def rewrite_functional(tokens: list[str]) -> list[str]:
+    """
+    Convert prefix functional notation to infix.
+    AND(X, Y)  →  (X AND Y)
+    OR(X, Y)   →  (X OR Y)
+    NOT(X)     →  (NOT X)
+
+    Uses a depth stack so nested plain parens don't confuse the operator tracking.
+    """
+    result = []
+    # Stack entries: (operator, open_paren_depth_when_this_call_started)
+    call_stack: list[tuple[str, int]] = []
+    depth = 0   # current paren nesting depth
+
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+
+        # Detect OPERATOR '('  →  start of functional call
+        if t in ('AND', 'OR', 'NOT') and i + 1 < len(tokens) and tokens[i + 1] == '(':
+            call_stack.append((t, depth))
+            result.append('(')
+            if t == 'NOT':
+                result.append('NOT')
+            depth += 1
+            i += 2   # consume OPERATOR and '('
+            continue
+
+        if t == '(':
+            result.append('(')
+            depth += 1
+            i += 1
+            continue
+
+        if t == ')':
+            result.append(')')
+            depth -= 1
+            # If we're closing the paren that a functional call opened, pop it
+            if call_stack and call_stack[-1][1] == depth:
+                call_stack.pop()
+            i += 1
+            continue
+
+        # Comma inside a binary functional call at the right depth
+        if t == ',':
+            if call_stack and call_stack[-1][0] in ('AND', 'OR') and call_stack[-1][1] == depth - 1:
+                result.append(call_stack[-1][0])
+            # else: comma in nested call – skip silently
+            i += 1
+            continue
+
+        result.append(t)
+        i += 1
+
+    return result
+
+
 def parse(tokens: list[str]):
     """
-    Recursive-descent / shunting-yard parser.
+    Shunting-yard parser.
     Returns a list of tokens in Reverse Polish Notation (RPN).
     """
     output = []
@@ -88,7 +153,6 @@ def parse(tokens: list[str]):
         output.append(op)
 
     i = 0
-    prev_was_value = False  # to detect implicit NOT before '('
 
     while i < len(tokens):
         t = tokens[i]
@@ -96,29 +160,24 @@ def parse(tokens: list[str]):
         if t in ('0', '1') or (len(t) > 1 or t.isalpha()) and t not in PRECEDENCE and t not in ('(', ')'):
             # Operand (variable or literal)
             output.append(t)
-            prev_was_value = True
 
         elif t == 'NOT':
             ops.append(t)
-            prev_was_value = False
 
         elif t in PRECEDENCE:
             while (ops and ops[-1] != '(' and ops[-1] in PRECEDENCE and
                    PRECEDENCE[ops[-1]] >= PRECEDENCE[t]):
                 pop_op()
             ops.append(t)
-            prev_was_value = False
 
         elif t == '(':
             ops.append(t)
-            prev_was_value = False
 
         elif t == ')':
             while ops and ops[-1] != '(':
                 pop_op()
             if ops:
                 ops.pop()  # discard '('
-            prev_was_value = True
 
         i += 1
 
@@ -167,6 +226,22 @@ def build_truth_table(expr_str: str) -> tuple[list[str], list[int], list[int]]:
     Returns (variables, minterms, maxterms).
     """
     tokens = tokenize(expr_str)
+    # Functional notation: AND/OR immediately followed by '(' AND preceded by
+    # nothing, '(' or ',' (i.e. not an operand/closing paren as in infix A AND (...))
+    def is_functional_call(tokens, i):
+        if tokens[i] not in ('AND', 'OR'):
+            return False
+        if i + 1 >= len(tokens) or tokens[i + 1] != '(':
+            return False
+        # Check what comes before
+        if i == 0:
+            return True
+        prev = tokens[i - 1]
+        return prev in ('(', ',')
+
+    is_functional = any(is_functional_call(tokens, i) for i in range(len(tokens)))
+    if is_functional:
+        tokens = rewrite_functional(tokens)
     rpn = parse(tokens)
     variables = extract_variables(rpn)
     fn = rpn_to_lambda(rpn, variables)
