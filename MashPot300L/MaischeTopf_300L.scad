@@ -15,16 +15,41 @@
 // ============================================================
 //  SCHALTER – hier ein/ausschalten
 // ============================================================
-topf_podest_aktiv  = true;   // Topf-Podest (Gestell unter dem Topf)
-laeuterblech_aktiv = false;   // Läuterblech
-podest_aktiv       = false;   // Innenpodest (Läuterblech-Träger)
-griff_aktiv        = true;   // Bügelgriffe
-boden_stutzen_aktiv = true;  // Boden-Ablassstutzen
-deckel_aktiv        = true;  // Deckel
-klappe_aktiv        = true;  // Klappe (Einwurfsöffnung)
-motor_aktiv         = true;  // Motor (Platzhalter)
 
- $fn = 128;  // Rendering-Qualität – auskommentiert für schnelles Vorschau-Rendering
+// --- Ansichts-Modus ---
+nur_laeuterblech    = false;  // true = nur Läuterblech (für Lasercutter, ohne Podest)
+
+// --- Komponenten (einzeln ein/ausschaltbar) ---
+// Bei nur_laeuterblech = true werden alle außer Läuterblech automatisch deaktiviert
+_topf_podest   = false;   // Topf-Podest
+_laeuterblech  = false;   // Läuterblech
+_podest        = false;   // Innenpodest
+_griffe        = false;   // Bügelgriffe
+_deckel        = false;   // Deckel
+_klappe        = false;   // Klappe
+_motor         = false;   // Motor
+
+topf_podest_aktiv   = nur_laeuterblech ? false : _topf_podest;
+laeuterblech_aktiv  = _laeuterblech;
+podest_aktiv        = nur_laeuterblech ? false : _podest;
+griff_aktiv         = nur_laeuterblech ? false : _griffe;
+deckel_aktiv        = nur_laeuterblech ? false : _deckel;
+klappe_aktiv        = nur_laeuterblech ? false : _klappe;
+motor_aktiv         = nur_laeuterblech ? false : _motor;
+
+// --- Tri-Clamp Stutzen (einzeln abschaltbar) ---
+tc_unten_links_aktiv  = true;   // 2"  unten links
+tc_unten_mitte_aktiv  = true;   // unten mitte ein/aus
+tc_unten_mitte_2zoll  = true;   // true = 2", false = 1.5"
+tc_unten_rechts_aktiv = true;   // 2"  unten rechts
+tc_oben_links_aktiv   = true;   // 2"  oben links
+tc_oben_rechts_aktiv  = true;   // 2"  oben rechts
+tc_temp_aktiv         = true;   // 1.5" Temperatursensor
+tc_oben_b_aktiv       = true;   // 1.5" oben (nahe Rand)
+boden_stutzen_aktiv   = true;   // Boden-Ablassstutzen ein/aus
+boden_stutzen_2zoll   = true;   // true = 2", false = 1.5"
+
+ //$fn = 128;  // Rendering-Qualität – auskommentiert für schnelles Vorschau-Rendering
 //             // Einkommentieren für finales Render
 
 // --- Topf-Parameter ---
@@ -39,7 +64,9 @@ topf_ir            = topf_id / 2;
 topf_or            = topf_od / 2;
 
 // --- Tri-Clamp: gemeinsame Parameter ---
-flansch_ueberstand = 15.0;   // Flanschring steht um diesen Betrag außen heraus
+flansch_ueberstand = 15.0;   // Flanschring steht um diesen Betrag außen heraus (untere Stutzen)
+flansch_ueberstand_oben = 15.0; // Flanschüberstand gerade Stutzen (Mitte, Temp, oben)
+flansch_ueberstand_lr   = 5.0;  // Flanschüberstand links/rechts Stutzen (kürzer wegen Wandkrümmung)
 // (Rohrstutzen-Länge wird automatisch berechnet, s.u.)
 
 // --- Tri-Clamp Flansch-Typ A: 2" ---
@@ -64,8 +91,9 @@ stutzen_abstand    = 150.0;  // Mitte-zu-Mitte Abstand zwischen den Stutzen
 
 // --- Höhe: unteres Stutzen-Trio ---
 spiel              = 2.0;    // Mindestabstand Rohrmitte von Bodenkante
-stutzen_z   = bodenstaerke + tc_a_rohr_od / 2 + spiel;  // 2"-Paar: so tief wie möglich
-stutzen_b_z = bodenstaerke + tc_b_rohr_id / 2;          // 1.5" Mitte: Auslass bodeneben (Innenkante auf Bodenhöhe)
+stutzen_z      = bodenstaerke + tc_a_rohr_od / 2 + spiel;  // 2"-Paar links/rechts: so tief wie möglich
+stutzen_mitte_z = bodenstaerke + (tc_unten_mitte_2zoll ? tc_a_rohr_id : tc_b_rohr_id) / 2; // bodeneben je nach Größe
+stutzen_b_z = bodenstaerke + tc_b_rohr_id / 2;              // 1.5" (Referenz, nicht mehr verwendet unten)
 
 // --- Höhe: oberes 2"-Paar (Rohrmitte von Boden) ---
 tc_a_oben_links_z  = 300.0;  // 2" oben links  (parametrisch)
@@ -173,7 +201,7 @@ strebe_staerke     = 3.0;
 // Läuterblech liegt auf Oberkante Podest (Füsse + Streben)
 blech_z            = bodenstaerke + podest_hoehe;
 
-// --- Boden-Ablassstutzen: 1.5" nach unten, abschaltbar ---
+// --- Boden-Ablassstutzen: 2" nach unten, abschaltbar ---
 boden_stutzen_rand     = 100.0;          // Abstand vom Topfrand (Innenrand) in Richtung Hauptgruppe
 boden_stutzen_versatz  = topf_ir - boden_stutzen_rand; // → Abstand von Topfmitte
 boden_stutzen_l        = 20.0;           // Länge des Stutzens unter dem Boden
@@ -191,9 +219,13 @@ function x_aussen(y) = sqrt(max(topf_or * topf_or - y * y, 0));
 // Flansch-Stirnfläche liegt bei allen Stutzen auf gleicher X-Position:
 // Außenwand bei y=0 + flansch_ueberstand
 flansch_x_ziel = topf_or + flansch_ueberstand;
+flansch_x_ziel_oben = topf_or + flansch_ueberstand_oben;
+flansch_x_ziel_lr   = topf_or + flansch_ueberstand_lr;
 
 // Stutzen-Länge pro Stutzen: von Innenwand(y) bis zur gemeinsamen Flansch-X
 function stutzen_laenge(y) = flansch_x_ziel - x_innen(y);
+function stutzen_laenge_oben(y) = flansch_x_ziel_oben - x_innen(y);
+function stutzen_laenge_lr(y)   = flansch_x_ziel_lr   - x_innen(y);
 
 // ============================================================
 //  MODULE: Tri-Clamp Stutzen (Flansch + Rohr)
@@ -286,6 +318,56 @@ module stutzen_parallel(
     einzug  = rohr_od / 2;
     xi      = x_innen(y_offset) - einzug;
     sl      = stutzen_laenge(y_offset) + einzug;
+
+    translate([xi, y_offset, z_pos])
+        rotate([0, 90, 0])
+            triclamp_stutzen(
+                flansch_od = flansch_od,
+                rohr_od    = rohr_od,
+                rohr_id    = rohr_id,
+                flansch_h  = flansch_h,
+                stutzen_l  = sl,
+                nut_tiefe  = nut_tiefe,
+                nut_breite = nut_breite
+            );
+}
+
+// ============================================================
+//  MODULE: Parallelen Stutzen für obere Position (näher an Wandaußenkante)
+// ============================================================
+module stutzen_parallel_oben(
+    y_offset, z_pos,
+    flansch_od, rohr_od, rohr_id,
+    flansch_h, nut_tiefe, nut_breite
+) {
+    einzug  = rohr_od / 2;
+    xi      = x_innen(y_offset) - einzug;
+    sl      = stutzen_laenge_oben(y_offset) + einzug;
+
+    translate([xi, y_offset, z_pos])
+        rotate([0, 90, 0])
+            triclamp_stutzen(
+                flansch_od = flansch_od,
+                rohr_od    = rohr_od,
+                rohr_id    = rohr_id,
+                flansch_h  = flansch_h,
+                stutzen_l  = sl,
+                nut_tiefe  = nut_tiefe,
+                nut_breite = nut_breite
+            );
+}
+
+// ============================================================
+//  MODULE: Paralleler Stutzen für links/rechts (eigener Flanschüberstand)
+// ============================================================
+module stutzen_parallel_lr(
+    y_offset, z_pos,
+    flansch_od, rohr_od, rohr_id,
+    flansch_h, nut_tiefe, nut_breite
+) {
+    einzug  = rohr_od / 2;
+    xi      = x_innen(y_offset) - einzug;
+    sl      = stutzen_laenge_lr(y_offset) + einzug;
 
     translate([xi, y_offset, z_pos])
         rotate([0, 90, 0])
@@ -492,41 +574,49 @@ module podest() {
 //  MODULE: Boden-Ablassstutzen (zeigt nach unten)
 // ============================================================
 module boden_stutzen() {
+    // Größe je nach Schalter
+    b_flansch_od = boden_stutzen_2zoll ? tc_a_flansch_od : tc_b_flansch_od;
+    b_rohr_od    = boden_stutzen_2zoll ? tc_a_rohr_od    : tc_b_rohr_od;
+    b_rohr_id    = boden_stutzen_2zoll ? tc_a_rohr_id    : tc_b_rohr_id;
+    b_flansch_h  = boden_stutzen_2zoll ? tc_a_flansch_h  : tc_b_flansch_h;
+    b_nut_tiefe  = boden_stutzen_2zoll ? tc_a_nut_tiefe  : tc_b_nut_tiefe;
+    b_nut_breite = boden_stutzen_2zoll ? tc_a_nut_breite : tc_b_nut_breite;
+
     rotate([0, 0, gruppe_winkel])
     translate([boden_stutzen_versatz, 0, 0])
     difference() {
         union() {
             // Rohrstutzen nach unten
             translate([0, 0, -(boden_stutzen_l + bodenstaerke)])
-                cylinder(h = boden_stutzen_l + bodenstaerke, r = tc_b_rohr_od / 2);
+                cylinder(h = boden_stutzen_l + bodenstaerke, r = b_rohr_od / 2);
             // Flanschring am unteren Ende
             translate([0, 0, -(boden_stutzen_l + bodenstaerke)])
-                translate([0, 0, -(tc_b_flansch_h)])
+                translate([0, 0, -(b_flansch_h)])
                     rotate_extrude()
                         polygon(points = [
-                            [tc_b_rohr_id/2,       0],
-                            [tc_b_rohr_od/2,       0],
-                            [tc_b_rohr_od/2,       tc_b_flansch_h],
-                            [tc_b_flansch_od/2,    tc_b_flansch_h],
-                            [tc_b_flansch_od/2,    tc_b_flansch_h - 2.5*tan(20)],
-                            [tc_b_flansch_od/2 - 2.5, 0],
-                            [tc_b_rohr_id/2,       0]
+                            [b_rohr_id/2,          0],
+                            [b_rohr_od/2,          0],
+                            [b_rohr_od/2,          b_flansch_h],
+                            [b_flansch_od/2,       b_flansch_h],
+                            [b_flansch_od/2,       b_flansch_h - 2.5*tan(20)],
+                            [b_flansch_od/2 - 2.5, 0],
+                            [b_rohr_id/2,          0]
                         ]);
             // Dichtsteg
-            translate([0, 0, -(boden_stutzen_l + bodenstaerke + tc_b_flansch_h) - 0.8])
+            translate([0, 0, -(boden_stutzen_l + bodenstaerke + b_flansch_h) - 0.8])
                 difference() {
-                    cylinder(h = 0.8, r = tc_b_rohr_id/2 + 1.5);
-                    cylinder(h = 0.9, r = tc_b_rohr_id/2);
+                    cylinder(h = 0.8, r = b_rohr_id/2 + 1.5);
+                    cylinder(h = 0.9, r = b_rohr_id/2);
                 }
         }
         // Innenbohrung durchgehend
-        translate([0, 0, -(boden_stutzen_l + bodenstaerke + tc_b_flansch_h + 1)])
-            cylinder(h = boden_stutzen_l + bodenstaerke + tc_b_flansch_h + 2, r = tc_b_rohr_id/2);
+        translate([0, 0, -(boden_stutzen_l + bodenstaerke + b_flansch_h + 1)])
+            cylinder(h = boden_stutzen_l + bodenstaerke + b_flansch_h + 2, r = b_rohr_id/2);
         // Dichtnut
-        translate([0, 0, -(boden_stutzen_l + bodenstaerke + tc_b_flansch_h - tc_b_nut_breite)])
+        translate([0, 0, -(boden_stutzen_l + bodenstaerke + b_flansch_h - b_nut_breite)])
             difference() {
-                cylinder(h = tc_b_nut_breite + 0.01, r = tc_b_flansch_od/2 - tc_b_nut_tiefe);
-                cylinder(h = tc_b_nut_breite + 0.02, r = tc_b_rohr_id/2);
+                cylinder(h = b_nut_breite + 0.01, r = b_flansch_od/2 - b_nut_tiefe);
+                cylinder(h = b_nut_breite + 0.02, r = b_rohr_id/2);
             }
     }
 }
@@ -542,7 +632,8 @@ module topf_koerper() {
             cylinder(h = topf_hoehe, r = topf_or);
 
             // Stutzen 2" LINKS  (y = +stutzen_abstand)
-            stutzen_parallel(
+            if (tc_unten_links_aktiv)
+            stutzen_parallel_lr(
                 y_offset   =  stutzen_abstand,
                 z_pos      = stutzen_z,
                 flansch_od = tc_a_flansch_od,
@@ -553,20 +644,22 @@ module topf_koerper() {
                 nut_breite = tc_a_nut_breite
             );
 
-            // Stutzen 1.5" MITTE (y = 0)
-            stutzen_parallel(
+            // Stutzen MITTE unten – 2" oder 1.5" je nach Schalter
+            if (tc_unten_mitte_aktiv)
+            stutzen_parallel_oben(
                 y_offset   =  0,
-                z_pos      = stutzen_b_z,
-                flansch_od = tc_b_flansch_od,
-                rohr_od    = tc_b_rohr_od,
-                rohr_id    = tc_b_rohr_id,
-                flansch_h  = tc_b_flansch_h,
-                nut_tiefe  = tc_b_nut_tiefe,
-                nut_breite = tc_b_nut_breite
+                z_pos      = stutzen_mitte_z,
+                flansch_od = tc_unten_mitte_2zoll ? tc_a_flansch_od : tc_b_flansch_od,
+                rohr_od    = tc_unten_mitte_2zoll ? tc_a_rohr_od    : tc_b_rohr_od,
+                rohr_id    = tc_unten_mitte_2zoll ? tc_a_rohr_id    : tc_b_rohr_id,
+                flansch_h  = tc_unten_mitte_2zoll ? tc_a_flansch_h  : tc_b_flansch_h,
+                nut_tiefe  = tc_unten_mitte_2zoll ? tc_a_nut_tiefe  : tc_b_nut_tiefe,
+                nut_breite = tc_unten_mitte_2zoll ? tc_a_nut_breite : tc_b_nut_breite
             );
 
             // Stutzen 2" RECHTS (y = -stutzen_abstand)
-            stutzen_parallel(
+            if (tc_unten_rechts_aktiv)
+            stutzen_parallel_lr(
                 y_offset   = -stutzen_abstand,
                 z_pos      = stutzen_z,
                 flansch_od = tc_a_flansch_od,
@@ -576,8 +669,9 @@ module topf_koerper() {
                 nut_tiefe  = tc_a_nut_tiefe,
                 nut_breite = tc_a_nut_breite
             );
-            // Stutzen 2\" OBEN LINKS  (y = +stutzen_abstand)
-            stutzen_parallel(
+            // Stutzen 2" OBEN LINKS  (y = +stutzen_abstand)
+            if (tc_oben_links_aktiv)
+            stutzen_parallel_lr(
                 y_offset   =  stutzen_abstand,
                 z_pos      = tc_a_oben_links_z,
                 flansch_od = tc_a_flansch_od,
@@ -588,8 +682,9 @@ module topf_koerper() {
                 nut_breite = tc_a_nut_breite
             );
 
-            // Stutzen 2\" OBEN RECHTS (y = -stutzen_abstand)
-            stutzen_parallel(
+            // Stutzen 2" OBEN RECHTS (y = -stutzen_abstand)
+            if (tc_oben_rechts_aktiv)
+            stutzen_parallel_lr(
                 y_offset   = -stutzen_abstand,
                 z_pos      = tc_a_oben_rechts_z,
                 flansch_od = tc_a_flansch_od,
@@ -601,8 +696,9 @@ module topf_koerper() {
             );
 
             // --- Temperatursensor: 1.5" mittig, 90° versetzt ---
+            if (tc_temp_aktiv)
             rotate([0, 0, temp_winkel - gruppe_winkel])
-                stutzen_parallel(
+                stutzen_parallel_oben(
                     y_offset   = 0,
                     z_pos      = temp_z,
                     flansch_od = tc_b_flansch_od,
@@ -614,7 +710,8 @@ module topf_koerper() {
                 );
 
             // --- Oberer 1.5" Stutzen: in Linie mit Hauptgruppe, nahe Topfrand ---
-            stutzen_parallel(
+            if (tc_oben_b_aktiv)
+            stutzen_parallel_oben(
                 y_offset   = 0,
                 z_pos      = oben_b_z,
                 flansch_od = tc_b_flansch_od,
@@ -641,26 +738,35 @@ module topf_koerper() {
             cylinder(h = topf_hoehe, r = topf_ir);
 
         // Wanddurchbrüche unteres Trio
-        durchbruch_parallel( stutzen_abstand, stutzen_z,          tc_a_rohr_id);
-        durchbruch_parallel( 0,               stutzen_b_z,        tc_b_rohr_id);
-        durchbruch_parallel(-stutzen_abstand, stutzen_z,          tc_a_rohr_id);
+        if (tc_unten_links_aktiv)
+            durchbruch_parallel( stutzen_abstand, stutzen_z,         tc_a_rohr_id);
+        if (tc_unten_mitte_aktiv)
+            durchbruch_parallel( 0, stutzen_mitte_z,
+                tc_unten_mitte_2zoll ? tc_a_rohr_id : tc_b_rohr_id);
+        if (tc_unten_rechts_aktiv)
+            durchbruch_parallel(-stutzen_abstand, stutzen_z,         tc_a_rohr_id);
 
         // Wanddurchbrüche oberes 2"-Paar
-        durchbruch_parallel( stutzen_abstand, tc_a_oben_links_z,  tc_a_rohr_id);
-        durchbruch_parallel(-stutzen_abstand, tc_a_oben_rechts_z, tc_a_rohr_id);
+        if (tc_oben_links_aktiv)
+            durchbruch_parallel( stutzen_abstand, tc_a_oben_links_z,  tc_a_rohr_id);
+        if (tc_oben_rechts_aktiv)
+            durchbruch_parallel(-stutzen_abstand, tc_a_oben_rechts_z, tc_a_rohr_id);
 
         // Wanddurchbruch Temperatursensor
-        rotate([0, 0, temp_winkel - gruppe_winkel])
-            durchbruch_parallel(0, temp_z, tc_b_rohr_id);
+        if (tc_temp_aktiv)
+            rotate([0, 0, temp_winkel - gruppe_winkel])
+                durchbruch_parallel(0, temp_z, tc_b_rohr_id);
 
         // Wanddurchbruch oberer 1.5" Stutzen
-        durchbruch_parallel(0, oben_b_z, tc_b_rohr_id);
+        if (tc_oben_b_aktiv)
+            durchbruch_parallel(0, oben_b_z, tc_b_rohr_id);
 
-        // Bodendurchbruch Ablassstutzen
+        // Bodendurchbruch Ablassstutzen (jetzt 2")
         if (boden_stutzen_aktiv)
             rotate([0, 0, gruppe_winkel])
                 translate([boden_stutzen_versatz, 0, -0.1])
-                    cylinder(h = bodenstaerke + 0.2, r = tc_b_rohr_id / 2);
+                    cylinder(h = bodenstaerke + 0.2,
+                             r = (boden_stutzen_2zoll ? tc_a_rohr_id : tc_b_rohr_id) / 2);
     }  // end difference
 }  // end topf_koerper
 
@@ -922,7 +1028,7 @@ module klappe() {
 // ============================================================
 //  HAUPTKONSTRUKTION
 // ============================================================
-topf_koerper();
+if (!nur_laeuterblech) topf_koerper();
 
 if (deckel_aktiv) {
     deckel();
