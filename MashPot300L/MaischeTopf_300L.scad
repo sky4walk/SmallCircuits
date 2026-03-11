@@ -16,13 +16,15 @@
 //  SCHALTER – hier ein/ausschalten
 // ============================================================
 topf_podest_aktiv  = true;   // Topf-Podest (Gestell unter dem Topf)
-laeuterblech_aktiv = true;   // Läuterblech
-podest_aktiv       = true;   // Innenpodest (Läuterblech-Träger)
+laeuterblech_aktiv = false;   // Läuterblech
+podest_aktiv       = false;   // Innenpodest (Läuterblech-Träger)
 griff_aktiv        = true;   // Bügelgriffe
 boden_stutzen_aktiv = true;  // Boden-Ablassstutzen
 deckel_aktiv        = true;  // Deckel
+klappe_aktiv        = true;  // Klappe (Einwurfsöffnung)
+motor_aktiv         = true;  // Motor (Platzhalter)
 
-// $fn = 128;  // Rendering-Qualität – auskommentiert für schnelles Vorschau-Rendering
+ $fn = 128;  // Rendering-Qualität – auskommentiert für schnelles Vorschau-Rendering
 //             // Einkommentieren für finales Render
 
 // --- Topf-Parameter ---
@@ -90,6 +92,38 @@ griff_r            = griff_rohr_od / 2; // Biegeradius der U-Kurve = Rohrradius
 deckel_staerke       = 3.0;    // Blechstärke des Deckels
 deckel_ueberstand    = 10.0;   // wie weit der Deckel über den Topfrand hinausragt
 deckel_r             = topf_or + deckel_ueberstand; // Außenradius Deckel
+
+// Einwurfsöffnung / Klappe
+// Klappe als Kreisabschnitt (Sehne = Scharnier, Bogen = freie Kante)
+// Kreisabschnitt: Pfeilhöhe = 1/3 des Radius → kompakte Einwurfsöffnung
+// Pfeilhöhe h = deckel_r / 3, Sehne bei klappe_tiefe = deckel_r - h = 2/3 * deckel_r
+klappe_tiefe       = deckel_r * 2 / 3;  // Abstand Sehne vom Mittelpunkt
+klappe_winkel_pos  = gruppe_winkel;      // Klappe zeigt zur Tri-Clamp Gruppe
+klappe_staerke     = 3.0;    // Blechstärke der Klappe
+klappe_offen       = 0;      // Öffnungswinkel (0=geschlossen, 90=offen)
+klappe_offen_aktiv = true;   // true = Öffnung im Deckel sichtbar, false = Deckel geschlossen
+
+// Sehnenlänge: 2 * sqrt(r² - d²)  mit d = klappe_tiefe
+// scharnier_l = Länge des Scharnierstabs entlang der Sehne
+scharnier_r        = 4.0;    // Radius des Scharnierstabs
+scharnier_l        = 2 * sqrt(deckel_r * deckel_r - klappe_tiefe * klappe_tiefe) - 20.0;
+
+// Bügelgriff auf der Klappe
+kgriff_rohr_od     = 8.0;    // Außendurchmesser Griffrohr
+kgriff_rohr_id     = 5.0;    // Innendurchmesser (hohl)
+kgriff_breite      = 60.0;   // Breite des U-Bügels
+kgriff_hoehe       = 25.0;   // Höhe des U-Bügels über Klappe
+// Griff nahe Außenkante: mittig auf der Klappe in Y, weit außen in X
+kgriff_x           = (klappe_tiefe + deckel_r) / 2;  // mittig zwischen Sehne und Bogen
+
+// --- Motor (Platzhalter, mittig auf Deckel) ---
+motor_lochkreis     = 80.0;   // Lochabstand der 4 Schrauben (quadratisch)
+motor_schraube_d    = 6.0;    // Schraubendurchmesser
+motor_welle_d       = 30.0;   // Wellendurchmesser
+motor_platte_b      = motor_lochkreis + 30.0;  // Montageplatte Breite
+motor_platte_h      = 8.0;    // Montageplatte Stärke
+motor_quader_b      = motor_lochkreis + 10.0;  // Motor-Quader Breite
+motor_quader_h      = 80.0;   // Motor-Quader Höhe (Platzhalter)
 
 // Arretierungszapfen (greift in den Bügelgriff)
 zapfen_r             = griff_rohr_id / 2 - 0.5;  // Radius = Griffinnen-ID minus Spiel
@@ -627,8 +661,8 @@ module topf_koerper() {
             rotate([0, 0, gruppe_winkel])
                 translate([boden_stutzen_versatz, 0, -0.1])
                     cylinder(h = bodenstaerke + 0.2, r = tc_b_rohr_id / 2);
-    }
-}
+    }  // end difference
+}  // end topf_koerper
 
 // ============================================================
 //  MODULE: Topf-Podest (4 Eckfüsse + oberer Rahmen)
@@ -710,49 +744,191 @@ module topf_podest() {
 // ============================================================
 module deckel() {
     z_deckel  = topf_hoehe;
-    halb_b    = griff_breite / 2;   // halbe Griffbreite (Y-Versatz der Zapfen)
-    lasche_b  = griff_breite + griff_rohr_od * 2;  // Breite der Lasche (beide Zapfen + Rand)
-    lasche_t  = griff_tiefe + griff_rohr_od;        // Tiefe der Lasche (bis hinter Griffrohre)
-    lasche_h  = deckel_staerke;                     // gleiche Stärke wie Deckel
+    halb_b    = griff_breite / 2;
+    lasche_b  = griff_breite + griff_rohr_od * 2;
+    lasche_t  = griff_tiefe + griff_rohr_od;
+    lasche_h  = deckel_staerke;
+    x_zapfen  = topf_or + griff_tiefe / 2;
 
-    union() {
-        // --- Grundplatte: flache Scheibe ---
-        translate([0, 0, z_deckel])
-            cylinder(h = deckel_staerke, r = deckel_r);
+    difference() {
+        union() {
+            // --- Grundplatte: flache Scheibe ---
+            translate([0, 0, z_deckel])
+                cylinder(h = deckel_staerke, r = deckel_r);
 
-        // --- Arretierung: je eine Lasche + 2 Zapfen pro Griff-Seite ---
-        // Zapfen zeigen senkrecht nach unten durch die Mitte des U-Bügels
-        // X-Position = Mitte des Griffs (topf_or + griff_tiefe/2)
-        // Y-Position = 0 (Mitte zwischen den beiden Schenkeln)
-        x_zapfen = topf_or + griff_tiefe / 2;
+            // --- Arretierung: je eine Lasche + 2 Zapfen pro Griff-Seite ---
+            // gruppe_winkel mitdrehen damit Laschen exakt auf den Griffen sitzen
+            rotate([0, 0, gruppe_winkel])
+            for (seite = [1, -1]) {
+                rotate([0, 0, seite * 90]) {
+                    // Rechteckige Lasche
+                    translate([topf_or - griff_rohr_od,
+                               -lasche_b / 2,
+                               z_deckel])
+                        cube([lasche_t, lasche_b, lasche_h]);
 
-        for (seite = [1, -1]) {
-            rotate([0, 0, seite * griff_winkel]) {
+                    // Zapfen links
+                    translate([x_zapfen,  halb_b / 2, z_deckel - zapfen_h])
+                        cylinder(h = zapfen_h, r = zapfen_r);
 
-                // Rechteckige Lasche: vom Deckelrand nach außen über den Griff
-                translate([topf_or - griff_rohr_od,
-                           -lasche_b / 2,
-                           z_deckel])
-                    cube([lasche_t, lasche_b, lasche_h]);
-
-                // Zapfen links: durch linke Hälfte des U (y = +halb_b/2)
-                translate([x_zapfen, halb_b / 2, z_deckel - zapfen_h])
-                    cylinder(h = zapfen_h, r = zapfen_r);
-
-                // Zapfen rechts: durch rechte Hälfte des U (y = -halb_b/2)
-                translate([x_zapfen, -halb_b / 2, z_deckel - zapfen_h])
-                    cylinder(h = zapfen_h, r = zapfen_r);
+                    // Zapfen rechts
+                    translate([x_zapfen, -halb_b / 2, z_deckel - zapfen_h])
+                        cylinder(h = zapfen_h, r = zapfen_r);
+                }
             }
         }
+
+        // --- Wellenöffnung für Motor mittig im Deckel ---
+        if (motor_aktiv)
+            translate([0, 0, topf_hoehe - 0.1])
+                cylinder(h = deckel_staerke + 0.2, r = motor_welle_d / 2);
+
+        // --- Öffnung für Klappe (Kreisabschnitt) ausschneiden, abschaltbar ---
+        if (klappe_offen_aktiv)
+            rotate([0, 0, klappe_winkel_pos])
+                translate([0, 0, topf_hoehe - 0.1])
+                    linear_extrude(height = deckel_staerke + 0.2)
+                        intersection() {
+                            circle(r = deckel_r + 0.1);
+                            translate([klappe_tiefe, -(deckel_r + 0.1)])
+                                square([deckel_r - klappe_tiefe + 0.1, (deckel_r + 0.1) * 2]);
+                        }
     }
 }
+
+// ============================================================
+//  MODULE: Motor (Platzhalter mit Montageplatte + Quader)
+//  - Montageplatte mit 4 Schraubenlöchern
+//  - Wellenöffnung im Deckel
+//  - Motor-Quader als Platzhalter
+// ============================================================
+module motor() {
+    halb_lk  = motor_lochkreis / 2;
+    halb_pb  = motor_platte_b / 2;
+    halb_qb  = motor_quader_b / 2;
+    z_deckel = topf_hoehe + deckel_staerke;
+
+    union() {
+        // --- Montageplatte ---
+        translate([-halb_pb, -halb_pb, z_deckel])
+            difference() {
+                cube([motor_platte_b, motor_platte_b, motor_platte_h]);
+
+                // Wellenöffnung mittig
+                translate([halb_pb, halb_pb, -0.1])
+                    cylinder(h = motor_platte_h + 0.2, r = motor_welle_d / 2);
+
+                // 4 Schraubenlöcher an den Ecken des Lochkreises
+                for (dx = [-1, 1], dy = [-1, 1])
+                    translate([halb_pb + dx * halb_lk,
+                               halb_pb + dy * halb_lk,
+                               -0.1])
+                        cylinder(h = motor_platte_h + 0.2,
+                                 r = motor_schraube_d / 2);
+            }
+
+        // --- Motor-Quader als Platzhalter (sitzt auf der Montageplatte) ---
+        translate([-halb_qb, -halb_qb, z_deckel + motor_platte_h])
+            difference() {
+                cube([motor_quader_b, motor_quader_b, motor_quader_h]);
+                // Wellenöffnung durchgehend
+                translate([halb_qb, halb_qb, -0.1])
+                    cylinder(h = motor_quader_h + 0.2, r = motor_welle_d / 2);
+            }
+    }
+}
+
+// ============================================================
+//  MODULE: Abgerundetes Rechteck (2D)
+// ============================================================
+module rundrechteck(b, t, r) {
+    hull() {
+        translate([ b/2 - r,  t/2 - r]) circle(r = r);
+        translate([-b/2 + r,  t/2 - r]) circle(r = r);
+        translate([ b/2 - r, -t/2 + r]) circle(r = r);
+        translate([-b/2 + r, -t/2 + r]) circle(r = r);
+    }
+}
+
+// ============================================================
+//  MODULE: Einwurfsklappe mit Scharnier
+//  - Rechteckige Öffnung im Deckel
+//  - Klappe liegt auf oder klappt auf (klappe_offen = 0..90°)
+//  - Einfaches Stabscharnier an der hinteren Kante
+// ============================================================
+module klappe() {
+    // Kreisabschnitt: Sehne bei x = klappe_tiefe (Scharnier), Bogen = freie Kante
+    // Klappe klappt um die Sehne (Y-Achse bei x = klappe_tiefe) nach oben auf
+
+    gr          = kgriff_rohr_od / 2;
+    gr_i        = kgriff_rohr_id / 2;
+    halb_kb     = kgriff_breite / 2;
+    z_deckel    = topf_hoehe + deckel_staerke;
+    z_scharnier = z_deckel - scharnier_r;
+    // Sehnenlänge (halbe Sehne für Y-Berechnung)
+    halb_sehne  = sqrt(deckel_r * deckel_r - klappe_tiefe * klappe_tiefe);
+
+    rotate([0, 0, klappe_winkel_pos])
+    union() {
+        // --- Scharnierstab entlang der Sehne (Y-Richtung bei x = klappe_tiefe) ---
+        translate([klappe_tiefe, -scharnier_l / 2, z_scharnier])
+            rotate([-90, 0, 0])
+                cylinder(h = scharnier_l, r = scharnier_r);
+
+        // --- Klappe dreht um Scharnier (Y-Achse bei x = klappe_tiefe) ---
+        translate([klappe_tiefe, 0, z_deckel])
+            rotate([0, -klappe_offen, 0])
+            translate([-klappe_tiefe, 0, -z_deckel])
+            union() {
+                // Kreisabschnitt-Platte
+                translate([0, 0, z_deckel])
+                    linear_extrude(height = klappe_staerke)
+                        intersection() {
+                            circle(r = deckel_r);
+                            translate([klappe_tiefe, -halb_sehne])
+                                square([deckel_r - klappe_tiefe + 0.1, halb_sehne * 2]);
+                        }
+
+                // Bügelgriff: mittig in Y=0, nahe Außenbogen in X
+                z_top = z_deckel + klappe_staerke;
+
+                // Schenkel links
+                translate([kgriff_x, halb_kb, z_top])
+                    difference() {
+                        cylinder(h = kgriff_hoehe, r = gr);
+                        cylinder(h = kgriff_hoehe + 1, r = gr_i);
+                    }
+                // Schenkel rechts
+                translate([kgriff_x, -halb_kb, z_top])
+                    difference() {
+                        cylinder(h = kgriff_hoehe, r = gr);
+                        cylinder(h = kgriff_hoehe + 1, r = gr_i);
+                    }
+                // Querrohr oben
+                translate([kgriff_x, -halb_kb, z_top + kgriff_hoehe - gr])
+                    rotate([-90, 0, 0])
+                        difference() {
+                            cylinder(h = kgriff_breite, r = gr);
+                            cylinder(h = kgriff_breite + 1, r = gr_i);
+                        }
+                // Verrundungen
+                translate([kgriff_x,  halb_kb, z_top + kgriff_hoehe - gr]) sphere(r = gr);
+                translate([kgriff_x, -halb_kb, z_top + kgriff_hoehe - gr]) sphere(r = gr);
+            }
+    }
+}
+
 
 // ============================================================
 //  HAUPTKONSTRUKTION
 // ============================================================
 topf_koerper();
 
-if (deckel_aktiv)       deckel();
+if (deckel_aktiv) {
+    deckel();
+    if (klappe_aktiv) klappe();
+    if (motor_aktiv)  motor();
+}
 if (topf_podest_aktiv)  topf_podest();
 if (laeuterblech_aktiv) laeuterblech();
 if (podest_aktiv)       podest();
