@@ -31,7 +31,7 @@
 anzeige = 1; // [0:Vierkantrohr, 1:Rechter Winkel, 2:T-Stück, 3:Kreuz, 4:Rechter Winkel 3D, 5:T-Verbinder 3D, 6:Kreuz mit Abgang, 7:Stern, 8:Rohrverlängerung]
 
 /* [Rohr] */
-rohr_laenge      = 500;
+rohr_laenge      = 50;
 rohr_innenrillen = true;
 rillen_anz       = 28;
 rillentiefe      = 0.25;
