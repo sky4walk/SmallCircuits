@@ -177,12 +177,12 @@ def grover_geheimzahl_detailliert():
     N = 2**n_qubits
     geheime_zahl = 2  # Die Geheimzahl
     
-    print("\n📝 PROBLEM:")
+    print("\n PROBLEM:")
     print(f"  Jemand hat eine Zahl zwischen 0 und {N-1} gewählt.")
     print(f"  Du bekommst eine Funktion f(x), die prüft ob x richtig ist.")
     print(f"  Finde die Geheimzahl!")
     
-    print("\n⚙️  SETUP:")
+    print("\n  SETUP:")
     print(f"  Anzahl Qubits: {n_qubits}")
     print(f"  Suchraum: {N} Einträge (0, 1, 2, 3)")
     print(f"  Geheimzahl: ??? (versteckt!)")
@@ -209,12 +209,12 @@ def grover_geheimzahl_detailliert():
     H = hadamard_n_qubits(n_qubits)
     zeige_matrix(H, "Hadamard-Matrix H⊗H")
     
-    print("\n🔄 Berechnung: H⊗H × |00⟩")
+    print("\n Berechnung: H⊗H × |00⟩")
     zustand = matrix_mal_vektor(H, zustand)
     
     zeige_vektor(zustand, "Zustand nach Hadamard")
     
-    print("\n💡 Interpretation:")
+    print("\n Interpretation:")
     print(f"  Alle {N} Zustände haben gleiche Amplitude 1/√{N} = {1/math.sqrt(N):.3f}")
     print(f"  Jeder Zustand hat Wahrscheinlichkeit 1/{N} = {1/N:.1%}")
     
@@ -308,7 +308,7 @@ def grover_geheimzahl_detailliert():
     print_step(7, "Messung")
     # ========================================================================
     
-    print("\n📏 Messe den Zustand:")
+    print("\n Messe den Zustand:")
     
     wahrscheinlichkeiten = [abs(amp)**2 for amp in zustand]
     gefunden_index = wahrscheinlichkeiten.index(max(wahrscheinlichkeiten))
@@ -322,7 +322,7 @@ def grover_geheimzahl_detailliert():
     print_step(8, "Verifikation")
     # ========================================================================
     
-    print(f"\n🔍 Prüfe mit der Funktion f:")
+    print(f"\n Prüfe mit der Funktion f:")
     print(f"  f({gefunden_index}) = {f(gefunden_index)}")
     
     if f(gefunden_index) == 1:
@@ -347,7 +347,7 @@ def grover_geheimzahl_detailliert():
   Suchraum:           {N} Einträge
   Geheimzahl:         {geheime_zahl}
   Gefunden:           {gefunden_index}
-  Erfolg:             {"Ja ✓" if gefunden_index == geheime_zahl else "Nein ✗"}
+  Erfolg:             {"Ja " if gefunden_index == geheime_zahl else "Nein "}
   
   Grover-Iterationen: {k_optimal}
   Wahrscheinlichkeit: {gefunden_prob:.1%}
@@ -355,7 +355,7 @@ def grover_geheimzahl_detailliert():
  VERGLEICH:
   Klassisch:          ~{N/2:.0f} Versuche (Durchschnitt)
   Grover:             ~{k_optimal} Iterationen
-  Speedup:            ~{N/(2*k_optimal):.1f}×
+  Speedup:            ~{N/(2*k_optimal):.1f}
   
  KERNIDEE:
   1. Superposition:   Alle Werte gleichzeitig
