@@ -32,12 +32,19 @@ except ImportError:
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-PAIN_NAMESPACE = "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02"
-XSI_NAMESPACE  = "http://www.w3.org/2001/XMLSchema-instance"
-SCHEMA_LOCATION = (
-    "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02 "
-    "pain.008.003.02.xsd"
-)
+XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance"
+
+PAIN_VERSIONS = {
+    "pain.008.003.02": {
+        "namespace":      "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02",
+        "schema_location":"urn:iso:std:iso:20022:tech:xsd:pain.008.003.02 pain.008.003.02.xsd",
+    },
+    "pain.008.001.02": {
+        "namespace":      "urn:iso:std:iso:20022:tech:xsd:pain.008.001.02",
+        "schema_location":"urn:iso:std:iso:20022:tech:xsd:pain.008.001.02 pain.008.001.02.xsd",
+    },
+}
+VALID_PAIN_VERSIONS = set(PAIN_VERSIONS.keys())
 
 VALID_SEQUENCE_TYPES = {"FRST", "RCUR", "OOFF", "FNAL"}
 
@@ -154,12 +161,19 @@ def parse_csv(path: str) -> tuple[dict, list[dict]]:
         if field not in raw_c or not raw_c[field]:
             raise ValidationError(f"Pflichtfeld '{field}' fehlt im #creditor Block")
 
+    pain_version = raw_c.get("pain_version", "pain.008.003.02").strip()
+    if pain_version not in VALID_PAIN_VERSIONS:
+        raise ValidationError(
+            f"Unbekannte pain_version '{pain_version}' – erlaubt: {', '.join(sorted(VALID_PAIN_VERSIONS))}"
+        )
+
     creditor = {
         "name":            raw_c["creditor_name"],
         "iban":            validate_iban(raw_c["creditor_iban"], "Gläubiger IBAN"),
         "bic":             validate_bic(raw_c["creditor_bic"],   "Gläubiger BIC"),
         "creditor_id":     validate_creditor_id(raw_c["creditor_id"], "Gläubiger-ID"),
         "collection_date": validate_date(raw_c["collection_date"], "Einzugsdatum"),
+        "pain_version":    pain_version,
     }
 
     # ── Parse debitors ──
@@ -214,12 +228,13 @@ def build_xml(creditor: dict, debitors: list[dict]) -> ElementTree:
         groups[d["sequence_type"]].append(d)
 
     # ── Root ──
+    version_cfg = PAIN_VERSIONS[creditor["pain_version"]]
     root = Element(
         "Document",
         attrib={
-            "xmlns":              PAIN_NAMESPACE,
+            "xmlns":              version_cfg["namespace"],
             "xmlns:xsi":          XSI_NAMESPACE,
-            "xsi:schemaLocation": SCHEMA_LOCATION,
+            "xsi:schemaLocation": version_cfg["schema_location"],
         },
     )
     cdi = SubElement(root, "CstmrDrctDbtInitn")
@@ -321,8 +336,9 @@ EXAMPLE_CSV = """\
 # creditor_bic     – BIC deiner Bank
 # creditor_id      – Gläubiger-ID (beantragen bei der Deutschen Bundesbank)
 # collection_date  – gewünschtes Einzugsdatum (YYYY-MM-DD, mind. 5 Bankarbeitstage in der Zukunft)
-creditor_name,creditor_iban,creditor_bic,creditor_id,collection_date
-Mein Unternehmen GmbH,DE12500105170648489890,INGDDEFFXXX,DE98ZZZ09999999999,2025-06-01
+# pain_version     – XML-Format: pain.008.003.02 (Standard) oder pain.008.001.02 (optional)
+creditor_name,creditor_iban,creditor_bic,creditor_id,collection_date,pain_version
+Mein Unternehmen GmbH,DE12500105170648489890,INGDDEFFXXX,DE98ZZZ09999999999,2025-06-01,pain.008.003.02
 
 #debitors
 # Schuldnerdaten – eine Zeile pro Einzug
@@ -351,41 +367,42 @@ def main():
     if len(sys.argv) < 2:
         default_input = "input.csv"
         if Path(default_input).exists():
-            print(f"Keine Argumente – verwende gefundene {default_input}")
+            print(f"📂 Keine Argumente – verwende gefundene {default_input}")
             input_path  = default_input
             output_path = "output.xml"
         else:
             create_example_csv("input.csv")
-            print(f"Keine input.csv gefunden – Beispieldatei als input.csv erstellt")
+            print(f"📝 Keine input.csv gefunden – Beispieldatei als input.csv erstellt")
             print("   Passe die Daten an und starte erneut mit: python csv_to_sepa.py")
             sys.exit(0)
     else:
         if sys.argv[1] == "--example":
             example_path = "input_example.csv"
             create_example_csv(example_path)
-            print(f"Beispieldatei erstellt: {example_path}")
+            print(f"📝 Beispieldatei erstellt: {example_path}")
             print("   Aufruf: python csv_to_sepa.py input_example.csv [output.xml]")
             sys.exit(0)
 
         input_path  = sys.argv[1]
         output_path = sys.argv[2] if len(sys.argv) > 2 else "output.xml"
 
-    print(f"Lese CSV: {input_path}")
+    print(f"📂 Lese CSV: {input_path}")
 
     errors = []
     try:
         creditor, debitors = parse_csv(input_path)
     except ValidationError as e:
-        print(f"\nValidierungsfehler: {e}")
+        print(f"\n❌ Validierungsfehler: {e}")
         sys.exit(1)
     except FileNotFoundError:
-        print(f"\nDatei nicht gefunden: {input_path}")
+        print(f"\n❌ Datei nicht gefunden: {input_path}")
         sys.exit(1)
 
-    print(f"Gläubiger:  {creditor['name']} ({creditor['iban']})")
-    print(f"Schuldner:  {len(debitors)} Einträge")
-    print(f"Gesamtbetrag: {sum(d['amount'] for d in debitors):.2f} EUR")
-    print(f"Einzugsdatum: {creditor['collection_date']}")
+    print(f"✅ Gläubiger:  {creditor['name']} ({creditor['iban']})")
+    print(f"✅ Format:     {creditor['pain_version']}")
+    print(f"✅ Schuldner:  {len(debitors)} Einträge")
+    print(f"✅ Gesamtbetrag: {sum(d['amount'] for d in debitors):.2f} EUR")
+    print(f"✅ Einzugsdatum: {creditor['collection_date']}")
 
     # ── Vorlaufzeit prüfen ──
     today = date.today()
@@ -395,9 +412,9 @@ def main():
     delta = (col_date - today).days
 
     if col_date <= today:
-        print(f"\nWarnung: Einzugsdatum {col_date} liegt in der Vergangenheit oder ist heute!")
+        print(f"\n⚠️  Warnung: Einzugsdatum {col_date} liegt in der Vergangenheit oder ist heute!")
     elif delta < required_days:
-        print(f"\nWarnung: Einzugsdatum {col_date} unterschreitet die empfohlene Vorlaufzeit.")
+        print(f"\n⚠️  Warnung: Einzugsdatum {col_date} unterschreitet die empfohlene Vorlaufzeit.")
         print(f"   Heute ist {today}, benötigt werden mind. {required_days} Kalendertage → frühestens {today + __import__('datetime').timedelta(days=required_days)}.")
         print(f"   Hinweis: Bankarbeitstage (ohne Wochenenden/Feiertage) werden hier nicht berechnet – bitte manuell prüfen.")
 
@@ -407,7 +424,7 @@ def main():
         fh.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         tree.write(fh, encoding="unicode", xml_declaration=False)
 
-    print(f"\nXML erfolgreich erstellt: {output_path}")
+    print(f"\n🎉 XML erfolgreich erstellt: {output_path}")
 
 
 if __name__ == "__main__":
