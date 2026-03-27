@@ -8,7 +8,11 @@ CSV format:
     creditor_name, creditor_iban, creditor_bic, creditor_id, collection_date
 
   Section 2 — Debitor block (preceded by "#debitors"):
-    name, iban, bic, amount, mandate_id, mandate_date, sequence_type[, description]
+    Mitglieds-Nr.,Name,Vorname,Ansprechpart-ner bei Firmen,Mitglied seit,Zahler ab,
+    geboren,Straße,PLZ,Ort,Adresse geändert seit Beitritt,Telefon,Handy,e-mail,
+    Zustimmung Fotos,Änderung Bank seit Beitritt?,abweichender Zahler,
+    Mandats-datum,IBAN,BIC,Bank,Betrag,Ausgetreten
+    Zeilen ohne IBAN oder mit Ausgetreten-Datum werden übersprungen.
 
 Usage:
   python csv_to_sepa.py input.csv [output.xml]
@@ -84,10 +88,13 @@ def validate_bic(bic_str: str, label: str) -> str:
 
 
 def validate_date(date_str: str, label: str) -> date:
-    try:
-        return datetime.strptime(date_str.strip(), "%Y-%m-%d").date()
-    except ValueError:
-        raise ValidationError(f"{label}: Datum '{date_str}' muss im Format YYYY-MM-DD sein")
+    date_str = date_str.strip()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    raise ValidationError(f"{label}: Datum '{date_str}' muss im Format YYYY-MM-DD oder DD.MM.YYYY sein")
 
 
 def validate_amount(amount_str: str, label: str) -> Decimal:
@@ -113,7 +120,7 @@ def validate_creditor_id(cid: str, label: str) -> str:
 
 # ── CSV parser ────────────────────────────────────────────────────────────────
 
-def parse_csv(path: str) -> tuple[dict, list[dict]]:
+def parse_csv(path: str, verbose: bool = False) -> tuple[dict, list[dict]]:
     """
     Returns (creditor_dict, [debitor_dict, ...]).
     Raises ValidationError on any problem.
@@ -172,42 +179,113 @@ def parse_csv(path: str) -> tuple[dict, list[dict]]:
         "iban":            validate_iban(raw_c["creditor_iban"], "Gläubiger IBAN"),
         "bic":             validate_bic(raw_c["creditor_bic"],   "Gläubiger BIC"),
         "creditor_id":     validate_creditor_id(raw_c["creditor_id"], "Gläubiger-ID"),
-        "collection_date": validate_date(raw_c["collection_date"], "Einzugsdatum"),
+        "collection_date": date.today() + __import__("datetime").timedelta(days=7),
         "pain_version":    pain_version,
     }
 
-    # ── Parse debitors ──
+    if verbose:
+        print("\n[Gläubiger]")
+        print(f"  Name:           {creditor['name']}")
+        print(f"  IBAN:           {creditor['iban']}")
+        print(f"  BIC:            {creditor['bic']}")
+        print(f"  Gläubiger-ID:   {creditor['creditor_id']}")
+        print(f"  Einzugsdatum:   {creditor['collection_date']}")
+        print(f"  pain_version:   {creditor['pain_version']}")
+
+    # ── Parse debitors (Vereinsmitglieder-Format) ──
     deb_reader = list(csv.DictReader(debitor_lines))
     if not deb_reader:
         raise ValidationError("Keine Schuldner-Zeilen gefunden")
 
-    debitors = []
-    required_d = ["name", "iban", "bic", "amount", "mandate_id", "mandate_date", "sequence_type"]
+    debitors  = []
+    skipped   = []
+
+    if verbose:
+        print(f"\n[Schuldner] – lese {len(deb_reader)} Zeilen...")
 
     for i, row in enumerate(deb_reader, start=1):
         row = {k.strip(): v.strip() for k, v in row.items() if k}
-        label = f"Zeile {i} ('{row.get('name', '?')}')"
 
-        for field in required_d:
-            if field not in row or not row[field]:
-                raise ValidationError(f"{label}: Pflichtfeld '{field}' fehlt")
+        # Name zusammensetzen
+        vorname    = row.get("Vorname", "").strip()
+        nachname   = row.get("Name", "").strip()
+        full_name  = f"{vorname} {nachname}".strip() or f"Zeile {i}"
+        label      = f"Zeile {i} ('{full_name}')"
 
-        seq = row["sequence_type"].strip().upper()
-        if seq not in VALID_SEQUENCE_TYPES:
-            raise ValidationError(
-                f"{label}: sequence_type '{seq}' ungültig – erlaubt: {', '.join(VALID_SEQUENCE_TYPES)}"
-            )
+        # Ausgetretene Mitglieder überspringen
+        ausgetreten = row.get("Ausgetreten", "").strip()
+        if ausgetreten:
+            msg = f"  ⏭  {label} – ausgetreten am {ausgetreten}"
+            skipped.append(msg)
+            if verbose: print(msg)
+            continue
 
-        debitors.append({
-            "name":          row["name"],
-            "iban":          validate_iban(row["iban"], f"{label} IBAN"),
-            "bic":           validate_bic(row["bic"],   f"{label} BIC"),
-            "amount":        validate_amount(row["amount"], label),
-            "mandate_id":    row["mandate_id"],
-            "mandate_date":  validate_date(row["mandate_date"], f"{label} Mandatsdatum"),
-            "sequence_type": seq,
-            "description":   row.get("description", "").strip() or "SEPA Lastschrift",
-        })
+        # Kein IBAN → überspringen
+        iban_raw = row.get("IBAN", "").strip()
+        if not iban_raw:
+            msg = f"  ⏭  {label} – keine IBAN vorhanden"
+            skipped.append(msg)
+            if verbose: print(msg)
+            continue
+
+        # Ungültige IBAN → überspringen
+        try:
+            iban_validated = validate_iban(iban_raw, label)
+        except ValidationError as e:
+            short_msg = f"  ⚠️  {label} – ungültige IBAN '{iban_raw}', wird übersprungen"
+            verbose_msg = f"{short_msg}: {e}"
+            skipped.append(short_msg)
+            print(verbose_msg if verbose else short_msg)
+            continue
+
+        # Pflichtfelder prüfen
+        mandate_id_raw  = row.get("Mitglieds-Nr.", "").strip()
+        mandate_date_raw = row.get("Mandats-datum", "").strip()
+        bic_raw         = row.get("BIC", "").strip()
+        # Bankname aus "Bank"-Spalte ist kein BIC – nur echte BIC-artige Werte übernehmen
+        if bic_raw and not re.fullmatch(r"[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?", bic_raw):
+            if verbose:
+                print(f"    ⚠️  '{bic_raw}' ist kein gültiger BIC und wird ignoriert (→ NOTPROVIDED)")
+            bic_raw = ""  # als leer behandeln
+        amount_raw      = row.get("Betrag", "").strip()
+
+        if not mandate_id_raw:
+            raise ValidationError(f"{label}: Pflichtfeld 'Mitglieds-Nr.' fehlt")
+        if not mandate_date_raw:
+            raise ValidationError(f"{label}: Pflichtfeld 'Mandats-datum' fehlt")
+        # BIC ist optional (seit 2016 innerhalb der EU nicht mehr zwingend)
+        if not amount_raw:
+            raise ValidationError(f"{label}: Pflichtfeld 'Betrag' fehlt")
+
+        entry = {
+            "name":          full_name,
+            "iban":          iban_validated,
+            "bic":           validate_bic(bic_raw, f"{label} BIC") if bic_raw else "",
+            "amount":        validate_amount(amount_raw,     label),
+            "mandate_id":    mandate_id_raw,
+            "mandate_date":  validate_date(mandate_date_raw, f"{label} Mandats-datum"),
+            "sequence_type": "RCUR",
+            "description":   "Jahresbeitrag",
+        }
+        if verbose:
+            print(f"\n  [Zeile {i}] {full_name}")
+            print(f"    Mitglieds-Nr.:  {entry['mandate_id']}")
+            print(f"    IBAN:           {entry['iban']}")
+            print(f"    BIC:            {entry['bic'] or '(leer → NOTPROVIDED)'}")
+            print(f"    Betrag:         {entry['amount']} EUR")
+            print(f"    Mandats-datum:  {entry['mandate_date']}")
+            print(f"    Sequenztyp:     {entry['sequence_type']}")
+        debitors.append(entry)
+
+    if skipped and not verbose:
+        print(f"  Übersprungen ({len(skipped)} Einträge):")
+        for s in skipped:
+            print(s)
+    elif skipped and verbose:
+        print(f"\n  → {len(skipped)} Einträge übersprungen.")
+
+    if not debitors:
+        raise ValidationError("Keine gültigen Schuldner-Einträge nach Filterung gefunden")
 
     return creditor, debitors
 
@@ -305,10 +383,13 @@ def build_xml(creditor: dict, debitors: list[dict]) -> ElementTree:
             SubElement(mndt, "MndtId").text   = tx["mandate_id"]
             SubElement(mndt, "DtOfSgntr").text = tx["mandate_date"].strftime("%Y-%m-%d")
 
-            # Debitor agent
-            dbtr_agt    = SubElement(ddt, "DbtrAgt")
-            dbtr_fi     = SubElement(dbtr_agt, "FinInstnId")
-            SubElement(dbtr_fi, "BIC").text   = tx["bic"]
+            # Debitor agent (BIC optional)
+            dbtr_agt = SubElement(ddt, "DbtrAgt")
+            dbtr_fi  = SubElement(dbtr_agt, "FinInstnId")
+            if tx["bic"]:
+                SubElement(dbtr_fi, "BIC").text = tx["bic"]
+            else:
+                SubElement(dbtr_fi, "Othr").text = "NOTPROVIDED"  # SEPA-konformer Platzhalter
 
             # Debitor
             dbtr        = SubElement(ddt, "Dbtr")
@@ -341,19 +422,19 @@ creditor_name,creditor_iban,creditor_bic,creditor_id,collection_date,pain_versio
 Mein Unternehmen GmbH,DE12500105170648489890,INGDDEFFXXX,DE98ZZZ09999999999,2025-06-01,pain.008.003.02
 
 #debitors
-# Schuldnerdaten – eine Zeile pro Einzug
-# name            – vollständiger Name des Kontoinhabers
-# iban            – IBAN des Schuldners
-# bic             – BIC der Bank des Schuldners
-# amount          – Betrag in EUR (Dezimalpunkt, z.B. 49.00)
-# mandate_id      – eindeutige Mandatsreferenz (z.B. Kundennummer)
-# mandate_date    – Datum der Mandatsunterschrift (YYYY-MM-DD)
-# sequence_type   – FRST (erster Einzug) | RCUR (wiederkehrend) | OOFF (einmalig) | FNAL (letzter)
-# description     – Verwendungszweck (optional, max. 140 Zeichen)
-name,iban,bic,amount,mandate_id,mandate_date,sequence_type,description
-Max Mustermann,DE89370400440532013000,COBADEFFXXX,99.50,MAND-001,2024-01-15,FRST,Mitgliedsbeitrag Q1
-Erika Musterfrau,DE75512108001245126199,SSKMDEMMXXX,49.00,MAND-002,2023-06-01,RCUR,Monatsbeitrag Mai
-Hans Schmidt,DE91100000000123456789,BELADEBEXXX,150.00,MAND-003,2022-11-20,OOFF,Einmalige Zahlung
+# Mitgliederdaten – eine Zeile pro Mitglied
+# Mitglieds-Nr.               – wird als Mandatsreferenz verwendet
+# Name / Vorname              – werden zu vollem Namen zusammengesetzt
+# Mandats-datum               – Datum der SEPA-Mandatsunterschrift (YYYY-MM-DD)
+# IBAN / BIC                  – Kontodaten des Zahlers
+# Betrag                      – Jahresbeitrag in EUR (Dezimalpunkt, z.B. 49.00)
+# Ausgetreten                 – wenn gefüllt, wird das Mitglied übersprungen
+# Alle anderen Spalten werden eingelesen aber für den Einzug nicht verwendet
+Mitglieds-Nr.,Name,Vorname,Ansprechpart-ner bei Firmen,Mitglied seit,Zahler ab,geboren,Straße,PLZ,Ort,Adresse geändert seit Beitritt,Telefon,Handy,e-mail,Zustimmung Fotos,Änderung Bank seit Beitritt?,abweichender Zahler,Mandats-datum,IBAN,BIC,Bank,Betrag,Ausgetreten
+1001,Mustermann,Max,,2020-01-01,,1985-03-12,Musterstraße 1,12345,Musterstadt,,0911123456,,max@example.de,Ja,Nein,,2020-01-01,DE89370400440532013000,COBADEFFXXX,Commerzbank,49.00,
+1002,Musterfrau,Erika,,2019-06-01,,1990-07-22,Beispielweg 5,54321,Beispielort,,,,erika@example.de,Nein,Nein,,2019-06-01,DE75512108001245126199,SSKMDEMMXXX,Sparkasse,49.00,
+1003,Schmidt,Hans,,2018-03-15,,1978-11-05,Testgasse 9,99999,Teststadt,,,,,,Nein,,2018-03-15,,,,,2023-05-01
+1004,Bauer,Anna,,2021-09-01,,1995-02-28,Hauptstr. 3,10115,Berlin,,030987654,,anna@example.de,Ja,Nein,,2021-09-01,DE91100000000123456789,BELADEBEXXX,Berliner Bank,49.00,
 """
 
 def create_example_csv(path: str) -> None:
@@ -383,14 +464,17 @@ def main():
             print("   Aufruf: python csv_to_sepa.py input_example.csv [output.xml]")
             sys.exit(0)
 
-        input_path  = sys.argv[1]
-        output_path = sys.argv[2] if len(sys.argv) > 2 else "output.xml"
+        args = [a for a in sys.argv[1:] if a != "--verbose"]
+        input_path  = args[0] if args else "input.csv"
+        output_path = args[1] if len(args) > 1 else "output.xml"
+
+    verbose = "--verbose" in sys.argv
 
     print(f"📂 Lese CSV: {input_path}")
 
     errors = []
     try:
-        creditor, debitors = parse_csv(input_path)
+        creditor, debitors = parse_csv(input_path, verbose=verbose)
     except ValidationError as e:
         print(f"\n❌ Validierungsfehler: {e}")
         sys.exit(1)
