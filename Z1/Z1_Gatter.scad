@@ -241,8 +241,8 @@ module Z1_XOR(print=false,A=false,B=false,t=false, gehause=false) {
         
         inA = (A) ? 1 : 0;
         inB = (B) ? 1 : 0;
-        xor1 = (t && xor(A,B)) ? 1 : 0;
-        xor2 = (t && xor(A,B)) ? 1 : 0;
+        xor1 = (t && (xor(A,B) || A)) ? 1 : 0;
+        xor2 = (t && (xor(A,B))) ? 1 : 0;
         s1  = (t) ? 1 : 0;
         s2  = (t && xor(A,B) ) ? 1 : 0;
         
@@ -269,4 +269,4 @@ module Z1_XOR(print=false,A=false,B=false,t=false, gehause=false) {
     }
 }
 
-Z1_AND(false,true,true,true,true);
+Z1_XOR(false,true,true,true,true);
