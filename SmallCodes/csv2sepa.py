@@ -245,15 +245,25 @@ def parse_csv(path: str, verbose: bool = False) -> tuple[dict, list[dict]]:
         # Bankname aus "Bank"-Spalte ist kein BIC – nur echte BIC-artige Werte übernehmen
         if bic_raw and not re.fullmatch(r"[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?", bic_raw):
             if verbose:
-                print(f"    ⚠️  '{bic_raw}' ist kein gültiger BIC und wird ignoriert (→ NOTPROVIDED)")
+                print(f"    ⚠️  '{bic_raw}' ist kein gültiger BIC und wird ignoriert")
             bic_raw = ""  # als leer behandeln
+        # BIC leer + schwifty verfügbar → aus IBAN ableiten
+        if not bic_raw and SCHWIFTY_AVAILABLE:
+            try:
+                derived_bic = IBAN(iban_validated).bic
+                if derived_bic:
+                    bic_raw = str(derived_bic)
+                    if verbose:
+                        print(f"    ℹ️  BIC aus IBAN abgeleitet: {bic_raw}")
+            except Exception:
+                pass
         amount_raw      = row.get("Betrag", "").strip()
 
         if not mandate_id_raw:
             raise ValidationError(f"{label}: Pflichtfeld 'Mitglieds-Nr.' fehlt")
         if not mandate_date_raw:
             raise ValidationError(f"{label}: Pflichtfeld 'Mandats-datum' fehlt")
-        # BIC ist optional (seit 2016 innerhalb der EU nicht mehr zwingend)
+        # BIC ist optional – wenn leer und schwifty verfügbar, aus IBAN ableiten
         if not amount_raw:
             raise ValidationError(f"{label}: Pflichtfeld 'Betrag' fehlt")
 
