@@ -319,4 +319,4 @@ module Z1_Switch(print=false,A=false,t=false, gehause=false) {
     }
 }
 
-Z1_XOR(false,true,true,true,true);
+Z1_XOR(true);
