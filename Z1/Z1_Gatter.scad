@@ -89,6 +89,26 @@ module blech_XOR2(posX=0,posY=0,posZ=0) {
                 }
             }
 }
+
+module blech_SW(posX=0,posY=0,posZ=0) {
+    oLen = 3;
+    translate([posX*quad, posY*quad,posZ*dicke])
+        color(col_blau)
+            difference() {
+                translate([0,-quad*oLen,0])
+                    platte(4,8+oLen*2);
+                union() {
+                    // Aussparung oben rechts
+                    oneHole(2, 6);
+                    oneHole(1, 6);
+                    oneHole(2, 5);
+                    // Aussparung unten links
+                    //oneHole(1, 1);
+                    oneHole(2, 1);
+                }
+            }
+}
+    
 module blech_ausgabe(posX=0,posY=0,posZ=0) {
     oLen = 2;
     translate([posX*quad, posY*quad,posZ*dicke])
@@ -265,6 +285,36 @@ module Z1_XOR(print=false,A=false,B=false,t=false, gehause=false) {
         translate([0,0,dicke]) {
             stift(18,2,5);
             stift(18,7,5);
+        }
+    }
+}
+
+module Z1_Switch(print=false,A=false,t=false, gehause=false) {
+    if ( print == false ) {
+        if ( gehause ) {
+            gehaeuse_boden(2);
+//            gehaeuse_deckel_and();
+        }
+        
+        inA = (A) ? 1 : 0;
+        s1  = (t) ? 1 : 0;
+        s2  = (t && A) ? 1 : 0;
+        
+        blech_eingabe(-inA,5);
+        stift(1-inA,7-s1,5);
+        stift(1,2-s2,5);
+        blech_SW(-1,1-s2,1);
+        blech_takt(-1,6-s1,2);
+        blech_ausgabe(-1,-2-s2,2);
+    } else {
+        gehaeuse_boden(1,3,7,2);
+        blech_eingabe(0,0);
+        blech_SW(-4,9,0);
+        blech_ausgabe(13,1,0);
+        blech_takt(13,9,0);
+        translate([0,0,dicke]) {
+            stift(10,10,5);
+            stift(10,13,5);
         }
     }
 }
