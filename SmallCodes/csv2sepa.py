@@ -399,7 +399,9 @@ def build_xml(creditor: dict, debitors: list[dict]) -> ElementTree:
             if tx["bic"]:
                 SubElement(dbtr_fi, "BIC").text = tx["bic"]
             else:
-                SubElement(dbtr_fi, "Othr").text = "NOTPROVIDED"  # SEPA-konformer Platzhalter
+                # Korrekte SEPA-Struktur: NOTPROVIDED in <Othr><Id>, nicht in <BIC>
+                othr = SubElement(dbtr_fi, "Othr")
+                SubElement(othr, "Id").text = "NOTPROVIDED" 
 
             # Debitor
             dbtr        = SubElement(ddt, "Dbtr")
