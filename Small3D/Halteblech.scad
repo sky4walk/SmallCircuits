@@ -13,6 +13,7 @@
 //    seite_oben_unten   < breite
 //    seite_links_rechts < hoehe
 // ============================================================
+variante = 2;
 
 m5                 = 5;
 breite             = 140;    // Gesamtbreite, mm
@@ -20,6 +21,7 @@ hoehe              = 30;     // Gesamthöhe,   mm
 tiefe              = 5;      // Extrusionstiefe (z-Achse), mm
 seite_oben_unten   = m5*4;   // Länge der oberen/unteren Seite, mm
 seite_links_rechts = m5*4;   // Höhe der linken/rechten Seite, mm
+stuhlbein          = 40;
 $fn=64;
 
 // ---- Modul -------------------------------------------------
@@ -46,11 +48,24 @@ module achteck(b, h, t, su, slr) {
 }
 
 // ---- Aufruf ------------------------------------------------
-difference()
-{
-    achteck(breite+4*m5, hoehe+4*m5, tiefe, seite_oben_unten, seite_links_rechts);
-    translate([-breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
-    translate([ breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
-    translate([0, hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
-    translate([0,-hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+if ( 1 == variante ) {
+    difference()
+    {
+        achteck(breite+4*m5, hoehe+4*m5, tiefe, seite_oben_unten, seite_links_rechts);
+        translate([-breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([ breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([0, hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([0,-hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+    }
+} else {
+    difference()
+    {
+        achteck(breite+4*m5, hoehe+4*m5, tiefe, stuhlbein+m5*2, seite_links_rechts);
+        translate([-breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([ breite/2,0,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([-stuhlbein/2-m5/2,-hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([ stuhlbein/2+m5/2,-hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([-stuhlbein/2-m5/2, hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+        translate([ stuhlbein/2+m5/2, hoehe/2,-.1]) cylinder(tiefe+.2,m5/2,m5/2);
+    }
 }
