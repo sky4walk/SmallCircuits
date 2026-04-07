@@ -87,7 +87,7 @@ tc_b_nut_breite    = 3.5;
 
 // --- Positionierung der Anschluss-Gruppe ---
 gruppe_winkel      = 0;      // Drehung der Gruppe um Z-Achse (0° = +X Richtung)
-stutzen_abstand    = 150.0;  // Mitte-zu-Mitte Abstand zwischen den Stutzen
+stutzen_abstand    = 100.0;  // Mitte-zu-Mitte Abstand zwischen den Stutzen
 
 // --- Höhe: unteres Stutzen-Trio ---
 spiel              = 2.0;    // Mindestabstand Rohrmitte von Bodenkante

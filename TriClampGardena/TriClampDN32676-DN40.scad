@@ -5,7 +5,7 @@
 // 4 : AG1/2
 // 7 : Tauchrohr
 // 8 : IG5/8
-type = 8;
+type = 2;
 draft = false;
 
 use <threadlib/threadlib.scad>;
