@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Podest Konfigurator</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: sans-serif; background: #111; color: #ccc; display: flex; flex-direction: column; height: 100vh; }
+  #canvas-wrap { flex: 1; position: relative; }
+  canvas { width: 100% !important; height: 100% !important; display: block; }
+  .hint { position: absolute; bottom: 8px; right: 12px; font-size: 11px; color: #555; font-family: monospace; }
+  #controls { background: #1a1a2e; padding: 12px 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .ctrl { background: #222; border-radius: 8px; padding: 10px 12px; }
+  .ctrl label { font-size: 12px; color: #888; display: block; margin-bottom: 6px; }
+  .ctrl label span { font-weight: 500; color: #dde3ec; }
+  input[type=range] { width: 100%; accent-color: #667eea; }
+  #info { background: #1a1a2e; padding: 8px 16px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; border-top: 1px solid #222; }
+  .stat { background: #222; border-radius: 6px; padding: 6px 10px; text-align: center; }
+  .stat .label { font-size: 11px; color: #666; }
+  .stat .val { font-size: 13px; font-weight: 500; color: #dde3ec; }
+  .ok  { color: #4ade80 !important; }
+  .warn { color: #facc15 !important; }
+</style>
+</head>
+<body>
+
+<div id="canvas-wrap">
+  <canvas id="c"></canvas>
+  <div class="hint">drag to rotate · scroll to zoom</div>
+</div>
+
+<div id="controls">
+  <div class="ctrl">
+    <label>Höhe: <span id="hv">800</span> mm</label>
+    <input type="range" id="height" min="200" max="1200" value="800" step="10">
+  </div>
+  <div class="ctrl">
+    <label>Fläche: <span id="sv">600</span> mm</label>
+    <input type="range" id="size" min="200" max="1000" value="600" step="10">
+  </div>
+  <div class="ctrl">
+    <label>Öffnung: <span id="ov">300</span> mm</label>
+    <input type="range" id="opening" min="50" max="900" value="300" step="10">
+  </div>
+  <div class="ctrl">
+    <label>Fussdicke: <span id="fv">50</span> mm</label>
+    <input type="range" id="foot" min="10" max="200" value="50" step="5">
+  </div>
+</div>
+
+<div id="info">
+  <div class="stat"><div class="label">Wandstärke</div><div class="val" id="wall-info">–</div></div>
+  <div class="stat"><div class="label">Fussdicke</div><div class="val" id="foot-info">–</div></div>
+  <div class="stat"><div class="label">Öffnung %</div><div class="val" id="pct-info">–</div></div>
+  <div class="stat"><div class="label">Status</div><div class="val" id="status-info">–</div></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ── Renderer ──────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('c');
+const wrap   = document.getElementById('canvas-wrap');
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x1a1a2e);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 10000);
+
+// ── Lights ────────────────────────────────────────────────────────────────────
+const amb = new THREE.AmbientLight(0xffffff, 0.5);
+scene.add(amb);
+
+const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+dir.position.set(800, 1200, 600);
+dir.castShadow = true;
+dir.shadow.camera.near = 1;
+dir.shadow.camera.far  = 6000;
+dir.shadow.camera.left = dir.shadow.camera.bottom = -2000;
+dir.shadow.camera.right = dir.shadow.camera.top   =  2000;
+dir.shadow.mapSize.set(1024, 1024);
+scene.add(dir);
+
+const fill = new THREE.DirectionalLight(0x8899ff, 0.3);
+fill.position.set(-600, 400, -400);
+scene.add(fill);
+
+// ── Grid ──────────────────────────────────────────────────────────────────────
+const grid = new THREE.GridHelper(3000, 30, 0x334455, 0x223344);
+grid.position.y = -1;
+scene.add(grid);
+
+// ── Materials ─────────────────────────────────────────────────────────────────
+const mat     = new THREE.MeshPhongMaterial({ color: 0xdde3ec, specular: 0x334455, shininess: 40, side: THREE.DoubleSide });
+const edgeMat = new THREE.LineBasicMaterial({ color: 0x667788 });
+
+// ── Podest group ──────────────────────────────────────────────────────────────
+const group = new THREE.Group();
+scene.add(group);
+
+// ── Build helpers ─────────────────────────────────────────────────────────────
+// Adds a box centered at (cx, cy) in XY, starting at z_base in Z.
+// Mirrors the OpenSCAD quader() module exactly.
+function addBox(cx, cy, z_base, w, d, h) {
+  const geo  = new THREE.BoxGeometry(w, h, d);
+  const mesh = new THREE.Mesh(geo, mat);
+  // Three.js Y is up; OpenSCAD Z is up → swap h/d axes accordingly
+  mesh.position.set(cx, z_base + h / 2, cy);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  group.add(mesh);
+
+  const edges = new THREE.EdgesGeometry(geo);
+  const line  = new THREE.LineSegments(edges, edgeMat);
+  line.position.copy(mesh.position);
+  group.add(line);
+}
+
+// ── Build podest ──────────────────────────────────────────────────────────────
+function buildPodest(H, S, O, F) {
+  // Clear previous geometry
+  while (group.children.length) group.remove(group.children[0]);
+
+  const wandstaerke = (S - O) / 2;
+  const deckel_h    = Math.max(20, H * 0.04);
+  const fuss_h      = H - deckel_h;
+  const fuss_mitte  = S / 2 - F / 2;
+
+  // ── Füsse (4 Ecken) ────────────────────────────────────────────────────────
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      addBox(sx * fuss_mitte, sy * fuss_mitte, 0, F, F, fuss_h);
+    }
+  }
+
+  // ── Deckplatte mit Öffnung (4 Planken) ────────────────────────────────────
+  // Vordere Planke  (Außenkante bei Y = +S/2)
+  addBox(0,  S/2 - wandstaerke/2, fuss_h, S, wandstaerke, deckel_h);
+  // Hintere Planke  (Außenkante bei Y = -S/2)
+  addBox(0, -S/2 + wandstaerke/2, fuss_h, S, wandstaerke, deckel_h);
+  // Rechte Planke   (Außenkante bei X = +S/2)
+  addBox( S/2 - wandstaerke/2, 0, fuss_h, wandstaerke, O, deckel_h);
+  // Linke Planke    (Außenkante bei X = -S/2)
+  addBox(-S/2 + wandstaerke/2, 0, fuss_h, wandstaerke, O, deckel_h);
+
+  // ── Info ────────────────────────────────────────────────────────────────────
+  document.getElementById('wall-info').textContent = Math.round(wandstaerke) + ' mm';
+  document.getElementById('foot-info').textContent = Math.round(F) + ' mm';
+  document.getElementById('pct-info').textContent  = Math.round((O / S) * 100) + '%';
+
+  const ok = wandstaerke > 20 && F >= 10 && F <= S / 2 - 10;
+  const statusEl = document.getElementById('status-info');
+  statusEl.textContent = ok ? '✓ Stabil' : '⚠ Prüfen';
+  statusEl.className = 'val ' + (ok ? 'ok' : 'warn');
+}
+
+// ── Resize ────────────────────────────────────────────────────────────────────
+function resize() {
+  const W = wrap.clientWidth;
+  const H = wrap.clientHeight;
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+}
+resize();
+new ResizeObserver(resize).observe(wrap);
+
+// ── Orbit controls (manual) ───────────────────────────────────────────────────
+let drag = false, last = { x: 0, y: 0 };
+let theta = Math.PI / 4, phi = Math.PI / 3.5, radius = 2000;
+
+function updateCamera() {
+  const H = parseInt(document.getElementById('height').value);
+  camera.position.set(
+    radius * Math.sin(phi) * Math.cos(theta),
+    radius * Math.cos(phi) + H * 0.3,
+    radius * Math.sin(phi) * Math.sin(theta)
+  );
+  camera.lookAt(0, H / 2, 0);
+}
+
+canvas.addEventListener('mousedown', e => { drag = true; last = { x: e.clientX, y: e.clientY }; });
+window.addEventListener('mouseup',   ()  => { drag = false; });
+window.addEventListener('mousemove', e  => {
+  if (!drag) return;
+  theta -= (e.clientX - last.x) * 0.008;
+  phi   -= (e.clientY - last.y) * 0.008;
+  phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, phi));
+  last = { x: e.clientX, y: e.clientY };
+  updateCamera();
+});
+canvas.addEventListener('wheel', e => {
+  radius = Math.max(400, Math.min(5000, radius + e.deltaY * 1.5));
+  updateCamera();
+}, { passive: true });
+
+// Touch
+let touch0 = null;
+canvas.addEventListener('touchstart', e => {
+  if (e.touches.length === 1) { touch0 = { x: e.touches[0].clientX, y: e.touches[0].clientY }; drag = true; }
+});
+canvas.addEventListener('touchmove', e => {
+  if (!drag || e.touches.length !== 1) return;
+  theta -= (e.touches[0].clientX - touch0.x) * 0.01;
+  phi   -= (e.touches[0].clientY - touch0.y) * 0.01;
+  phi = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, phi));
+  touch0 = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  updateCamera();
+});
+canvas.addEventListener('touchend', () => { drag = false; });
+
+// ── Controls ──────────────────────────────────────────────────────────────────
+function getVals() {
+  return {
+    H: parseInt(document.getElementById('height').value),
+    S: parseInt(document.getElementById('size').value),
+    O: parseInt(document.getElementById('opening').value),
+    F: parseInt(document.getElementById('foot').value)
+  };
+}
+
+function clampSliders() {
+  const s  = parseInt(document.getElementById('size').value);
+  const oEl = document.getElementById('opening');
+  const fEl = document.getElementById('foot');
+  oEl.max = Math.max(50, s - 60);
+  if (parseInt(oEl.value) > parseInt(oEl.max)) oEl.value = oEl.max;
+  fEl.max = Math.floor(s / 2) - 10;
+  if (parseInt(fEl.value) > parseInt(fEl.max)) fEl.value = fEl.max;
+}
+
+['height', 'size', 'opening', 'foot'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    if (id === 'size') clampSliders();
+    const v = getVals();
+    document.getElementById('hv').textContent = v.H;
+    document.getElementById('sv').textContent = v.S;
+    document.getElementById('ov').textContent = v.O;
+    document.getElementById('fv').textContent = v.F;
+    buildPodest(v.H, v.S, v.O, v.F);
+    updateCamera();
+  });
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+buildPodest(800, 600, 300, 50);
+updateCamera();
+
+// ── Render loop ───────────────────────────────────────────────────────────────
+(function loop() { requestAnimationFrame(loop); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>
