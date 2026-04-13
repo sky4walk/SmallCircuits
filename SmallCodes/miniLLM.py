@@ -6,7 +6,7 @@ Kombiniert unseren Tokenizer mit einem einfachen Transformer für Text-Generieru
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-#from TokenizerExampleA import SubwordTokenizer
+from TokenizerExampleA import SubwordTokenizer
 
 # PIP vorbereiten
 # sudo apt update
@@ -241,7 +241,7 @@ def main():
 
 
 # 1. Tokenizer trainieren
-from TokenizerExampleA import SubwordTokenizer
+#from TokenizerExampleA import SubwordTokenizer
 
 tokenizer = SubwordTokenizer()
 
