@@ -492,6 +492,48 @@ def load(path, allow_pickle=False):
     return {k: ndarray(v.tolist(), v.shape) for k, v in data.items()}
 
 
+def zeros_like(arr):
+    """Array mit Nullen in gleicher Shape wie arr."""
+    if isinstance(arr, ndarray):
+        shape = arr.shape
+    else:
+        shape = _get_shape(arr)
+    import functools
+    size = functools.reduce(lambda a, b: a * b, shape)
+    flat = [0.0] * size
+    return ndarray(_unflatten(flat, shape), shape)
+
+
+def maximum(a, b):
+    """
+    Element-weises Maximum zweier Arrays oder Array und Skalar.
+    Entspricht np.maximum(a, b) — nicht np.max(a).
+    """
+    return _elementwise(a, b, lambda x, y: x if x > y else y)
+
+
+def argmax(x, axis=None):
+    """
+    Index des größten Elements.
+    Ohne axis: globales Argmax als Integer.
+    """
+    if isinstance(x, ndarray):
+        flat = _flatten(x.data)
+    else:
+        flat = list(x)
+
+    if axis is None:
+        best_idx = 0
+        best_val = flat[0]
+        for i, v in enumerate(flat):
+            if v > best_val:
+                best_val = v
+                best_idx = i
+        return best_idx
+
+    raise NotImplementedError("argmax mit axis ist noch nicht implementiert")
+
+
 class random:
     @staticmethod
     def choice(n, p=None):
@@ -519,6 +561,52 @@ class random:
             if r <= cs:
                 return i
         return n - 1
+
+    @staticmethod
+    def seed(s):
+        """Setzt den Zufallszahlenseed für Reproduzierbarkeit."""
+        import random as _r
+        _r.seed(s)
+
+    @staticmethod
+    def shuffle(lst):
+        """
+        Mischst eine Liste in-place (wie np.random.shuffle).
+        Arbeitet direkt auf der Liste, kein Rückgabewert.
+        Fisher-Yates Algorithmus.
+        """
+        import random as _r
+        n = len(lst)
+        for i in range(n - 1, 0, -1):
+            j = _r.randint(0, i)
+            lst[i], lst[j] = lst[j], lst[i]
+
+    @staticmethod
+    def randn(*shape):
+        """
+        Normalverteilte Zufallswerte (Mittelwert=0, Std=1).
+        Verwendet Box-Muller-Transformation.
+        Beispiel: random.randn(3, 4) -> ndarray mit shape (3, 4)
+        """
+        import random as _r
+
+        def _box_muller():
+            """Erzeugt eine standardnormalverteilte Zahl via Box-Muller."""
+            while True:
+                u1 = _r.random()
+                u2 = _r.random()
+                if u1 > 0:
+                    break
+            z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+            return z
+
+        if len(shape) == 1 and isinstance(shape[0], tuple):
+            shape = shape[0]
+
+        import functools
+        size = functools.reduce(lambda a, b: a * b, shape)
+        flat = [_box_muller() for _ in range(size)]
+        return ndarray(_unflatten(flat, shape), shape)
 
 
 # =============================================================================
