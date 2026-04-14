@@ -829,6 +829,388 @@ class SubwordTokenizer:
             print("Kein Training möglich - keine Texte geladen.")
 
 
+class MultiHeadSelfAttention:
+    """
+    Multi-Head Self-Attention Mechanismus (aus "Attention is All You Need").
+    Berechnet für jeden Token, wie stark er auf andere Tokens achten soll.
+
+    Formel: Attention(Q, K, V) = softmax(Q @ Kᵀ / sqrt(d_k)) @ V
+    """
+
+    def __init__(self, embedding_dim, num_heads=2):
+        """
+        Args:
+            embedding_dim: Dimensionalität der Eingabe-Vektoren
+            num_heads:     Anzahl der Attention-Köpfe (muss embedding_dim teilen)
+        """
+        assert embedding_dim % num_heads == 0, \
+            "embedding_dim muss durch num_heads teilbar sein!"
+
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
+        self.head_dim = embedding_dim // num_heads  # Dimension pro Kopf
+
+        import random
+        import math
+        self._random = random
+        self._math = math
+
+        print(f"\nInitialisiere Multi-Head Self-Attention:")
+        print(f"  Embedding-Dim: {embedding_dim}")
+        print(f"  Anzahl Köpfe:  {num_heads}")
+        print(f"  Dim pro Kopf:  {self.head_dim}")
+
+        # Gewichtsmatrizen für Q, K, V und Output-Projektion
+        # Jede hat Form (embedding_dim x embedding_dim)
+        self.W_q = self._init_weights(embedding_dim, embedding_dim)
+        self.W_k = self._init_weights(embedding_dim, embedding_dim)
+        self.W_v = self._init_weights(embedding_dim, embedding_dim)
+        self.W_o = self._init_weights(embedding_dim, embedding_dim)
+
+    # ------------------------------------------------------------------ #
+    #  Hilfsmethoden                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _init_weights(self, rows, cols):
+        """Xavier-ähnliche Initialisierung."""
+        scale = (2.0 / (rows + cols)) ** 0.5
+        return [
+            [(self._random.random() - 0.5) * 2 * scale for _ in range(cols)]
+            for _ in range(rows)
+        ]
+
+    def _matmul(self, A, B):
+        """Matrix-Multiplikation: A (n×m) @ B (m×p) → (n×p)"""
+        n, m, p = len(A), len(A[0]), len(B[0])
+        assert len(B) == m, "Inkompatible Dimensionen für Matmul!"
+        C = [[0.0] * p for _ in range(n)]
+        for i in range(n):
+            for k in range(m):
+                if A[i][k] == 0.0:
+                    continue
+                for j in range(p):
+                    C[i][j] += A[i][k] * B[k][j]
+        return C
+
+    def _transpose(self, M):
+        """Transponiert eine Matrix."""
+        return [[M[j][i] for j in range(len(M))] for i in range(len(M[0]))]
+
+    def _softmax(self, row):
+        """Numerisch stabiles Softmax über eine Liste."""
+        max_val = max(row)
+        exps = [self._math.exp(x - max_val) for x in row]
+        total = sum(exps)
+        return [e / total for e in exps]
+
+    def _linear(self, X, W):
+        """
+        Projiziert jede Zeile von X mit W.
+        X: (seq_len × embedding_dim)
+        W: (embedding_dim × embedding_dim)
+        → (seq_len × embedding_dim)
+        """
+        return self._matmul(X, W)
+
+    def _split_heads(self, X):
+        """
+        Teilt X in num_heads Teilmatrizen.
+        X: (seq_len × embedding_dim)
+        → Liste von num_heads Matrizen, je (seq_len × head_dim)
+        """
+        seq_len = len(X)
+        heads = []
+        for h in range(self.num_heads):
+            start = h * self.head_dim
+            end = start + self.head_dim
+            head = [[X[i][j] for j in range(start, end)] for i in range(seq_len)]
+            heads.append(head)
+        return heads
+
+    def _concat_heads(self, heads):
+        """
+        Fügt num_heads Teilmatrizen wieder zusammen.
+        heads: Liste von (seq_len × head_dim)
+        → (seq_len × embedding_dim)
+        """
+        seq_len = len(heads[0])
+        return [
+            [val for head in heads for val in head[i]]
+            for i in range(seq_len)
+        ]
+
+    def _scaled_dot_product_attention(self, Q, K, V, mask=None):
+        """
+        Kernformel: softmax(Q @ Kᵀ / sqrt(d_k)) @ V
+
+        Args:
+            Q, K, V: Matrizen (seq_len × head_dim)
+            mask:    optionale Causal-Mask (seq_len × seq_len), 0 = blockiert
+        Returns:
+            Attention-Output (seq_len × head_dim),
+            Attention-Gewichte (seq_len × seq_len)
+        """
+        scale = self._math.sqrt(self.head_dim)
+        K_T = self._transpose(K)
+
+        # Scores: (seq_len × seq_len)
+        scores = self._matmul(Q, K_T)
+
+        # Skalierung
+        for i in range(len(scores)):
+            for j in range(len(scores[i])):
+                scores[i][j] /= scale
+
+        # Causal Mask anwenden: maskierte Positionen auf -∞ setzen
+        if mask is not None:
+            for i in range(len(scores)):
+                for j in range(len(scores[i])):
+                    if mask[i][j] == 0:
+                        scores[i][j] = -1e9  # -∞ → nach Softmax ≈ 0
+
+        # Softmax zeilenweise
+        attn_weights = [self._softmax(row) for row in scores]
+
+        # Gewichtete Summe über V
+        output = self._matmul(attn_weights, V)
+        return output, attn_weights
+
+    # ------------------------------------------------------------------ #
+    #  Öffentliche Methode                                                 #
+    # ------------------------------------------------------------------ #
+
+    def forward(self, X, mask=None):
+        """
+        Vollständiger Multi-Head Attention Forward-Pass.
+
+        Args:
+            X:    Eingabe-Sequenz (seq_len × embedding_dim)
+            mask: optionale Causal-Mask (seq_len × seq_len)
+
+        Returns:
+            output:       (seq_len × embedding_dim)
+            attn_weights: Liste der Attention-Gewichte pro Kopf
+        """
+        seq_len = len(X)
+        print(f"\n--- Multi-Head Attention Forward-Pass ---")
+        print(f"  Sequenzlänge: {seq_len}, Embedding-Dim: {self.embedding_dim}")
+
+        # 1. Lineare Projektionen Q, K, V
+        Q = self._linear(X, self.W_q)
+        K = self._linear(X, self.W_k)
+        V = self._linear(X, self.W_v)
+
+        # 2. Aufteilen in num_heads Köpfe
+        Q_heads = self._split_heads(Q)
+        K_heads = self._split_heads(K)
+        V_heads = self._split_heads(V)
+
+        # 3. Scaled Dot-Product Attention pro Kopf
+        head_outputs = []
+        all_attn_weights = []
+
+        for h in range(self.num_heads):
+            out_h, w_h = self._scaled_dot_product_attention(
+                Q_heads[h], K_heads[h], V_heads[h], mask
+            )
+            head_outputs.append(out_h)
+            all_attn_weights.append(w_h)
+            print(f"  Kopf {h+1}: Attention-Gewichte (erste Zeile) = "
+                  f"{[round(v, 4) for v in w_h[0]]}")
+
+        # 4. Köpfe wieder zusammenführen
+        concat = self._concat_heads(head_outputs)
+
+        # 5. Finale Output-Projektion
+        output = self._linear(concat, self.W_o)
+
+        print(f"  Output-Shape: {len(output)} × {len(output[0])}")
+        return output, all_attn_weights
+
+    def show_attention_weights(self, attn_weights, token_strings=None):
+        """
+        Gibt die Attention-Gewichte als Matrix aus.
+
+        Args:
+            attn_weights: Gewichtsmatrix eines Kopfes (seq_len × seq_len)
+            token_strings: optionale Token-Strings für Beschriftung
+        """
+        seq_len = len(attn_weights)
+        labels = token_strings if token_strings else [f"T{i}" for i in range(seq_len)]
+
+        print(f"\nAttention-Gewichte (Zeile = Query, Spalte = Key):")
+        header = "        " + "  ".join(f"{l:>6}" for l in labels)
+        print(header)
+
+        for i, row in enumerate(attn_weights):
+            vals = "  ".join(f"{v:>6.3f}" for v in row)
+            print(f"  {labels[i]:>6}: {vals}")
+
+
+class FeedForward:
+    """
+    Position-wise Feed-Forward Network (FFN).
+    Zwei lineare Schichten mit ReLU dazwischen.
+    Formel: FFN(x) = max(0, x @ W1 + b1) @ W2 + b2
+    """
+
+    def __init__(self, embedding_dim, ffn_dim=None):
+        """
+        Args:
+            embedding_dim: Eingabe-/Ausgabedimension
+            ffn_dim:       Innere Dimension (Standard: 4 × embedding_dim)
+        """
+        import random
+        import math
+        self._random = random
+        self._math = math
+
+        self.embedding_dim = embedding_dim
+        self.ffn_dim = ffn_dim or embedding_dim * 4
+
+        print(f"\nInitialisiere Feed-Forward Network:")
+        print(f"  Eingabe-Dim:   {embedding_dim}")
+        print(f"  Innere Dim:    {self.ffn_dim}")
+        print(f"  Ausgabe-Dim:   {embedding_dim}")
+
+        scale1 = (2.0 / (embedding_dim + self.ffn_dim)) ** 0.5
+        scale2 = (2.0 / (self.ffn_dim + embedding_dim)) ** 0.5
+
+        self.W1 = [
+            [(random.random() - 0.5) * 2 * scale1 for _ in range(self.ffn_dim)]
+            for _ in range(embedding_dim)
+        ]
+        self.b1 = [0.0] * self.ffn_dim
+        self.W2 = [
+            [(random.random() - 0.5) * 2 * scale2 for _ in range(embedding_dim)]
+            for _ in range(self.ffn_dim)
+        ]
+        self.b2 = [0.0] * embedding_dim
+
+    def _relu(self, x):
+        return max(0.0, x)
+
+    def forward(self, X):
+        """
+        Args:
+            X: (seq_len × embedding_dim)
+        Returns:
+            (seq_len × embedding_dim)
+        """
+        output = []
+        for vec in X:
+            # Erste Schicht + ReLU
+            hidden = [
+                self._relu(
+                    sum(vec[k] * self.W1[k][j] for k in range(self.embedding_dim))
+                    + self.b1[j]
+                )
+                for j in range(self.ffn_dim)
+            ]
+            # Zweite Schicht
+            out = [
+                sum(hidden[k] * self.W2[k][j] for k in range(self.ffn_dim))
+                + self.b2[j]
+                for j in range(self.embedding_dim)
+            ]
+            output.append(out)
+        return output
+
+
+class LayerNorm:
+    """
+    Layer Normalization.
+    Normalisiert jeden Vektor auf Mittelwert 0 und Varianz 1,
+    dann skaliert mit lernbaren Parametern gamma und beta.
+    """
+
+    def __init__(self, embedding_dim, eps=1e-6):
+        self.embedding_dim = embedding_dim
+        self.eps = eps
+        self.gamma = [1.0] * embedding_dim  # Skalierung (lernbar)
+        self.beta = [0.0] * embedding_dim   # Verschiebung (lernbar)
+
+    def forward(self, X):
+        """
+        Args:
+            X: (seq_len × embedding_dim)
+        Returns:
+            Normalisierte Matrix gleicher Form
+        """
+        import math
+        output = []
+        for vec in X:
+            mean = sum(vec) / len(vec)
+            var = sum((x - mean) ** 2 for x in vec) / len(vec)
+            std = math.sqrt(var + self.eps)
+            normed = [
+                self.gamma[i] * (vec[i] - mean) / std + self.beta[i]
+                for i in range(len(vec))
+            ]
+            output.append(normed)
+        return output
+
+
+class TransformerBlock:
+    """
+    Ein vollständiger Transformer-Block (Decoder-Stil, causal).
+
+    Aufbau:
+        x → LayerNorm → MultiHeadSelfAttention → Residual (+x)
+          → LayerNorm → FeedForward             → Residual (+x)
+    """
+
+    def __init__(self, embedding_dim, num_heads=2, ffn_dim=None):
+        """
+        Args:
+            embedding_dim: Dimensionalität der Token-Vektoren
+            num_heads:     Anzahl Attention-Köpfe
+            ffn_dim:       Innere FFN-Dimension
+        """
+        print(f"\n{'='*60}")
+        print(f"Initialisiere Transformer-Block")
+        print(f"{'='*60}")
+
+        self.norm1 = LayerNorm(embedding_dim)
+        self.attn  = MultiHeadSelfAttention(embedding_dim, num_heads)
+        self.norm2 = LayerNorm(embedding_dim)
+        self.ffn   = FeedForward(embedding_dim, ffn_dim)
+
+    def _add_residual(self, X, residual):
+        """Elementweise Addition (Residual Connection)."""
+        return [
+            [X[i][j] + residual[i][j] for j in range(len(X[i]))]
+            for i in range(len(X))
+        ]
+
+    def forward(self, X, mask=None):
+        """
+        Forward-Pass durch den Transformer-Block.
+
+        Args:
+            X:    Eingabe (seq_len × embedding_dim)
+            mask: Causal-Mask (seq_len × seq_len) oder None
+
+        Returns:
+            output:       (seq_len × embedding_dim)
+            attn_weights: Attention-Gewichte aller Köpfe
+        """
+        print(f"\n--- Transformer-Block Forward-Pass ---")
+
+        # Sub-Layer 1: Self-Attention mit Pre-LayerNorm + Residual
+        normed1 = self.norm1.forward(X)
+        attn_out, attn_weights = self.attn.forward(normed1, mask)
+        X = self._add_residual(attn_out, X)
+
+        # Sub-Layer 2: FFN mit Pre-LayerNorm + Residual
+        normed2 = self.norm2.forward(X)
+        ffn_out = self.ffn.forward(normed2)
+        X = self._add_residual(ffn_out, X)
+
+        print(f"  Block-Output-Shape: {len(X)} × {len(X[0])}")
+        return X, attn_weights
+
+
 # Beispielverwendung
 if __name__ == "__main__":
     tokenizer = SubwordTokenizer()
@@ -1008,11 +1390,73 @@ if __name__ == "__main__":
     print(f"   Shape: {len(final_with_pos)} Tokens × {len(final_with_pos[0])} Dimensionen")
 
     print("\n" + "="*60)
-    print("FERTIG! NÄCHSTER SCHRITT: TRANSFORMER-ARCHITEKTUR")
     print("="*60)
-    print("\nDie Vektoren können jetzt in ein Transformer-Modell eingespeist werden:")
-    print("  → Multi-Head Self-Attention")
-    print("  → Feed-Forward Netzwerk")
-    print("  → Layer Normalization")
-    print("  → Output-Projektion auf Vokabular")
-    print("  → Softmax für Wahrscheinlichkeiten")
+    print("TRANSFORMER-ARCHITEKTUR")
+    print("="*60)
+    print("="*60)
+
+    # ------------------------------------------------------------------ #
+    # 1. Multi-Head Self-Attention                                         #
+    # ------------------------------------------------------------------ #
+    print("\n1. MULTI-HEAD SELF-ATTENTION:")
+
+    embedding_dim_tf = 8  # muss durch num_heads teilbar sein
+    num_heads_tf = 2
+
+    # Embedding-Layer und Positional Encoding für Demo
+    demo_tokenizer = SubwordTokenizer()
+    demo_tokenizer.train_bpe(["hallo welt test"], num_merges=5)
+
+    demo_vocab_size = demo_tokenizer.get_vocab_size()
+    demo_emb = EmbeddingLayer(vocab_size=demo_vocab_size, embedding_dim=embedding_dim_tf)
+    demo_pe  = PositionalEncoding(embedding_dim=embedding_dim_tf, max_sequence_length=64)
+
+    demo_text = "hallo welt"
+    demo_ids  = demo_tokenizer.tokenize(demo_text)
+    demo_vecs = demo_emb.embed_sequence(demo_ids)
+    demo_vecs = demo_pe.add_positional_encoding(demo_vecs)
+
+    # Causal Mask erzeugen
+    seq_len_tf = len(demo_vecs)
+    causal_mask = demo_tokenizer.create_causal_mask(seq_len_tf)
+
+    # Multi-Head Attention
+    mhsa = MultiHeadSelfAttention(embedding_dim=embedding_dim_tf, num_heads=num_heads_tf)
+    attn_output, attn_weights = mhsa.forward(demo_vecs, mask=causal_mask)
+
+    # Attention-Gewichte des ersten Kopfes anzeigen
+    token_strings = [demo_tokenizer.id_to_token.get(tid, "?") for tid in demo_ids]
+    print("\nAttention-Gewichte Kopf 1:")
+    mhsa.show_attention_weights(attn_weights[0], token_strings=token_strings)
+
+    # ------------------------------------------------------------------ #
+    # 2. Vollständiger Transformer-Block                                   #
+    # ------------------------------------------------------------------ #
+    print("\n" + "="*60)
+    print("2. VOLLSTÄNDIGER TRANSFORMER-BLOCK:")
+
+    transformer = TransformerBlock(embedding_dim=embedding_dim_tf, num_heads=num_heads_tf)
+    block_output, block_attn = transformer.forward(demo_vecs, mask=causal_mask)
+
+    print(f"\nEingabe-Vektoren  (Position 0): {[round(v,4) for v in demo_vecs[0]]}")
+    print(f"Ausgabe-Vektoren  (Position 0): {[round(v,4) for v in block_output[0]]}")
+
+    # ------------------------------------------------------------------ #
+    # 3. Komplette Pipeline: Text → Transformer-Output                    #
+    # ------------------------------------------------------------------ #
+    print("\n" + "="*60)
+    print("3. KOMPLETTE PIPELINE: TEXT → TRANSFORMER-OUTPUT")
+    print("="*60)
+
+    pipeline_text = "test beispiel"
+    print(f"\nInput: '{pipeline_text}'")
+
+    p_ids  = demo_tokenizer.tokenize(pipeline_text)
+    p_vecs = demo_emb.embed_sequence(p_ids)
+    p_vecs = demo_pe.add_positional_encoding(p_vecs)
+    p_mask = demo_tokenizer.create_causal_mask(len(p_vecs))
+
+    p_out, _ = transformer.forward(p_vecs, mask=p_mask)
+
+    print(f"\nShape: {len(p_out)} Tokens × {len(p_out[0])} Dimensionen")
+    print("→ Bereit für Output-Projektion auf Vokabular + Softmax!")
