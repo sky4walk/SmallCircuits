@@ -145,6 +145,7 @@ class ndarray:
 import builtins
 builtins_sum = builtins.sum
 builtins_max = builtins.max
+builtins_min = builtins.min
 
 
 # =============================================================================
@@ -662,6 +663,239 @@ def _add_dim(data, axis, ndim):
     if isinstance(data, list):
         return [_add_dim(item, axis - 1, ndim - 1) for item in data]
     return [data]
+
+
+# =============================================================================
+# ERGÄNZUNGEN FÜR LSTM — fehlende Funktionen
+# =============================================================================
+
+def vstack(arrays):
+    """
+    Stapelt Arrays vertikal (entlang Achse 0).
+    Entspricht np.vstack([a, b]).
+
+    Beispiel:
+        a = ndarray([[1],[2]])   shape (2,1)
+        b = ndarray([[3],[4]])   shape (2,1)
+        vstack([a, b])           shape (4,1)
+
+    In der LSTM-Zelle genutzt um h_prev und x zu [h; x] zusammenzuführen:
+        concat = np.vstack([h_prev, x])
+    """
+    flat_all = []
+    total_rows = 0
+    cols = None
+
+    for arr in arrays:
+        if isinstance(arr, ndarray):
+            data = arr.data
+            shape = arr.shape
+        else:
+            data = arr
+            shape = _get_shape(arr)
+
+        # Sicherstellen dass wir 2D haben
+        if len(shape) == 1:
+            # (n,) → (n, 1)
+            data = [[x] for x in _flatten(data)]
+            shape = (shape[0], 1)
+
+        rows, c = shape
+        if cols is None:
+            cols = c
+        assert cols == c, f"vstack: Spaltenanzahl stimmt nicht überein ({cols} vs {c})"
+
+        flat_all.extend(data)
+        total_rows += rows
+
+    new_shape = (total_rows, cols)
+    return ndarray(flat_all, new_shape)
+
+
+def clip(x, a_min, a_max):
+    """
+    Begrenzt alle Werte auf den Bereich [a_min, a_max].
+    Entspricht np.clip(x, a_min, a_max).
+
+    In der LSTM-Implementierung an zwei Stellen genutzt:
+      1. In sigmoid(): np.clip(x, -500, 500)  → verhindert numerischen Overflow
+      2. In update():  np.clip(dW, -5, 5)     → Gradient Clipping
+    """
+    def _clip_val(v):
+        if v < a_min:
+            return float(a_min)
+        if v > a_max:
+            return float(a_max)
+        return v
+
+    if isinstance(x, ndarray):
+        return _apply(x, _clip_val)
+    return _clip_val(x)
+
+
+def convolve(a, b, mode='full'):
+    """
+    1D-Faltung zweier Arrays.
+    Entspricht np.convolve(a, b, mode).
+
+    Unterstützte Modi:
+      'full'  — Ausgabe hat Länge len(a) + len(b) - 1
+      'valid' — nur vollständig überlappende Abschnitte
+      'same'  — Ausgabe hat Länge wie a (zentriert)
+
+    In der LSTM-Implementierung genutzt für den geglätteten Trainingsverlauf:
+        smooth = np.convolve(losses, np.ones(window)/window, mode='valid')
+    """
+    if isinstance(a, ndarray):
+        a = _flatten(a.data)
+    if isinstance(b, ndarray):
+        b = _flatten(b.data)
+
+    na, nb = len(a), len(b)
+    full_len = na + nb - 1
+    result = [0.0] * full_len
+
+    for i in range(na):
+        for j in range(nb):
+            result[i + j] += a[i] * b[j]
+
+    if mode == 'full':
+        return ndarray(result, (full_len,))
+    elif mode == 'valid':
+        valid_len = builtins_max(na, nb) - builtins_min(na, nb) + 1
+        start = min(na, nb) - 1
+        valid = result[start:start + valid_len]
+        return ndarray(valid, (valid_len,))
+    elif mode == 'same':
+        start = nb // 2
+        same = result[start:start + na]
+        return ndarray(same, (na,))
+    else:
+        raise NotImplementedError(f"convolve: mode='{mode}' nicht unterstützt")
+
+
+def ones(shape):
+    """Array gefüllt mit Einsen (falls noch nicht vorhanden)."""
+    if isinstance(shape, int):
+        shape = (shape,)
+    import functools
+    size = functools.reduce(lambda a, b: a * b, shape)
+    flat = [1.0] * size
+    return ndarray(_unflatten(flat, shape), shape)
+
+
+# =============================================================================
+# ERGÄNZUNGEN IN DER random-KLASSE
+# =============================================================================
+
+class random:
+    @staticmethod
+    def choice(n, p=None):
+        """Wählt zufällig einen Index basierend auf Wahrscheinlichkeiten p."""
+        if p is None:
+            import random as _r
+            return _r.randint(0, n - 1)
+
+        if isinstance(p, ndarray):
+            p = _flatten(p.data)
+
+        cumsum = []
+        s = 0.0
+        for prob in p:
+            s += prob
+            cumsum.append(s)
+
+        import random as _r
+        r = _r.random()
+        for i, cs in enumerate(cumsum):
+            if r <= cs:
+                return i
+        return n - 1
+
+    @staticmethod
+    def seed(s):
+        """Setzt den Zufallszahlenseed für Reproduzierbarkeit."""
+        import random as _r
+        _r.seed(s)
+
+    @staticmethod
+    def shuffle(lst):
+        """Mischt eine Liste in-place (Fisher-Yates)."""
+        import random as _r
+        n = len(lst)
+        for i in range(n - 1, 0, -1):
+            j = _r.randint(0, i)
+            lst[i], lst[j] = lst[j], lst[i]
+
+    @staticmethod
+    def randn(*shape):
+        """
+        Normalverteilte Zufallswerte (Mittelwert=0, Std=1).
+        Verwendet Box-Muller-Transformation.
+        """
+        import random as _r
+
+        def _box_muller():
+            while True:
+                u1 = _r.random()
+                u2 = _r.random()
+                if u1 > 0:
+                    break
+            return math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+
+        if len(shape) == 1 and isinstance(shape[0], tuple):
+            shape = shape[0]
+
+        import functools
+        size = functools.reduce(lambda a, b: a * b, shape)
+        flat = [_box_muller() for _ in range(size)]
+        return ndarray(_unflatten(flat, shape), shape)
+
+    @staticmethod
+    def randint(low, high=None):
+        """
+        Zufällige ganze Zahl.
+        Entspricht np.random.randint(low, high).
+
+        Aufruf-Varianten (wie NumPy):
+          randint(high)        → zufällig aus [0, high)
+          randint(low, high)   → zufällig aus [low, high)
+
+        In der LSTM-Implementierung genutzt für:
+          - Zufällige Sequenzlänge: np.random.randint(0, T//10 + 1)
+          - Position der Marker:    np.random.randint(0, min(10, seq_len))
+        """
+        import random as _r
+        if high is None:
+            low, high = 0, low
+        return _r.randint(low, high - 1)
+
+    @staticmethod
+    def uniform(low, high, size=None):
+        """
+        Gleichverteilte Zufallszahlen aus [low, high).
+        Entspricht np.random.uniform(low, high, size).
+
+        In der LSTM-Implementierung genutzt für die Sequenzwerte:
+          values = np.random.uniform(-1, 1, seq_len)
+        """
+        import random as _r
+
+        def _one():
+            return low + _r.random() * (high - low)
+
+        if size is None:
+            return _one()
+
+        if isinstance(size, int):
+            shape = (size,)
+        else:
+            shape = tuple(size)
+
+        import functools
+        n = functools.reduce(lambda a, b: a * b, shape)
+        flat = [_one() for _ in range(n)]
+        return ndarray(_unflatten(flat, shape), shape)
 
 
 # Damit np.random.choice funktioniert
