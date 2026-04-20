@@ -24,7 +24,6 @@ def organize_files_by_date(source_dir, target_base_dir=None):
     """
     source_path = Path(source_dir)
     
-    # Wenn kein Zielverzeichnis angegeben, verwende das Quellverzeichnis
     if target_base_dir is None:
         target_base_dir = source_path
     else:
@@ -34,26 +33,17 @@ def organize_files_by_date(source_dir, target_base_dir=None):
         print(f"Fehler: Verzeichnis {source_dir} existiert nicht!")
         return
     
-    # Durchlaufe alle Dateien im Quellverzeichnis
     for item in source_path.iterdir():
-        # Überspringe Verzeichnisse
         if item.is_dir():
             continue
         
-        # Hole das Änderungsdatum der Datei
         modification_time = datetime.fromtimestamp(item.stat().st_mtime)
-        
-        # Erstelle Verzeichnisname im Format YYYY-MM-DD
         date_folder_name = modification_time.strftime("%Y-%m-%d")
         date_folder_path = target_base_dir / date_folder_name
-        
-        # Erstelle das Verzeichnis, falls es nicht existiert
         date_folder_path.mkdir(exist_ok=True)
         
-        # Verschiebe die Datei
         target_file_path = date_folder_path / item.name
         
-        # Falls Datei bereits existiert, füge Timestamp hinzu
         if target_file_path.exists():
             timestamp = datetime.now().strftime("%H%M%S")
             name_parts = item.stem, timestamp, item.suffix
@@ -78,19 +68,15 @@ def delete_old_directories(base_dir, days_old=7):
         print(f"Fehler: Verzeichnis {base_dir} existiert nicht!")
         return
     
-    # Berechne das Grenzdatum
     cutoff_date = datetime.now() - timedelta(days=days_old)
     
-    # Durchlaufe alle Unterverzeichnisse
     for item in base_path.iterdir():
         if not item.is_dir():
             continue
         
-        # Versuche, das Datum aus dem Verzeichnisnamen zu parsen (Format: YYYY-MM-DD)
         try:
             dir_date = datetime.strptime(item.name, "%Y-%m-%d")
             
-            # Prüfe, ob das Verzeichnis älter als das Grenzdatum ist
             if dir_date < cutoff_date:
                 age_days = (datetime.now() - dir_date).days
                 try:
@@ -98,51 +84,44 @@ def delete_old_directories(base_dir, days_old=7):
                     print(f"Gelöscht: {item.name} (Alter: {age_days} Tage)")
                 except Exception as e:
                     print(f"Fehler beim Löschen von {item.name}: {e}")
-            else:
-                # Optional: Zeige an, welche Verzeichnisse behalten werden
-                # print(f"Behalten: {item.name} (Alter: {(datetime.now() - dir_date).days} Tage)")
-                pass
         except ValueError:
-            # Verzeichnisname entspricht nicht dem Format YYYY-MM-DD, überspringen
             print(f"Übersprungen: {item.name} (kein gültiges Datumsformat YYYY-MM-DD)")
             continue
 
 
-def run_once():
+def run_once(source_directory):
     """
     Führt die Organisierung einmalig aus.
     """
-    SOURCE_DIRECTORY = os.getcwd()
-    
     print("=" * 60)
     print("Datei-Organizer gestartet")
-    print(f"Verzeichnis: {SOURCE_DIRECTORY}")
+    print(f"Verzeichnis: {source_directory}")
     print(f"Zeit: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
     
-    # Schritt 1: Dateien organisieren
     print("\n1. Organisiere Dateien nach Datum...")
-    organize_files_by_date(SOURCE_DIRECTORY)
+    organize_files_by_date(source_directory)
     
-    # Schritt 2: Alte Verzeichnisse löschen
     print("\n2. Lösche Verzeichnisse älter als 7 Tage...")
-    delete_old_directories(SOURCE_DIRECTORY, days_old=7)
+    delete_old_directories(source_directory, days_old=7)
     
     print("\n" + "=" * 60)
     print("Fertig!")
     print("=" * 60)
 
 
-def run_daily(target_hour=2, target_minute=0):
+def run_daily(source_directory, target_hour=2, target_minute=0):
     """
     Führt die Organisierung täglich zur angegebenen Uhrzeit aus.
     
     Args:
+        source_directory: Arbeitsverzeichnis
         target_hour: Stunde (0-23), Standard: 2 Uhr
         target_minute: Minute (0-59), Standard: 0
     """
     print("=" * 60)
     print("Datei-Organizer im Daemon-Modus")
+    print(f"Verzeichnis: {source_directory}")
     print(f"Wird täglich um {target_hour:02d}:{target_minute:02d} Uhr ausgeführt")
     print("Drücke Ctrl+C zum Beenden")
     print("=" * 60)
@@ -150,94 +129,112 @@ def run_daily(target_hour=2, target_minute=0):
     while True:
         now = datetime.now()
         
-        # Berechne die nächste Ausführungszeit
         next_run = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
         
-        # Wenn die Zeit heute schon vorbei ist, nimm morgen
         if now >= next_run:
             next_run += timedelta(days=1)
         
-        # Berechne Wartezeit
         wait_seconds = (next_run - now).total_seconds()
         
         print(f"\n[{now.strftime('%Y-%m-%d %H:%M:%S')}] Nächste Ausführung: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Warte {wait_seconds/3600:.1f} Stunden...")
         
-        # Warte bis zur nächsten Ausführung
         time.sleep(wait_seconds)
         
-        # Führe die Organisierung aus
-        run_once()
+        run_once(source_directory)
 
 
-def main():
+def parse_args():
     """
-    Hauptfunktion: Organisiert Dateien und löscht alte Verzeichnisse.
+    Parst Kommandozeilenargumente manuell (ohne argparse).
+    Gibt ein dict mit den geparsten Werten zurück.
     """
-    # Verwende das aktuelle Arbeitsverzeichnis
-    SOURCE_DIRECTORY = os.getcwd()
-    
-    print("=" * 60)
-    print("Datei-Organizer gestartet",SOURCE_DIRECTORY)
-    print("=" * 60)
-    
-    # Schritt 1: Dateien organisieren
-    print("\n1. Organisiere Dateien nach Datum...")
-    organize_files_by_date(SOURCE_DIRECTORY)
-    
-    # Schritt 2: Alte Verzeichnisse löschen
-    print("\n2. Lösche Verzeichnisse älter als 7 Tage...")
-    delete_old_directories(SOURCE_DIRECTORY, days_old=7)
-    
-    print("\n" + "=" * 60)
-    print("Fertig!")
-    print("=" * 60)
+    args = {
+        "mode": "once",        # "once" | "daemon"
+        "path": None,          # Arbeitsverzeichnis (None = cwd)
+        "time": (2, 0),        # (hour, minute) für Daemon-Modus
+    }
 
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
 
-if __name__ == "__main__":
-    # Prüfe Kommandozeilenargumente
-    if len(sys.argv) > 1:
-        if sys.argv[1] == "--daemon" or sys.argv[1] == "-d":
-            # Daemon-Modus: Läuft täglich
-            target_hour = 2  # Standard: 2 Uhr nachts
-            target_minute = 0
-            
-            # Optional: Zeit als Argument übergeben (z.B. --daemon 14:30)
-            if len(sys.argv) > 2:
+        if arg in ("--daemon", "-d"):
+            args["mode"] = "daemon"
+            # Optionale Zeitangabe direkt danach: z.B. -d 14:30
+            if i + 1 < len(sys.argv) and ":" in sys.argv[i + 1]:
+                i += 1
                 try:
-                    time_parts = sys.argv[2].split(":")
-                    target_hour = int(time_parts[0])
-                    target_minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-                except:
+                    parts = sys.argv[i].split(":")
+                    args["time"] = (int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+                except ValueError:
                     print("Fehler: Zeitformat sollte HH:MM sein (z.B. 14:30)")
                     sys.exit(1)
-            
-            try:
-                run_daily(target_hour, target_minute)
-            except KeyboardInterrupt:
-                print("\n\nDaemon beendet.")
-                sys.exit(0)
-        elif sys.argv[1] == "--help" or sys.argv[1] == "-h":
+
+        elif arg in ("--path", "-p"):
+            if i + 1 >= len(sys.argv):
+                print("Fehler: --path benötigt ein Verzeichnis als Argument")
+                sys.exit(1)
+            i += 1
+            args["path"] = sys.argv[i]
+
+        elif arg in ("--help", "-h"):
             print("""
 Datei-Organizer - Verwendung:
 
-  python3 OrganizeFile.py           Einmalige Ausführung
-  python3 OrganizeFile.py -d        Daemon-Modus (täglich um 2:00 Uhr)
-  python3 OrganizeFile.py -d 14:30  Daemon-Modus (täglich um 14:30 Uhr)
-  python3 OrganizeFile.py --help    Diese Hilfe anzeigen
-  
-  Idee:
-  python3 nohup OrganizeFile.py -d  Laesst das Programm auch nach dem Ausloggen laufen
+  python3 OrganizeFiles.py                        Einmalige Ausführung (aktuelles Verzeichnis)
+  python3 OrganizeFiles.py -p /pfad/zum/ordner    Einmalige Ausführung (angegebener Pfad)
+  python3 OrganizeFiles.py -d                     Daemon-Modus (täglich um 2:00 Uhr, aktuelles Verzeichnis)
+  python3 OrganizeFiles.py -d 14:30               Daemon-Modus (täglich um 14:30 Uhr)
+  python3 OrganizeFiles.py -d -p /pfad/zum/ordner Daemon-Modus mit angegebenem Pfad
+  python3 OrganizeFiles.py -d 14:30 -p /pfad      Daemon-Modus mit Zeit und Pfad
+  python3 OrganizeFiles.py --help                 Diese Hilfe anzeigen
+
+Optionen:
+  -p, --path <verzeichnis>   Arbeitsverzeichnis (Standard: aktuelles Verzeichnis)
+  -d, --daemon [HH:MM]       Daemon-Modus, optional mit Uhrzeit (Standard: 02:00)
 
 Funktionen:
   - Verschiebt Dateien in Unterverzeichnisse nach Datum (YYYY-MM-DD)
   - Löscht Verzeichnisse, die älter als 7 Tage sind
+
+Tipp:
+  nohup python3 OrganizeFiles.py -d -p /home/pi/daten &
+  Lässt das Programm auch nach dem Ausloggen laufen.
             """)
             sys.exit(0)
+
         else:
-            print(f"Unbekannte Option: {sys.argv[1]}")
+            print(f"Unbekannte Option: {arg}")
             print("Verwende --help für Hilfe")
             sys.exit(1)
+
+        i += 1
+
+    return args
+
+
+def main():
+    args = parse_args()
+
+    # Pfad bestimmen: Argument > aktuelles Verzeichnis
+    source_directory = args["path"] if args["path"] else os.getcwd()
+
+    # Pfad validieren
+    if not Path(source_directory).exists():
+        print(f"Fehler: Verzeichnis '{source_directory}' existiert nicht!")
+        sys.exit(1)
+
+    if args["mode"] == "daemon":
+        hour, minute = args["time"]
+        try:
+            run_daily(source_directory, target_hour=hour, target_minute=minute)
+        except KeyboardInterrupt:
+            print("\n\nDaemon beendet.")
+            sys.exit(0)
     else:
-        # Standardmodus: Einmalige Ausführung
-        main()
+        run_once(source_directory)
+
+
+if __name__ == "__main__":
+    main()
