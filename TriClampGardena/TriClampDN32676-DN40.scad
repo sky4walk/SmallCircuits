@@ -10,7 +10,7 @@
 type = 10;
 draft = false;
 
-use <threadlib/threadlib.scad>;
+use <threadlib.scad>;
 
 d1 = 38;
 d2 = 41;
