@@ -5,7 +5,9 @@
 // 4 : AG1/2
 // 7 : Tauchrohr
 // 8 : IG5/8
-type = 2;
+// 9 : AG5/8
+// 10: AG3/4
+type = 10;
 draft = false;
 
 use <threadlib/threadlib.scad>;
@@ -328,4 +330,31 @@ else if ( 8 == type )
         nut("G5/8", turns=10, Douter=25);
     clamp_raw(r4);
 }
-
+else if ( 9 == type )
+{
+    infill=6;
+    difference() 
+    {
+        union()
+        {
+            translate ([0, 0,infill])
+                bolt("G5/8", turns=10);
+            clamp_raw(infill);
+        }
+        translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
+    } 
+}
+else if ( 10 == type )
+{
+    infill=6;
+    difference() 
+    {
+        union()
+        {
+            translate ([0, 0,infill])
+                bolt("G3/4", turns=10);
+            clamp_raw(infill);
+        }
+        translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
+    } 
+}
