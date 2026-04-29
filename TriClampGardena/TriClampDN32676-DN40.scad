@@ -7,7 +7,8 @@
 // 8 : IG5/8
 // 9 : AG5/8
 // 10: AG3/4
-type = 10;
+// 11: Gardena IG 3/4
+type = 11;
 draft = false;
 
 use <threadlib.scad>;
@@ -203,6 +204,14 @@ module pipe(aussen_r1, pipe_r2, wall_thick, bend_angle)
     }
 }
 
+module rohr(r_out,r_in,l)
+{
+    difference() {
+        cylinder(l,r_out,r_out);
+        translate([0,0,-.1]) cylinder(l+.2,r_in,r_in);    
+    }
+}
+
 if ( 1 == type )
 {
     clamp_flansch();
@@ -357,4 +366,11 @@ else if ( 10 == type )
         }
         translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
     } 
+}
+else if ( 11 == type )
+{
+    posGardena=13;
+    translate ([0, 0,posGardena])GardenaConnector (r4);
+    nut("G3/4", turns=5, Douter=30);
+    translate([0,0,10]) rohr(15,4.5,3);
 }
