@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BeerXML → BML Konverter</title>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Source+Code+Pro:wght@400;600&family=Libre+Franklin:wght@300;400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --amber: #C8720A;
+      --amber-light: #F0A030;
+      --amber-dark: #7A4200;
+      --foam: #F5EDD6;
+      --malt: #2A1A08;
+      --malt-mid: #3D2810;
+      --copper: #8B4513;
+      --grain: #E8D5A3;
+      --text: #1A0D00;
+      --text-muted: #6B4C2A;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--malt);
+      background-image:
+        radial-gradient(ellipse at 20% 0%, #4a2800 0%, transparent 60%),
+        radial-gradient(ellipse at 80% 100%, #5c3200 0%, transparent 60%);
+      min-height: 100vh;
+      font-family: 'Libre Franklin', sans-serif;
+      color: var(--foam);
+    }
+
+    /* Grain texture overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.4;
+    }
+
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 48px 24px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+
+    .logo-line {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+
+    .logo-line::before,
+    .logo-line::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: linear-gradient(to right, transparent, var(--amber));
+    }
+    .logo-line::after {
+      background: linear-gradient(to left, transparent, var(--amber));
+    }
+
+    .hop-icon {
+      font-size: 28px;
+    }
+
+    h1 {
+      font-family: 'Playfair Display', serif;
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      font-weight: 900;
+      color: var(--amber-light);
+      letter-spacing: -0.5px;
+      line-height: 1.1;
+    }
+
+    h1 span {
+      color: var(--foam);
+      font-weight: 700;
+    }
+
+    .subtitle {
+      margin-top: 10px;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      font-weight: 600;
+      color: #A07040;
+    }
+
+    /* Drop Zone */
+    .drop-zone {
+      border: 2px dashed var(--amber-dark);
+      border-radius: 4px;
+      padding: 56px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      background: rgba(200, 114, 10, 0.04);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .drop-zone::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse at center, rgba(200,114,10,0.08) 0%, transparent 70%);
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .drop-zone:hover,
+    .drop-zone.dragover {
+      border-color: var(--amber);
+      background: rgba(200, 114, 10, 0.08);
+    }
+
+    .drop-zone:hover::before,
+    .drop-zone.dragover::before {
+      opacity: 1;
+    }
+
+    .drop-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      display: block;
+      filter: drop-shadow(0 0 12px rgba(200,114,10,0.4));
+    }
+
+    .drop-label {
+      font-size: 1.1rem;
+      color: var(--grain);
+      font-weight: 300;
+    }
+
+    .drop-label strong {
+      color: var(--amber-light);
+      font-weight: 600;
+    }
+
+    .drop-hint {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: #7A5A30;
+      letter-spacing: 0.05em;
+    }
+
+    #fileInput {
+      display: none;
+    }
+
+    /* Preview Panel */
+    .panel {
+      margin-top: 32px;
+      background: rgba(10, 5, 0, 0.6);
+      border: 1px solid var(--amber-dark);
+      border-radius: 4px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .panel.visible {
+      display: block;
+      animation: fadeUp 0.35s ease;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .panel-header {
+      background: rgba(200, 114, 10, 0.12);
+      border-bottom: 1px solid var(--amber-dark);
+      padding: 14px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .panel-title {
+      font-family: 'Playfair Display', serif;
+      font-size: 1rem;
+      color: var(--amber-light);
+      font-weight: 700;
+    }
+
+    .badge {
+      background: var(--amber-dark);
+      color: var(--foam);
+      font-size: 0.7rem;
+      padding: 3px 10px;
+      border-radius: 2px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+
+    /* Recipe Info */
+    .recipe-info {
+      padding: 20px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 16px;
+      border-bottom: 1px solid rgba(200,114,10,0.15);
+    }
+
+    .info-card {
+      background: rgba(200, 114, 10, 0.06);
+      border: 1px solid rgba(200,114,10,0.2);
+      border-radius: 3px;
+      padding: 12px 16px;
+    }
+
+    .info-card-label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #7A5A30;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+
+    .info-card-value {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 1rem;
+      color: var(--amber-light);
+      font-weight: 600;
+    }
+
+    /* Mash Steps Table */
+    .steps-table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    .steps-table thead tr {
+      background: rgba(200, 114, 10, 0.08);
+    }
+
+    .steps-table th {
+      padding: 10px 16px;
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: #8A6A3A;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid rgba(200,114,10,0.2);
+    }
+
+    .steps-table td {
+      padding: 11px 16px;
+      font-family: 'Source Code Pro', monospace;
+      font-size: 0.85rem;
+      color: var(--grain);
+      border-bottom: 1px solid rgba(200,114,10,0.08);
+    }
+
+    .steps-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    .steps-table tr:hover td {
+      background: rgba(200,114,10,0.05);
+    }
+
+    .step-type {
+      display: inline-block;
+      font-size: 0.65rem;
+      padding: 2px 7px;
+      border-radius: 2px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-weight: 600;
+    }
+
+    .type-infusion { background: rgba(100,180,255,0.15); color: #90C8FF; }
+    .type-temperature { background: rgba(255,160,48,0.15); color: #F0A030; }
+    .type-decoction { background: rgba(255,80,80,0.15); color: #FF9090; }
+
+    /* Output XML */
+    .xml-output {
+      padding: 20px;
+      max-height: 320px;
+      overflow-y: auto;
+    }
+
+    .xml-output pre {
+      font-family: 'Source Code Pro', monospace;
+      font-size: 0.78rem;
+      color: #B8A080;
+      line-height: 1.7;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+
+    .xml-output pre .tag { color: #C87820; }
+    .xml-output pre .attr { color: #80B8D0; }
+    .xml-output pre .val { color: #A0D080; }
+    .xml-output pre .str { color: #D0A060; }
+
+    /* Scrollbar */
+    .xml-output::-webkit-scrollbar { width: 6px; }
+    .xml-output::-webkit-scrollbar-track { background: transparent; }
+    .xml-output::-webkit-scrollbar-thumb { background: var(--amber-dark); border-radius: 3px; }
+
+    /* Action Buttons */
+    .actions {
+      padding: 16px 20px;
+      background: rgba(0,0,0,0.3);
+      border-top: 1px solid rgba(200,114,10,0.15);
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn {
+      font-family: 'Libre Franklin', sans-serif;
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      border: none;
+      border-radius: 3px;
+      padding: 11px 24px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--amber);
+      color: var(--malt);
+    }
+
+    .btn-primary:hover {
+      background: var(--amber-light);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 16px rgba(200,114,10,0.4);
+    }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--amber);
+      border: 1px solid var(--amber-dark);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--amber);
+      background: rgba(200,114,10,0.08);
+    }
+
+    .btn-success {
+      background: transparent;
+      color: #80C880;
+      border: 1px solid #406040;
+      display: none;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-success.show { display: flex; }
+
+    .status-msg {
+      margin-left: auto;
+      font-size: 0.75rem;
+      color: #7A5A30;
+    }
+
+    /* Error */
+    .error-box {
+      margin-top: 20px;
+      padding: 16px 20px;
+      background: rgba(200, 60, 60, 0.1);
+      border: 1px solid rgba(200,60,60,0.3);
+      border-radius: 4px;
+      color: #FF9090;
+      font-size: 0.85rem;
+      display: none;
+    }
+
+    .error-box.visible { display: block; }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      margin-top: 48px;
+      font-size: 0.72rem;
+      color: #4A3010;
+      letter-spacing: 0.08em;
+    }
+
+    /* Warning */
+    .warning {
+      background: rgba(200,114,10,0.1);
+      border: 1px solid rgba(200,114,10,0.25);
+      border-radius: 3px;
+      padding: 10px 16px;
+      font-size: 0.78rem;
+      color: #C08040;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+
+  <header>
+    <div class="logo-line">
+      <span class="hop-icon">🌾</span>
+    </div>
+    <h1>BeerXML <span>→</span> BML</h1>
+    <p class="subtitle">Konverter für mikroSikaru Brausteuerung</p>
+  </header>
+
+  <!-- Drop Zone -->
+  <div class="drop-zone" id="dropZone">
+    <span class="drop-icon">🍺</span>
+    <p class="drop-label"><strong>BeerXML Datei laden</strong></p>
+    <p class="drop-label" style="margin-top:6px;font-size:0.9rem;">Drag & Drop oder klicken</p>
+    <p class="drop-hint">.xml · .beerxml</p>
+    <input type="file" id="fileInput" accept=".xml,.beerxml">
+  </div>
+
+  <div class="error-box" id="errorBox"></div>
+
+  <!-- Preview Panel -->
+  <div class="panel" id="previewPanel">
+    <div class="panel-header">
+      <span class="panel-title" id="recipeName">Rezept</span>
+      <span class="badge">Vorschau</span>
+    </div>
+
+    <div class="recipe-info" id="recipeInfo"></div>
+
+    <table class="steps-table" id="stepsTable">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Name</th>
+          <th>Info / Hopfen</th>
+          <th>Temp (°C)</th>
+          <th>Zeit (min)</th>
+        </tr>
+      </thead>
+      <tbody id="stepsBody"></tbody>
+    </table>
+
+    <div class="actions">
+      <button class="btn btn-primary" id="downloadBtn">⬇ BML herunterladen</button>
+      <button class="btn btn-secondary" id="resetBtn">Neue Datei</button>
+      <button class="btn btn-success" id="copiedBtn">✓ Kopiert</button>
+      <span class="status-msg" id="statusMsg"></span>
+    </div>
+  </div>
+
+</div>
+
+<footer>
+  BeerXML Standard v1.0 · mikroSikaru BrausteuerungApp Format
+</footer>
+
+<script>
+  const dropZone = document.getElementById('dropZone');
+  const fileInput = document.getElementById('fileInput');
+  const previewPanel = document.getElementById('previewPanel');
+  const errorBox = document.getElementById('errorBox');
+  const recipeName = document.getElementById('recipeName');
+  const recipeInfo = document.getElementById('recipeInfo');
+  const stepsBody = document.getElementById('stepsBody');
+  const downloadBtn = document.getElementById('downloadBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const copiedBtn = document.getElementById('copiedBtn');
+  const statusMsg = document.getElementById('statusMsg');
+
+  let generatedBML = '';
+  let outputFilename = 'rezept.bml';
+
+  // Drag & Drop
+  dropZone.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    const file = e.dataTransfer.files[0];
+    if (file) processFile(file);
+  });
+  fileInput.addEventListener('change', e => {
+    if (e.target.files[0]) processFile(e.target.files[0]);
+  });
+
+  resetBtn.addEventListener('click', () => {
+    previewPanel.classList.remove('visible');
+    errorBox.classList.remove('visible');
+    fileInput.value = '';
+    copiedBtn.classList.remove('show');
+  });
+
+  downloadBtn.addEventListener('click', () => {
+    if (!generatedBML) return;
+    const blob = new Blob([generatedBML], { type: 'application/xml' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = outputFilename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    statusMsg.textContent = '✓ Datei gespeichert';
+    setTimeout(() => statusMsg.textContent = '', 3000);
+  });
+
+  function showError(msg) {
+    errorBox.textContent = msg;
+    errorBox.classList.add('visible');
+    previewPanel.classList.remove('visible');
+  }
+
+  function processFile(file) {
+    errorBox.classList.remove('visible');
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        convert(e.target.result, file.name);
+      } catch (err) {
+        showError('Fehler beim Lesen der Datei: ' + err.message);
+      }
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  function getText(el, tag) {
+    const node = el.querySelector(tag);
+    return node ? node.textContent.trim() : '';
+  }
+
+  function convert(xmlStr, filename) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlStr, 'application/xml');
+
+    const parseError = doc.querySelector('parsererror');
+    if (parseError) throw new Error('Ungültiges XML-Format');
+
+    const recipe = doc.querySelector('RECIPE');
+    if (!recipe) throw new Error('Kein <RECIPE> Element gefunden. Ist das eine gültige BeerXML Datei?');
+
+    const mash = recipe.querySelector('MASH');
+    if (!mash) throw new Error('Kein <MASH> Block im Rezept gefunden.');
+
+    const mashSteps = Array.from(mash.querySelectorAll('MASH_STEP'));
+    if (mashSteps.length === 0) throw new Error('Keine MASH_STEP Einträge gefunden.');
+
+    // Recipe metadata
+    const name = getText(recipe, 'NAME') || 'Unbekanntes Rezept';
+    const batchSize = parseFloat(getText(recipe, 'BATCH_SIZE') || '0');
+    const boilTime = getText(recipe, 'BOIL_TIME') || '?';
+    const efficiency = getText(recipe, 'EFFICIENCY') || '?';
+    const style = recipe.querySelector('STYLE > NAME');
+    const styleName = style ? style.textContent.trim() : '';
+
+    // Hops info for description
+    const hops = Array.from(recipe.querySelectorAll('HOP'));
+    const fermentables = Array.from(recipe.querySelectorAll('FERMENTABLE'));
+    const yeasts = Array.from(recipe.querySelectorAll('YEAST'));
+
+    // Build description like the sample BML
+    let descParts = [`Name : ${name}`];
+    descParts.push(`Sudmenge : ${batchSize.toFixed(1)}`);
+    fermentables.forEach(f => {
+      const fname = getText(f, 'NAME');
+      const famount = parseFloat(getText(f, 'AMOUNT') || '0');
+      descParts.push(`Malz Name : ${fname} Menge : ${famount.toFixed(2)}`);
+    });
+    yeasts.forEach(y => {
+      const yname = getText(y, 'NAME');
+      const yform = getText(y, 'FORM');
+      descParts.push(`Hefe Name: ${yname} Form: ${yform}`);
+    });
+    descParts.push(`Name : Sudhaus Sudmenge : ${batchSize.toFixed(1)}`);
+
+    // Convert MASH_STEP type
+    function stepType(t) {
+      switch ((t || '').toLowerCase()) {
+        case 'infusion': return 'Infusion';
+        case 'decoction': return 'Decoction';
+        default: return 'Temperature';
+      }
+    }
+
+    // Convert MASH_STEP to rast objects
+    const rasts = [];
+    let nr = 0;
+
+    // Einmaischtemperatur aus erstem MASH_STEP
+    const firstStep = mashSteps[0];
+    const firstTemp = parseFloat(getText(firstStep, 'STEP_TEMP') || '57');
+
+    // Heizrast: heizt auf Einmaischtemperatur vor, wartet auf Brauerruf
+    rasts.push({
+      nr: nr++,
+      name: 'Aufheizen',
+      on: true,
+      halt: true,
+      call: true,
+      sollTemp: firstTemp,
+      time: 1,
+      minTemp: -0.1,
+      maxTemp: 0.1,
+      kp: 1.0, ki: 0.0, kd: 0.0,
+      onPulse: 0, offPulse: 0,
+      maxGradient: 1.0,
+      info: `Einmaischtemperatur ${firstTemp}\u00b0C erreicht \u2013 Malz einsch\u00fctten!`
+    });
+
+    // Einmaischen
+    rasts.push({
+      nr: nr++,
+      name: 'Einmaischen',
+      on: true,
+      halt: true,
+      call: true,
+      sollTemp: firstTemp,
+      time: parseInt(getText(firstStep, 'STEP_TIME') || '10'),
+      minTemp: -0.1,
+      maxTemp: -0.1,
+      kp: 1.0, ki: 0.0, kd: 0.0,
+      onPulse: 0, offPulse: 0,
+      maxGradient: 1.0,
+      info: ''
+    });
+
+    // Remaining mash steps
+    for (let i = 1; i < mashSteps.length; i++) {
+      const s = mashSteps[i];
+      const sName = getText(s, 'NAME') || `Rast ${nr + 1}`;
+      const sTemp = parseFloat(getText(s, 'STEP_TEMP') || '0');
+      const sTime = parseInt(getText(s, 'STEP_TIME') || '0');
+      const rampTime = parseFloat(getText(s, 'RAMP_TIME') || '0');
+
+      rasts.push({
+        nr: nr++,
+        name: sName,
+        on: true,
+        halt: false,
+        call: false,
+        sollTemp: sTemp,
+        time: sTime,
+        minTemp: -0.1,
+        maxTemp: -0.1,
+        kp: 1.0, ki: 0.0, kd: 0.0,
+        onPulse: 0, offPulse: 0,
+        maxGradient: rampTime > 0 ? parseFloat((sTemp / rampTime).toFixed(1)) : 1.0,
+        info: ''
+      });
+    }
+
+    // Abmaischen
+    const lastMashTemp = 78;
+    rasts.push({
+      nr: nr++,
+      name: 'Abmaischen',
+      on: true, halt: true, call: true,
+      sollTemp: lastMashTemp, time: 5,
+      minTemp: -0.1, maxTemp: 0.1,
+      kp: 1.0, ki: 0.0, kd: 0.0,
+      onPulse: 0, offPulse: 0,
+      maxGradient: 0.0, info: ''
+    });
+
+    // Läutern
+    rasts.push({
+      nr: nr++,
+      name: 'Laeutern',
+      on: true, halt: true, call: true,
+      sollTemp: 20.0, time: 1,
+      minTemp: -5.0, maxTemp: 5.0,
+      kp: 0.0, ki: 0.0, kd: 0.0,
+      onPulse: 0, offPulse: 0,
+      maxGradient: 0.0, info: ''
+    });
+
+    // Hop steps from boil hops
+    const boilHops = hops.filter(h => {
+      const use = getText(h, 'USE').toLowerCase();
+      return use === 'boil' || use === 'first wort';
+    });
+
+    // Sort by time descending
+    boilHops.sort((a, b) => parseFloat(getText(b, 'TIME') || '0') - parseFloat(getText(a, 'TIME') || '0'));
+
+    if (boilHops.length === 0) {
+      // Generic Kochen
+      rasts.push({
+        nr: nr++,
+        name: 'Kochen',
+        on: true, halt: true, call: true,
+        sollTemp: 99.0, time: parseInt(boilTime) || 60,
+        minTemp: 2.0, maxTemp: 5.0,
+        kp: 0.0, ki: 0.0, kd: 0.0,
+        onPulse: 0, offPulse: 0,
+        maxGradient: 0, info: ''
+      });
+    } else {
+      // Kochen step (aufheizen)
+      const firstHop = boilHops[0];
+      const firstHopName = getText(firstHop, 'NAME');
+      const firstHopAlpha = getText(firstHop, 'ALPHA');
+      const firstHopAmt = Math.round(parseFloat(getText(firstHop, 'AMOUNT') || '0') * 1000);
+      rasts.push({
+        nr: nr++,
+        name: 'Kochen',
+        on: true, halt: true, call: true,
+        sollTemp: 99.0, time: 1,
+        minTemp: 2.0, maxTemp: 5.0,
+        kp: 0.0, ki: 0.0, kd: 0.0,
+        onPulse: 0, offPulse: 0,
+        maxGradient: 0,
+        info: `Hopfen: ${firstHopName} Alpha: ${firstHopAlpha} Menge: ${firstHopAmt}g`
+      });
+
+      // Bitterhopfen (longest time)
+      const totalBoilTime = parseInt(boilTime) || 60;
+      for (let i = 0; i < boilHops.length; i++) {
+        const h = boilHops[i];
+        const hName = getText(h, 'NAME');
+        const hAlpha = getText(h, 'ALPHA');
+        const hAmt = Math.round(parseFloat(getText(h, 'AMOUNT') || '0') * 1000);
+        const hTime = parseFloat(getText(h, 'TIME') || '0');
+        const nextTime = i + 1 < boilHops.length ? parseFloat(getText(boilHops[i+1], 'TIME') || '0') : 0;
+        const duration = hTime - nextTime;
+
+        const stepName = i === 0 ? 'Bitterhopfen' : (i === boilHops.length - 1 ? 'Aromahopfen' : `Hopfengabe ${i + 1}`);
+        const nextInfo = i + 1 < boilHops.length
+          ? `Hopfen: ${getText(boilHops[i+1], 'NAME')} Alpha:${getText(boilHops[i+1], 'ALPHA')} Menge ${Math.round(parseFloat(getText(boilHops[i+1], 'AMOUNT')||'0')*1000)}g`
+          : '';
+
+        rasts.push({
+          nr: nr++,
+          name: stepName,
+          on: true, halt: true, call: true,
+          sollTemp: 99.0, time: duration,
+          minTemp: 2.0, maxTemp: 5.0,
+          kp: 0.0, ki: 0.0, kd: 0.0,
+          onPulse: 0, offPulse: 0,
+          maxGradient: 0,
+          info: nextInfo
+        });
+      }
+    }
+
+    // Add aroma hops (whirlpool/aroma)
+    const aromaHops = hops.filter(h => {
+      const use = getText(h, 'USE').toLowerCase();
+      return use === 'aroma' || use === 'dry hop' || use === 'whirlpool';
+    });
+    if (aromaHops.length > 0 && (boilHops.length === 0)) {
+      const aromaInfo = aromaHops.map(h => {
+        const hName = getText(h, 'NAME');
+        const hAlpha = getText(h, 'ALPHA');
+        const hAmt = Math.round(parseFloat(getText(h, 'AMOUNT') || '0') * 1000);
+        return `${hName} Alpha:${hAlpha} Menge:${hAmt}g`;
+      }).join(' | ');
+      rasts.push({
+        nr: nr++,
+        name: 'Aromahopfen',
+        on: true, halt: true, call: true,
+        sollTemp: 99.0, time: 5,
+        minTemp: 2.0, maxTemp: 5.0,
+        kp: 0.0, ki: 0.0, kd: 0.0,
+        onPulse: 0, offPulse: 0,
+        maxGradient: 0.0,
+        info: aromaInfo
+      });
+    }
+
+    // Pad to 16 rasts
+    const totalSlots = 16;
+    while (rasts.length < totalSlots) {
+      const idx = rasts.length;
+      rasts.push({
+        nr: idx,
+        name: `Rast${idx + 1}`,
+        on: false, halt: false, call: false,
+        sollTemp: 0.0, time: 0,
+        minTemp: -0.1, maxTemp: 0.1,
+        kp: 0.0, ki: 0.0, kd: 0.0,
+        onPulse: 0, offPulse: 0,
+        maxGradient: 0.0, info: ''
+      });
+    }
+
+    // Generate BML XML
+    const boolStr = b => b ? 'true' : 'false';
+    const floatStr = f => Number.isInteger(f) ? f.toFixed(1) : f.toString();
+
+    const rastXml = rasts.map(r => `  <rast>
+    <Nr>${r.nr}</Nr>
+    <Name>${escapeXml(r.name)}</Name>
+    <On>${boolStr(r.on)}</On>
+    <Halt>${boolStr(r.halt)}</Halt>
+    <Call>${boolStr(r.call)}</Call>
+    <SollTemp>${floatStr(r.sollTemp)}</SollTemp>
+    <Time>${r.time}</Time>
+    <MinTemp>${floatStr(r.minTemp)}</MinTemp>
+    <MaxTemp>${floatStr(r.maxTemp)}</MaxTemp>
+    <Kp>${floatStr(r.kp)}</Kp>
+    <Ki>${floatStr(r.ki)}</Ki>
+    <Kd>${floatStr(r.kd)}</Kd>
+    <OnTimePulse>${r.onPulse}</OnTimePulse>
+    <OffTimePulse>${r.offPulse}</OffTimePulse>
+    <MaxGradient>${floatStr(r.maxGradient)}</MaxGradient>
+    <Info>${escapeXml(r.info)}</Info>
+  </rast>`).join('\n');
+
+    generatedBML = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+<recipe AppDevice="mikroSikaru.de" AppName="BrausteuerungApp" AppVersion="1.19">
+  <description>${escapeXml(descParts.join(' '))}</description>
+${rastXml}
+</recipe>`;
+
+    // Output filename
+    const baseName = filename.replace(/\.(xml|beerxml)$/i, '');
+    outputFilename = baseName + '.bml';
+
+    // Update UI
+    recipeName.textContent = name + (styleName ? ` — ${styleName}` : '');
+
+    recipeInfo.innerHTML = `
+      <div class="info-card"><div class="info-card-label">Sudmenge</div><div class="info-card-value">${batchSize.toFixed(1)} L</div></div>
+      <div class="info-card"><div class="info-card-label">Kochzeit</div><div class="info-card-value">${boilTime} min</div></div>
+      <div class="info-card"><div class="info-card-label">Effizienz</div><div class="info-card-value">${efficiency} %</div></div>
+      <div class="info-card"><div class="info-card-label">Rasten</div><div class="info-card-value">${mashSteps.length}</div></div>
+      <div class="info-card"><div class="info-card-label">Hopfengaben</div><div class="info-card-value">${hops.length}</div></div>
+      <div class="info-card"><div class="info-card-label">Malze</div><div class="info-card-value">${fermentables.length}</div></div>
+    `;
+
+    // Steps table — alle aktiven BML-Rasten
+    const activeRasts = rasts.filter(r => r.on);
+    stepsBody.innerHTML = activeRasts.map(r => {
+      return `<tr>
+        <td>${r.nr}</td>
+        <td>${escapeHtml(r.name)}</td>
+        <td>${r.info ? `<span style="font-size:0.72rem;color:#A07040;font-family:'Libre Franklin',sans-serif;">${escapeHtml(r.info)}</span>` : '—'}</td>
+        <td>${r.sollTemp.toFixed(1)}°C</td>
+        <td>${r.time}'</td>
+      </tr>`;
+    }).join('');
+
+    previewPanel.classList.add('visible');
+    statusMsg.textContent = `${rasts.filter(r => r.on).length} aktive Steps generiert`;
+  }
+
+  function escapeXml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+</script>
+</body>
+</html>
