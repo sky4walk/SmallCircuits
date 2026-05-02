@@ -618,6 +618,97 @@
       min-height: 56px;
       font-size: 0.78rem !important;
     }
+
+    /* ── SIDEBAR COLLAPSE ── */
+    .layout {
+      transition: grid-template-columns 0.3s ease;
+    }
+    .layout.sidebar-hidden {
+      grid-template-columns: 1fr 0px;
+    }
+    aside {
+      transition: padding 0.3s ease, opacity 0.3s ease;
+      overflow: hidden;
+    }
+    .layout.sidebar-hidden aside {
+      padding: 0;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .btn-sidebar-toggle {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: transparent;
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 2px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn-sidebar-toggle:hover {
+      border-color: var(--border-bright);
+      color: var(--text);
+    }
+
+    .btn-beerxml {
+      font-family: 'IBM Plex Mono', monospace;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: transparent;
+      color: var(--amber);
+      border: 1px solid var(--amber-dim);
+      padding: 8px 16px;
+      border-radius: 2px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn-beerxml:hover {
+      background: var(--amber-dim);
+      color: #FFB84D;
+      box-shadow: 0 0 10px rgba(212,136,42,0.2);
+    }
+
+    /* ── MOBILE ── */
+    @media (max-width: 700px) {
+      .layout {
+        grid-template-columns: 1fr !important;
+        grid-template-rows: auto 1fr auto;
+      }
+      aside {
+        height: auto;
+        position: static;
+        border-left: none;
+        border-top: 1px solid var(--border);
+        padding: 20px 16px !important;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+      }
+      .layout.sidebar-hidden aside {
+        display: none;
+      }
+      main {
+        padding: 20px 16px;
+      }
+      header {
+        padding: 0 16px;
+        flex-wrap: wrap;
+        height: auto;
+        gap: 8px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+      }
+      .header-sep { display: none; }
+      .header-meta { font-size: 0.65rem; }
+    }
   </style>
 </head>
 <body>
@@ -627,8 +718,11 @@
     <div class="logo">BML<span>// Generator &amp; Editor</span></div>
     <div class="header-sep"></div>
     <div class="header-meta" id="headerMeta">0 Rasten &middot; 0 min</div>
+    <button class="btn-beerxml" onclick="document.getElementById('beerxmlFileInput').click()" title="BeerXML importieren">&#x1F37A; BeerXML</button>
+    <input type="file" id="beerxmlFileInput" accept=".xml,.beerxml" style="display:none" onchange="loadBeerXMLFile(this)">
     <button class="btn-load" onclick="document.getElementById('bmlFileInput').click()">&#x2B06; BML laden</button>
     <input type="file" id="bmlFileInput" accept=".bml,.xml" style="display:none" onchange="loadBMLFile(this)">
+    <button class="btn-sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()" title="Seitenleiste ein/ausblenden">&#x25E8; Info</button>
   </header>
   <div class="load-toast" id="loadToast"></div>
 
@@ -1095,6 +1189,145 @@ ${rastXml}
     toast.style.color = isError ? '#ff8080' : 'var(--green-bright)';
     toast.classList.add('show');
     setTimeout(() => toast.classList.remove('show'), 3200);
+  }
+
+  // ── SIDEBAR TOGGLE ──────────────────────────────────────
+  function toggleSidebar() {
+    const layout = document.querySelector('.layout');
+    const btn    = document.getElementById('sidebarToggle');
+    const hidden = layout.classList.toggle('sidebar-hidden');
+    btn.innerHTML = hidden ? '&#x25A7; Info' : '&#x25E8; Info';
+    btn.title = hidden ? 'Seitenleiste einblenden' : 'Seitenleiste ausblenden';
+  }
+
+  // ── BEERXML IMPORT ───────────────────────────────────────
+  function loadBeerXMLFile(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        parseBeerXML(e.target.result, file.name);
+      } catch(err) {
+        showToast('BeerXML Fehler: ' + err.message, true);
+      }
+      input.value = '';
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  function getXMLText(el, tag) {
+    const node = el.querySelector(tag);
+    return node ? node.textContent.trim() : '';
+  }
+
+  function parseBeerXML(xmlStr, filename) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlStr, 'application/xml');
+    if (doc.querySelector('parsererror')) throw new Error('Ungültiges XML-Format');
+
+    const recipe = doc.querySelector('RECIPE');
+    if (!recipe) throw new Error('Kein <RECIPE> Element — ist das eine gültige BeerXML Datei?');
+
+    const mash = recipe.querySelector('MASH');
+    if (!mash) throw new Error('Kein <MASH> Block gefunden.');
+
+    const mashSteps = Array.from(mash.querySelectorAll('MASH_STEP'));
+    if (mashSteps.length === 0) throw new Error('Keine MASH_STEP Einträge gefunden.');
+
+    const name       = getXMLText(recipe, 'NAME') || filename.replace(/\.(xml|beerxml)$/i,'');
+    const boilTime   = parseInt(getXMLText(recipe, 'BOIL_TIME') || '60');
+    const hops       = Array.from(recipe.querySelectorAll('HOP'));
+    const boilHops   = hops.filter(h => {
+      const use = getXMLText(h,'USE').toLowerCase();
+      return use === 'boil' || use === 'first wort';
+    }).sort((a,b) => parseFloat(getXMLText(b,'TIME')||0) - parseFloat(getXMLText(a,'TIME')||0));
+
+    const loaded = [];
+
+    // Aufheizrast
+    const firstTemp = parseFloat(getXMLText(mashSteps[0],'STEP_TEMP') || '57');
+    loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+      name: 'Aufheizen', on: true, halt: true, call: true,
+      sollTemp: firstTemp, time: 1, minTemp: -0.1, maxTemp: 0.1, maxGradient: 1.0,
+      info: 'Einmaischtemperatur ' + firstTemp + '\u00b0C erreicht \u2013 Malz einsch\u00fctten!'
+    });
+
+    // Einmaischen
+    loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+      name: 'Einmaischen', on: true, halt: true, call: true,
+      sollTemp: firstTemp,
+      time: parseInt(getXMLText(mashSteps[0],'STEP_TIME')||'10'),
+      minTemp: -0.1, maxTemp: -0.1, maxGradient: 1.0, info: ''
+    });
+
+    // Weitere Maische-Schritte
+    for (let i = 1; i < mashSteps.length; i++) {
+      const s = mashSteps[i];
+      const sName = getXMLText(s,'NAME') || ('Rast ' + i);
+      const sTemp = parseFloat(getXMLText(s,'STEP_TEMP')||'0');
+      const sTime = parseInt(getXMLText(s,'STEP_TIME')||'0');
+      const ramp  = parseFloat(getXMLText(s,'RAMP_TIME')||'0');
+      loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+        name: sName, on: true, halt: false, call: false,
+        sollTemp: sTemp, time: sTime, minTemp: -0.1, maxTemp: 0.1,
+        maxGradient: ramp > 0 ? parseFloat((sTemp/ramp).toFixed(1)) : 1.0, info: ''
+      });
+    }
+
+    // Abmaischen
+    loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+      name: 'Abmaischen', on: true, halt: true, call: true,
+      sollTemp: 78, time: 5, minTemp: -0.1, maxTemp: 0.1, maxGradient: 0, info: ''
+    });
+
+    // Läutern
+    loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+      name: 'Laeutern', on: true, halt: true, call: true,
+      sollTemp: 20, time: 1, minTemp: -5, maxTemp: 5,
+      kp: 0, ki: 0, kd: 0, maxGradient: 0, info: ''
+    });
+
+    // Kochen + Hopfengaben
+    if (boilHops.length === 0) {
+      loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+        name: 'Kochen', on: true, halt: true, call: true,
+        sollTemp: 99, time: boilTime, minTemp: 2, maxTemp: 5, kp: 0, ki: 0, kd: 0, maxGradient: 0, info: ''
+      });
+    } else {
+      // Aufheizen auf Kochen
+      const fh = boilHops[0];
+      const fhAmt = Math.round(parseFloat(getXMLText(fh,'AMOUNT')||'0')*1000);
+      loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+        name: 'Kochen', on: true, halt: true, call: true,
+        sollTemp: 99, time: 1, minTemp: 2, maxTemp: 5, kp: 0, ki: 0, kd: 0, maxGradient: 0,
+        info: 'Hopfen: ' + getXMLText(fh,'NAME') + ' Alpha: ' + getXMLText(fh,'ALPHA') + ' Menge: ' + fhAmt + 'g'
+      });
+      // Hopfengaben
+      for (let i = 0; i < boilHops.length; i++) {
+        const h = boilHops[i];
+        const hTime = parseFloat(getXMLText(h,'TIME')||'0');
+        const nextTime = i+1 < boilHops.length ? parseFloat(getXMLText(boilHops[i+1],'TIME')||'0') : 0;
+        const dur = Math.max(1, hTime - nextTime);
+        const stepName = i === 0 ? 'Bitterhopfen' : (i === boilHops.length-1 ? 'Aromahopfen' : 'Hopfengabe '+(i+1));
+        let nextInfo = '';
+        if (i+1 < boilHops.length) {
+          const nh = boilHops[i+1];
+          nextInfo = 'Hopfen: ' + getXMLText(nh,'NAME') + ' Alpha: ' + getXMLText(nh,'ALPHA') + ' Menge: ' + Math.round(parseFloat(getXMLText(nh,'AMOUNT')||'0')*1000) + 'g';
+        }
+        loaded.push({ ...DEFAULT_RAST, id: nextId++, open: false,
+          name: stepName, on: true, halt: true, call: true,
+          sollTemp: 99, time: dur, minTemp: 2, maxTemp: 5, kp: 0, ki: 0, kd: 0, maxGradient: 0,
+          info: nextInfo
+        });
+      }
+    }
+
+    rasts = loaded;
+    document.getElementById('recipeName').value = name;
+    renderRasts();
+    updateAll();
+    showToast('\u2713 BeerXML "' + name + '" \u2014 ' + loaded.length + ' Rasten importiert');
   }
 
   // Init
