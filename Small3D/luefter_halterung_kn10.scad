@@ -11,8 +11,8 @@
 // ---- Anpassbare Parameter ----
 
 // KN10 / KG DN100 Rohr
-rohr_aussen_d    = 110;   // Außendurchmesser KN10-Rohr [mm]
-muffe_spiel      = 0.4;   // Spiel für den Stecksitz [mm]
+rohr_aussen_d    = 100;   // Außendurchmesser KN10-Rohr [mm]
+muffe_spiel      = 0.1;   // Spiel für den Stecksitz [mm]
 muffe_laenge     = 50;    // Tiefe der Muffe [mm]
 muffe_wandstaerke = 3;    // Wandstärke der Muffe [mm]
 
