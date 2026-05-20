@@ -21,7 +21,7 @@ module rohr(da,dw,l) {
     }
     translate([0,0,l]) cylinder(dw, da/2, da/2);
 }
-
+/*
 difference() {
     union() {
         if ( 1 == auswahl )
@@ -32,3 +32,6 @@ difference() {
     }
     cylinder(l_steckrohr+30, d_durchlass, d_durchlass);
 }
+*/
+
+bolt("M13", turns=10);
