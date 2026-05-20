@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Moonlander</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; touch-action: manipulation; }
+body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+#wrap { position: relative; width: 100%; max-width: 680px; background: #000; user-select: none; }
+canvas { display: block; width: 100%; height: auto; }
+#ui {
+  position: absolute; top: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 6px 10px; pointer-events: none;
+  font-family: monospace; font-size: 11px; color: #aaa;
+}
+.stat { display: flex; flex-direction: column; gap: 3px; }
+.bar-wrap { width: 70px; height: 6px; background: #222; border-radius: 3px; overflow: hidden; }
+.bar { height: 100%; border-radius: 3px; }
+#fuel-bar { background: #3fa; width: 100%; }
+#overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px;
+  background: rgba(0,0,0,0.75); font-family: monospace;
+}
+#overlay h2 { font-size: 20px; color: #fff; }
+#overlay p  { font-size: 12px; color: #aaa; text-align: center; max-width: 300px; line-height: 1.8; }
+#overlay button {
+  margin-top: 4px; padding: 10px 32px; background: transparent;
+  border: 0.5px solid #555; color: #eee; font-family: monospace;
+  font-size: 14px; border-radius: 6px; cursor: pointer;
+}
+#overlay button:hover, #overlay button:active { background: #111; border-color: #888; }
+#controls {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  display: flex; justify-content: space-between; align-items: flex-end;
+  padding: 8px 12px 10px;
+  pointer-events: none;
+}
+.ctrl-btn {
+  pointer-events: all;
+  width: 64px; height: 64px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.25);
+  background: rgba(255,255,255,0.08);
+  color: rgba(255,255,255,0.7);
+  font-size: 22px;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.08s, border-color 0.08s;
+}
+.ctrl-btn.active {
+  background: rgba(255,255,255,0.2);
+  border-color: rgba(255,255,255,0.5);
+}
+#btn-thrust {
+  width: 72px; height: 72px;
+  background: rgba(255,140,0,0.15);
+  border-color: rgba(255,140,0,0.4);
+  font-size: 26px;
+  align-self: flex-end;
+}
+#btn-thrust.active {
+  background: rgba(255,140,0,0.35);
+  border-color: rgba(255,140,0,0.8);
+}
+.ctrl-side { display: flex; gap: 10px; align-items: flex-end; }
+</style>
+</head>
+<body>
+<div id="wrap">
+<canvas id="c" width="680" height="520"></canvas>
+<div id="ui">
+  <div class="stat">
+    <span id="fuel-label">FUEL 100%</span>
+    <div class="bar-wrap"><div class="bar" id="fuel-bar"></div></div>
+  </div>
+  <div class="stat" style="align-items:center">
+    <span id="vel-label">SPD 0.0</span>
+    <span id="alt-label" style="color:#666">ALT ---</span>
+  </div>
+  <div class="stat" style="align-items:flex-end">
+    <span id="ang-label">ANG 0°</span>
+    <span id="score-label" style="color:#666">SCORE 0</span>
+  </div>
+</div>
+
+<div id="controls">
+  <div class="ctrl-side">
+    <div class="ctrl-btn" id="btn-left">&#9664;</div>
+    <div class="ctrl-btn" id="btn-right">&#9654;</div>
+  </div>
+  <div class="ctrl-btn" id="btn-thrust">&#128293;</div>
+</div>
+
+<div id="overlay">
+  <h2 id="ov-title">🚀 MOONLANDER</h2>
+  <p id="ov-msg">Steuere deine Rakete sicher auf die Plattform.<br><br>
+  <b style="color:#eee">← →</b> Drehen &nbsp;|&nbsp; <b style="color:#eee">↑ / Space / 🔥</b> Schub<br><br>
+  Landung: Geschwindigkeit &lt; 2.0, Winkel &lt; 15°</p>
+  <button id="btn">STARTEN</button>
+</div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = 680, H = 520;
+const G = 0.04;
+const THRUST = 0.08;
+const ROT_SPD = 2.5;
+const MAX_LAND_SPD = 2.0;
+const MAX_LAND_ANG = 15;
+const FUEL_MAX = 100;
+
+let state, terrain, landPad, stars;
+let keys = {};
+let touch = { left: false, right: false, thrust: false };
+let animId = null;
+let score = 0;
+let level = 1;
+let gameRunning = false;
+
+// Audio
+let audioCtx = null, thrustNode = null, thrustGain = null;
+
+function getAC() {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  return audioCtx;
+}
+function startThrustSound() {
+  if (thrustNode) return;
+  const ac = getAC();
+  thrustGain = ac.createGain();
+  thrustGain.gain.setValueAtTime(0, ac.currentTime);
+  thrustGain.gain.linearRampToValueAtTime(0.18, ac.currentTime + 0.08);
+  thrustGain.connect(ac.destination);
+  const o1 = ac.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 65;
+  const o2 = ac.createOscillator(); o2.type = 'square';   o2.frequency.value = 120;
+  const bufSize = ac.sampleRate * 0.5;
+  const buf = ac.createBuffer(1, bufSize, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) d[i] = (Math.random() * 2 - 1);
+  const noise = ac.createBufferSource(); noise.buffer = buf; noise.loop = true;
+  const flt = ac.createBiquadFilter(); flt.type = 'bandpass'; flt.frequency.value = 180; flt.Q.value = 0.8;
+  const ng = ac.createGain(); ng.gain.value = 0.55;
+  const g1 = ac.createGain(); g1.gain.value = 0.5;
+  const g2 = ac.createGain(); g2.gain.value = 0.15;
+  o1.connect(g1); g1.connect(thrustGain);
+  o2.connect(g2); g2.connect(thrustGain);
+  noise.connect(flt); flt.connect(ng); ng.connect(thrustGain);
+  o1.start(); o2.start(); noise.start();
+  thrustNode = { o1, o2, noise };
+}
+function stopThrustSound() {
+  if (!thrustNode || !thrustGain) return;
+  const ac = getAC();
+  thrustGain.gain.linearRampToValueAtTime(0, ac.currentTime + 0.12);
+  const n = thrustNode;
+  setTimeout(() => { try { n.o1.stop(); n.o2.stop(); n.noise.stop(); } catch(e) {} }, 150);
+  thrustNode = null; thrustGain = null;
+}
+function playExplosion() {
+  const ac = getAC(), g = ac.createGain();
+  g.gain.setValueAtTime(0.6, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + 1.2);
+  g.connect(ac.destination);
+  const buf = ac.createBuffer(1, ac.sampleRate * 1.2, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 1.5);
+  const ns = ac.createBufferSource(); ns.buffer = buf;
+  const fl = ac.createBiquadFilter(); fl.type = 'lowpass'; fl.frequency.value = 400;
+  ns.connect(fl); fl.connect(g); ns.start();
+}
+function playLanding() {
+  const ac = getAC();
+  [0, 0.12, 0.24].forEach((t, i) => {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.frequency.value = 440 + i * 220; o.type = 'sine';
+    g.gain.setValueAtTime(0.2, ac.currentTime + t);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + t + 0.25);
+    o.connect(g); g.connect(ac.destination);
+    o.start(ac.currentTime + t); o.stop(ac.currentTime + t + 0.3);
+  });
+}
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+
+function genStars() {
+  stars = [];
+  for (let i = 0; i < 120; i++) stars.push({ x: rnd(0, W), y: rnd(0, H * 0.65), r: rnd(0.5, 1.5), b: rnd(0.3, 1) });
+}
+
+function genTerrain() {
+  terrain = [];
+  const segs = 14, dx = W / segs;
+  let y = rnd(360, 420);
+  for (let i = 0; i <= segs; i++) {
+    terrain.push({ x: i * dx, y });
+    if (i < segs) y += rnd(-40, 40);
+    y = Math.max(330, Math.min(H - 55, y));
+  }
+  const pi = Math.floor(rnd(2, segs - 2)), pw = 50;
+  const py = terrain[pi].y;
+  terrain[pi + 1] = { x: terrain[pi].x + pw, y: py };
+  for (let i = pi + 2; i <= segs; i++) terrain[i].x = terrain[pi].x + pw + (i - pi - 1) * dx;
+  landPad = { x1: terrain[pi].x, x2: terrain[pi].x + pw, y: py };
+}
+
+function initRocket() {
+  state = {
+    x: rnd(100, 580), y: 40,
+    vx: rnd(-0.4, 0.4), vy: 0,
+    angle: rnd(-10, 10),
+    fuel: FUEL_MAX,
+    thrusting: false,
+    dead: false, landed: false,
+    particles: []
+  };
+}
+
+function reset(lv) { level = lv || 1; genTerrain(); genStars(); initRocket(); }
+
+function terrainY(px) {
+  for (let i = 0; i < terrain.length - 1; i++) {
+    const a = terrain[i], b = terrain[i + 1];
+    if (px >= a.x && px <= b.x) { const t = (px - a.x) / (b.x - a.x); return a.y * (1 - t) + b.y * t; }
+  }
+  return H;
+}
+function getRocketBase() { const r = state.angle * Math.PI / 180; return { x: state.x - Math.sin(r) * 18, y: state.y + Math.cos(r) * 18 }; }
+function getRocketTip()  { const r = state.angle * Math.PI / 180; return { x: state.x + Math.sin(r) * 18, y: state.y - Math.cos(r) * 18 }; }
+
+function spawnParticles(thrust) {
+  const r = state.angle * Math.PI / 180;
+  for (let i = 0; i < (thrust ? 3 : 1); i++) {
+    const p = {
+      x: state.x - Math.sin(r) * 20, y: state.y + Math.cos(r) * 20,
+      vx: -Math.sin(r) * rnd(0.5, 1.5) + rnd(-0.5, 0.5),
+      vy:  Math.cos(r) * rnd(0.5, 1.5) + rnd(-0.5, 0.5),
+      life: thrust ? rnd(15, 30) : rnd(8, 18), col: thrust ? '#f80' : '#666'
+    };
+    p.max = p.life; state.particles.push(p);
+  }
+}
+
+function isThrusting() { return (keys['ArrowUp'] || keys[' '] || touch.thrust) && state.fuel > 0; }
+function isLeft()      { return keys['ArrowLeft']  || touch.left; }
+function isRight()     { return keys['ArrowRight'] || touch.right; }
+
+function update() {
+  if (state.dead || state.landed) return;
+  const s = state;
+  if (isLeft())  s.angle -= ROT_SPD;
+  if (isRight()) s.angle += ROT_SPD;
+  const thr = isThrusting();
+  if (thr && !s.thrusting) startThrustSound();
+  if (!thr && s.thrusting) stopThrustSound();
+  s.thrusting = thr;
+  if (thr) {
+    const r = s.angle * Math.PI / 180;
+    s.vx += Math.sin(r) * THRUST; s.vy -= Math.cos(r) * THRUST;
+    s.fuel = Math.max(0, s.fuel - 0.4);
+    spawnParticles(true);
+  }
+  s.vy += G; s.x += s.vx; s.y += s.vy;
+  s.x = ((s.x % W) + W) % W;
+  s.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.02; p.life--; });
+  s.particles = s.particles.filter(p => p.life > 0);
+
+  const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+  const base = getRocketBase();
+  const ty = terrainY(base.x);
+  if (base.y >= ty) {
+    stopThrustSound();
+    const onPad = base.x >= landPad.x1 && base.x <= landPad.x2;
+    const ang = Math.abs(s.angle % 360), normAng = Math.min(ang, 360 - ang);
+    if (onPad && speed < MAX_LAND_SPD && normAng < MAX_LAND_ANG) {
+      s.landed = true; playLanding();
+      const pts = Math.round((MAX_LAND_SPD - speed) * 200 + s.fuel * 5 + (10000 / (level * 500)));
+      score += pts;
+      setTimeout(() => showOverlay('✅ GELANDET!',
+        `Geschwindigkeit: ${speed.toFixed(2)} | Winkel: ${normAng.toFixed(1)}°<br>Treibstoff: ${s.fuel.toFixed(0)}% | +${pts} Punkte`,
+        'NÄCHSTES LEVEL', true), 600);
+    } else {
+      s.dead = true; playExplosion();
+      for (let i = 0; i < 30; i++) spawnParticles(false);
+      setTimeout(() => showOverlay('💥 ABGESTÜRZT',
+        onPad ? (speed >= MAX_LAND_SPD ? `Zu schnell (${speed.toFixed(2)})` : `Zu schräg (${normAng.toFixed(1)}°)`)
+              : `Nicht auf der Plattform.<br>Geschwindigkeit: ${speed.toFixed(2)}`,
+        'NEU STARTEN', false), 800);
+    }
+  }
+}
+
+function drawRocket(x, y, angle, thrusting, fuel) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(angle * Math.PI / 180);
+  ctx.fillStyle = '#ccc';
+  ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(8, 10); ctx.lineTo(-8, 10); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#888'; ctx.fillRect(-5, 8, 4, 8); ctx.fillRect(1, 8, 4, 8);
+  ctx.fillStyle = '#e44'; ctx.beginPath(); ctx.arc(0, -18, 4, 0, Math.PI * 2); ctx.fill();
+  if (thrusting && fuel > 0) {
+    const fl = rnd(8, 18);
+    const grd = ctx.createLinearGradient(0, 12, 0, 12 + fl);
+    grd.addColorStop(0, '#ff8800'); grd.addColorStop(1, 'rgba(255,80,0,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.moveTo(-4, 12); ctx.lineTo(4, 12); ctx.lineTo(0, 12 + fl); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawScene() {
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  stars.forEach(s => {
+    ctx.fillStyle = `rgba(255,255,255,${s.b})`;
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.fillStyle = 'rgba(200,200,220,0.07)';
+  ctx.beginPath(); ctx.arc(W * 0.82, H * 0.1, 55, 0, Math.PI * 2); ctx.fill();
+
+  state.particles.forEach(p => {
+    ctx.globalAlpha = p.life / p.max * 0.8;
+    ctx.fillStyle = p.col;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.globalAlpha = 1;
+  });
+
+  ctx.strokeStyle = '#ffe066'; ctx.lineWidth = 3;
+  ctx.shadowColor = '#ffe06688'; ctx.shadowBlur = 6;
+  ctx.beginPath(); ctx.moveTo(landPad.x1, landPad.y); ctx.lineTo(landPad.x2, landPad.y); ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#ffe066'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+  ctx.fillText('▼', (landPad.x1 + landPad.x2) / 2, landPad.y - 5);
+
+  ctx.fillStyle = '#445';
+  ctx.beginPath(); ctx.moveTo(terrain[0].x, H);
+  terrain.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(terrain[terrain.length - 1].x, H); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#778'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  terrain.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.stroke();
+
+  if (!state.dead) drawRocket(state.x, state.y, state.angle, state.thrusting, state.fuel);
+}
+
+function updateHUD() {
+  const s = state;
+  const fp = (s.fuel / FUEL_MAX * 100).toFixed(0);
+  document.getElementById('fuel-label').textContent = 'FUEL ' + fp + '%';
+  document.getElementById('fuel-bar').style.width = fp + '%';
+  document.getElementById('fuel-bar').style.background = fp > 30 ? '#3fa' : fp > 10 ? '#f80' : '#f33';
+  const spd = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
+  document.getElementById('vel-label').textContent = 'SPD ' + spd.toFixed(1);
+  const tip = getRocketTip();
+  document.getElementById('alt-label').textContent = 'ALT ' + Math.max(0, terrainY(tip.x) - tip.y).toFixed(0) + 'm';
+  const ang = Math.abs(s.angle % 360);
+  document.getElementById('ang-label').textContent = 'ANG ' + Math.min(ang, 360 - ang).toFixed(0) + '°';
+  document.getElementById('score-label').textContent = 'SCORE ' + score;
+  document.getElementById('btn-left').classList.toggle('active', isLeft());
+  document.getElementById('btn-right').classList.toggle('active', isRight());
+  document.getElementById('btn-thrust').classList.toggle('active', isThrusting());
+}
+
+function loop() {
+  update(); drawScene(); updateHUD();
+  animId = requestAnimationFrame(loop);
+}
+
+function showOverlay(title, msg, btnText, nextLevel) {
+  gameRunning = false;
+  document.getElementById('ov-title').textContent = title;
+  document.getElementById('ov-msg').innerHTML = msg;
+  document.getElementById('btn').textContent = btnText;
+  document.getElementById('overlay').style.display = 'flex';
+  document.getElementById('btn').onclick = () => startGame(nextLevel ? level + 1 : 1, nextLevel);
+}
+
+function startGame(lv, keepScore) {
+  if (!keepScore) score = 0;
+  document.getElementById('overlay').style.display = 'none';
+  reset(lv || 1); gameRunning = true;
+  if (!animId) loop();
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === ' ' && !gameRunning) {
+    e.preventDefault();
+    if (document.getElementById('overlay').style.display !== 'none') document.getElementById('btn').click();
+    return;
+  }
+  keys[e.key] = true;
+  if (['ArrowUp', 'ArrowDown', ' '].includes(e.key)) e.preventDefault();
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+
+function setupBtn(id, prop) {
+  const el = document.getElementById(id);
+  el.addEventListener('touchstart',  e => { e.preventDefault(); touch[prop] = true;  }, { passive: false });
+  el.addEventListener('touchend',    e => { e.preventDefault(); touch[prop] = false; }, { passive: false });
+  el.addEventListener('touchcancel', e => { touch[prop] = false; });
+  el.addEventListener('mousedown',   e => { touch[prop] = true;  });
+  el.addEventListener('mouseup',     e => { touch[prop] = false; });
+  el.addEventListener('mouseleave',  e => { touch[prop] = false; });
+}
+setupBtn('btn-left',   'left');
+setupBtn('btn-right',  'right');
+setupBtn('btn-thrust', 'thrust');
+
+document.getElementById('btn').onclick = () => startGame(1, false);
+
+genStars();
+</script>
+</body>
+</html>
