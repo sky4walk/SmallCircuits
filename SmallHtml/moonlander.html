@@ -51,21 +51,14 @@ canvas { display: block; width: 100%; height: auto; }
   -webkit-tap-highlight-color: transparent;
   transition: background 0.08s, border-color 0.08s;
 }
-.ctrl-btn.active {
-  background: rgba(255,255,255,0.2);
-  border-color: rgba(255,255,255,0.5);
-}
+.ctrl-btn.active { background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.5); }
 #btn-thrust {
   width: 72px; height: 72px;
   background: rgba(255,140,0,0.15);
   border-color: rgba(255,140,0,0.4);
-  font-size: 26px;
-  align-self: flex-end;
+  font-size: 26px; align-self: flex-end;
 }
-#btn-thrust.active {
-  background: rgba(255,140,0,0.35);
-  border-color: rgba(255,140,0,0.8);
-}
+#btn-thrust.active { background: rgba(255,140,0,0.35); border-color: rgba(255,140,0,0.8); }
 .ctrl-side { display: flex; gap: 10px; align-items: flex-end; }
 </style>
 </head>
@@ -96,10 +89,10 @@ canvas { display: block; width: 100%; height: auto; }
 </div>
 
 <div id="overlay">
-  <h2 id="ov-title">🚀 MOONLANDER</h2>
+  <h2 id="ov-title">&#128640; MOONLANDER</h2>
   <p id="ov-msg">Steuere deine Rakete sicher auf die Plattform.<br><br>
-  <b style="color:#eee">← →</b> Drehen &nbsp;|&nbsp; <b style="color:#eee">↑ / Space / 🔥</b> Schub<br><br>
-  Landung: Geschwindigkeit &lt; 2.0, Winkel &lt; 15°</p>
+  <b style="color:#eee">&#8592; &#8594;</b> Drehen &nbsp;|&nbsp; <b style="color:#eee">&#8593; / Space / &#128293;</b> Schub<br><br>
+  Landung: Geschwindigkeit &lt; 2.0, Winkel &lt; 15&deg;</p>
   <button id="btn">STARTEN</button>
 </div>
 </div>
@@ -108,24 +101,26 @@ canvas { display: block; width: 100%; height: auto; }
 const canvas = document.getElementById('c');
 const ctx = canvas.getContext('2d');
 const W = 680, H = 520;
-const G = 0.04;
-const THRUST = 0.08;
-const ROT_SPD = 2.5;
+
+const G        = 0.022;
+const THRUST   = 0.045;
+const ROT_SPD  = 1.6;
 const MAX_LAND_SPD = 2.0;
 const MAX_LAND_ANG = 15;
 const FUEL_MAX = 100;
+const FUEL_BURN = 0.25;
 
 let state, terrain, landPad, stars;
 let keys = {};
 let touch = { left: false, right: false, thrust: false };
 let animId = null;
+let lastTime = null;
+const TARGET_DT = 1000 / 60;
 let score = 0;
 let level = 1;
 let gameRunning = false;
 
-// Audio
 let audioCtx = null, thrustNode = null, thrustGain = null;
-
 function getAC() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   return audioCtx;
@@ -212,8 +207,8 @@ function genTerrain() {
 function initRocket() {
   state = {
     x: rnd(100, 580), y: 40,
-    vx: rnd(-0.4, 0.4), vy: 0,
-    angle: rnd(-10, 10),
+    vx: rnd(-0.2, 0.2), vy: 0,
+    angle: rnd(-8, 8),
     fuel: FUEL_MAX,
     thrusting: false,
     dead: false, landed: false,
@@ -221,7 +216,7 @@ function initRocket() {
   };
 }
 
-function reset(lv) { level = lv || 1; genTerrain(); genStars(); initRocket(); }
+function reset(lv) { level = lv || 1; genTerrain(); genStars(); initRocket(); lastTime = null; }
 
 function terrainY(px) {
   for (let i = 0; i < terrain.length - 1; i++) {
@@ -250,24 +245,33 @@ function isThrusting() { return (keys['ArrowUp'] || keys[' '] || touch.thrust) &
 function isLeft()      { return keys['ArrowLeft']  || touch.left; }
 function isRight()     { return keys['ArrowRight'] || touch.right; }
 
-function update() {
+function update(dt) {
   if (state.dead || state.landed) return;
   const s = state;
-  if (isLeft())  s.angle -= ROT_SPD;
-  if (isRight()) s.angle += ROT_SPD;
+  const dtScale = dt / TARGET_DT;
+
+  if (isLeft())  s.angle -= ROT_SPD * dtScale;
+  if (isRight()) s.angle += ROT_SPD * dtScale;
+
   const thr = isThrusting();
   if (thr && !s.thrusting) startThrustSound();
   if (!thr && s.thrusting) stopThrustSound();
   s.thrusting = thr;
+
   if (thr) {
     const r = s.angle * Math.PI / 180;
-    s.vx += Math.sin(r) * THRUST; s.vy -= Math.cos(r) * THRUST;
-    s.fuel = Math.max(0, s.fuel - 0.4);
+    s.vx += Math.sin(r) * THRUST * dtScale;
+    s.vy -= Math.cos(r) * THRUST * dtScale;
+    s.fuel = Math.max(0, s.fuel - FUEL_BURN * dtScale);
     spawnParticles(true);
   }
-  s.vy += G; s.x += s.vx; s.y += s.vy;
+
+  s.vy += G * dtScale;
+  s.x  += s.vx * dtScale;
+  s.y  += s.vy * dtScale;
   s.x = ((s.x % W) + W) % W;
-  s.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.vy += 0.02; p.life--; });
+
+  s.particles.forEach(p => { p.x += p.vx * dtScale; p.y += p.vy * dtScale; p.vy += 0.02 * dtScale; p.life -= dtScale; });
   s.particles = s.particles.filter(p => p.life > 0);
 
   const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy);
@@ -281,15 +285,15 @@ function update() {
       s.landed = true; playLanding();
       const pts = Math.round((MAX_LAND_SPD - speed) * 200 + s.fuel * 5 + (10000 / (level * 500)));
       score += pts;
-      setTimeout(() => showOverlay('✅ GELANDET!',
-        `Geschwindigkeit: ${speed.toFixed(2)} | Winkel: ${normAng.toFixed(1)}°<br>Treibstoff: ${s.fuel.toFixed(0)}% | +${pts} Punkte`,
-        'NÄCHSTES LEVEL', true), 600);
+      setTimeout(() => showOverlay('Gelandet!',
+        'Geschwindigkeit: ' + speed.toFixed(2) + ' | Winkel: ' + normAng.toFixed(1) + '&deg;<br>Treibstoff: ' + s.fuel.toFixed(0) + '% | +' + pts + ' Punkte',
+        'NAECHSTES LEVEL', true), 600);
     } else {
       s.dead = true; playExplosion();
       for (let i = 0; i < 30; i++) spawnParticles(false);
-      setTimeout(() => showOverlay('💥 ABGESTÜRZT',
-        onPad ? (speed >= MAX_LAND_SPD ? `Zu schnell (${speed.toFixed(2)})` : `Zu schräg (${normAng.toFixed(1)}°)`)
-              : `Nicht auf der Plattform.<br>Geschwindigkeit: ${speed.toFixed(2)}`,
+      setTimeout(() => showOverlay('ABGESTUERZT',
+        onPad ? (speed >= MAX_LAND_SPD ? 'Zu schnell (' + speed.toFixed(2) + ')' : 'Zu schraeg (' + normAng.toFixed(1) + '&deg;)')
+              : 'Nicht auf der Plattform.<br>Geschwindigkeit: ' + speed.toFixed(2),
         'NEU STARTEN', false), 800);
     }
   }
@@ -315,7 +319,7 @@ function drawScene() {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
   stars.forEach(s => {
-    ctx.fillStyle = `rgba(255,255,255,${s.b})`;
+    ctx.fillStyle = 'rgba(255,255,255,' + s.b + ')';
     ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
   });
   ctx.fillStyle = 'rgba(200,200,220,0.07)';
@@ -333,7 +337,7 @@ function drawScene() {
   ctx.beginPath(); ctx.moveTo(landPad.x1, landPad.y); ctx.lineTo(landPad.x2, landPad.y); ctx.stroke();
   ctx.shadowBlur = 0;
   ctx.fillStyle = '#ffe066'; ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
-  ctx.fillText('▼', (landPad.x1 + landPad.x2) / 2, landPad.y - 5);
+  ctx.fillText('\u25BC', (landPad.x1 + landPad.x2) / 2, landPad.y - 5);
 
   ctx.fillStyle = '#445';
   ctx.beginPath(); ctx.moveTo(terrain[0].x, H);
@@ -358,15 +362,18 @@ function updateHUD() {
   const tip = getRocketTip();
   document.getElementById('alt-label').textContent = 'ALT ' + Math.max(0, terrainY(tip.x) - tip.y).toFixed(0) + 'm';
   const ang = Math.abs(s.angle % 360);
-  document.getElementById('ang-label').textContent = 'ANG ' + Math.min(ang, 360 - ang).toFixed(0) + '°';
+  document.getElementById('ang-label').textContent = 'ANG ' + Math.min(ang, 360 - ang).toFixed(0) + '\u00b0';
   document.getElementById('score-label').textContent = 'SCORE ' + score;
   document.getElementById('btn-left').classList.toggle('active', isLeft());
   document.getElementById('btn-right').classList.toggle('active', isRight());
   document.getElementById('btn-thrust').classList.toggle('active', isThrusting());
 }
 
-function loop() {
-  update(); drawScene(); updateHUD();
+function loop(ts) {
+  if (lastTime === null) lastTime = ts;
+  const dt = Math.min(ts - lastTime, 50);
+  lastTime = ts;
+  update(dt); drawScene(); updateHUD();
   animId = requestAnimationFrame(loop);
 }
 
@@ -383,7 +390,7 @@ function startGame(lv, keepScore) {
   if (!keepScore) score = 0;
   document.getElementById('overlay').style.display = 'none';
   reset(lv || 1); gameRunning = true;
-  if (!animId) loop();
+  if (!animId) animId = requestAnimationFrame(loop);
 }
 
 document.addEventListener('keydown', e => {
@@ -411,7 +418,6 @@ setupBtn('btn-right',  'right');
 setupBtn('btn-thrust', 'thrust');
 
 document.getElementById('btn').onclick = () => startGame(1, false);
-
 genStars();
 </script>
 </body>
