@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GRAVITY FLIP</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#1a0a2e;overflow:hidden;}
+body{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;font-family:'Press Start 2P',monospace;padding:8px 0 0;}
+
+#hud{display:flex;justify-content:space-between;align-items:center;width:100%;max-width:480px;padding:0 8px 6px;}
+.hb{display:flex;flex-direction:column;align-items:center;gap:2px;}
+.hl{font-size:7px;letter-spacing:2px;color:rgba(255,255,255,0.3);}
+.hv{font-size:14px;letter-spacing:1px;}
+
+#cbox{position:relative;border:3px solid #3d1f6e;image-rendering:pixelated;}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;}
+
+.ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(10,4,20,0.92);z-index:10;}
+.ov.hidden{display:none;}
+.ot{font-size:clamp(14px,4vw,22px);letter-spacing:4px;}
+.os{font-size:8px;letter-spacing:2px;color:rgba(255,255,255,0.4);}
+.blink{animation:bl 0.8s step-end infinite;}
+@keyframes bl{0%,100%{opacity:1}50%{opacity:0}}
+
+#hi-list{display:flex;flex-direction:column;gap:3px;margin-top:4px;}
+.hi-row{display:flex;gap:14px;font-size:7px;}
+.hr{color:rgba(255,255,255,0.3);width:10px;}
+.hn{color:#fff;width:40px;}
+.hp{text-align:right;width:55px;}
+
+input#nin{background:transparent;border:none;border-bottom:1px solid #fff;color:#fff;font-family:'Press Start 2P',monospace;font-size:14px;letter-spacing:4px;text-align:center;width:64px;text-transform:uppercase;outline:none;}
+
+#pubar{width:100%;max-width:480px;min-height:20px;display:flex;gap:6px;padding:3px 8px;flex-wrap:wrap;}
+.pt{font-size:7px;letter-spacing:1px;padding:2px 6px;border:1px solid;background:rgba(0,0,0,0.4);}
+
+#dpad{display:none;margin-top:6px;}
+.flip-btn{font-family:'Press Start 2P',monospace;font-size:12px;padding:12px 28px;background:#3d1f6e;color:#fff;border:2px solid #7b3fe4;cursor:pointer;letter-spacing:2px;}
+.flip-btn:active{background:#5a2fa0;}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="hb"><span class="hl">SCORE</span><span class="hv" id="hScore" style="color:#ffd700;">0</span></div>
+  <div class="hb"><span class="hl">BEST</span><span class="hv" id="hBest" style="color:#ff6ec7;">0</span></div>
+  <div class="hb"><span class="hl">DIST</span><span class="hv" id="hDist" style="color:#00ff9f;">0m</span></div>
+  <div class="hb"><span class="hl">LIVES</span><span class="hv" id="hLives" style="color:#ff4444;">♥♥♥</span></div>
+</div>
+
+<div id="cbox">
+  <canvas id="c"></canvas>
+
+  <!-- START -->
+  <div class="ov" id="ovStart">
+    <div class="ot" style="color:#ffd700;text-shadow:2px 2px #b8860b,4px 4px #8b6914;">GRAVITY</div>
+    <div class="ot" style="color:#ff6ec7;text-shadow:2px 2px #c2185b,4px 4px #880e4f;margin-top:-4px;">FLIP</div>
+    <div class="os" style="margin-top:4px;">LEERTASTE / TIPPEN = GRAVITÄT FLIPPEN</div>
+    <div class="os">WEICHE STACHELN UND LÜCKEN AUS</div>
+    <div id="hi-list"></div>
+    <div class="os blink" style="margin-top:8px;color:#ffd700;">LEERTASTE ZUM STARTEN</div>
+  </div>
+
+  <!-- DEAD -->
+  <div class="ov hidden" id="ovDead">
+    <div class="ot" style="color:#ff4444;text-shadow:2px 2px #b71c1c;">GAME OVER</div>
+    <div class="os" id="deadScore"></div>
+    <div id="newhi" style="font-size:8px;letter-spacing:2px;color:#ffd700;display:none;">★ HIGHSCORE! ★</div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:4px;">
+      <div class="os">DEIN NAME (3 ZEICHEN)</div>
+      <input id="nin" maxlength="3">
+    </div>
+    <div class="os blink" style="margin-top:6px;color:#ffd700;">ENTER ZUM FORTFAHREN</div>
+  </div>
+</div>
+
+<div id="pubar"></div>
+<div id="dpad"><button class="flip-btn" id="flipBtn">▲▼ FLIP</button></div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ── SIZING ────────────────────────────────────────────────
+const GH = 16;  // grid cell height (pixels)
+let W, H, COLS, ROWS;
+
+function resize(){
+  const maxW = Math.min(window.innerWidth, 480);
+  const hudH = document.getElementById('hud').offsetHeight +
+               document.getElementById('pubar').offsetHeight + 20;
+  W = maxW;
+  H = Math.min(window.innerHeight - hudH, 320);
+  H = Math.floor(H/GH)*GH;
+  ROWS = H/GH;
+  COLS = Math.ceil(W/GH)+2;
+  canvas.width=W; canvas.height=H;
+  canvas.style.width=W+'px'; canvas.style.height=H+'px';
+  document.getElementById('cbox').style.width=W+'px';
+}
+resize();
+window.addEventListener('resize',()=>{ resize(); });
+
+// ── PALETTE ───────────────────────────────────────────────
+const COL = {
+  sky:    ['#1a0a2e','#0d1b6e','#0a2a4a'],  // cycling bg
+  ground: '#3d1f6e',
+  ground2:'#5a2fa0',
+  spike:  '#ff4444',
+  spike2: '#ff8c00',
+  player: ['#00ff9f','#00cc7f'],
+  coin:   '#ffd700',
+  coin2:  '#ffec60',
+  gem:    '#ff6ec7',
+  gem2:   '#ff9de2',
+  spring: '#00eeff',
+  portal: '#bf5fff',
+  star:   'rgba(255,255,255,0.8)',
+  text:   '#fff',
+};
+
+// ── AUDIO ─────────────────────────────────────────────────
+const AC = new (window.AudioContext||window.webkitAudioContext)();
+function beep(f,d,t='square',v=0.08){
+  try{
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.connect(g);g.connect(AC.destination);
+    o.type=t;o.frequency.value=f;
+    g.gain.setValueAtTime(v,AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+d);
+    o.start();o.stop(AC.currentTime+d);
+  }catch(e){}
+}
+const sndFlip  = ()=>beep(440,0.06,'square',0.1);
+const sndCoin  = ()=>{ beep(880,0.05,'square',0.1); setTimeout(()=>beep(1100,0.07,'square',0.1),50); };
+const sndGem   = ()=>{ [660,880,1100,1320].forEach((f,i)=>setTimeout(()=>beep(f,0.06,'square',0.1),i*40)); };
+const sndDie   = ()=>{ beep(220,0.1,'sawtooth',0.15); setTimeout(()=>beep(150,0.15,'sawtooth',0.1),100); };
+const sndSpring= ()=>beep(600,0.08,'sine',0.12);
+const sndPU    = ()=>{ beep(500,0.05,'square',0.1); setTimeout(()=>beep(700,0.07,'square',0.12),60); };
+
+// ── HIGHSCORES ────────────────────────────────────────────
+const HKEY='gravflip_hi_v1';
+let hi=[];
+try{ hi=JSON.parse(localStorage.getItem(HKEY)||'[]'); }catch(e){}
+function saveHi(name,sc){ hi.push({name:(name||'???').toUpperCase().substring(0,3),score:sc}); hi.sort((a,b)=>b.score-a.score); hi=hi.slice(0,8); try{localStorage.setItem(HKEY,JSON.stringify(hi));}catch(e){} }
+function renderHi(){
+  const el=document.getElementById('hi-list'); el.innerHTML='';
+  hi.slice(0,5).forEach((h,i)=>{
+    const c=['#ffd700','#ccc','#cd7f32','#fff','#fff'][i];
+    el.innerHTML+=`<div class="hi-row"><span class="hr" style="color:${c}">${i+1}.</span><span class="hn">${h.name}</span><span class="hp" style="color:${c}">${h.score}</span></div>`;
+  });
+  document.getElementById('hBest').textContent=hi.length?hi[0].score:0;
+}
+
+// ── GAME STATE ────────────────────────────────────────────
+let state='start';
+let score=0, lives=3, dist=0;
+let gravDir=1;      // 1=down, -1=up
+let camX=0;         // camera scroll offset (pixels)
+let speed=2.2;      // scroll speed px/frame
+let player;
+let chunks=[];      // generated level chunks
+let particles=[];
+let puActive={};    // type→frames
+let bgPhase=0;
+let raf, lastTs=0;
+let inputQueue=false; // flip queued
+
+// ── PLAYER ────────────────────────────────────────────────
+function makePlayer(){
+  return {
+    x: W*0.22,
+    y: H/2 - GH,
+    vy: 0,
+    w: GH-4,
+    h: GH-4,
+    grounded: false,
+    animFrame: 0,
+    animTimer: 0,
+    invincible: 0,
+  };
+}
+
+// ── LEVEL GENERATION ──────────────────────────────────────
+// Level is made of tiles on a grid.
+// We generate chunks ahead of the camera.
+const TILE = { NONE:0, GROUND:1, SPIKE_UP:2, SPIKE_DOWN:3, COIN:4, GEM:5, SPRING:6 };
+
+function genChunk(startCol){
+  const tiles=[];
+
+  // difficulty ramps up with distance:
+  // d=0..80:  safe intro     — no spikes, no gaps, wide tunnel
+  // d=80..200: easy          — occasional spikes, no gaps
+  // d=200..500: medium       — spikes + rare gaps
+  // d=500+:   hard           — more spikes, wider gaps, fast
+  const d = dist; // meters
+
+  const gapChance   = d<200 ? 0 : Math.min((d-200)/2000, 0.22);
+  const spikeChance = d<80  ? 0 : Math.min((d-80)/1500,  0.22);
+  const ceilSpike   = d<150 ? 0 : Math.min((d-150)/2000, 0.16);
+  const gemChance   = d<50  ? 0 : 0.05;
+  const coinChance  = d<30  ? 0 : 0.28;
+
+  // tunnel height: starts very open, narrows over time
+  // floorH/ceilH = how many rows of solid tiles
+  const maxFloor = d<100 ? 1 : d<300 ? 2 : 2;
+  const maxCeil  = d<100 ? 1 : d<300 ? 1 : 2;
+
+  const hasGap = Math.random() < gapChance;
+  const gapW   = hasGap ? 1 + Math.floor(Math.random() * (d<600?1:2)) : 0;
+
+  for(let dc=0; dc<12; dc++){
+    const col = startCol + dc;
+    const inGap = hasGap && dc>=5 && dc<5+gapW;
+    const ct = {col, floor:[], ceil:[], items:[]};
+
+    if(!inGap){
+      const floorH = 1 + Math.floor(Math.random()*maxFloor);
+      const ceilH  = 1 + Math.floor(Math.random()*maxCeil);
+      for(let r=ROWS-floorH; r<ROWS; r++) ct.floor.push({r, type:TILE.GROUND});
+      for(let r=0; r<ceilH;  r++)         ct.ceil.push( {r, type:TILE.GROUND});
+
+      // spikes — only if there's enough vertical room
+      const roomRows = ROWS - floorH - ceilH;
+      if(roomRows >= 4){
+        if(Math.random() < spikeChance)
+          ct.items.push({r: ROWS-floorH-1, type: TILE.SPIKE_UP});
+        if(Math.random() < ceilSpike)
+          ct.items.push({r: ceilH, type: TILE.SPIKE_DOWN});
+      }
+      // never put spike AND coin in same column
+      const hasSpike = ct.items.some(i=>i.type===TILE.SPIKE_UP||i.type===TILE.SPIKE_DOWN);
+      if(!hasSpike){
+        if(Math.random() < coinChance){
+          const r = ceilH + 1 + Math.floor(Math.random()*(roomRows-2));
+          if(r < ROWS-floorH-1) ct.items.push({r, type:TILE.COIN});
+        }
+        if(Math.random() < gemChance){
+          const r = Math.floor((ceilH + ROWS-floorH) / 2);
+          ct.items.push({r, type:TILE.GEM});
+        }
+      }
+      if(Math.random() < 0.03 && d > 100)
+        ct.items.push({r: ROWS-floorH-1, type:TILE.SPRING});
+    }
+    tiles.push(ct);
+  }
+  return tiles;
+}
+
+function ensureChunks(){
+  const visEndCol = Math.ceil((camX+W)/GH)+4;
+  while(chunks.length===0 || chunks[chunks.length-1].col < visEndCol){
+    const startCol = chunks.length===0 ? 0 : chunks[chunks.length-1].col+1;
+    // first few cols: safe
+    if(startCol<20){
+      // safe intro zone: flat floor, minimal ceiling, no obstacles
+      chunks.push({col:startCol, floor:[{r:ROWS-1,type:TILE.GROUND},{r:ROWS-2,type:TILE.GROUND}], ceil:[{r:0,type:TILE.GROUND}], items:[]});
+    } else {
+      const newCols=genChunk(startCol);
+      newCols.forEach(c=>chunks.push(c));
+    }
+  }
+  // remove old chunks
+  const minCol=Math.floor(camX/GH)-4;
+  while(chunks.length&&chunks[0].col<minCol) chunks.shift();
+}
+
+function getColData(col){
+  return chunks.find(c=>c.col===col)||null;
+}
+
+// ── PARTICLES ────────────────────────────────────────────
+function burst(x,y,col,n=8){
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, s=1+Math.random()*3;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:1,col,r:2+Math.random()*2});
+  }
+}
+
+// ── POWER-UPS ─────────────────────────────────────────────
+const PU_DEFS={
+  shield:  {label:'SHIELD',  col:'#00eeff'},
+  magnet:  {label:'MAGNET',  col:'#ffd700'},
+  tiny:    {label:'MINI',    col:'#ff6ec7'},
+};
+
+function updatePUBar(){
+  const el=document.getElementById('pubar'); el.innerHTML='';
+  for(const [t,f] of Object.entries(puActive)){
+    if(f<=0) continue;
+    const d=PU_DEFS[t];
+    if(!d) continue;
+    el.innerHTML+=`<div class="pt" style="color:${d.col};border-color:${d.col};">${d.label} ${Math.ceil(f/60)}s</div>`;
+  }
+}
+
+// ── FLIP ─────────────────────────────────────────────────
+function flip(){
+  gravDir *= -1;
+  // impulse AWAY from the new gravity direction (i.e. launch toward new ceiling)
+  // gravDir=+1 means falling down → impulse upward = negative vy
+  // gravDir=-1 means falling up   → impulse downward = positive vy
+  player.vy = gravDir * 5.5;
+  sndFlip();
+  burst(player.x+player.w/2, player.y+player.h/2, gravDir===1?COL.player[0]:COL.gem, 6);
+}
+
+// ── GAME FLOW ─────────────────────────────────────────────
+function startGame(){
+  score=0; lives=3; dist=0; gravDir=1; camX=0; speed=2.2;
+  chunks=[]; particles=[]; puActive={};
+  player=makePlayer();
+  inputQueue=false;
+  ensureChunks();
+  document.getElementById('hScore').textContent='0';
+  document.getElementById('hDist').textContent='0m';
+  document.getElementById('hLives').textContent='♥♥♥';
+  updatePUBar();
+  hide('ovStart'); hide('ovDead');
+  state='play';
+}
+
+function loseLife(){
+  sndDie();
+  burst(player.x+player.w/2,player.y+player.h/2,'#ff4444',14);
+  lives--;
+  document.getElementById('hLives').textContent='♥'.repeat(Math.max(0,lives));
+  if(lives<=0){ gameOver(); return; }
+  // respawn
+  player=makePlayer();
+  gravDir=1;
+  player.invincible=90;
+}
+
+function gameOver(){
+  state='over';
+  document.getElementById('deadScore').textContent='SCORE: '+score+'  DIST: '+Math.floor(dist)+'m';
+  const isHi=!hi.length||score>(hi[hi.length-1]?.score||0)||hi.length<8;
+  document.getElementById('newhi').style.display=isHi?'block':'none';
+  document.getElementById('nin').value='';
+  show('ovDead');
+  setTimeout(()=>document.getElementById('nin').focus(),100);
+}
+
+function submitScore(){
+  const name=document.getElementById('nin').value.toUpperCase()||'???';
+  saveHi(name,score); renderHi();
+  hide('ovDead'); show('ovStart');
+  state='start';
+}
+
+document.getElementById('nin').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();submitScore();}
+  setTimeout(()=>{ document.getElementById('nin').value=document.getElementById('nin').value.toUpperCase(); },0);
+});
+
+// ── INPUT ─────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  if(e.code==='Space') e.preventDefault();
+  if(state==='start'&&e.code==='Space'){ AC.resume(); startGame(); return; }
+  if(state==='over'&&e.code==='Enter'){ submitScore(); return; }
+  if(state==='play'&&e.code==='Space'){ flip(); }
+});
+canvas.addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  if(state==='start'){ AC.resume(); startGame(); return; }
+  if(state==='play') flip();
+});
+document.getElementById('flipBtn').addEventListener('pointerdown',e=>{
+  e.preventDefault();
+  if(state==='start'){ AC.resume(); startGame(); return; }
+  if(state==='play') flip();
+});
+if('ontouchstart' in window) document.getElementById('dpad').style.display='block';
+
+// ── UPDATE ────────────────────────────────────────────────
+const GRAV  = 0.45;
+const MAX_VY= 8;
+
+function isSolid(col, row){
+  const cd = getColData(col);
+  if(!cd) return false;
+  return [...cd.floor, ...cd.ceil].some(t => t.type===TILE.GROUND && t.r===row);
+}
+
+function update(){
+  bgPhase += 0.005;
+
+  // scroll
+  camX  += speed;
+  dist   = camX / GH * 0.5;
+  speed  = Math.min(2.2 + dist*0.001, 6.5);
+  document.getElementById('hDist').textContent = Math.floor(dist)+'m';
+
+  ensureChunks();
+
+  const tiny = puActive.tiny > 0;
+  const pw   = tiny ? GH*0.5 : player.w;
+  const ph   = tiny ? GH*0.5 : player.h;
+
+  // ── gravity & vertical movement ──
+  player.vy += gravDir * GRAV;
+  player.vy  = Math.max(-MAX_VY, Math.min(MAX_VY, player.vy));
+  player.y  += player.vy;
+
+  // ── vertical tile collision ──
+  // Simple AABB: move Y first, then resolve ONE axis only.
+  // Columns the player occupies in world-grid space
+  const colL = Math.floor((camX + player.x + 2)      / GH);
+  const colR = Math.floor((camX + player.x + pw - 3) / GH);
+
+  player.grounded = false;
+
+  // For each column, find the topmost solid row and bottommost solid row
+  // that the player currently overlaps, and push out.
+  // Gravity direction tells us which surface to land on:
+  // gravDir=+1 (falling down)  → land on TOP of tiles  → push player UP
+  // gravDir=-1 (falling up)    → land on BOTTOM of tiles → push player DOWN
+
+  for(let c = colL; c <= colR; c++){
+    const rTop = Math.floor(player.y            / GH);
+    const rBot = Math.floor((player.y + ph - 1) / GH);
+
+    if(gravDir === 1){
+      // falling down: find the topmost solid tile the player bottom entered
+      for(let r = rBot; r >= rTop; r--){
+        if(isSolid(c, r)){
+          player.y  = r * GH - ph;   // place player just above tile
+          player.vy = Math.min(player.vy, 0);
+          player.grounded = true;
+          break;
+        }
+      }
+    } else {
+      // falling up: find the bottommost solid tile the player top entered
+      for(let r = rTop; r <= rBot; r++){
+        if(isSolid(c, r)){
+          player.y  = (r + 1) * GH;  // place player just below tile
+          player.vy = Math.max(player.vy, 0);
+          player.grounded = true;
+          break;
+        }
+      }
+    }
+  }
+
+  // Safety clamp
+  player.y = Math.max(0, Math.min(H - ph, player.y));
+
+  // ── Die only in gaps (reached screen edge with no solid tile there) ──
+  const atBottom = player.y + ph >= H;
+  const atTop    = player.y <= 0;
+  if(atBottom || atTop){
+    let hasSurface = false;
+    for(let c = colL; c <= colR; c++){
+      if(atBottom && isSolid(c, ROWS-1)){ hasSurface=true; break; }
+      if(atTop    && isSolid(c, 0))     { hasSurface=true; break; }
+    }
+    if(!hasSurface && player.invincible<=0 && !puActive.shield){
+      loseLife(); return;
+    }
+    player.vy = 0;
+  }
+
+  // ── item & spike collision ──
+  const chkColL = Math.floor((camX + player.x)      / GH);
+  const chkColR = Math.floor((camX + player.x + pw) / GH);
+
+  for(let c = chkColL; c <= chkColR + 1; c++){
+    const cd = getColData(c);
+    if(!cd) continue;
+    const sx = c * GH - camX;
+
+    for(let ii = cd.items.length - 1; ii >= 0; ii--){
+      const t  = cd.items[ii];
+      const tx = sx, ty = t.r * GH;
+
+      // AABB with 3px shrink for fairness
+      const overlap =
+        player.x + pw > tx + 3 &&
+        player.x      < tx + GH - 3 &&
+        player.y + ph > ty + 3 &&
+        player.y      < ty + GH - 3;
+
+      if(!overlap) continue;
+
+      if(t.type === TILE.SPIKE_UP || t.type === TILE.SPIKE_DOWN){
+        if(puActive.shield && puActive.shield > 0){
+          burst(tx+GH/2, ty+GH/2, '#00eeff', 6);
+          puActive.shield = Math.max(0, puActive.shield - 40);
+          updatePUBar();
+        } else if(player.invincible <= 0){
+          loseLife(); return;
+        }
+      }
+      else if(t.type === TILE.COIN){
+        sndCoin(); score += 10;
+        burst(tx+GH/2, ty+GH/2, COL.coin, 5);
+        document.getElementById('hScore').textContent = score;
+        cd.items.splice(ii, 1);
+        if(puActive.magnet > 0){
+          for(const cd2 of chunks){
+            for(let j = cd2.items.length-1; j >= 0; j--){
+              if(cd2.items[j].type===TILE.COIN && Math.abs(cd2.col-c)<6){
+                score += 10; cd2.items.splice(j,1);
+              }
+            }
+          }
+          document.getElementById('hScore').textContent = score;
+        }
+      }
+      else if(t.type === TILE.GEM){
+        sndGem(); score += 50;
+        burst(tx+GH/2, ty+GH/2, COL.gem, 10);
+        document.getElementById('hScore').textContent = score;
+        cd.items.splice(ii, 1);
+      }
+      else if(t.type === TILE.SPRING){
+        sndSpring();
+        player.vy = -gravDir * MAX_VY * 1.2;
+        burst(tx+GH/2, ty+GH/2, COL.spring, 6);
+      }
+    }
+  }
+
+  // invincibility
+  if(player.invincible > 0) player.invincible--;
+
+  // PU timers
+  let changed = false;
+  for(const t of Object.keys(puActive)){
+    if(puActive[t] > 0){ puActive[t]--; if(!puActive[t]) changed = true; }
+  }
+  if(changed) updatePUBar();
+
+  // random PU grant
+  if(Math.random() < 0.0015){
+    const types = Object.keys(PU_DEFS);
+    const t = types[Math.floor(Math.random()*types.length)];
+    puActive[t] = (puActive[t]||0) + 300;
+    sndPU(); updatePUBar();
+  }
+
+  // distance score
+  const ds = Math.floor(dist) * 2;
+  if(ds > score){ score = ds; document.getElementById('hScore').textContent = score; }
+
+  // particles
+  particles = particles.filter(p => p.life > 0.02);
+  particles.forEach(p => { p.x+=p.vx; p.y+=p.vy; p.vy+=0.08; p.life-=0.035; });
+
+  // animation
+  player.animTimer++;
+  if(player.animTimer > 6){ player.animTimer = 0; player.animFrame = (player.animFrame+1)%2; }
+}
+
+// ── DRAW ──────────────────────────────────────────────────
+let stars=[];
+for(let i=0;i<60;i++) stars.push({x:Math.random(),y:Math.random()*0.8+0.05,s:Math.random()*1.5+0.5,sp:0.2+Math.random()*0.6});
+
+function draw(){
+  // background gradient
+  const ci=Math.floor(bgPhase*3)%COL.sky.length;
+  const cn=(ci+1)%COL.sky.length;
+  const t=(bgPhase*3)%1;
+  const grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0, COL.sky[ci]);
+  grad.addColorStop(1, COL.sky[cn]);
+  ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+
+  // stars
+  stars.forEach(s=>{
+    const sx=((s.x*W - camX*s.sp*0.05)%W+W)%W;
+    const sy=s.y*H;
+    ctx.fillStyle=COL.star; ctx.fillRect(sx,sy,s.s,s.s);
+  });
+
+  // tiles
+  const startCol=Math.floor(camX/GH)-1;
+  const endCol  =startCol+COLS+2;
+  for(let col=startCol;col<endCol;col++){
+    const cd=getColData(col);
+    if(!cd) continue;
+    const sx=col*GH-camX;
+
+    // draw floor/ceil ground
+    for(const t of [...cd.floor,...cd.ceil]){
+      const ty=t.r*GH;
+      // block body
+      ctx.fillStyle=COL.ground; ctx.fillRect(sx,ty,GH,GH);
+      // top highlight
+      ctx.fillStyle=COL.ground2; ctx.fillRect(sx,ty,GH,3);
+      ctx.fillRect(sx,ty,3,GH);
+      // pixel border
+      ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(sx+GH-2,ty,2,GH); ctx.fillRect(sx,ty+GH-2,GH,2);
+    }
+
+    // items
+    for(const t of cd.items){
+      const ty=t.r*GH;
+      if(t.type===TILE.SPIKE_UP){
+        ctx.fillStyle=COL.spike;
+        ctx.beginPath(); ctx.moveTo(sx+2,ty+GH); ctx.lineTo(sx+GH/2,ty+2); ctx.lineTo(sx+GH-2,ty+GH); ctx.fill();
+        ctx.fillStyle=COL.spike2;
+        ctx.beginPath(); ctx.moveTo(sx+GH*0.3,ty+GH); ctx.lineTo(sx+GH/2,ty+6); ctx.lineTo(sx+GH*0.7,ty+GH); ctx.fill();
+      }
+      else if(t.type===TILE.SPIKE_DOWN){
+        ctx.fillStyle=COL.spike;
+        ctx.beginPath(); ctx.moveTo(sx+2,ty); ctx.lineTo(sx+GH/2,ty+GH-2); ctx.lineTo(sx+GH-2,ty); ctx.fill();
+        ctx.fillStyle=COL.spike2;
+        ctx.beginPath(); ctx.moveTo(sx+GH*0.3,ty); ctx.lineTo(sx+GH/2,ty+GH-6); ctx.lineTo(sx+GH*0.7,ty); ctx.fill();
+      }
+      else if(t.type===TILE.COIN){
+        const pulse=0.85+Math.sin(Date.now()*0.006+col)*0.15;
+        ctx.fillStyle=COL.coin; ctx.globalAlpha=pulse;
+        ctx.fillRect(sx+4,ty+4,GH-8,GH-8);
+        ctx.fillStyle=COL.coin2;
+        ctx.fillRect(sx+5,ty+5,3,3);
+        ctx.globalAlpha=1;
+      }
+      else if(t.type===TILE.GEM){
+        const pulse=0.8+Math.sin(Date.now()*0.008+col*0.7)*0.2;
+        ctx.fillStyle=COL.gem; ctx.globalAlpha=pulse;
+        ctx.beginPath();
+        ctx.moveTo(sx+GH/2,ty+2); ctx.lineTo(sx+GH-2,ty+GH/2);
+        ctx.lineTo(sx+GH/2,ty+GH-2); ctx.lineTo(sx+2,ty+GH/2); ctx.closePath(); ctx.fill();
+        ctx.fillStyle=COL.gem2; ctx.fillRect(sx+GH/2-1,ty+3,3,3);
+        ctx.globalAlpha=1;
+      }
+      else if(t.type===TILE.SPRING){
+        ctx.fillStyle=COL.spring;
+        ctx.fillRect(sx+3,ty+GH-6,GH-6,6);
+        ctx.fillRect(sx+5,ty+GH-10,GH-10,5);
+        ctx.fillRect(sx+7,ty+GH-14,GH-14,5);
+      }
+    }
+  }
+
+  // gap warning — dark void
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  for(let col=startCol;col<endCol;col++){
+    const cd=getColData(col);
+    if(!cd||cd.floor.length===0){
+      ctx.fillRect(col*GH-camX,0,GH,H);
+    }
+  }
+
+  // particles
+  particles.forEach(p=>{
+    ctx.globalAlpha=p.life; ctx.fillStyle=p.col;
+    ctx.fillRect(p.x-p.r/2,p.y-p.r/2,p.r,p.r);
+  });
+  ctx.globalAlpha=1;
+
+  // player
+  if(state==='play'){
+    const tiny=puActive.tiny>0;
+    const pw=tiny?GH*0.5:player.w;
+    const ph=tiny?GH*0.5:player.h;
+    const px=player.x, py=player.y;
+    const blink=player.invincible>0&&Math.floor(player.invincible/4)%2===0;
+    if(!blink){
+      // body
+      ctx.fillStyle=COL.player[player.animFrame];
+      ctx.fillRect(px,py,pw,ph);
+      // highlight
+      ctx.fillStyle='rgba(255,255,255,0.4)';
+      ctx.fillRect(px,py,pw,3); ctx.fillRect(px,py,3,ph);
+      // eyes (2 pixels)
+      ctx.fillStyle='#000';
+      if(gravDir===1){
+        ctx.fillRect(px+pw-6,py+4,3,3); ctx.fillRect(px+pw-6,py+ph-7,3,3);
+      } else {
+        ctx.fillRect(px+pw-6,py+3,3,3); ctx.fillRect(px+pw-6,py+ph-6,3,3);
+      }
+      // gravity indicator arrow
+      ctx.fillStyle=gravDir===1?'#ffd700':'#ff6ec7';
+      if(gravDir===1){
+        ctx.fillRect(px+2,py+ph-4,4,3);
+        ctx.fillRect(px+3,py+ph-2,2,2);
+      } else {
+        ctx.fillRect(px+2,py+1,4,3);
+        ctx.fillRect(px+3,py,2,2);
+      }
+      // shield aura
+      if(puActive.shield>0){
+        ctx.strokeStyle='#00eeff'; ctx.lineWidth=2;
+        ctx.globalAlpha=0.6+Math.sin(Date.now()*0.01)*0.3;
+        ctx.strokeRect(px-3,py-3,pw+6,ph+6);
+        ctx.globalAlpha=1; ctx.lineWidth=1;
+      }
+    }
+  }
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────
+function loop(ts){
+  raf=requestAnimationFrame(loop);
+  if(state==='play') update();
+  draw();
+}
+
+// ── INIT ──────────────────────────────────────────────────
+function show(id){document.getElementById(id).classList.remove('hidden');}
+function hide(id){document.getElementById(id).classList.add('hidden');}
+
+renderHi();
+show('ovStart');
+raf=requestAnimationFrame(loop);
+</script>
+</body>
+</html>
