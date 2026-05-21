@@ -370,7 +370,7 @@ function makeTank(idx, mode){
     exploding: 0,
     alive: true,
     // AI state
-    aiTimer: 0, aiDir: 0, aiShootTimer: 0,
+    aiTimer: 0, aiDir: 0, aiShootTimer: 0, aiTargetAngle: Math.PI,
   };
 }
 
@@ -387,38 +387,211 @@ let particles=[];
 let raf, lastTs=0;
 
 // ── AI ────────────────────────────────────────────────────
+
+// Raycast: shoot a ray from (x,y) in direction angle, return dist to first wall/edge
+function raycast(x, y, angle, maxDist=400){
+  const dx=Math.cos(angle), dy=Math.sin(angle);
+  let px=x, py=y;
+  for(let d=4; d<maxDist; d+=4){
+    px=x+dx*d; py=y+dy*d;
+    if(px<4||px>W-4||py<4||py>H-4) return {dist:d, edge:true};
+    if(wallsHit(px,py,3)) return {dist:d, edge:false};
+  }
+  return {dist:maxDist, edge:false};
+}
+
+// Blinky-style navigation: at each "junction" pick the direction closest to target
+// Returns the best angle to steer toward
+function blinkNav(ai, targetX, targetY){
+  const LOOK = 28; // how far ahead to probe (pixels)
+  const DIRS = [0, Math.PI/2, Math.PI, -Math.PI/2]; // E S W N
+
+  // find which cardinal directions are open
+  const open = DIRS.filter(d=>{
+    const nx=ai.x+Math.cos(d)*LOOK;
+    const ny=ai.y+Math.sin(d)*LOOK;
+    return !wallsHit(nx,ny,TANK_SIZE/2) && nx>TANK_SIZE && nx<W-TANK_SIZE && ny>TANK_SIZE && ny<H-TANK_SIZE;
+  });
+
+  if(open.length===0) return ai.angle; // nowhere to go
+
+  // forbid 180° reversal (Pac-Man rule) unless it's the only option
+  const reverseAngle = ai.angle + Math.PI;
+  const forward = open.filter(d=>{
+    let diff = d - reverseAngle;
+    while(diff>Math.PI) diff-=Math.PI*2;
+    while(diff<-Math.PI) diff+=Math.PI*2;
+    return Math.abs(diff) > 0.1;
+  });
+  const choices = forward.length > 0 ? forward : open;
+
+  // pick direction that minimises distance to target (Blinky rule)
+  let bestDir=choices[0], bestDist=Infinity;
+  for(const d of choices){
+    const nx=ai.x+Math.cos(d)*LOOK;
+    const ny=ai.y+Math.sin(d)*LOOK;
+    const dist=Math.hypot(nx-targetX, ny-targetY);
+    if(dist<bestDist){ bestDist=dist; bestDir=d; }
+  }
+  return bestDir;
+}
+
+// Simulate bullet path from position (bx,by) at given angle
+// Returns: 'enemy' if hits enemy, 'self' if hits self, null if misses
+function simulateBullet(bx, by, angle, ai, enemy){
+  let vx=Math.cos(angle)*BULLET_SPEED;
+  let vy=Math.sin(angle)*BULLET_SPEED;
+  let px=bx, py=by;
+  let bounces=0;
+  for(let step=0; step<300; step++){
+    px+=vx; py+=vy;
+    // hit enemy
+    if(Math.hypot(px-enemy.x, py-enemy.y)<TANK_SIZE+3) return 'enemy';
+    // hit self (after at least 1 bounce — original behavior)
+    if(bounces>0 && Math.hypot(px-ai.x, py-ai.y)<TANK_SIZE+3) return 'self';
+    // screen bounce
+    if(px<3||px>W-3){ vx*=-1; bounces++; }
+    if(py<3||py>H-3){ vy*=-1; bounces++; }
+    if(bounces>4) break;
+    // wall bounce
+    const hw=wallsHit(px,py,3);
+    if(hw){
+      const overlapX=Math.min(Math.abs(px-hw.x),Math.abs(px-(hw.x+hw.w)));
+      const overlapY=Math.min(Math.abs(py-hw.y),Math.abs(py-(hw.y+hw.h)));
+      if(overlapX<overlapY) vx*=-1; else vy*=-1;
+      bounces++;
+      if(bounces>4) break;
+    }
+  }
+  return null;
+}
+
+// Scan a range of angles to find best shot — prefers direct hits, avoids self-hits
+function findBestShot(ai, enemy){
+  const SCAN_RANGE = 0.35; // radians either side
+  const SCAN_STEP  = 0.04;
+  let bestAngle = null;
+  let bestType  = null; // 'direct' > 'ricochet'
+
+  for(let da=-SCAN_RANGE; da<=SCAN_RANGE; da+=SCAN_STEP){
+    const testAngle = ai.angle + da;
+    const result = simulateBullet(
+      ai.x + Math.cos(testAngle)*TANK_SIZE,
+      ai.y + Math.sin(testAngle)*TANK_SIZE,
+      testAngle, ai, enemy
+    );
+    if(result === 'self') continue; // never shoot ourselves
+    if(result === 'enemy'){
+      const isDirect = Math.abs(da) < 0.08;
+      if(bestType !== 'direct' || isDirect){
+        bestAngle = testAngle;
+        bestType  = isDirect ? 'direct' : 'ricochet';
+        if(isDirect) break; // direct hit found, no need to scan further
+      }
+    }
+  }
+  return bestAngle;
+}
+
+// Check if an incoming bullet is dangerous
+function bulletDanger(ai){
+  for(const tank of tanks){
+    if(tank.idx===ai.idx) continue;
+    for(const b of tank.bullets){
+      const dist=Math.hypot(b.x-ai.x, b.y-ai.y);
+      if(dist<80){
+        // is it heading toward us?
+        const toBullet=Math.atan2(b.y-ai.y, b.x-ai.x);
+        const bulletDir=Math.atan2(b.vy, b.vx);
+        let diff=bulletDir-toBullet;
+        while(diff>Math.PI) diff-=Math.PI*2;
+        while(diff<-Math.PI) diff+=Math.PI*2;
+        if(Math.abs(diff)<0.5) return {danger:true, b};
+      }
+    }
+  }
+  return {danger:false};
+}
+
+function normalizeAngle(a){
+  while(a>Math.PI) a-=Math.PI*2;
+  while(a<-Math.PI) a+=Math.PI*2;
+  return a;
+}
+
 function aiUpdate(ai, enemy, dt){
-  ai.aiTimer -= dt;
+  ai.aiTimer    -= dt;
   ai.aiShootTimer -= dt;
 
-  // turn toward enemy with some randomness
-  const dx = enemy.x - ai.x, dy = enemy.y - ai.y;
-  const targetAngle = Math.atan2(dy, dx);
-  let da = targetAngle - ai.angle;
-  // normalize
-  while(da > Math.PI)  da -= Math.PI*2;
-  while(da < -Math.PI) da += Math.PI*2;
+  const dx = enemy.x - ai.x;
+  const dy = enemy.y - ai.y;
+  const distToEnemy = Math.hypot(dx, dy);
+  const angleToEnemy = Math.atan2(dy, dx);
+  let da = normalizeAngle(angleToEnemy - ai.angle);
 
-  // random direction changes
-  if(ai.aiTimer <= 0){
-    ai.aiTimer = 600 + Math.random()*800;
-    ai.aiDir   = (Math.random()<0.7) ? Math.sign(da) : (Math.random()<0.5?1:-1);
+  // ── 1. Dodge incoming bullets ──
+  const {danger} = bulletDanger(ai);
+  if(danger){
+    // turn perpendicular and move
+    ai.angle += ai.turnSpeed * 2.5;
+    const ex=ai.x+Math.cos(ai.angle)*ai.speed*0.8;
+    const ey=ai.y+Math.sin(ai.angle)*ai.speed*0.8;
+    if(!wallsHit(ex,ey,TANK_SIZE/2)&&ex>TANK_SIZE&&ex<W-TANK_SIZE&&ey>TANK_SIZE&&ey<H-TANK_SIZE){
+      ai.x=ex; ai.y=ey;
+    }
+    return; // prioritize dodging
   }
 
-  ai.angle += ai.aiDir * ai.turnSpeed * 0.55;
+  // ── 2. Blinky navigation: get best direction toward enemy ──
+  // Update nav target every ~200ms or when close to a junction
+  ai.aiTimer -= dt;
+  if(ai.aiTimer <= 0){
+    ai.aiTimer = 180 + Math.random()*120;
+    // occasionally target a random offset to be less predictable
+    const jitter = Math.random()<0.15;
+    const tx = jitter ? enemy.x + (Math.random()-0.5)*80 : enemy.x;
+    const ty = jitter ? enemy.y + (Math.random()-0.5)*80 : enemy.y;
+    ai.aiTargetAngle = blinkNav(ai, tx, ty);
+  }
 
-  // move forward, avoid walls
-  const nx = ai.x + Math.cos(ai.angle)*ai.speed*0.6;
-  const ny = ai.y + Math.sin(ai.angle)*ai.speed*0.6;
-  const hitW = wallsHit(nx,ny,TANK_SIZE/2);
-  const hitEdge = nx<TANK_SIZE||nx>W-TANK_SIZE||ny<TANK_SIZE||ny>H-TANK_SIZE;
-  if(!hitW&&!hitEdge){ ai.x=nx; ai.y=ny; }
-  else { ai.angle += 0.12; } // nudge away from wall
+  // ── 3. Smoothly rotate toward target angle ──
+  if(ai.aiTargetAngle !== undefined){
+    let diff = normalizeAngle(ai.aiTargetAngle - ai.angle);
+    // turn at full speed toward target
+    const turnAmt = Math.min(Math.abs(diff), ai.turnSpeed * 1.1) * Math.sign(diff);
+    ai.angle += turnAmt;
+  }
 
-  // shoot when roughly aimed at enemy
-  if(ai.aiShootTimer<=0 && Math.abs(da)<0.45 && ai.bullets.length<MAX_BULLETS){
-    shootTank(ai);
-    ai.aiShootTimer = 900 + Math.random()*800;
+  // ── 4. Move forward ──
+  // Back off if too close, otherwise always move forward
+  const tooClose = distToEnemy < 70;
+  if(tooClose){
+    const bx=ai.x-Math.cos(ai.angle)*ai.speed*0.5;
+    const by=ai.y-Math.sin(ai.angle)*ai.speed*0.5;
+    if(!wallsHit(bx,by,TANK_SIZE/2)&&bx>TANK_SIZE&&bx<W-TANK_SIZE&&by>TANK_SIZE&&by<H-TANK_SIZE){
+      ai.x=bx; ai.y=by;
+    }
+  } else {
+    const nx=ai.x+Math.cos(ai.angle)*ai.speed*0.7;
+    const ny=ai.y+Math.sin(ai.angle)*ai.speed*0.7;
+    if(!wallsHit(nx,ny,TANK_SIZE/2)&&nx>TANK_SIZE&&nx<W-TANK_SIZE&&ny>TANK_SIZE&&ny<H-TANK_SIZE){
+      ai.x=nx; ai.y=ny;
+    } else {
+      // blocked — let blinkNav recalculate immediately
+      ai.aiTimer=0;
+    }
+  }
+
+  // ── 5. Shoot: scan for best shot incl. ricochets, avoid self-hits ──
+  if(ai.aiShootTimer<=0 && ai.bullets.length<MAX_BULLETS){
+    const bestAngle = findBestShot(ai, enemy);
+    if(bestAngle !== null){
+      const savedAngle = ai.angle;
+      ai.angle = bestAngle;
+      shootTank(ai);
+      ai.angle = savedAngle;
+      ai.aiShootTimer = 600 + Math.random()*600;
+    }
   }
 }
 
@@ -579,7 +752,7 @@ function update(dt){
       if(b.y<3||b.y>H-3){ b.vy*=-1; b.bounces++; sndBounce(); }
       if(b.bounces>4){ tank.bullets.splice(i,1); continue; }
 
-      // hit other tank
+      // hit any tank including own shooter (original behavior)
       for(const other of tanks){
         if(!other.alive||other.exploding>0) continue;
         if(Math.hypot(b.x-other.x,b.y-other.y)<TANK_SIZE){
