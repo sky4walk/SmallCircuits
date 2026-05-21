@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CENTIPEDE</title>
+<style>
+@import url('https://fonts.bunny.net/css?family=press-start-2p:400&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#000;overflow:hidden;}
+body{display:flex;flex-direction:column;align-items:center;font-family:'Press Start 2P',monospace;color:#fff;}
+
+#hud{width:100%;max-width:420px;display:flex;justify-content:space-between;align-items:center;padding:8px 12px 4px;}
+.hb{display:flex;flex-direction:column;align-items:center;gap:2px;}
+.hl{font-size:7px;letter-spacing:2px;color:rgba(255,255,255,0.4);}
+.hv{font-size:14px;color:#fff;}
+
+#cbox{position:relative;}
+canvas{display:block;image-rendering:pixelated;image-rendering:crisp-edges;}
+
+/* scanlines */
+#cbox::after{content:'';position:absolute;inset:0;
+  background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.12) 2px,rgba(0,0,0,0.12) 4px);
+  pointer-events:none;z-index:5;}
+
+.ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;background:rgba(0,0,0,0.92);z-index:10;}
+.ov.hidden{display:none;}
+.ot{font-size:clamp(14px,4vw,20px);letter-spacing:4px;}
+.os{font-size:7px;letter-spacing:2px;color:rgba(255,255,255,0.4);}
+.blink{animation:bl 0.8s step-end infinite;}
+@keyframes bl{0%,100%{opacity:1}50%{opacity:0}}
+
+#hi-list{display:flex;flex-direction:column;gap:3px;margin-top:4px;}
+.hr2{display:flex;gap:14px;font-size:7px;}
+.hrk{color:rgba(255,255,255,0.3);width:12px;}
+.hrn{color:#fff;width:44px;}
+.hrp{text-align:right;width:60px;color:#fff;}
+
+input#nin{background:transparent;border:none;border-bottom:1px solid #fff;
+  color:#fff;font-family:'Press Start 2P',monospace;font-size:14px;
+  letter-spacing:4px;text-align:center;width:64px;text-transform:uppercase;outline:none;}
+
+#mctrl{display:none;flex-direction:column;align-items:center;gap:4px;
+  width:100%;max-width:420px;margin-top:6px;}
+#mctrl-row{display:flex;gap:6px;justify-content:center;}
+.mcb{font-family:'Press Start 2P',monospace;font-size:10px;padding:10px 14px;
+  background:#001a00;color:#fff;border:1px solid #333;cursor:pointer;}
+.mcb:active{background:#003300;}
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="hb"><span class="hl">SCORE</span><span class="hv" id="hScore">0</span></div>
+  <div class="hb"><span class="hl">LEVEL</span><span class="hv" id="hLevel">1</span></div>
+  <div class="hb"><span class="hl">BEST</span><span class="hv" id="hBest">0</span></div>
+  <div class="hb"><span class="hl">LEBEN</span><span class="hv" id="hLives">▌▌▌</span></div>
+</div>
+
+<div id="cbox">
+  <canvas id="c"></canvas>
+
+  <div class="ov" id="ovStart">
+    <div class="ot" style="color:#4fff4f;text-shadow:2px 2px #1a7a1a;">CENTIPEDE</div>
+    <div class="os" style="margin-top:4px;">ATARI 1980</div>
+    <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px;font-size:7px;
+      color:rgba(255,255,255,0.35);letter-spacing:1px;text-align:center;">
+      <div>← → BEWEGEN &nbsp; LEERTASTE SCHIESSEN</div>
+      <div style="margin-top:4px;">
+        <span style="color:#4fff4f;">■</span> TAUSENDFÜSLER = 10/100 &nbsp;
+        <span style="color:#ff4444;">★</span> FLOH = 200 &nbsp;
+        <span style="color:#ff8c00;">◆</span> SPINNE = 300/600/900
+      </div>
+    </div>
+    <div id="hi-list"></div>
+    <div class="os blink" style="margin-top:10px;color:#fff;">LEERTASTE ZUM STARTEN</div>
+  </div>
+
+  <div class="ov hidden" id="ovLevel">
+    <div class="os">LEVEL</div>
+    <div class="ot blink" id="ovLevelNum" style="color:#4fff4f;">2</div>
+  </div>
+
+  <div class="ov hidden" id="ovOver">
+    <div class="ot" style="color:#ff4444;text-shadow:2px 2px #7a0000;">GAME OVER</div>
+    <div class="os" id="deadScore"></div>
+    <div id="newhi" style="font-size:7px;letter-spacing:2px;color:#ffff00;display:none;">★ HIGHSCORE! ★</div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px;margin-top:4px;">
+      <div class="os">DEIN NAME (3 ZEICHEN)</div>
+      <input id="nin" maxlength="3">
+    </div>
+    <div class="os blink" style="margin-top:6px;color:#fff;">ENTER ZUM FORTFAHREN</div>
+  </div>
+</div>
+
+<div id="mctrl">
+  <button class="mcb" id="mbFire">⬛ FEUER</button>
+  <div id="mctrl-row">
+    <button class="mcb" id="mbL">◀</button>
+    <button class="mcb" id="mbR">▶</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+// ── SIZING ─────────────────────────────────────────────────
+const CELL = 16; // pixel size per grid cell
+let COLS, ROWS;
+
+function resize(){
+  const maxW = Math.min(window.innerWidth, 420);
+  const hudH  = document.getElementById('hud').offsetHeight + 8;
+  COLS = Math.floor(maxW / CELL);
+  if(COLS % 2 === 0) COLS--;
+  ROWS = Math.floor((Math.min(window.innerHeight - hudH - 50, maxW * 1.4)) / CELL);
+  canvas.width  = COLS * CELL;
+  canvas.height = ROWS * CELL;
+  canvas.style.width  = (COLS*CELL)+'px';
+  canvas.style.height = (ROWS*CELL)+'px';
+  document.getElementById('cbox').style.width = (COLS*CELL)+'px';
+  document.getElementById('hud').style.maxWidth = (COLS*CELL)+'px';
+  document.getElementById('mctrl').style.maxWidth = (COLS*CELL)+'px';
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Player zone: bottom 5 rows
+const PLAYER_ROWS = 5;
+
+// ── COLORS ──────────────────────────────────────────────────
+const C = {
+  bg:        '#000',
+  grid:      '#0a0a0a',
+  // centipede segments alternate green/yellow-green
+  centi_head:'#ffff00',
+  centi_body:'#4fff4f',
+  centi_body2:'#2db82d',
+  // mushroom
+  mush_full: '#ff4fb0',
+  mush_dmg1: '#cc3d8d',
+  mush_dmg2: '#992e6b',
+  mush_dmg3: '#663050',
+  // player
+  player:    '#00eeff',
+  player_hi: '#aaffff',
+  // bullet
+  bullet:    '#ffffff',
+  // spider
+  spider:    '#ff8c00',
+  spider_hi: '#ffcc66',
+  // flea
+  flea:      '#ff4444',
+  flea_hi:   '#ff9999',
+  // score popup
+  popup:     '#ffff00',
+  // scorpion
+  scorpion:  '#ff6600',
+  scorpion_hi:'#ffaa44',
+  // poisoned mushroom
+  mush_poison:'#ffff00',
+  // DDT bomber
+  ddt:       '#88aaff',
+  ddt_hi:    '#ccddff',
+  // DDT explosion
+  ddt_exp:   '#aaffaa',
+  // enemy bullet
+  ebullet:   '#ff4444',
+};
+
+// ── AUDIO ───────────────────────────────────────────────────
+const AC = new (window.AudioContext||window.webkitAudioContext)();
+function beep(f,d,t='square',v=0.07){
+  try{
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.connect(g);g.connect(AC.destination);
+    o.type=t;o.frequency.value=f;
+    g.gain.setValueAtTime(v,AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+d);
+    o.start();o.stop(AC.currentTime+d);
+  }catch(e){}
+}
+const sndShoot   = ()=>beep(800,0.05,'square',0.07);
+const sndMush    = ()=>beep(300,0.05,'square',0.06);
+const sndCentiHit= ()=>{ beep(600,0.04,'square',0.1); beep(400,0.06,'square',0.06); };
+const sndDie     = ()=>{ [400,300,200,100].forEach((f,i)=>setTimeout(()=>beep(f,0.08,'sawtooth',0.15),i*60)); };
+const sndSpider  = ()=>{ if(Math.random()<0.1) beep(200+Math.random()*100,0.04,'sine',0.05); };
+const sndFlea    = ()=>{ if(Math.random()<0.15) beep(1000,0.03,'square',0.05); };
+const sndLevelUp = ()=>{ [523,659,784,1047].forEach((f,i)=>setTimeout(()=>beep(f,0.08,'square',0.1),i*70)); };
+
+// ── HIGHSCORES ──────────────────────────────────────────────
+const HKEY='centipede_hi_v1';
+let hi=[];
+try{ hi=JSON.parse(localStorage.getItem(HKEY)||'[]'); }catch(e){}
+function saveHi(name,sc){
+  hi.push({name:(name||'???').toUpperCase().substring(0,3),score:sc});
+  hi.sort((a,b)=>b.score-a.score); hi=hi.slice(0,8);
+  try{localStorage.setItem(HKEY,JSON.stringify(hi));}catch(e){}
+}
+function renderHi(){
+  const el=document.getElementById('hi-list'); el.innerHTML='';
+  hi.slice(0,5).forEach((h,i)=>{
+    const c=['#ffff00','#ccc','#cd7f32','#fff','#fff'][i];
+    el.innerHTML+=`<div class="hr2"><span class="hrk" style="color:${c}">${i+1}.</span><span class="hrn">${h.name}</span><span class="hrp" style="color:${c}">${h.score}</span></div>`;
+  });
+  document.getElementById('hBest').textContent=hi.length?hi[0].score:0;
+}
+
+// ── GAME STATE ──────────────────────────────────────────────
+let state='start';
+let score=0, lives=3, level=1;
+let mushrooms=[];   // {col,row,hp}  hp: 4=full .. 1=almost dead
+let centipedes=[];  // array of segments [{col,row,dir,isHead}]
+let bullets=[];     // {col,row} (row in float for movement)
+let spider=null;    // {x,y,vx,vy,timer}
+let flea=null;      // {col,y,timer}
+let scorpion=null;  // {x,y,vx,timer}
+let scorpionTimer=0;
+let ddt=null;       // {col,y,timer}
+let ddtTimer=0;
+let ddtExplosion=null; // {x,y,r,life}
+let enemyBullets=[]; // {col,row} fired by centipede heads
+let player;         // {col, row=ROWS-1}
+let bulletTimer=0;
+let centiMoveTimer=0;
+let spiderTimer=0;
+let fleaTimer=0;
+let levelTimer=0;
+let popups=[];      // {x,y,text,life}
+let keys={}, mbKeys={left:false,right:false,fire:false};
+let raf, lastTs=0;
+
+// ── INIT ────────────────────────────────────────────────────
+function makeMushrooms(count){
+  const arr=[];
+  const usedZone = new Set();
+  // avoid player zone
+  let attempts=0;
+  while(arr.length<count && attempts<500){
+    attempts++;
+    const col=Math.floor(Math.random()*COLS);
+    const row=Math.floor(Math.random()*(ROWS-PLAYER_ROWS-1))+1;
+    const key=col+','+row;
+    if(!usedZone.has(key)){ usedZone.add(key); arr.push({col,row,hp:4}); }
+  }
+  return arr;
+}
+
+function makeCentipede(len, startRow=0){
+  const segs=[];
+  const startCol = Math.floor(COLS/2);
+  for(let i=0;i<len;i++){
+    segs.push({col:startCol-i, row:startRow, dir:1, isHead:i===0});
+  }
+  return segs;
+}
+
+function mushAt(col,row){ return mushrooms.find(m=>m.col===col&&m.row===row); }
+
+function startGame(){
+  score=0; lives=3; level=1;
+  mushrooms=makeMushrooms(Math.min(30+level*2, COLS*(ROWS-PLAYER_ROWS)*0.4|0));
+  centipedes=[makeCentipede(10+Math.min(level-1,6))];
+  bullets=[]; spider=null; flea=null; scorpion=null; ddt=null;
+  ddtExplosion=null; enemyBullets=[]; popups=[];
+  player={col:Math.floor(COLS/2), row:ROWS-1};
+  bulletTimer=0; centiMoveTimer=0; spiderTimer=1500+Math.random()*2000;
+  fleaTimer=2000+Math.random()*3000; scorpionTimer=4000+Math.random()*4000;
+  ddtTimer=5000+Math.random()*5000; ddtExplosion=null; enemyBullets=[];
+  scorpion=null; ddt=null;
+  document.getElementById('hScore').textContent='0';
+  document.getElementById('hLevel').textContent='1';
+  document.getElementById('hLives').textContent='▌'.repeat(lives);
+  hide('ovStart'); hide('ovOver'); hide('ovLevel');
+  state='play';
+}
+
+function nextLevel(){
+  level++;
+  document.getElementById('hLevel').textContent=level;
+  document.getElementById('ovLevelNum').textContent=level;
+  show('ovLevel');
+  state='level';
+  levelTimer=1600;
+  sndLevelUp();
+}
+
+function beginLevel(){
+  hide('ovLevel');
+  // add more mushrooms, new centipede
+  const newMush=makeMushrooms(Math.min(5+level, 20));
+  mushrooms=[...mushrooms.filter(m=>m.row<ROWS-PLAYER_ROWS), ...newMush];
+  const len=Math.min(10+level-1, 16);
+  centipedes=[makeCentipede(len)];
+  bullets=[]; spider=null; flea=null; scorpion=null; ddt=null;
+  ddtExplosion=null; enemyBullets=[]; popups=[];
+  player={col:Math.floor(COLS/2), row:ROWS-1};
+  bulletTimer=0; centiMoveTimer=0;
+  spiderTimer=1500+Math.random()*2000;
+  fleaTimer=2000+Math.random()*3000;
+  scorpionTimer=3000+Math.random()*3000;
+  ddtTimer=4000+Math.random()*4000;
+  ddtExplosion=null; enemyBullets=[];
+  scorpion=null; ddt=null;
+  state='play';
+}
+
+function loseLife(){
+  sndDie(); lives--;
+  document.getElementById('hLives').textContent='▌'.repeat(Math.max(0,lives));
+  if(lives<=0){ gameOver(); return; }
+  player={col:Math.floor(COLS/2), row:ROWS-1};
+  bullets=[]; spider=null; flea=null; scorpion=null; ddt=null;
+  ddtExplosion=null; enemyBullets=[];
+  // reset centipede
+  centipedes=[makeCentipede(Math.min(10+level-1,16))];
+}
+
+function gameOver(){
+  state='over';
+  document.getElementById('deadScore').textContent='SCORE: '+score;
+  const isHi=!hi.length||score>(hi[hi.length-1]?.score||0)||hi.length<8;
+  document.getElementById('newhi').style.display=isHi?'block':'none';
+  document.getElementById('nin').value='';
+  show('ovOver');
+  setTimeout(()=>document.getElementById('nin').focus(),100);
+}
+
+function submitScore(){
+  const name=document.getElementById('nin').value.toUpperCase()||'???';
+  saveHi(name,score); renderHi();
+  hide('ovOver'); show('ovStart');
+  state='start';
+}
+
+document.getElementById('nin').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();submitScore();}
+  setTimeout(()=>{ document.getElementById('nin').value=document.getElementById('nin').value.toUpperCase();},0);
+});
+
+function show(id){document.getElementById(id).classList.remove('hidden');}
+function hide(id){document.getElementById(id).classList.add('hidden');}
+
+// ── INPUT ───────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(['Space','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) e.preventDefault();
+  if(state==='start'&&e.code==='Space'){ AC.resume(); startGame(); }
+  if(state==='over'&&e.code==='Enter') submitScore();
+});
+document.addEventListener('keyup',e=>{ keys[e.code]=false; });
+
+document.getElementById('mbL').addEventListener('pointerdown',()=>mbKeys.left=true);
+document.getElementById('mbL').addEventListener('pointerup',  ()=>mbKeys.left=false);
+document.getElementById('mbR').addEventListener('pointerdown',()=>mbKeys.right=true);
+document.getElementById('mbR').addEventListener('pointerup',  ()=>mbKeys.right=false);
+document.getElementById('mbFire').addEventListener('pointerdown',()=>{
+  mbKeys.fire=true;
+  if(state==='start'){AC.resume();startGame();}
+});
+document.getElementById('mbFire').addEventListener('pointerup',()=>mbKeys.fire=false);
+if('ontouchstart' in window) document.getElementById('mctrl').style.display='flex';
+
+// ── UPDATE ──────────────────────────────────────────────────
+function update(dt){
+  // ── Player movement ──
+  const pspd = 0.008 * dt;  // ~0.13 Zellen pro Frame bei 60fps
+  if((keys['ArrowLeft']||keys['KeyA']||mbKeys.left) && player.col>0) player.col=Math.max(0,player.col-pspd);
+  if((keys['ArrowRight']||keys['KeyD']||mbKeys.right) && player.col<COLS-1) player.col=Math.min(COLS-1,player.col+pspd);
+  if((keys['ArrowUp']||keys['KeyW']) && player.row>ROWS-PLAYER_ROWS) player.row=Math.max(ROWS-PLAYER_ROWS,player.row-pspd*0.6);
+  if((keys['ArrowDown']||keys['KeyS']) && player.row<ROWS-1) player.row=Math.min(ROWS-1,player.row+pspd*0.6);
+
+  // ── Shoot ──
+  bulletTimer=Math.max(0,bulletTimer-dt);
+  const wantFire=keys['Space']||keys['KeyZ']||mbKeys.fire;
+  if(wantFire&&bulletTimer<=0&&bullets.length<2){
+    bullets.push({col:player.col, row:player.row-0.5});
+    sndShoot(); bulletTimer=220;
+  }
+
+  // ── Move bullets ──
+  const bspd=0.025*dt;
+  for(let i=bullets.length-1;i>=0;i--){
+    bullets[i].row-=bspd;
+    if(bullets[i].row<0){ bullets.splice(i,1); continue; }
+
+    const bc=Math.round(bullets[i].col);
+    const br=Math.round(bullets[i].row);
+
+    // hit mushroom
+    const mIdx=mushrooms.findIndex(m=>m.col===bc&&m.row===br);
+    if(mIdx>=0){
+      mushrooms[mIdx].hp--;
+      sndMush();
+      if(mushrooms[mIdx].hp<=0){
+        mushrooms.splice(mIdx,1);
+        addScore(1);
+      }
+      bullets.splice(i,1);
+      continue;
+    }
+
+    // hit centipede segment
+    let hitCenti=false;
+    outer:
+    for(let ci=0;ci<centipedes.length;ci++){
+      const segs=centipedes[ci];
+      for(let si=segs.length-1;si>=0;si--){
+        const s=segs[si];
+        if(Math.abs(s.col-bc)<=0.5&&Math.abs(s.row-br)<=0.5){
+          sndCentiHit();
+          addScore(s.isHead?100:10, bc*CELL, br*CELL);
+          // place mushroom at hit location
+          if(!mushAt(s.col,s.row)) mushrooms.push({col:s.col,row:s.row,hp:4});
+          // split centipede
+          const tail=segs.splice(si+1);
+          segs.splice(si,1); // remove hit segment
+          if(segs.length>0) segs[0].isHead=true;
+          if(tail.length>0){ tail[0].isHead=true; centipedes.push(tail); }
+          if(segs.length===0) centipedes.splice(ci,1);
+          bullets.splice(i,1);
+          hitCenti=true;
+          break outer;
+        }
+      }
+    }
+    if(hitCenti) continue;
+
+    // hit spider
+    if(spider&&Math.hypot(bullets[i].col-spider.x/CELL, bullets[i].row-spider.y/CELL)<1.2){
+      const dist=Math.hypot(spider.x/CELL-player.col, spider.y/CELL-player.row);
+      const pts=dist<3?900:dist<6?600:300;
+      addScore(pts, spider.x, spider.y);
+      spider=null; bullets.splice(i,1); continue;
+    }
+
+    // hit flea
+    if(flea&&Math.abs(bullets[i].col-flea.col)<0.8&&Math.abs(bullets[i].row-flea.y/CELL)<0.8){
+      addScore(200, flea.col*CELL, flea.y);
+      flea=null; bullets.splice(i,1); continue;
+    }
+  }
+
+  // ── Move centipede ──
+  const centiSpeed=Math.max(60,220-level*15);
+  centiMoveTimer+=dt;
+  while(centiMoveTimer>=centiSpeed){
+    centiMoveTimer-=centiSpeed;
+    moveCentipedes();
+  }
+
+  // ── Spider ──
+  spiderTimer-=dt;
+  if(!spider&&spiderTimer<=0){
+    const side=Math.random()<0.5?0:COLS-1;
+    spider={
+      x:side*CELL, y:(ROWS-PLAYER_ROWS)*CELL,
+      vx:side===0?1.5:-1.5, vy:(Math.random()-0.5)*1.5,
+      timer:0
+    };
+    spiderTimer=3000+Math.random()*3000;
+  }
+  if(spider){
+    sndSpider();
+    spider.timer+=dt;
+    if(spider.timer>200){
+      spider.timer=0;
+      spider.vx=(Math.random()-0.5)*3;
+      spider.vy=(Math.random()-0.5)*2;
+    }
+    spider.x+=spider.vx*(dt*0.05);
+    spider.y+=spider.vy*(dt*0.05);
+    // keep in player zone
+    spider.y=Math.max((ROWS-PLAYER_ROWS)*CELL, Math.min((ROWS-0.5)*CELL, spider.y));
+    if(spider.x<0||spider.x>COLS*CELL) spider=null;
+    // eat mushrooms near spider
+    if(spider){
+      const sc=Math.round(spider.x/CELL), sr=Math.round(spider.y/CELL);
+      const mi=mushrooms.findIndex(m=>m.col===sc&&m.row===sr);
+      if(mi>=0) mushrooms.splice(mi,1);
+      // hit player
+      if(Math.hypot(spider.x/CELL-player.col, spider.y/CELL-player.row)<1.2) loseLife();
+    }
+  }
+
+  // ── Flea ──
+  fleaTimer-=dt;
+  if(!flea&&fleaTimer<=0&&mushrooms.filter(m=>m.col===Math.floor(COLS/2)).length<2){
+    flea={col:Math.floor(Math.random()*COLS), y:0, timer:0};
+    fleaTimer=3000+Math.random()*3000;
+  }
+  if(flea){
+    sndFlea();
+    flea.y+=0.18*dt;
+    // drop mushrooms randomly
+    if(Math.random()<0.012&&!mushAt(flea.col,Math.round(flea.y/CELL))){
+      mushrooms.push({col:flea.col,row:Math.round(flea.y/CELL),hp:4});
+    }
+    if(flea.y>ROWS*CELL) flea=null;
+    // hit player
+    if(flea&&Math.abs(flea.col-player.col)<1&&Math.abs(flea.y/CELL-player.row)<1) loseLife();
+  }
+
+  // ── Scorpion ──
+  scorpionTimer-=dt;
+  if(!scorpion&&scorpionTimer<=0&&level>=2){
+    const side=Math.random()<0.5?0:(COLS-1)*CELL;
+    scorpion={x:side, y:(1+Math.floor(Math.random()*(ROWS-PLAYER_ROWS-2)))*CELL,
+      vx:side===0?1.8:-1.8};
+    scorpionTimer=4000+Math.random()*4000;
+  }
+  if(scorpion){
+    scorpion.x+=scorpion.vx*(dt*0.05);
+    // poison mushrooms it walks over
+    const sc=Math.round(scorpion.x/CELL), sr=Math.round(scorpion.y/CELL);
+    const pm=mushrooms.find(m=>m.col===sc&&m.row===sr);
+    if(pm&&!pm.poisoned) pm.poisoned=true;
+    if(scorpion.x<-CELL||scorpion.x>COLS*CELL) scorpion=null;
+    // hit by bullet
+    for(let i=bullets.length-1;i>=0;i--){
+      if(Math.abs(bullets[i].col-scorpion?.x/CELL)<1&&Math.abs(bullets[i].row-scorpion?.y/CELL)<1){
+        addScore(1000, scorpion.x, scorpion.y);
+        scorpion=null; bullets.splice(i,1); break;
+      }
+    }
+  }
+
+  // ── DDT Bomber ──
+  ddtTimer-=dt;
+  if(!ddt&&ddtTimer<=0&&level>=2){
+    ddt={col:Math.floor(Math.random()*COLS), y:0};
+    ddtTimer=6000+Math.random()*5000;
+  }
+  if(ddt){
+    ddt.y+=0.06*dt;
+    // hit by player bullet
+    for(let i=bullets.length-1;i>=0;i--){
+      if(Math.abs(bullets[i].col-ddt.col)<1&&Math.abs(bullets[i].row-ddt.y/CELL)<1){
+        // EXPLODE: destroy all mushrooms + centipede segs in radius
+        const ex=ddt.col*CELL, ey=ddt.y;
+        const RADIUS=3*CELL;
+        addScore(500,ex,ey);
+        ddtExplosion={x:ex,y:ey,r:0,life:600};
+        // destroy mushrooms
+        mushrooms=mushrooms.filter(m=>{
+          const d=Math.hypot(m.col*CELL-ex,m.row*CELL-ey);
+          if(d<RADIUS){ addScore(1); return false; } return true;
+        });
+        // destroy centipede segments in radius
+        for(let ci=centipedes.length-1;ci>=0;ci--){
+          centipedes[ci]=centipedes[ci].filter(s=>{
+            const d=Math.hypot(s.col*CELL-ex,s.row*CELL-ey);
+            if(d<RADIUS){ addScore(s.isHead?100:10); return false; } return true;
+          });
+          if(centipedes[ci].length>0) centipedes[ci][0].isHead=true;
+          if(centipedes[ci].length===0) centipedes.splice(ci,1);
+        }
+        ddt=null; bullets.splice(i,1); break;
+      }
+    }
+    if(ddt&&ddt.y>ROWS*CELL) ddt=null;
+    // DDT hits player
+    if(ddt&&Math.abs(ddt.col-Math.round(player.col))<1&&Math.abs(ddt.y/CELL-player.row)<1){
+      loseLife(); return;
+    }
+  }
+  // DDT explosion animation
+  if(ddtExplosion){
+    ddtExplosion.r+=0.25*dt;
+    ddtExplosion.life-=dt;
+    if(ddtExplosion.life<=0) ddtExplosion=null;
+  }
+
+  // ── Enemy bullets (centipede head fires, level 3+) ──
+  if(level>=3){
+    for(const segs of centipedes){
+      const head=segs[0];
+      if(head&&head.row>2&&head.row<ROWS-PLAYER_ROWS&&Math.random()<0.0004*dt){
+        enemyBullets.push({col:head.col, row:head.row+0.5});
+      }
+    }
+  }
+  for(let i=enemyBullets.length-1;i>=0;i--){
+    enemyBullets[i].row+=0.015*dt;
+    if(enemyBullets[i].row>ROWS){ enemyBullets.splice(i,1); continue; }
+    // hit player
+    if(Math.abs(enemyBullets[i].col-Math.round(player.col))<1&&
+       Math.abs(enemyBullets[i].row-player.row)<1){
+      loseLife(); return;
+    }
+  }
+
+  // check if centipede reached player zone bottom
+  for(const segs of centipedes){
+    for(const s of segs){
+      if(s.row>=ROWS-1&&Math.abs(s.col-Math.round(player.col))<1.5){ loseLife(); return; }
+    }
+  }
+
+  // all centipedes gone = level clear
+  if(centipedes.length===0||centipedes.every(c=>c.length===0)){ nextLevel(); }
+
+  // popups
+  popups=popups.filter(p=>p.life>0);
+  popups.forEach(p=>{ p.y-=0.5; p.life-=dt; });
+}
+
+function moveCentipedes(){
+  for(const segs of centipedes){
+    // move from tail to head to avoid overwriting
+    for(let i=segs.length-1;i>=0;i--){
+      const s=segs[i];
+      if(i===0){
+        // head moves
+        const nextCol=s.col+s.dir;
+        const hitWall=nextCol<0||nextCol>=COLS;
+        const hitMush=!!mushAt(nextCol,s.row);
+        if(hitWall||hitMush){
+          // drop down one row, reverse direction
+          s.row++;
+          s.dir*=-1;
+        } else {
+          s.col=nextCol;
+        }
+        // if on poisoned mushroom: race straight down
+        const pm=mushrooms.find(m=>m.col===s.col&&m.row===s.row&&m.poisoned);
+        if(pm){ s.row++; } // skip sideways, just fall
+      } else {
+        // body follows segment ahead
+        segs[i].col=segs[i-1].col;
+        segs[i].row=segs[i-1].row;
+        segs[i].dir=segs[i-1].dir;
+      }
+    }
+  }
+}
+
+function addScore(pts, px, py){
+  score+=pts;
+  document.getElementById('hScore').textContent=score;
+  if(px!==undefined) popups.push({x:px,y:py,text:pts,life:800});
+}
+
+// ── DRAW ────────────────────────────────────────────────────
+function drawCell(col,row,color,px=2){
+  const x=Math.floor(col)*CELL, y=Math.floor(row)*CELL;
+  ctx.fillStyle=color;
+  ctx.fillRect(x+px,y+px,CELL-px*2,CELL-px*2);
+}
+
+function drawMushroom(m){
+  const x=m.col*CELL, y=m.row*CELL;
+  const cols=[C.mush_full,C.mush_dmg1,C.mush_dmg2,C.mush_dmg3];
+  let col=cols[4-m.hp]||cols[3];
+  // poisoned mushroom flickers yellow
+  if(m.poisoned&&Math.floor(Date.now()/200)%2===0) col='#ffff00';
+  // mushroom cap
+  ctx.fillStyle=col;
+  ctx.fillRect(x+2,y+2,CELL-4,CELL*0.55);
+  // spots
+  ctx.fillStyle='rgba(255,255,255,0.3)';
+  ctx.fillRect(x+4,y+4,3,3);
+  ctx.fillRect(x+CELL-7,y+5,3,3);
+  // stem
+  ctx.fillStyle='#cc9944';
+  ctx.fillRect(x+CELL*0.3,y+CELL*0.55,CELL*0.4,CELL*0.35);
+}
+
+function drawCentiSegment(s, isHead){
+  const x=s.col*CELL, y=s.row*CELL;
+  if(isHead){
+    // head: yellow circle with eyes
+    ctx.fillStyle=C.centi_head;
+    ctx.beginPath(); ctx.arc(x+CELL/2,y+CELL/2,CELL/2-1,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='#000';
+    const eyeOff=s.dir>0?4:-4;
+    ctx.fillRect(x+CELL/2+eyeOff-1,y+4,3,3);
+    ctx.fillRect(x+CELL/2+eyeOff-1,y+CELL-7,3,3);
+  } else {
+    // body: alternating green squares
+    const c=(s.col+s.row)%2===0?C.centi_body:C.centi_body2;
+    ctx.fillStyle=c;
+    ctx.fillRect(x+2,y+2,CELL-4,CELL-4);
+    ctx.fillStyle='rgba(0,0,0,0.3)';
+    ctx.fillRect(x+2,y+2,CELL-4,2);
+  }
+}
+
+function drawSpider(){
+  if(!spider) return;
+  const x=spider.x, y=spider.y;
+  const t=Date.now()*0.01;
+  ctx.fillStyle=C.spider;
+  // body
+  ctx.beginPath(); ctx.arc(x,y,CELL*0.4,0,Math.PI*2); ctx.fill();
+  // legs (4 pairs)
+  ctx.strokeStyle=C.spider_hi; ctx.lineWidth=1.5;
+  for(let i=0;i<4;i++){
+    const a1=(i/4)*Math.PI+t*0.3;
+    const a2=a1+0.4;
+    ctx.beginPath();
+    ctx.moveTo(x,y);
+    ctx.lineTo(x+Math.cos(a1)*CELL*0.9, y+Math.sin(a1)*CELL*0.9);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x,y);
+    ctx.lineTo(x+Math.cos(a1+Math.PI)*CELL*0.9, y+Math.sin(a1+Math.PI)*CELL*0.9);
+    ctx.stroke();
+  }
+  ctx.lineWidth=1;
+}
+
+function drawFlea(){
+  if(!flea) return;
+  const x=flea.col*CELL+CELL/2, y=flea.y;
+  ctx.fillStyle=C.flea;
+  ctx.fillRect(x-3,y-5,6,10);
+  ctx.fillStyle=C.flea_hi;
+  ctx.fillRect(x-2,y-5,2,2);
+  // antennae
+  ctx.strokeStyle=C.flea; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(x,y-5); ctx.lineTo(x-4,y-9); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x,y-5); ctx.lineTo(x+4,y-9); ctx.stroke();
+  ctx.lineWidth=1;
+}
+
+function drawPlayer(){
+  const x=Math.floor(player.col)*CELL, y=Math.floor(player.row)*CELL;
+  // classic shooter shape
+  ctx.fillStyle=C.player;
+  ctx.fillRect(x+3,y,CELL-6,4);      // cannon
+  ctx.fillRect(x+1,y+4,CELL-2,CELL-4); // base
+  ctx.fillStyle=C.player_hi;
+  ctx.fillRect(x+1,y+4,CELL-2,3);
+  ctx.fillRect(x+1,y+4,3,CELL-4);
+}
+
+function draw(){
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,canvas.width,canvas.height);
+  if(!player) return;
+
+  // subtle grid dots
+  ctx.fillStyle='#0f0f0f';
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++)
+    ctx.fillRect(c*CELL+CELL/2-1,r*CELL+CELL/2-1,2,2);
+
+  // player zone line
+  ctx.strokeStyle='rgba(0,100,255,0.15)'; ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(0,(ROWS-PLAYER_ROWS)*CELL);
+  ctx.lineTo(canvas.width,(ROWS-PLAYER_ROWS)*CELL);
+  ctx.stroke();
+
+  // DDT explosion
+  if(ddtExplosion){
+    const alpha=ddtExplosion.life/600;
+    ctx.globalAlpha=alpha*0.7;
+    ctx.fillStyle=C.ddt_exp;
+    ctx.beginPath();
+    ctx.arc(ddtExplosion.x+CELL/2, ddtExplosion.y, ddtExplosion.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.globalAlpha=1;
+  }
+
+  // mushrooms
+  mushrooms.forEach(drawMushroom);
+
+  // centipedes
+  for(const segs of centipedes){
+    segs.forEach((s,i)=>drawCentiSegment(s,i===0));
+  }
+
+  // spider
+  drawSpider();
+
+  // scorpion
+  if(scorpion){
+    const sx=scorpion.x, sy=scorpion.y, t=Date.now()*0.015;
+    ctx.fillStyle=C.scorpion;
+    ctx.fillRect(sx+1,sy+3,CELL-2,CELL-6);
+    ctx.fillStyle=C.scorpion_hi;
+    ctx.fillRect(sx+1,sy+3,CELL-2,3);
+    // claws
+    ctx.strokeStyle=C.scorpion; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(sx+CELL-2,sy+CELL/2);
+    ctx.lineTo(sx+CELL+4,sy+CELL/2-3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx+CELL-2,sy+CELL/2);
+    ctx.lineTo(sx+CELL+4,sy+CELL/2+3); ctx.stroke();
+    // tail curl
+    ctx.beginPath(); ctx.moveTo(sx+2,sy+CELL/2);
+    ctx.quadraticCurveTo(sx-4,sy+2,sx-2,sy-2); ctx.stroke();
+    ctx.lineWidth=1;
+  }
+
+  // DDT bomber
+  if(ddt){
+    const dx=ddt.col*CELL, dy=ddt.y;
+    ctx.fillStyle=C.ddt;
+    ctx.beginPath(); ctx.arc(dx+CELL/2,dy,CELL*0.45,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=C.ddt_hi;
+    ctx.fillRect(dx+CELL/2-1,dy-CELL*0.45,3,CELL*0.3); // fuse
+    // DDT text
+    ctx.fillStyle='#000';
+    ctx.font='5px monospace'; ctx.textAlign='center';
+    ctx.fillText('DDT',dx+CELL/2,dy+2);
+    ctx.textAlign='left';
+  }
+
+  // enemy bullets
+  ctx.fillStyle=C.ebullet;
+  enemyBullets.forEach(b=>ctx.fillRect(Math.floor(b.col)*CELL+CELL/2-1,b.row*CELL,3,CELL*0.7));
+
+  // flea
+  drawFlea();
+
+  // bullets
+  ctx.fillStyle=C.bullet;
+  bullets.forEach(b=>ctx.fillRect(Math.floor(b.col)*CELL+CELL/2-1,b.row*CELL,3,CELL*0.7));
+
+  // player
+  drawPlayer();
+
+  // score popups
+  popups.forEach(p=>{
+    ctx.globalAlpha=Math.min(1,p.life/400);
+    ctx.fillStyle=C.popup;
+    ctx.font='7px "Press Start 2P"';
+    ctx.textAlign='center';
+    ctx.fillText(p.text,p.x+CELL/2,p.y);
+  });
+  ctx.globalAlpha=1;
+  ctx.textAlign='left';
+}
+
+// ── MAIN LOOP ───────────────────────────────────────────────
+function loop(ts){
+  raf=requestAnimationFrame(loop);
+  const dt=lastTs?Math.min(ts-lastTs,50):16;
+  lastTs=ts;
+
+  if(state==='play') update(dt);
+  if(state==='level'){
+    levelTimer-=dt;
+    if(levelTimer<=0) beginLevel();
+  }
+  draw();
+}
+
+// ── INIT ────────────────────────────────────────────────────
+renderHi();
+show('ovStart');
+raf=requestAnimationFrame(loop);
+</script>
+</body>
+</html>
