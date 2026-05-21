@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TRON</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;background:#000;overflow:hidden;}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'Orbitron',monospace;}
+
+:root{
+  --p1:#00eeff;  /* cyan  — player 1 */
+  --p2:#ff3d00;  /* orange-red — player 2 / AI */
+  --dim:#111;
+}
+
+#wrap{display:flex;flex-direction:column;align-items:center;gap:6px;width:100%;}
+
+/* HUD */
+#hud{display:flex;justify-content:space-between;align-items:center;width:100%;max-width:620px;padding:0 4px;}
+.score-block{display:flex;flex-direction:column;align-items:center;gap:2px;}
+.score-label{font-size:8px;letter-spacing:3px;}
+.score-val{font-size:20px;font-weight:700;letter-spacing:2px;}
+.p1c{color:var(--p1);text-shadow:0 0 10px var(--p1);}
+.p2c{color:var(--p2);text-shadow:0 0 10px var(--p2);}
+#round-info{font-size:10px;letter-spacing:3px;color:rgba(255,255,255,0.3);}
+
+/* CANVAS */
+#cbox{position:relative;border:1px solid rgba(255,255,255,0.1);box-shadow:0 0 30px rgba(0,200,255,0.08);}
+canvas{display:block;image-rendering:pixelated;}
+
+/* OVERLAY */
+.ov{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:rgba(0,0,0,0.88);z-index:10;}
+.ov.hidden{display:none;}
+.ov-title{font-size:clamp(20px,5vw,38px);font-weight:900;letter-spacing:10px;}
+.ov-sub{font-size:9px;letter-spacing:3px;color:rgba(255,255,255,0.35);}
+.blink{animation:bl 0.9s step-end infinite;}
+@keyframes bl{0%,100%{opacity:1}50%{opacity:0}}
+
+/* Mode buttons */
+.mode-btns{display:flex;gap:10px;margin-top:4px;}
+.mbtn{
+  font-family:'Orbitron',monospace;font-size:10px;letter-spacing:2px;
+  padding:10px 18px;background:transparent;cursor:pointer;
+  border:1px solid;transition:background 0.15s;
+}
+.mbtn.p1{color:var(--p1);border-color:var(--p1);}
+.mbtn.p1:hover{background:rgba(0,238,255,0.12);}
+.mbtn.p2{color:var(--p2);border-color:var(--p2);}
+.mbtn.p2:hover{background:rgba(255,61,0,0.12);}
+
+/* key legend */
+.keys{display:flex;gap:20px;margin-top:2px;}
+.key-block{display:flex;flex-direction:column;align-items:center;gap:3px;font-size:8px;letter-spacing:1px;}
+.key-block .lbl{color:rgba(255,255,255,0.25);}
+.key-block .k{letter-spacing:2px;}
+
+/* win screen */
+#winMsg{font-size:clamp(14px,3vw,22px);font-weight:700;letter-spacing:6px;}
+#scoreBoard{display:flex;gap:30px;margin-top:2px;}
+.sb-cell{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:9px;letter-spacing:2px;}
+.sb-val{font-size:22px;font-weight:700;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <div class="score-block">
+      <span class="score-label p1c">SPIELER 1</span>
+      <span class="score-val p1c" id="s1">0</span>
+    </div>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:2px;">
+      <div id="round-info">RUNDE 1</div>
+      <div id="mode-info" style="font-size:8px;letter-spacing:2px;color:rgba(255,255,255,0.2);">VS KI</div>
+    </div>
+    <div class="score-block">
+      <span class="score-label p2c" id="p2label">KI</span>
+      <span class="score-val p2c" id="s2">0</span>
+    </div>
+  </div>
+
+  <div id="cbox">
+    <canvas id="c"></canvas>
+
+    <!-- START / MODE SELECT -->
+    <div class="ov" id="ovStart">
+      <div class="ov-title" style="color:var(--p1);text-shadow:0 0 20px var(--p1),0 0 40px rgba(0,238,255,0.4);">TRON</div>
+      <div class="ov-sub">LIGHT CYCLES</div>
+      <div class="mode-btns">
+        <button class="mbtn p1" id="btnVsAI">▶ VS KI</button>
+        <button class="mbtn p2" id="btn2P">▶ 2 SPIELER</button>
+      </div>
+      <div class="keys" style="margin-top:10px;">
+        <div class="key-block p1c">
+          <span class="lbl">SPIELER 1</span>
+          <span class="k">W A S D</span>
+        </div>
+        <div class="key-block p2c" id="p2keys">
+          <span class="lbl">SPIELER 2</span>
+          <span class="k">↑ ← ↓ →</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- COUNTDOWN -->
+    <div class="ov hidden" id="ovCount">
+      <div class="ov-title blink" id="countNum" style="font-size:clamp(40px,10vw,80px);color:#fff;text-shadow:0 0 30px #fff;">3</div>
+    </div>
+
+    <!-- ROUND RESULT -->
+    <div class="ov hidden" id="ovRound">
+      <div id="winMsg"></div>
+      <div id="scoreBoard">
+        <div class="sb-cell"><span class="p1c">P1</span><span class="sb-val p1c" id="sb1">0</span></div>
+        <div class="sb-cell" style="color:rgba(255,255,255,0.2);font-size:18px;align-self:center;">:</div>
+        <div class="sb-cell"><span class="p2c" id="sb2lbl">KI</span><span class="sb-val p2c" id="sb2">0</span></div>
+      </div>
+      <div class="ov-sub blink" style="margin-top:8px;color:rgba(255,255,255,0.5);">LEERTASTE — NÄCHSTE RUNDE</div>
+      <div class="ov-sub" style="margin-top:2px;cursor:pointer;text-decoration:underline;" id="btnMenu">MENÜ</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const CELL   = 6;
+let COLS, ROWS;
+
+function resize(){
+  const maxW = Math.min(window.innerWidth - 8, 620);
+  const maxH = Math.min(window.innerHeight - 80, 480);
+  COLS = Math.floor(maxW / CELL);
+  ROWS = Math.floor(maxH / CELL);
+  canvas.width  = COLS * CELL;
+  canvas.height = ROWS * CELL;
+  canvas.style.width  = (COLS*CELL)+'px';
+  canvas.style.height = (ROWS*CELL)+'px';
+  document.getElementById('cbox').style.width  = (COLS*CELL+2)+'px';
+  document.getElementById('hud').style.maxWidth = (COLS*CELL+2)+'px';
+}
+resize();
+window.addEventListener('resize', ()=>{ resize(); if(state!=='play') drawBg(); });
+
+// ── AUDIO ─────────────────────────────────────────────────
+const AC = new (window.AudioContext||window.webkitAudioContext)();
+function tone(f,d,t='sine',v=0.08,df=0){
+  try{
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.connect(g);g.connect(AC.destination);
+    o.type=t;o.frequency.value=f;o.detune.value=df;
+    g.gain.setValueAtTime(v,AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+d);
+    o.start();o.stop(AC.currentTime+d);
+  }catch(e){}
+}
+const sndTurn   = ()=>tone(600,0.04,'square',0.06);
+const sndCrash  = ()=>{ tone(180,0.15,'sawtooth',0.2); setTimeout(()=>tone(100,0.3,'sawtooth',0.12),150); };
+const sndCount  = ()=>tone(880,0.08,'square',0.1);
+const sndGo     = ()=>{ tone(660,0.05,'square',0.1); setTimeout(()=>tone(880,0.05,'square',0.1),60); setTimeout(()=>tone(1100,0.1,'square',0.15),120); };
+const sndEngine = ()=>tone(80+Math.random()*20,0.04,'sawtooth',0.03);
+
+// ── STATE ─────────────────────────────────────────────────
+let state    = 'start';  // start | countdown | play | round
+let mode     = 'ai';     // ai | 2p
+let round    = 1;
+let scores   = [0, 0];
+let players  = [];
+let keys     = {};
+let countVal = 3;
+let countTimer, tickTimer, lastTs, raf;
+const TICK_MS = 40; // ~25 fps game logic
+
+// ── PLAYER ────────────────────────────────────────────────
+function makePlayer(idx){
+  const isP1 = idx === 0;
+  const x    = isP1 ? Math.floor(COLS*0.25) : Math.floor(COLS*0.75);
+  const y    = Math.floor(ROWS/2);
+  const dir  = isP1 ? {x:1,y:0} : {x:-1,y:0};
+  const col  = isP1 ? '#00eeff' : '#ff3d00';
+  const glow = isP1 ? '#00eeff' : '#ff6633';
+  const trail= []; // array of {x,y}
+  trail.push({x,y});
+  return { x, y, dir, nextDir:{...dir}, col, glow, trail, alive:true, idx };
+}
+
+// ── GRID (trail map for fast collision) ───────────────────
+let grid; // Uint8Array: 0=empty, 1=P1 trail, 2=P2 trail
+function clearGrid(){
+  grid = new Uint8Array(COLS * ROWS);
+}
+function gridSet(x,y,v){ if(x>=0&&x<COLS&&y>=0&&y<ROWS) grid[y*COLS+x]=v; }
+function gridGet(x,y){
+  if(x<0||x>=COLS||y<0||y>=ROWS) return 255; // wall
+  return grid[y*COLS+x];
+}
+
+// ── AI ────────────────────────────────────────────────────
+function aiTick(ai, enemy){
+  // look ahead: try to stay alive and cut off enemy
+  const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  // remove 180° reverse
+  const valid=dirs.filter(d=>!(d.x===-ai.dir.x&&d.y===-ai.dir.y));
+
+  // score each direction by how many free cells reachable (flood fill, limited depth)
+  let best=null, bestScore=-1;
+  for(const d of valid){
+    const nx=ai.x+d.x, ny=ai.y+d.y;
+    if(gridGet(nx,ny)!==0) continue; // immediately blocked
+    const space=floodCount(nx,ny,18);
+    // bonus: moves toward enemy (aggressive) at higher rounds
+    const dist=Math.abs(nx-enemy.x)+Math.abs(ny-enemy.y);
+    const aggro = round>=3 ? (1/(dist+1))*6 : 0;
+    const score = space + aggro + Math.random()*2; // small random so not robotic
+    if(score>bestScore){ bestScore=score; best=d; }
+  }
+  if(best) ai.nextDir=best;
+}
+
+function floodCount(sx,sy,maxDepth){
+  // BFS limited to maxDepth steps
+  const visited=new Set();
+  const queue=[{x:sx,y:sy,d:0}];
+  visited.add(sx+','+sy);
+  let count=0;
+  while(queue.length){
+    const {x,y,d}=queue.shift();
+    count++;
+    if(d>=maxDepth) continue;
+    for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      const nx=x+dx,ny=y+dy;
+      const key=nx+','+ny;
+      if(!visited.has(key)&&gridGet(nx,ny)===0){ visited.add(key); queue.push({x:nx,y:ny,d:d+1}); }
+    }
+  }
+  return count;
+}
+
+// ── GAME FLOW ─────────────────────────────────────────────
+function startMode(m){
+  AC.resume();
+  mode=m;
+  scores=[0,0];
+  round=1;
+  document.getElementById('s1').textContent='0';
+  document.getElementById('s2').textContent='0';
+  document.getElementById('p2label').textContent=m==='ai'?'KI':'SPIELER 2';
+  document.getElementById('sb2lbl').textContent=m==='ai'?'KI':'P2';
+  document.getElementById('mode-info').textContent=m==='ai'?'VS KI':'2 SPIELER';
+  document.getElementById('p2keys').style.opacity=m==='ai'?'0.3':'1';
+  hide('ovStart');
+  startRound();
+}
+
+function startRound(){
+  document.getElementById('round-info').textContent='RUNDE '+round;
+  clearGrid();
+  initTrailCanvas();
+  players=[makePlayer(0), makePlayer(1)];
+  // mark starting positions
+  players.forEach((p,i)=>gridSet(p.x,p.y,i+1));
+  tickTimer=0; lastTs=0;
+  hide('ovRound');
+  show('ovCount');
+  countVal=3;
+  document.getElementById('countNum').textContent='3';
+  sndCount();
+  state='countdown';
+  countTimer=3;
+}
+
+function goPlay(){
+  hide('ovCount');
+  sndGo();
+  state='play';
+}
+
+function endRound(winnerIdx){
+  // -1 = draw
+  state='round';
+  sndCrash();
+  let msg='', col='#fff';
+  if(winnerIdx===-1){
+    msg='UNENTSCHIEDEN'; col='#fff';
+  } else {
+    scores[winnerIdx]++;
+    document.getElementById('s'+(winnerIdx+1)).textContent=scores[winnerIdx];
+    msg = winnerIdx===0 ? 'SPIELER 1 GEWINNT' : (mode==='ai'?'KI GEWINNT':'SPIELER 2 GEWINNT');
+    col = winnerIdx===0 ? '#00eeff' : '#ff3d00';
+  }
+  document.getElementById('winMsg').textContent=msg;
+  document.getElementById('winMsg').style.color=col;
+  document.getElementById('winMsg').style.textShadow=`0 0 15px ${col}`;
+  document.getElementById('sb1').textContent=scores[0];
+  document.getElementById('sb2').textContent=scores[1];
+  show('ovRound');
+}
+
+// ── INPUT ─────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  keys[e.code]=true;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.key)) e.preventDefault();
+  if(state==='round'&&e.code==='Space'){ round++; startRound(); return; }
+  if(state!=='play') return;
+  // P1: WASD
+  const p1=players[0];
+  if(e.code==='KeyW'&&p1.dir.y!==1)  { p1.nextDir={x:0,y:-1}; sndTurn(); }
+  if(e.code==='KeyS'&&p1.dir.y!==-1) { p1.nextDir={x:0,y:1};  sndTurn(); }
+  if(e.code==='KeyA'&&p1.dir.x!==1)  { p1.nextDir={x:-1,y:0}; sndTurn(); }
+  if(e.code==='KeyD'&&p1.dir.x!==-1) { p1.nextDir={x:1,y:0};  sndTurn(); }
+  // P2: Arrows (only in 2p mode)
+  if(mode==='2p'){
+    const p2=players[1];
+    if(e.code==='ArrowUp'&&p2.dir.y!==1)    { p2.nextDir={x:0,y:-1}; sndTurn(); }
+    if(e.code==='ArrowDown'&&p2.dir.y!==-1) { p2.nextDir={x:0,y:1};  sndTurn(); }
+    if(e.code==='ArrowLeft'&&p2.dir.x!==1)  { p2.nextDir={x:-1,y:0}; sndTurn(); }
+    if(e.code==='ArrowRight'&&p2.dir.x!==-1){ p2.nextDir={x:1,y:0};  sndTurn(); }
+  }
+});
+document.addEventListener('keyup',e=>keys[e.code]=false);
+
+document.getElementById('btnVsAI').onclick = ()=>startMode('ai');
+document.getElementById('btn2P').onclick   = ()=>startMode('2p');
+document.getElementById('btnMenu').onclick = ()=>{ hide('ovRound'); show('ovStart'); state='start'; };
+
+// ── GAME TICK ─────────────────────────────────────────────
+function tick(){
+  const [p1,p2]=players;
+
+  // AI move
+  if(mode==='ai'&&p2.alive) aiTick(p2,p1);
+
+  // move both
+  let p1died=false, p2died=false;
+  for(const p of players){
+    if(!p.alive) continue;
+    p.dir={...p.nextDir};
+    const nx=p.x+p.dir.x, ny=p.y+p.dir.y;
+    // check collision
+    if(gridGet(nx,ny)!==0){ p.alive=false; if(p.idx===0)p1died=true; else p2died=true; continue; }
+    p.x=nx; p.y=ny;
+    gridSet(nx,ny,p.idx+1);
+    p.trail.push({x:nx,y:ny});
+  }
+
+  // sound engine hum
+  if(Math.random()<0.15) sndEngine();
+
+  // check end
+  if(p1died&&p2died) endRound(-1);
+  else if(p1died)    endRound(1);
+  else if(p2died)    endRound(0);
+  else if(!p1.alive&&!p2.alive) endRound(-1);
+}
+
+// ── DRAW ──────────────────────────────────────────────────
+// We use an offscreen ImageData for the trail (fast pixel-level drawing)
+let trailCanvas, trailCtx;
+function initTrailCanvas(){
+  trailCanvas=document.createElement('canvas');
+  trailCanvas.width=canvas.width; trailCanvas.height=canvas.height;
+  trailCtx=trailCanvas.getContext('2d');
+  trailCtx.fillStyle='#000'; trailCtx.fillRect(0,0,canvas.width,canvas.height);
+}
+
+function drawBg(){
+  ctx.fillStyle='#000'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  // subtle grid
+  ctx.strokeStyle='rgba(0,180,255,0.04)'; ctx.lineWidth=1;
+  for(let x=0;x<canvas.width;x+=CELL){ ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke(); }
+  for(let y=0;y<canvas.height;y+=CELL){ ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke(); }
+}
+
+function drawFrame(){
+  // background
+  drawBg();
+
+  // draw trails from trailCanvas
+  ctx.drawImage(trailCanvas,0,0);
+
+  // draw player heads with glow
+  for(const p of players){
+    if(!p.alive) continue;
+    const x=p.x*CELL, y=p.y*CELL;
+    ctx.shadowColor=p.glow; ctx.shadowBlur=14;
+    ctx.fillStyle=p.col;
+    ctx.fillRect(x,y,CELL,CELL);
+    // bright center
+    ctx.fillStyle='#fff';
+    ctx.fillRect(x+1,y+1,CELL-2,CELL-2);
+    ctx.shadowBlur=0;
+  }
+}
+
+function paintTrailSegment(p){
+  // paint latest trail cell onto trailCanvas
+  const seg=p.trail[p.trail.length-1];
+  if(!seg) return;
+  const x=seg.x*CELL, y=seg.y*CELL;
+  // glow layers
+  trailCtx.shadowColor=p.glow; trailCtx.shadowBlur=8;
+  trailCtx.fillStyle=p.col;
+  trailCtx.fillRect(x,y,CELL,CELL);
+  trailCtx.shadowBlur=0;
+  // slightly dimmer inner body
+  trailCtx.fillStyle=p.idx===0?'#006677':'#882200';
+  trailCtx.fillRect(x+1,y+1,CELL-2,CELL-2);
+}
+
+function fullRedrawTrails(){
+  trailCtx.fillStyle='#000'; trailCtx.fillRect(0,0,trailCanvas.width,trailCanvas.height);
+  for(const p of players){
+    for(const seg of p.trail){
+      const x=seg.x*CELL, y=seg.y*CELL;
+      trailCtx.shadowColor=p.glow; trailCtx.shadowBlur=6;
+      trailCtx.fillStyle=p.col; trailCtx.fillRect(x,y,CELL,CELL);
+      trailCtx.shadowBlur=0;
+      trailCtx.fillStyle=p.idx===0?'#006677':'#882200';
+      trailCtx.fillRect(x+1,y+1,CELL-2,CELL-2);
+    }
+  }
+}
+
+// ── MAIN LOOP ─────────────────────────────────────────────
+function loop(ts){
+  raf=requestAnimationFrame(loop);
+  const dt=lastTs?Math.min(ts-lastTs,100):0;
+  lastTs=ts;
+
+  if(state==='countdown'){
+    countTimer-=dt/1000;
+    const v=Math.ceil(countTimer);
+    if(v!==countVal){
+      countVal=v;
+      if(v>0){ document.getElementById('countNum').textContent=v; sndCount(); }
+      else { document.getElementById('countNum').textContent='GO!'; setTimeout(goPlay,400); }
+    }
+    drawBg();
+    return;
+  }
+
+  if(state==='play'){
+    tickTimer+=dt;
+    while(tickTimer>=TICK_MS&&state==='play'){
+      tickTimer-=TICK_MS;
+      const prevLens=players.map(p=>p.trail.length);
+      tick();
+      // paint new trail segments
+      players.forEach((p,i)=>{ if(p.trail.length>prevLens[i]) paintTrailSegment(p); });
+    }
+    drawFrame();
+    return;
+  }
+
+  // idle
+  drawBg();
+}
+
+// ── INIT ──────────────────────────────────────────────────
+function show(id){document.getElementById(id).classList.remove('hidden');}
+function hide(id){document.getElementById(id).classList.add('hidden');}
+
+initTrailCanvas();
+show('ovStart');
+drawBg();
+raf=requestAnimationFrame(loop);
+</script>
+</body>
+</html>
