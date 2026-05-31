@@ -33,25 +33,37 @@ def organize_files_by_date(source_dir, target_base_dir=None):
         print(f"Fehler: Verzeichnis {source_dir} existiert nicht!")
         return
     
-    for item in source_path.iterdir():
-        if item.is_dir():
+    # Snapshot der Dateiliste vor der Verarbeitung, um Race Conditions
+    # mit parallel schreibenden Prozessen (z.B. Kameras) zu vermeiden.
+    items = [item for item in source_path.iterdir() if item.is_file()]
+
+    for item in items:
+        try:
+            stat = item.stat()
+        except FileNotFoundError:
+            # Datei wurde zwischen iterdir() und stat() gelöscht (z.B. durch Kamera)
+            print(f"Übersprungen: {item.name} (nicht mehr vorhanden)")
             continue
-        
-        modification_time = datetime.fromtimestamp(item.stat().st_mtime)
+
+        modification_time = datetime.fromtimestamp(stat.st_mtime)
         date_folder_name = modification_time.strftime("%Y-%m-%d")
         date_folder_path = target_base_dir / date_folder_name
         date_folder_path.mkdir(exist_ok=True)
-        
+
         target_file_path = date_folder_path / item.name
-        
+
         if target_file_path.exists():
-            timestamp = datetime.now().strftime("%H%M%S")
-            name_parts = item.stem, timestamp, item.suffix
-            new_name = f"{name_parts[0]}_{name_parts[1]}{name_parts[2]}"
+            timestamp = datetime.now().strftime("%H%M%S%f")
+            new_name = f"{item.stem}_{timestamp}{item.suffix}"
             target_file_path = date_folder_path / new_name
-        
-        shutil.move(str(item), str(target_file_path))
-        print(f"Verschoben: {item.name} -> {date_folder_name}/")
+
+        try:
+            shutil.move(str(item), str(target_file_path))
+            print(f"Verschoben: {item.name} -> {date_folder_name}/")
+        except FileNotFoundError:
+            print(f"Übersprungen: {item.name} (verschwunden vor dem Verschieben)")
+        except Exception as e:
+            print(f"Fehler beim Verschieben von {item.name}: {e}")
 
 
 def delete_old_directories(base_dir, days_old=7):
