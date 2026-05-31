@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quadcopter PID Simulator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<style>
+:root {
+  --bg:       #0d0f14;
+  --bg2:      #13161e;
+  --bg3:      #1a1e28;
+  --bg4:      #21263300;
+  --border:   rgba(255,255,255,0.07);
+  --border2:  rgba(255,255,255,0.13);
+  --accent:   #00e5ff;
+  --accent2:  #ff6b35;
+  --accent3:  #7fff6f;
+  --text:     #e8eaf0;
+  --muted:    #6b7280;
+  --muted2:   #9ca3af;
+  --danger:   #ff4444;
+  --warn:     #ffaa00;
+  --ok:       #4ade80;
+  --mono:     'Space Mono', monospace;
+  --sans:     'DM Sans', sans-serif;
+  --radius:   8px;
+  --radius-lg:12px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+/* ── TOP BAR ── */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2rem;
+  height: 56px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.logo svg { width: 24px; height: 24px; }
+.logo-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(0.7)} }
+.status-pill {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
+  padding: 5px 12px; border-radius: 20px;
+  border: 1px solid var(--border2);
+  background: var(--bg3);
+  transition: all 0.3s;
+}
+.status-pill.flying { border-color: var(--accent3); color: var(--accent3); }
+.status-pill.flying .dot { background: var(--accent3); animation: pulse 1s infinite; }
+.status-pill.crashed { border-color: var(--danger); color: var(--danger); }
+.status-pill.crashed .dot { background: var(--danger); }
+.status-pill .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+
+/* ── LAYOUT ── */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: calc(100vh - 56px);
+}
+
+/* ── SIDEBAR ── */
+.sidebar {
+  background: var(--bg2);
+  border-right: 1px solid var(--border);
+  padding: 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  overflow-y: auto;
+}
+.sidebar-section h3 {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.field { margin-bottom: 10px; }
+.field label {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; color: var(--muted2); margin-bottom: 4px;
+}
+.field label span { font-family: var(--mono); font-size: 11px; color: var(--accent); }
+.field input[type=number] {
+  width: 100%;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  padding: 6px 10px;
+  transition: border-color 0.2s;
+  -moz-appearance: textfield;
+}
+.field input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+.field input[type=number]:focus { outline: none; border-color: var(--accent); }
+.calc-card {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.calc-card .clabel { font-size: 11px; color: var(--muted2); }
+.calc-card .cval { font-family: var(--mono); font-size: 13px; font-weight: 700; }
+.cval.ok { color: var(--ok); } .cval.warn { color: var(--warn); } .cval.bad { color: var(--danger); }
+.warn-box {
+  background: rgba(255,170,0,0.08);
+  border: 1px solid rgba(255,170,0,0.25);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--warn);
+  display: none;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+.preset-row { display: flex; flex-direction: column; gap: 6px; }
+.preset-btn {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted2);
+  font-family: var(--sans);
+  font-size: 12px;
+  padding: 7px 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s;
+  display: flex; align-items: center; gap: 6px;
+}
+.preset-btn:hover { border-color: var(--accent); color: var(--accent); background: rgba(0,229,255,0.05); }
+.preset-btn .tag {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* ── MAIN ── */
+.main { padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem; overflow-y: auto; }
+
+/* ── CONTROL STRIP ── */
+.control-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.btn {
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--sans); font-size: 13px; font-weight: 500;
+  padding: 8px 16px; border-radius: var(--radius);
+  cursor: pointer; border: 1px solid var(--border2);
+  background: var(--bg3); color: var(--text);
+  transition: all 0.2s;
+}
+.btn:hover { background: var(--bg4); border-color: var(--border2); }
+.btn.play { background: rgba(0,229,255,0.12); border-color: rgba(0,229,255,0.35); color: var(--accent); }
+.btn.play:hover { background: rgba(0,229,255,0.2); }
+.btn.disturbance { border-color: rgba(255,107,53,0.35); color: var(--accent2); }
+.btn.disturbance:hover { background: rgba(255,107,53,0.08); }
+.btn.calc { border-color: rgba(127,255,111,0.35); color: var(--accent3); }
+.btn.calc:hover { background: rgba(127,255,111,0.08); }
+.sep { width: 1px; height: 24px; background: var(--border); }
+
+/* ── SETPOINTS ── */
+.setpoints-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.sp-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+}
+.sp-card .sp-title {
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px;
+}
+.sp-card .sp-val-display {
+  font-family: var(--mono); font-size: 22px; font-weight: 700;
+  color: var(--accent); margin-bottom: 8px; line-height: 1;
+}
+.sp-card input[type=range] {
+  width: 100%; -webkit-appearance: none; appearance: none;
+  height: 3px; background: var(--bg3); border-radius: 2px;
+  outline: none; cursor: pointer;
+}
+.sp-card input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px;
+  border-radius: 50%; background: var(--accent);
+  border: 2px solid var(--bg); cursor: pointer;
+}
+.sp-card input[type=range]::-moz-range-thumb {
+  width: 14px; height: 14px; border-radius: 50%;
+  background: var(--accent); border: 2px solid var(--bg); cursor: pointer;
+}
+
+/* ── PID GRID ── */
+.pid-section-title {
+  font-family: var(--mono); font-size: 10px;
+  letter-spacing: 0.12em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 12px;
+}
+.pid-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.pid-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+}
+.pid-card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.pid-card-title {
+  font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted2);
+}
+.pid-axis-badge {
+  width: 8px; height: 8px; border-radius: 50%;
+}
+.pid-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.pid-term {
+  font-family: var(--mono); font-size: 13px; font-weight: 700;
+  min-width: 16px; color: var(--muted);
+}
+.pid-row input[type=range] {
+  flex: 1; -webkit-appearance: none; appearance: none;
+  height: 3px; background: var(--bg3); border-radius: 2px;
+  outline: none; cursor: pointer;
+}
+.pid-row input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 12px; height: 12px;
+  border-radius: 50%; cursor: pointer; border: 2px solid var(--bg);
+}
+.pid-row input[type=range]::-moz-range-thumb {
+  width: 12px; height: 12px; border-radius: 50%;
+  cursor: pointer; border: 2px solid var(--bg);
+}
+#roll-p::-webkit-slider-thumb, #roll-i::-webkit-slider-thumb, #roll-d::-webkit-slider-thumb { background: #00e5ff; }
+#pitch-p::-webkit-slider-thumb, #pitch-i::-webkit-slider-thumb, #pitch-d::-webkit-slider-thumb { background: #7fff6f; }
+#yaw-p::-webkit-slider-thumb, #yaw-i::-webkit-slider-thumb, #yaw-d::-webkit-slider-thumb { background: #ff6b35; }
+#alt-p::-webkit-slider-thumb, #alt-i::-webkit-slider-thumb, #alt-d::-webkit-slider-thumb { background: #c084fc; }
+.pid-val { font-family: var(--mono); font-size: 12px; min-width: 38px; text-align: right; color: var(--text); }
+
+/* ── METRICS ── */
+.metrics-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.metric {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.metric-label { font-size: 10px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.08em; }
+.metric-val { font-family: var(--mono); font-size: 18px; font-weight: 700; color: var(--text); }
+.metric-val.ok { color: var(--ok); } .metric-val.warn { color: var(--warn); } .metric-val.bad { color: var(--danger); }
+
+/* ── CHARTS ── */
+.charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.chart-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+}
+.chart-title {
+  font-family: var(--mono); font-size: 11px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.chart-title .dot { width: 6px; height: 6px; border-radius: 50%; }
+.chart-wrap { position: relative; height: 160px; }
+
+/* ── FOOTER BAR ── */
+.footer-bar {
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  padding: 8px 2rem;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  display: flex;
+  gap: 2rem;
+  flex-wrap: wrap;
+}
+.footer-bar span { display: flex; align-items: center; gap: 6px; }
+.footer-bar span::before { content: '◆'; color: var(--accent); font-size: 8px; }
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+  .pid-grid, .setpoints-row, .metrics-row { grid-template-columns: repeat(2, 1fr); }
+  .charts-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 560px) {
+  .pid-grid, .setpoints-row, .metrics-row { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="12" cy="12" r="2"/>
+      <path d="M4 4l4 4M20 4l-4 4M4 20l4-4M20 20l-4-4"/>
+      <circle cx="4" cy="4" r="2"/><circle cx="20" cy="4" r="2"/>
+      <circle cx="4" cy="20" r="2"/><circle cx="20" cy="20" r="2"/>
+    </svg>
+    QUADCOPTER PID SIMULATOR
+    <div class="logo-dot"></div>
+  </div>
+  <div id="status-pill" class="status-pill">
+    <div class="dot"></div>
+    <span id="status-text">GESTOPPT</span>
+  </div>
+</div>
+
+<div class="layout">
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar">
+
+    <div class="sidebar-section">
+      <h3>Masse &amp; Geometrie</h3>
+      <div class="field"><label>Gesamtmasse<span id="v-mass">0.500 kg</span></label><input type="number" id="hw-mass" value="0.5" step="0.05" min="0.1" max="5" oninput="hwChanged()"></div>
+      <div class="field"><label>Armradius (Achse-Achse)<span id="v-arm">0.220 m</span></label><input type="number" id="hw-arm" value="0.22" step="0.01" min="0.05" max="1" oninput="hwChanged()"></div>
+      <div class="field"><label>Trägheit Ixx / Iyy<span id="v-ixy">0.00300 kg·m²</span></label><input type="number" id="hw-ixy" value="0.003" step="0.0005" min="0.0001" oninput="hwChanged()"></div>
+      <div class="field"><label>Trägheit Izz<span id="v-izz">0.00500 kg·m²</span></label><input type="number" id="hw-izz" value="0.005" step="0.0005" min="0.0001" oninput="hwChanged()"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Motor &amp; Antrieb</h3>
+      <div class="field"><label>Max. Schub / Motor<span id="v-thrust">6.00 N</span></label><input type="number" id="hw-thrust" value="6.0" step="0.5" min="0.5" oninput="hwChanged()"></div>
+      <div class="field"><label>Schubkoeffizient kT<span id="v-kt">1.5e-5 N·s²</span></label><input type="number" id="hw-kt" value="0.000015" step="0.000001" min="0.000001" oninput="hwChanged()"></div>
+      <div class="field"><label>Drehmoment kQ/kT<span id="v-kq">0.020</span></label><input type="number" id="hw-kq" value="0.02" step="0.005" min="0.001" max="0.1" oninput="hwChanged()"></div>
+      <div class="field"><label>Motorzeitkonstante τ<span id="v-tau">30 ms</span></label><input type="number" id="hw-tau" value="30" step="5" min="5" max="200" oninput="hwChanged()"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Sensor &amp; Loop</h3>
+      <div class="field"><label>PID-Loop Rate<span id="v-loop">1000 Hz</span></label><input type="number" id="hw-looprate" value="1000" step="100" min="100" max="8000" oninput="hwChanged()"></div>
+      <div class="field"><label>Gyro-Rauschen RMS<span id="v-noise">0.050 °/s</span></label><input type="number" id="hw-noise" value="0.05" step="0.01" min="0" max="2" oninput="hwChanged()"></div>
+      <div class="field"><label>D-Filter Cutoff<span id="v-dfilter">100 Hz</span></label><input type="number" id="hw-dfilter" value="100" step="10" min="10" max="500" oninput="hwChanged()"></div>
+      <div class="field"><label>Luftwiderstand<span id="v-drag">0.050</span></label><input type="number" id="hw-drag" value="0.05" step="0.01" min="0" max="1" oninput="hwChanged()"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Berechnete Parameter</h3>
+      <div id="warn-box" class="warn-box"></div>
+      <div class="calc-card"><span class="clabel">Schub / Gewicht</span><span class="cval" id="c-twr">—</span></div>
+      <div class="calc-card"><span class="clabel">Auto Ixy</span><span class="cval" id="c-ixy">—</span></div>
+      <div class="calc-card"><span class="clabel">Max. α Roll</span><span class="cval" id="c-aroll">—</span></div>
+      <div class="calc-card"><span class="clabel">Eff. Motor τ</span><span class="cval" id="c-tau">—</span></div>
+    </div>
+
+    <div class="sidebar-section">
+      <h3>Hardware-Presets</h3>
+      <div class="preset-row">
+        <button class="preset-btn" onclick="loadPresetHW('5inch')">
+          ◈ 5" Racing Quad <span class="tag">~450g</span>
+        </button>
+        <button class="preset-btn" onclick="loadPresetHW('micro')">
+          ◈ Micro 2" Whoop <span class="tag">~80g</span>
+        </button>
+        <button class="preset-btn" onclick="loadPresetHW('heavy')">
+          ◈ 7" Cinelifter <span class="tag">~1.8kg</span>
+        </button>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ── MAIN ── -->
+  <main class="main">
+
+    <!-- Control strip -->
+    <div class="control-strip">
+      <button class="btn play" id="btn-play" onclick="toggleSim()">
+        <svg id="play-icon" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        <span id="play-label">Simulation starten</span>
+      </button>
+      <button class="btn" onclick="resetSim()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+        Reset
+      </button>
+      <div class="sep"></div>
+      <button class="btn disturbance" onclick="addDisturbance()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9.59 4.59A2 2 0 1 1 11 8H2m10.59 11.41A2 2 0 1 0 14 16H2m15.73-8.27A2.5 2.5 0 1 1 19.5 12H2"/></svg>
+        Windböe
+      </button>
+      <div class="sep"></div>
+      <button class="btn calc" onclick="calcAndApply()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l1.9 5.87H20l-5 3.63 1.9 5.87L12 15l-4.9 3.37 1.9-5.87-5-3.63h6.1z"/></svg>
+        PID aus Hardware berechnen
+      </button>
+    </div>
+
+    <!-- Setpoints -->
+    <div class="setpoints-row">
+      <div class="sp-card">
+        <div class="sp-title">Roll — Sollwert</div>
+        <div class="sp-val-display" id="spv-roll">0°</div>
+        <input type="range" min="-45" max="45" value="0" step="1" id="sp-roll" oninput="updateSP('roll',this.value)">
+      </div>
+      <div class="sp-card">
+        <div class="sp-title">Nick — Sollwert</div>
+        <div class="sp-val-display" id="spv-pitch">0°</div>
+        <input type="range" min="-45" max="45" value="0" step="1" id="sp-pitch" oninput="updateSP('pitch',this.value)">
+      </div>
+      <div class="sp-card">
+        <div class="sp-title">Gier — Rate</div>
+        <div class="sp-val-display" id="spv-yaw">0°/s</div>
+        <input type="range" min="-180" max="180" value="0" step="5" id="sp-yaw" oninput="updateSP('yaw',this.value)">
+      </div>
+      <div class="sp-card">
+        <div class="sp-title">Höhe — Ziel</div>
+        <div class="sp-val-display" id="spv-alt">5.0m</div>
+        <input type="range" min="0" max="20" value="5" step="0.5" id="sp-alt" oninput="updateSP('alt',this.value)">
+      </div>
+    </div>
+
+    <!-- PID Regler -->
+    <div>
+      <div class="pid-section-title">PID-Regler</div>
+      <div class="pid-grid">
+        <!-- Roll -->
+        <div class="pid-card">
+          <div class="pid-card-header">
+            <span class="pid-card-title">Roll</span>
+            <div class="pid-axis-badge" style="background:#00e5ff"></div>
+          </div>
+          <div class="pid-row"><span class="pid-term">P</span><input type="range" min="0" max="15" step="0.1" value="4.0" id="roll-p" oninput="updatePID('roll','p',this.value)"><span class="pid-val" id="roll-p-val">4.0</span></div>
+          <div class="pid-row"><span class="pid-term">I</span><input type="range" min="0" max="8" step="0.05" value="0.5" id="roll-i" oninput="updatePID('roll','i',this.value)"><span class="pid-val" id="roll-i-val">0.50</span></div>
+          <div class="pid-row"><span class="pid-term">D</span><input type="range" min="0" max="5" step="0.05" value="0.3" id="roll-d" oninput="updatePID('roll','d',this.value)"><span class="pid-val" id="roll-d-val">0.30</span></div>
+        </div>
+        <!-- Nick -->
+        <div class="pid-card">
+          <div class="pid-card-header">
+            <span class="pid-card-title">Nick</span>
+            <div class="pid-axis-badge" style="background:#7fff6f"></div>
+          </div>
+          <div class="pid-row"><span class="pid-term">P</span><input type="range" min="0" max="15" step="0.1" value="4.0" id="pitch-p" oninput="updatePID('pitch','p',this.value)"><span class="pid-val" id="pitch-p-val">4.0</span></div>
+          <div class="pid-row"><span class="pid-term">I</span><input type="range" min="0" max="8" step="0.05" value="0.5" id="pitch-i" oninput="updatePID('pitch','i',this.value)"><span class="pid-val" id="pitch-i-val">0.50</span></div>
+          <div class="pid-row"><span class="pid-term">D</span><input type="range" min="0" max="5" step="0.05" value="0.3" id="pitch-d" oninput="updatePID('pitch','d',this.value)"><span class="pid-val" id="pitch-d-val">0.30</span></div>
+        </div>
+        <!-- Gier -->
+        <div class="pid-card">
+          <div class="pid-card-header">
+            <span class="pid-card-title">Gier</span>
+            <div class="pid-axis-badge" style="background:#ff6b35"></div>
+          </div>
+          <div class="pid-row"><span class="pid-term">P</span><input type="range" min="0" max="15" step="0.1" value="2.0" id="yaw-p" oninput="updatePID('yaw','p',this.value)"><span class="pid-val" id="yaw-p-val">2.0</span></div>
+          <div class="pid-row"><span class="pid-term">I</span><input type="range" min="0" max="8" step="0.05" value="0.2" id="yaw-i" oninput="updatePID('yaw','i',this.value)"><span class="pid-val" id="yaw-i-val">0.20</span></div>
+          <div class="pid-row"><span class="pid-term">D</span><input type="range" min="0" max="5" step="0.05" value="0.1" id="yaw-d" oninput="updatePID('yaw','d',this.value)"><span class="pid-val" id="yaw-d-val">0.10</span></div>
+        </div>
+        <!-- Höhe -->
+        <div class="pid-card">
+          <div class="pid-card-header">
+            <span class="pid-card-title">Höhe</span>
+            <div class="pid-axis-badge" style="background:#c084fc"></div>
+          </div>
+          <div class="pid-row"><span class="pid-term">P</span><input type="range" min="0" max="15" step="0.1" value="3.0" id="alt-p" oninput="updatePID('alt','p',this.value)"><span class="pid-val" id="alt-p-val">3.0</span></div>
+          <div class="pid-row"><span class="pid-term">I</span><input type="range" min="0" max="8" step="0.05" value="0.3" id="alt-i" oninput="updatePID('alt','i',this.value)"><span class="pid-val" id="alt-i-val">0.30</span></div>
+          <div class="pid-row"><span class="pid-term">D</span><input type="range" min="0" max="5" step="0.05" value="0.5" id="alt-d" oninput="updatePID('alt','d',this.value)"><span class="pid-val" id="alt-d-val">0.50</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="metrics-row">
+      <div class="metric"><div class="metric-label">Roll-Fehler</div><div class="metric-val" id="m-roll">0.0°</div></div>
+      <div class="metric"><div class="metric-label">Nick-Fehler</div><div class="metric-val" id="m-pitch">0.0°</div></div>
+      <div class="metric"><div class="metric-label">Höhe IST</div><div class="metric-val" id="m-alt">0.0m</div></div>
+      <div class="metric"><div class="metric-label">Überschwingen</div><div class="metric-val" id="m-over">0.0°</div></div>
+      <div class="metric"><div class="metric-label">Einschwingzeit</div><div class="metric-val" id="m-settle">—</div></div>
+      <div class="metric"><div class="metric-label">TWR</div><div class="metric-val" id="m-twr">—</div></div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title"><div class="dot" style="background:#00e5ff"></div>Roll-Winkel (°)</div>
+        <div class="chart-wrap"><canvas id="chart-roll" role="img" aria-label="Roll-Winkel Verlauf"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><div class="dot" style="background:#7fff6f"></div>Nick-Winkel (°)</div>
+        <div class="chart-wrap"><canvas id="chart-pitch" role="img" aria-label="Nick-Winkel Verlauf"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><div class="dot" style="background:#c084fc"></div>Höhe (m)</div>
+        <div class="chart-wrap"><canvas id="chart-alt" role="img" aria-label="Höhe Verlauf"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title"><div class="dot" style="background:#ff6b35"></div>Motorausgabe (%)</div>
+        <div class="chart-wrap"><canvas id="chart-motors" role="img" aria-label="Motorleistung der 4 Motoren"></canvas></div>
+      </div>
+    </div>
+
+    <div class="footer-bar">
+      <span>P = Proportional (Sofortreaktion auf Fehler)</span>
+      <span>I = Integral (Dauerfehler ausgleichen)</span>
+      <span>D = Derivative (Überschwingen dämpfen)</span>
+      <span>Windböe simuliert externen Störimpuls</span>
+    </div>
+
+  </main>
+</div>
+
+<script>
+const MAX_PTS = 250;
+let DT = 1/1000;
+let running = false, simInt = null, t = 0;
+let maxOver = 0, settleTime = null, settleStart = null;
+
+let hw = { mass:0.5, arm:0.22, ixy:0.003, izz:0.005, thrust:6.0, kt:0.000015, kq:0.02, tau:30, looprate:1000, noise:0.05, dfilter:100, drag:0.05 };
+let pid = { roll:{p:4.0,i:0.5,d:0.3}, pitch:{p:4.0,i:0.5,d:0.3}, yaw:{p:2.0,i:0.2,d:0.1}, alt:{p:3.0,i:0.3,d:0.5} };
+let setpoints = { roll:0, pitch:0, yaw:0, alt:5 };
+let state = { roll:0,rollRate:0,rollInt:0,rollPrev:0, pitch:0,pitchRate:0,pitchInt:0,pitchPrev:0, yaw:0,yawRate:0,yawInt:0,yawPrev:0, alt:0,altRate:0,altInt:0,altPrev:0, m1:50,m2:50,m3:50,m4:50 };
+
+function hwChanged() {
+  hw.mass      = parseFloat(document.getElementById('hw-mass').value)||0.5;
+  hw.arm       = parseFloat(document.getElementById('hw-arm').value)||0.22;
+  hw.ixy       = parseFloat(document.getElementById('hw-ixy').value)||0.003;
+  hw.izz       = parseFloat(document.getElementById('hw-izz').value)||0.005;
+  hw.thrust    = parseFloat(document.getElementById('hw-thrust').value)||6.0;
+  hw.kt        = parseFloat(document.getElementById('hw-kt').value)||0.000015;
+  hw.kq        = parseFloat(document.getElementById('hw-kq').value)||0.02;
+  hw.tau       = parseFloat(document.getElementById('hw-tau').value)||30;
+  hw.looprate  = parseFloat(document.getElementById('hw-looprate').value)||1000;
+  hw.noise     = parseFloat(document.getElementById('hw-noise').value)||0.05;
+  hw.dfilter   = parseFloat(document.getElementById('hw-dfilter').value)||100;
+  hw.drag      = parseFloat(document.getElementById('hw-drag').value)||0.05;
+  DT = 1/hw.looprate;
+  document.getElementById('v-mass').textContent    = hw.mass.toFixed(3)+' kg';
+  document.getElementById('v-arm').textContent     = hw.arm.toFixed(3)+' m';
+  document.getElementById('v-ixy').textContent     = hw.ixy.toFixed(5)+' kg·m²';
+  document.getElementById('v-izz').textContent     = hw.izz.toFixed(5)+' kg·m²';
+  document.getElementById('v-thrust').textContent  = hw.thrust.toFixed(2)+' N';
+  document.getElementById('v-kt').textContent      = hw.kt.toExponential(2);
+  document.getElementById('v-kq').textContent      = hw.kq.toFixed(3);
+  document.getElementById('v-tau').textContent     = hw.tau+' ms';
+  document.getElementById('v-loop').textContent    = hw.looprate+' Hz';
+  document.getElementById('v-noise').textContent   = hw.noise.toFixed(3)+' °/s';
+  document.getElementById('v-dfilter').textContent = hw.dfilter+' Hz';
+  document.getElementById('v-drag').textContent    = hw.drag.toFixed(3);
+  updateCalc();
+}
+
+function updateCalc() {
+  const G = 9.81;
+  const twr = (hw.thrust*4)/(hw.mass*G);
+  const ixyAuto = (hw.mass*hw.arm*hw.arm*0.5);
+  const maxAlpha = (hw.thrust*hw.arm*2)/hw.ixy;
+  const tauEff = hw.tau*(1+hw.dfilter/500);
+  const twrEl = document.getElementById('c-twr');
+  twrEl.textContent = twr.toFixed(2)+'x';
+  twrEl.className = 'cval '+(twr<1.5?'bad':twr<2.5?'warn':'ok');
+  document.getElementById('c-ixy').textContent = ixyAuto.toFixed(4)+' kg·m²';
+  document.getElementById('c-aroll').textContent = maxAlpha.toFixed(0)+' rad/s²';
+  document.getElementById('c-tau').textContent = tauEff.toFixed(0)+' ms';
+  document.getElementById('m-twr').textContent = twr.toFixed(2)+'x';
+  document.getElementById('m-twr').className = 'metric-val '+(twr<1.5?'bad':twr<2.5?'warn':'ok');
+  const wb = document.getElementById('warn-box');
+  if (twr < 1.5) { wb.style.display='block'; wb.textContent='⚠ TWR < 1.5 — Kopter kann kaum fliegen. Schub erhöhen oder Masse reduzieren.'; }
+  else if (hw.tau > 80) { wb.style.display='block'; wb.textContent='⚠ Motor τ > 80ms — Träge Motoren: D-Werte reduzieren um Schwingungen zu vermeiden.'; }
+  else { wb.style.display='none'; }
+}
+
+function calcAndApply() {
+  hwChanged();
+  const G = 9.81;
+  const twr = (hw.thrust*4)/(hw.mass*G);
+  const maxTorqueRoll = hw.thrust*hw.arm*2;
+  const filterFactor = Math.max(0.3, 1-(hw.dfilter/500));
+  const tauFactor = Math.max(0.2, 1-(hw.tau/200));
+  const pRoll  = parseFloat(Math.min(12, Math.max(1, (maxTorqueRoll/hw.ixy)*0.0008*tauFactor)).toFixed(1));
+  const iRoll  = parseFloat((pRoll*0.12).toFixed(2));
+  const dRoll  = parseFloat((pRoll*0.08*filterFactor*tauFactor).toFixed(2));
+  const pYaw   = parseFloat((pRoll*0.5).toFixed(1));
+  const iYaw   = parseFloat((pYaw*0.1).toFixed(2));
+  const dYaw   = parseFloat((pYaw*0.05).toFixed(2));
+  const pAlt   = parseFloat(Math.min(8, Math.max(1, twr*0.7)).toFixed(1));
+  const iAlt   = parseFloat((pAlt*0.1).toFixed(2));
+  const dAlt   = parseFloat((pAlt*0.18).toFixed(2));
+  const vals = { roll:{p:pRoll,i:iRoll,d:dRoll}, pitch:{p:pRoll,i:iRoll,d:dRoll}, yaw:{p:pYaw,i:iYaw,d:dYaw}, alt:{p:pAlt,i:iAlt,d:dAlt} };
+  Object.entries(vals).forEach(([axis,v]) => {
+    Object.entries(v).forEach(([term,val]) => {
+      pid[axis][term] = val;
+      const el = document.getElementById(axis+'-'+term);
+      if (el) el.value = val;
+      const vEl = document.getElementById(axis+'-'+term+'-val');
+      if (vEl) vEl.textContent = val.toFixed(term==='p'?1:2);
+    });
+  });
+}
+
+function loadPresetHW(name) {
+  const presets = {
+    '5inch': {mass:0.45,arm:0.22,ixy:0.003,izz:0.005,thrust:8.0,kt:0.000018,kq:0.02,tau:25,looprate:8000,noise:0.03,dfilter:120,drag:0.04},
+    'micro':  {mass:0.08,arm:0.085,ixy:0.0002,izz:0.0003,thrust:0.9,kt:0.000003,kq:0.015,tau:15,looprate:4000,noise:0.08,dfilter:80,drag:0.02},
+    'heavy':  {mass:1.8,arm:0.35,ixy:0.025,izz:0.04,thrust:18.0,kt:0.00006,kq:0.025,tau:50,looprate:500,noise:0.04,dfilter:60,drag:0.12}
+  };
+  const p = presets[name];
+  Object.entries(p).forEach(([k,v]) => { const el=document.getElementById('hw-'+k); if(el) el.value=v; });
+  hwChanged();
+}
+
+function makeChart(id, mainColor, spColor, motorLabels) {
+  const ctx = document.getElementById(id).getContext('2d');
+  let datasets;
+  if (motorLabels) {
+    datasets = motorLabels.map((l,i) => ({
+      label:l, data:[], borderColor:['#00e5ff','#ff6b35','#7fff6f','#c084fc'][i],
+      borderWidth:1.5, pointRadius:0, tension:0.3, fill:false
+    }));
+  } else {
+    datasets = [{label:'Ist',data:[],borderColor:mainColor,borderWidth:1.5,pointRadius:0,tension:0.3,fill:false}];
+    if (spColor) datasets.push({label:'Soll',data:[],borderColor:spColor,borderWidth:1,borderDash:[5,4],pointRadius:0,fill:false});
+  }
+  return new Chart(ctx, {
+    type:'line',
+    data:{labels:[],datasets},
+    options:{
+      responsive:true, maintainAspectRatio:false, animation:false,
+      plugins:{ legend:{ display:!!motorLabels, labels:{ color:'rgba(255,255,255,0.5)', boxWidth:8, font:{size:10}, padding:12 }} },
+      scales:{
+        x:{ display:false },
+        y:{ grid:{color:'rgba(255,255,255,0.06)'}, ticks:{color:'rgba(255,255,255,0.4)',font:{size:10},maxTicksLimit:5} }
+      }
+    }
+  });
+}
+
+const charts = {
+  roll:   makeChart('chart-roll',   '#00e5ff', 'rgba(255,68,68,0.7)'),
+  pitch:  makeChart('chart-pitch',  '#7fff6f', 'rgba(255,107,53,0.7)'),
+  alt:    makeChart('chart-alt',    '#c084fc', 'rgba(192,132,252,0.4)'),
+  motors: makeChart('chart-motors', null, null, ['M1','M2','M3','M4'])
+};
+
+function pushData(ch, vals, sp) {
+  ch.data.labels.push('');
+  ch.data.datasets[0].data.push(vals[0]);
+  if (sp !== undefined) ch.data.datasets[1].data.push(sp);
+  if (vals.length > 1) for (let i=1;i<vals.length;i++) ch.data.datasets[i].data.push(vals[i]);
+  if (ch.data.labels.length > MAX_PTS) { ch.data.labels.shift(); ch.data.datasets.forEach(d=>d.data.shift()); }
+  ch.update('none');
+}
+
+function lowpass(prev, input, cutHz) {
+  const alpha = 1/(1+1/(2*Math.PI*cutHz*DT));
+  return prev + alpha*(input-prev);
+}
+
+function pidStep(axis, actual) {
+  const cfg = pid[axis];
+  const sp = setpoints[axis];
+  const err = sp - actual;
+  state[axis+'Int'] = Math.max(-60, Math.min(60, state[axis+'Int'] + err*DT));
+  const rawD = (err - state[axis+'Prev'])/DT;
+  const filtD = lowpass(0, rawD, hw.dfilter);
+  state[axis+'Prev'] = err;
+  const noise = (Math.random()-0.5)*hw.noise;
+  return cfg.p*(err+noise) + cfg.i*state[axis+'Int'] + cfg.d*filtD;
+}
+
+const G = 9.81;
+
+function simStep() {
+  t += DT;
+  const rollOut  = Math.max(-1000, Math.min(1000, pidStep('roll',  state.roll)));
+  const pitchOut = Math.max(-1000, Math.min(1000, pidStep('pitch', state.pitch)));
+  const yawOut   = Math.max(-1000, Math.min(1000, pidStep('yaw',   state.yawRate)));
+  const altOut   = Math.max(-200,  Math.min(200,  pidStep('alt',   state.alt)));
+
+  const tauS = hw.tau/1000;
+  const ma   = DT/(tauS+DT);
+  const base = 50 + altOut*0.3;
+  const tM1  = Math.max(0,Math.min(100, base + rollOut*0.04 - pitchOut*0.04 + yawOut*0.04));
+  const tM2  = Math.max(0,Math.min(100, base - rollOut*0.04 - pitchOut*0.04 - yawOut*0.04));
+  const tM3  = Math.max(0,Math.min(100, base - rollOut*0.04 + pitchOut*0.04 + yawOut*0.04));
+  const tM4  = Math.max(0,Math.min(100, base + rollOut*0.04 + pitchOut*0.04 - yawOut*0.04));
+  state.m1 += (tM1-state.m1)*ma;
+  state.m2 += (tM2-state.m2)*ma;
+  state.m3 += (tM3-state.m3)*ma;
+  state.m4 += (tM4-state.m4)*ma;
+
+  const rollTorque  = (state.m1-state.m2-state.m3+state.m4)*hw.thrust*0.01*hw.arm;
+  const pitchTorque = (-state.m1-state.m2+state.m3+state.m4)*hw.thrust*0.01*hw.arm;
+  const yawTorque   = (state.m1-state.m2+state.m3-state.m4)*hw.thrust*0.01*hw.kq*50;
+  const totalThrust = (state.m1+state.m2+state.m3+state.m4)*hw.thrust*0.01;
+
+  state.rollRate  += (rollTorque/hw.ixy)*DT;
+  state.rollRate  *= (1-hw.drag*DT*3);
+  state.roll      += state.rollRate*DT;
+  state.pitchRate += (pitchTorque/hw.ixy)*DT;
+  state.pitchRate *= (1-hw.drag*DT*3);
+  state.pitch     += state.pitchRate*DT;
+  state.yawRate   += (yawTorque/hw.izz)*DT;
+  state.yawRate   *= (1-hw.drag*DT*2);
+  state.yaw       += state.yawRate*DT;
+  state.altRate   += (totalThrust/hw.mass-G)*DT;
+  state.altRate   *= (1-hw.drag*DT);
+  state.alt       += state.altRate*DT;
+  state.alt        = Math.max(-1, state.alt);
+
+  const rollErr = Math.abs(state.roll - setpoints.roll);
+  if (rollErr > maxOver && t > 0.3) maxOver = rollErr;
+  if (rollErr < 1 && settleStart && !settleTime) settleTime = t - settleStart;
+
+  const re = rollErr;
+  document.getElementById('m-roll').textContent = re.toFixed(1)+'°';
+  document.getElementById('m-roll').className = 'metric-val '+(re<2?'ok':re<10?'warn':'bad');
+  document.getElementById('m-pitch').textContent = Math.abs(state.pitch-setpoints.pitch).toFixed(1)+'°';
+  document.getElementById('m-alt').textContent = state.alt.toFixed(2)+'m';
+  document.getElementById('m-over').textContent = maxOver.toFixed(1)+'°';
+  document.getElementById('m-settle').textContent = settleTime ? settleTime.toFixed(2)+'s' : '—';
+
+  if (Math.abs(state.roll) > 80 || Math.abs(state.pitch) > 80) {
+    stopSim(true); return;
+  }
+
+  pushData(charts.roll,   [parseFloat(state.roll.toFixed(2))], setpoints.roll);
+  pushData(charts.pitch,  [parseFloat(state.pitch.toFixed(2))], setpoints.pitch);
+  pushData(charts.alt,    [parseFloat(state.alt.toFixed(3))], setpoints.alt);
+  pushData(charts.motors, [state.m1.toFixed(1),state.m2.toFixed(1),state.m3.toFixed(1),state.m4.toFixed(1)]);
+}
+
+function toggleSim() { if (running) stopSim(false); else startSim(); }
+
+function startSim() {
+  running = true;
+  DT = 1/Math.max(100, hw.looprate);
+  document.getElementById('play-icon').innerHTML = '<rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>';
+  document.getElementById('play-label').textContent = 'Pause';
+  const sp = document.getElementById('status-pill');
+  sp.className = 'status-pill flying';
+  document.getElementById('status-text').textContent = 'FLIEGT';
+  simInt = setInterval(simStep, Math.max(8, DT*1000));
+}
+
+function stopSim(crashed=false) {
+  running = false; clearInterval(simInt);
+  document.getElementById('play-icon').innerHTML = '<path d="M8 5v14l11-7z"/>';
+  document.getElementById('play-label').textContent = 'Simulation starten';
+  const sp = document.getElementById('status-pill');
+  if (crashed) {
+    sp.className = 'status-pill crashed';
+    document.getElementById('status-text').textContent = 'ABGESTÜRZT';
+  } else {
+    sp.className = 'status-pill';
+    document.getElementById('status-text').textContent = 'PAUSIERT';
+  }
+}
+
+function resetSim() {
+  stopSim(false);
+  t=0; maxOver=0; settleTime=null; settleStart=null;
+  state={roll:0,rollRate:0,rollInt:0,rollPrev:0,pitch:0,pitchRate:0,pitchInt:0,pitchPrev:0,yaw:0,yawRate:0,yawInt:0,yawPrev:0,alt:0,altRate:0,altInt:0,altPrev:0,m1:50,m2:50,m3:50,m4:50};
+  Object.values(charts).forEach(c=>{c.data.labels=[];c.data.datasets.forEach(d=>d.data=[]);c.update('none');});
+  ['m-roll','m-pitch','m-alt','m-over'].forEach(id=>document.getElementById(id).textContent='0.0');
+  document.getElementById('m-settle').textContent='—';
+  const sp = document.getElementById('status-pill');
+  sp.className = 'status-pill';
+  document.getElementById('status-text').textContent = 'GESTOPPT';
+}
+
+function addDisturbance() {
+  state.rollRate  += (Math.random()-0.5)*150;
+  state.pitchRate += (Math.random()-0.5)*150;
+  state.altRate   += (Math.random()-0.5)*5;
+  maxOver=0; settleTime=null; settleStart=t;
+}
+
+function updateSP(axis, val) {
+  setpoints[axis] = parseFloat(val);
+  const suffix = axis==='yaw'?'°/s':axis==='alt'?'m':'°';
+  document.getElementById('spv-'+axis).textContent = parseFloat(val).toFixed(axis==='alt'?1:0)+suffix;
+  settleTime=null; settleStart=t; maxOver=0;
+}
+
+function updatePID(axis, term, val) {
+  pid[axis][term] = parseFloat(val);
+  document.getElementById(axis+'-'+term+'-val').textContent = parseFloat(val).toFixed(term==='p'?1:2);
+}
+
+updateCalc();
+</script>
+</body>
+</html>
