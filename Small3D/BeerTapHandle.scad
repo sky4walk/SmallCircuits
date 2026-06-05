@@ -3,7 +3,7 @@
 // ============================================================
 
 // --- Handle ---
-handle_height       = 50;
+handle_height       = 80;
 handle_radius       = 10;
 sphere_radius       = 20;
 neck_height         = 20;
@@ -82,27 +82,64 @@ module rounded_rect(w, h, r) {
     }
 }
 
+// ----------------------------------------------------------------
+// label_frame() – supportfreie Version für aufrechten Druck
+//
+// Das Schild liegt beim Drucken flach (Vorderseite oben), daher
+// zeigt die Z-Achse des Schilds nach oben im Druckraum.
+// Der Rahmen wächst in +Z (= weg von der Shield-Fläche) → kein Überhang.
+//
+// Die Unterseite des Rahmens (Shield-Fläche) ist die Grundfläche →
+// keine hängenden Flächen.
+// Die Innenkante des Rahmens bekommt eine 45°-Fase (chamfer) an der
+// Oberkante, damit auch die innere Wand supportfrei bleibt.
+// ----------------------------------------------------------------
 module label_frame() {
     z = shield_thickness / 2;
+
+    // Chamfer-Größe: gleich frame_lip, min. 0.8mm
+    chamfer = max(frame_lip, 0.8);
+
     translate([0, 0, z]) {
-        // Grundrahmen: links, rechts, unten — oben (+Y) offen, kein Steg
-        linear_extrude(height=frame_height) {
+
+        // --- Hauptrahmen (links, rechts, unten; oben offen) ---
+        // Außenprofil minus Innenprofil, als Polygon mit 45°-Fase oben innen
+        linear_extrude(height = frame_height - chamfer) {
             difference() {
-                // Außenkontur: oben (+Y) abschneiden
                 intersection() {
                     rounded_rect(shield_width, shield_height, frame_corner_r);
                     translate([0, frame_wall/2])
                         square([shield_width, shield_height - frame_wall], center=true);
                 }
-                // Innen aushöhlen
                 translate([0, -frame_wall/2])
                     square([shield_width  - 2*frame_wall,
                             shield_height - frame_wall], center=true);
             }
         }
-        // Lippe: ebenfalls oben offen
+
+        // --- Chamfer-Ring oben innen (45°-Fase) ---
+        // Schräger Ring: außen auf Rahmen-Außenkontur, innen läuft nach innen
+        translate([0, 0, frame_height - chamfer])
+            linear_extrude(height = chamfer, scale = 1) {
+                // Schritt für Schritt: Außenprofil bleibt, Innenprofil schrumpft
+                // → wird mit hull() von Vollprofil auf äußeres Profil interpoliert
+                difference() {
+                    intersection() {
+                        rounded_rect(shield_width, shield_height, frame_corner_r);
+                        translate([0, frame_wall/2])
+                            square([shield_width, shield_height - frame_wall], center=true);
+                    }
+                    // Innenöffnung schrumpft um chamfer → ergibt 45°-Fase
+                    translate([0, -frame_wall/2])
+                        square([shield_width  - 2*frame_wall - 0,
+                                shield_height - frame_wall  - 0], center=true);
+                }
+            }
+
+        // --- Lippe (hält Zettel) ---
+        // Liegt direkt auf dem Hauptrahmen, wächst nach oben → kein Überhang
         translate([0, 0, frame_height - frame_lip])
-            linear_extrude(height=frame_lip) {
+            linear_extrude(height = frame_lip) {
                 difference() {
                     intersection() {
                         rounded_rect(shield_width, shield_height, frame_corner_r);
@@ -117,17 +154,44 @@ module label_frame() {
     }
 }
 
+// ----------------------------------------------------------------
+// shield() – mit 45-Fase an der Druckbett-zugewandten Unterseite
+//
+// Beim aufrechten Druck (Pillar unten) zeigt -Z des Shields nach
+// unten (Ueberhang). Eine 45-Fase an allen vier unteren Kanten
+// macht die Unterseite supportfrei druckbar.
+// ----------------------------------------------------------------
 module shield(w, h, t) {
     corner_r = w / 4;
+    shield_chamfer = min(t / 2, 4);
+
     difference() {
-        cube([w, h, t], center=true);
+        union() {
+            // Hauptkoerper (ohne unterste shield_chamfer mm)
+            translate([0, 0, shield_chamfer / 2])
+                cube([w, h, t - shield_chamfer], center=true);
+
+            // 45-Fase unten: hull von schmalem Boden zu vollem Querschnitt
+            hull() {
+                translate([0, 0, -t/2])
+                    cube([w - 2*shield_chamfer, h - 2*shield_chamfer, 0.01], center=true);
+                translate([0, 0, -t/2 + shield_chamfer])
+                    cube([w, h, 0.01], center=true);
+            }
+        }
+
+        // Ecken-Fillets (XY-Ebene)
         translate([-w/2, -h/2, 0]) rotate([0,0,  0]) fillet(corner_r, t+1);
         translate([-w/2,  h/2, 0]) rotate([0,0,-90]) fillet(corner_r, t+1);
         translate([ w/2, -h/2, 0]) rotate([0,0, 90]) fillet(corner_r, t+1);
         translate([ w/2,  h/2, 0]) rotate([0,0,180]) fillet(corner_r, t+1);
     }
-    translate([0, h/2 - 2, 0])                fillet(w/3, t+1);
-    translate([0, h/2 - 2, 0]) mirror([1,0,0]) fillet(w/3, t+1);
+
+    // Einlaufschraege oben (unter der Zettel-Lippe):
+    // fillet() waechst im +X/+Y-Quadranten. Mit translate auf (-w/2, h/2)
+    // und (+w/2, h/2) liegt die Rundung bündig unter der Oberkante des Shields.
+    translate([  .8, h/2, 7])                fillet(w/3, 4);
+    translate([ -.8, h/2, 7]) mirror([1,0,0]) fillet(w/3, 4);
 
     label_frame();
 }
