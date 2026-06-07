@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ENDURO</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#000;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  min-height:100vh;
+  overflow:hidden;
+}
+canvas {
+  display:block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+#ui {
+  position:fixed;
+  inset:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:#000;
+  z-index:10;
+  flex-direction:column;
+  gap:18px;
+  color:#fff;
+  font-family:'Courier New',monospace;
+}
+#ui h1 {
+  font-size:clamp(40px,10vw,90px);
+  letter-spacing:.35em;
+  color:#fff;
+  text-shadow:0 0 20px #ff6600;
+  font-weight:900;
+}
+#ui p { color:#aaa; font-size:clamp(11px,2vw,15px); letter-spacing:.15em; }
+#ui button {
+  margin-top:10px;
+  padding:12px 44px;
+  background:transparent;
+  border:2px solid #ff6600;
+  color:#ff6600;
+  font-family:'Courier New',monospace;
+  font-size:16px;
+  letter-spacing:.3em;
+  cursor:pointer;
+  text-transform:uppercase;
+}
+#ui button:hover { background:#ff6600; color:#000; }
+#gameover {
+  position:fixed;
+  inset:0;
+  display:none;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  background:rgba(0,0,0,.85);
+  z-index:10;
+  color:#fff;
+  font-family:'Courier New',monospace;
+  gap:14px;
+}
+#gameover h2 { font-size:clamp(28px,7vw,64px); color:#ff2200; letter-spacing:.3em; }
+#gameover p  { font-size:clamp(12px,2vw,16px); color:#aaa; letter-spacing:.1em; }
+#gameover button {
+  margin-top:14px;
+  padding:11px 38px;
+  background:transparent;
+  border:2px solid #ff6600;
+  color:#ff6600;
+  font-family:'Courier New',monospace;
+  font-size:15px;
+  letter-spacing:.3em;
+  cursor:pointer;
+  text-transform:uppercase;
+}
+#gameover button:hover { background:#ff6600; color:#000; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <h1>ENDURO</h1>
+  <p>← → oder A/D zum Lenken</p>
+  <p>Überhol so viele Autos wie möglich pro Tag</p>
+  <p>Schaffst du das Tagesziel nicht — Game Over!</p>
+  <button onclick="startGame()">STARTEN</button>
+</div>
+
+<div id="gameover">
+  <h2>GAME OVER</h2>
+  <p id="go1"></p>
+  <p id="go2"></p>
+  <p id="go3"></p>
+  <button onclick="startGame()">NOCHMAL</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ── sizing ──────────────────────────────────────────────────────────────
+const NATIVE_W = 320, NATIVE_H = 210;   // original Atari aspect‑ish
+let scale = 1;
+
+function resize() {
+  const s = Math.min(window.innerWidth / NATIVE_W, window.innerHeight / NATIVE_H);
+  scale = Math.max(1, Math.floor(s));
+  canvas.width  = NATIVE_W * scale;
+  canvas.height = NATIVE_H * scale;
+  ctx.setTransform(scale, 0, 0, scale, 0, 0);
+}
+window.addEventListener('resize', () => { resize(); });
+resize();
+
+// ── palette ─────────────────────────────────────────────────────────────
+const PAL = {
+  sky_day:   '#3060c8',
+  sky_night: '#000010',
+  sky_dawn:  '#d05020',
+  sky_fog:   '#a0b0a0',
+  sky_snow:  '#8899aa',
+  sky_rain:  '#334455',
+  ground_day:   '#1a7a20',
+  ground_night: '#061406',
+  ground_dawn:  '#2a4010',
+  ground_fog:   '#5a7060',
+  ground_snow:  '#c8d8e0',
+  ground_rain:  '#2a4a30',
+  hill_day:   '#8a8820',
+  hill_night: '#050805',
+  hill_dawn:  '#403010',
+  hill_fog:   '#708070',
+  hill_snow:  '#99aabb',
+  hill_rain:  '#445566',
+};
+
+// ── road / scene constants ───────────────────────────────────────────────
+const HORIZON_Y = 65;          // pixel row where road vanishes
+const GROUND_Y  = NATIVE_H - 40; // bottom of playfield
+const ROAD_BOTTOM_HALF = 55;   // half‑width of road at bottom of screen
+const ROAD_TOP_HALF    = 2;    // half‑width at horizon (vanishing)
+const CX = NATIVE_W / 2;       // screen centre x
+
+// Player sits at fixed position
+const PLAYER_Y  = GROUND_Y - 12;
+const PLAYER_W  = 18;
+const PLAYER_H  = 10;
+
+// ── time of day cycle ────────────────────────────────────────────────────
+// Each "day" cycles through these phases (indices into PHASES array)
+const PHASES = [
+  { name:'day',   sky:'sky_day',   gnd:'ground_day',   hill:'hill_day',   line:'#ffffff', lineAlpha:0.85 },
+  { name:'dusk',  sky:'sky_dawn',  gnd:'ground_dawn',  hill:'hill_dawn',  line:'#ffeeaa', lineAlpha:0.7  },
+  { name:'night', sky:'sky_night', gnd:'ground_night', hill:'hill_night', line:'#223344', lineAlpha:0.5  },
+  { name:'dawn',  sky:'sky_dawn',  gnd:'ground_dawn',  hill:'hill_dawn',  line:'#ffddaa', lineAlpha:0.7  },
+  { name:'day',   sky:'sky_day',   gnd:'ground_day',   hill:'hill_day',   line:'#ffffff', lineAlpha:0.85 },
+  { name:'fog',   sky:'sky_fog',   gnd:'ground_fog',   hill:'hill_fog',   line:'#ccddcc', lineAlpha:0.6  },
+  { name:'snow',  sky:'sky_snow',  gnd:'ground_snow',  hill:'hill_snow',  line:'#ffffff', lineAlpha:0.9  },
+  { name:'rain',  sky:'sky_rain',  gnd:'ground_rain',  hill:'hill_rain',  line:'#aabbcc', lineAlpha:0.7  },
+];
+
+// ── curve system ─────────────────────────────────────────────────────────
+// The road curves by shifting the vanishing point horizontally.
+// curvature: target offset of vanishing point from CX, in pixels.
+// We lerp toward it over time, and change it every N frames.
+
+// ── enemy car colours ────────────────────────────────────────────────────
+const ENEMY_COLORS = ['#00cccc','#cccc00','#cc2222','#2244cc','#22aa44','#cc6622','#aa22aa'];
+
+// ── per‑day goals ────────────────────────────────────────────────────────
+const GOALS = [5,10,15,20,25,30,35,40,50,60];
+
+// ════════════════════════════════════════════════════════════════════════
+class AudioEngine {
+  constructor() {
+    this.ctx    = null;
+    this.osc1   = null;  // main engine tone
+    this.osc2   = null;  // harmonic
+    this.noise  = null;  // rumble noise
+    this.gain   = null;
+    this.ready  = false;
+  }
+
+  init() {
+    if (this.ready) return;
+    this.ctx   = new (window.AudioContext || window.webkitAudioContext)();
+    const ac   = this.ctx;
+
+    // Master gain
+    this.gain  = ac.createGain();
+    this.gain.gain.value = 0.0;
+    this.gain.connect(ac.destination);
+
+    // Low-pass filter for warmth
+    this.filter = ac.createBiquadFilter();
+    this.filter.type = 'lowpass';
+    this.filter.frequency.value = 800;
+    this.filter.connect(this.gain);
+
+    // Oscillator 1: fundamental engine tone (sawtooth = growly)
+    this.osc1  = ac.createOscillator();
+    this.osc1.type = 'sawtooth';
+    this.osc1.frequency.value = 55;
+    const g1   = ac.createGain();
+    g1.gain.value = 0.4;
+    this.osc1.connect(g1);
+    g1.connect(this.filter);
+    this.osc1.start();
+
+    // Oscillator 2: octave above, quieter
+    this.osc2  = ac.createOscillator();
+    this.osc2.type = 'sawtooth';
+    this.osc2.frequency.value = 110;
+    const g2   = ac.createGain();
+    g2.gain.value = 0.15;
+    this.osc2.connect(g2);
+    g2.connect(this.filter);
+    this.osc2.start();
+
+    // Brown noise for road rumble
+    const bufSize = ac.sampleRate * 2;
+    const buf  = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    let last   = 0;
+    for (let i = 0; i < bufSize; i++) {
+      const white = Math.random() * 2 - 1;
+      last  = (last + 0.02 * white) / 1.02;
+      data[i] = last * 3.5;
+    }
+    this.noiseSource = ac.createBufferSource();
+    this.noiseSource.buffer = buf;
+    this.noiseSource.loop   = true;
+    const gn = ac.createGain();
+    gn.gain.value = 0.12;
+    this.noiseSource.connect(gn);
+    gn.connect(this.filter);
+    this.noiseSource.start();
+    this.noiseGain = gn;
+
+    this.ready = true;
+  }
+
+  // speed: 0..1 normalised (0=idle, 1=max)
+  update(speed, crashed) {
+    if (!this.ready) return;
+    const ac  = this.ctx;
+    const now = ac.currentTime;
+
+    if (crashed) {
+      // Stall: drop frequency and volume sharply
+      this.osc1.frequency.setTargetAtTime(38, now, 0.08);
+      this.osc2.frequency.setTargetAtTime(76, now, 0.08);
+      this.gain.gain.setTargetAtTime(0.25, now, 0.05);
+      this.noiseGain.gain.setTargetAtTime(0.04, now, 0.1);
+    } else {
+      // Frequency: 55 Hz idle → 160 Hz at full speed (sawtooth engine growl)
+      const freq = 55 + speed * 105;
+      this.osc1.frequency.setTargetAtTime(freq,      now, 0.15);
+      this.osc2.frequency.setTargetAtTime(freq * 2,  now, 0.15);
+      // Volume: quiet at idle, louder at speed
+      const vol = 0.18 + speed * 0.38;
+      this.gain.gain.setTargetAtTime(vol, now, 0.1);
+      // Filter opens up with speed (more treble = higher revs)
+      this.filter.frequency.setTargetAtTime(400 + speed * 1200, now, 0.2);
+      // Rumble increases with speed
+      this.noiseGain.gain.setTargetAtTime(0.05 + speed * 0.18, now, 0.15);
+    }
+  }
+
+  crash() {
+    if (!this.ready) return;
+    const ac  = this.ctx;
+    const now = ac.currentTime;
+
+    // White noise burst (impact)
+    const bufSize = ac.sampleRate * 0.4;
+    const buf  = ac.createBuffer(1, bufSize, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      // amplitude envelope: sharp attack, fast decay
+      const env = Math.pow(1 - i / bufSize, 2.5);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+    const src  = ac.createBufferSource();
+    src.buffer = buf;
+
+    // Low-pass so it sounds like metal crunch, not pure hiss
+    const flt  = ac.createBiquadFilter();
+    flt.type   = 'lowpass';
+    flt.frequency.value = 900;
+
+    const g    = ac.createGain();
+    g.gain.value = 0.9;
+
+    src.connect(flt);
+    flt.connect(g);
+    g.connect(ac.destination);
+    src.start(now);
+
+    // Short pitched thud underneath (low freq "bang")
+    const osc  = ac.createOscillator();
+    osc.type   = 'sine';
+    osc.frequency.setValueAtTime(120, now);
+    osc.frequency.exponentialRampToValueAtTime(40, now + 0.25);
+    const og   = ac.createGain();
+    og.gain.setValueAtTime(0.7, now);
+    og.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+    osc.connect(og);
+    og.connect(ac.destination);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  }
+
+  stop() {
+    if (!this.ready) return;
+    this.gain.gain.setTargetAtTime(0, this.ctx.currentTime, 0.2);
+  }
+}
+
+const audio = new AudioEngine();
+
+// ════════════════════════════════════════════════════════════════════════
+class Game {
+  constructor() {
+    // state
+    this.keys = {};
+    this.running = false;
+    this.over    = false;
+    this.raf     = null;
+    this.last    = null;
+
+    this.day          = 0;
+    this.dayTime      = 0;     // seconds elapsed in current day
+    this.dayDuration  = 60;    // seconds per day
+    this.phaseIdx     = 0;     // index into PHASES (visual only)
+    this.phaseTime    = 0;     // seconds in current phase
+    this.phaseDur     = 10;    // seconds per visual phase
+    this.passedToday  = 0;
+    this.totalPassed  = 0;
+    this.score        = 0;
+    this.goal         = GOALS[0];
+
+    // player
+    this.px         = CX;
+    this.pVel       = 0;
+    this.speed      = 1.0;
+    this.crashed    = false;
+    this.crashT     = 0;
+    this.invincible = false;
+    this.invincT    = 0;
+    this.flashT     = 0;
+    this.crashSpeed = 1.0;
+
+    // road
+    this.curvature    = 0;
+    this.curvTarget   = 0;
+    this.curveCDT     = 0;
+    this.roadOffset   = 0;
+    this.horizonOffset = 0;  // scrolling offset for background hills
+
+    // enemies
+    this.enemies  = [];
+    this.spawnCDT = 0;
+
+    // snow / rain
+    this.snow = [];
+    this.rain = [];
+
+    // stars
+    this.stars = Array.from({length:60}, () => ({
+      x: Math.random() * NATIVE_W,
+      y: Math.random() * HORIZON_Y * 0.85,
+      b: Math.random()
+    }));
+
+    this.buildRoadTable();
+  }
+
+  start() {
+    this.running = true;
+    this.last = null;
+    this.raf = requestAnimationFrame(ts => this.loop(ts));
+  }
+
+  loop(ts) {
+    if (!this.running) return;
+    if (this.last === null) this.last = ts;
+    const dt = Math.min(0.05, (ts - this.last) / 1000);
+    this.last = ts;
+    this.update(dt);
+    this.draw();
+    // update audio: normalise speed 0..1
+    const maxSpd = 1.0 + this.day * 0.3;
+    audio.update(Math.min(1, this.speed / Math.max(1, maxSpd)), this.crashed);
+    this.raf = requestAnimationFrame(ts2 => this.loop(ts2));
+  }
+
+  stop() {
+    this.running = false;
+    if (this.raf) cancelAnimationFrame(this.raf);
+  }
+
+  // ── update ──────────────────────────────────────────────────────────
+  update(dt) {
+    const ph = PHASES[this.phaseIdx];
+
+    // day timer: one day = DAY_DURATION seconds, split into phases for visuals
+    this.dayTime  += dt;
+    this.phaseTime += dt;
+    if (this.phaseTime >= this.phaseDur) {
+      this.phaseTime = 0;
+      this.phaseIdx  = (this.phaseIdx + 1) % PHASES.length;
+    }
+    if (this.dayTime >= this.dayDuration) {
+      this.dayTime = 0;
+      if (this.passedToday < this.goal) { this.gameOver(); return; }
+      this.day++;
+      this.passedToday = 0;
+      this.goal = GOALS[Math.min(this.day, GOALS.length - 1)];
+    }
+
+    // speed ramp per phase
+    const baseSpeed = 1.0 + this.day * 0.3;
+    this.speed = baseSpeed;
+
+    // curve: curvature is a signed value controlling road bend
+    this.curveCDT -= dt;
+    if (this.curveCDT <= 0) {
+      const maxC = 6 + this.day * 0.4;
+      this.curvTarget = (Math.random() * 2 - 1) * maxC;
+      this.curveCDT   = 2 + Math.random() * 2.5;
+    }
+    this.curvature += (this.curvTarget - this.curvature) * dt * 2.0;
+    // Rebuild scanline road table each frame
+    this.buildRoadTable();
+
+    // road scroll animation
+    this.roadOffset = (this.roadOffset + this.speed * 60 * dt) % 16;
+
+    // horizon scroll: berge wandern entgegengesetzt zur Kurvenrichtung
+    // Linkskurve (curvature < 0) → Berge wandern nach rechts (positiver offset)
+    this.horizonOffset = ((this.horizonOffset || 0) - this.curvature * this.speed * 1.5 * dt * NATIVE_W * 0.04) % (NATIVE_W * 2);
+
+    // player steering + centrifugal drift in curves
+    if (!this.crashed) {
+      const steer = 90 + this.day * 8;
+      if (this.keys['ArrowLeft']  || this.keys['a'] || this.keys['A']) this.pVel -= steer * dt;
+      else if (this.keys['ArrowRight'] || this.keys['d'] || this.keys['D']) this.pVel += steer * dt;
+      else this.pVel *= Math.pow(0.1, dt);
+
+      // centrifugal: Linkskurve → nach rechts, Rechtskurve → links
+      // Schnee und Regen: deutlich mehr Drift (schlechte Haftung)
+      const slippery = (ph.name === 'snow' || ph.name === 'rain');
+      const driftFactor = slippery ? 9.5 : 4.5;
+      const drift = -this.curvature * this.speed * driftFactor;
+      this.pVel += drift * dt;
+
+      const maxVel = 55 + this.speed * 10;
+      this.pVel = Math.max(-maxVel, Math.min(maxVel, this.pVel));
+      this.px += this.pVel * dt;
+    } else {
+      this.crashT -= dt;
+      this.pVel *= Math.pow(0.05, dt);
+      this.px   += this.pVel * dt;
+      // speed recovers gradually back to normal after crash
+      if (this.speed < (1.0 + this.day * 0.3)) {
+        this.speed = Math.min(1.0 + this.day * 0.3, this.speed + 0.4 * dt);
+      }
+      if (this.crashT <= 0) this.crashed = false;
+    }
+    // invincibility countdown
+    if (this.invincible) {
+      this.invincT -= dt;
+      if (this.invincT <= 0) { this.invincible = false; }
+    }
+    // screen flash countdown
+    if (this.flashT > 0) this.flashT -= dt;
+
+    // road bounds at player y
+    const { lx, rx } = this.roadEdgesAtY(PLAYER_Y);
+    const margin = PLAYER_W * 0.35;
+    if (this.px - margin < lx) { this.px = lx + margin; if (!this.crashed) this.crash(); }
+    if (this.px + margin > rx) { this.px = rx - margin; if (!this.crashed) this.crash(); }
+
+    // spawn enemies
+    this.spawnCDT -= dt;
+    if (this.spawnCDT <= 0) {
+      this.spawnEnemy();
+      const rate = Math.max(0.4, 1.8 - this.day * 0.08);
+      this.spawnCDT = rate;
+    }
+
+    // update enemies (move toward player = decrease z)
+    for (let e of this.enemies) {
+      e.z -= dt * this.speed * 0.35;
+    }
+
+    // collision & pass detection — collision check FIRST, then pass
+    for (let e of this.enemies) {
+      if (e.done) continue;
+
+      // collision check (priority, while enemy is near player)
+      if (!this.invincible && e.z < 0.55 && e.z > -0.1) {
+        const { ex, ey, ew, eh } = this.enemyScreen(e);
+        const dx = Math.abs(this.px - ex);
+        const dy = Math.abs(PLAYER_Y - ey);
+        if (dx < (PLAYER_W + ew) * 0.4 && dy < (PLAYER_H + eh) * 0.55) {
+          e.crashed = true;
+          e.done = true;
+          this.crash();
+          continue;
+        }
+      }
+
+      // passed = enemy moved past player without collision
+      if (e.z < -0.05 && !e.crashed) {
+        e.done = true;
+        this.passedToday++;
+        this.totalPassed++;
+        this.score += 10;
+        continue;
+      }
+
+      // cleanup very old enemies
+      if (e.z < -0.3) { e.done = true; }
+    }
+    this.enemies = this.enemies.filter(e => !e.done);
+
+    // snow
+    if (ph.name === 'snow') {
+      while (this.snow.length < 50) {
+        this.snow.push({ x: Math.random()*NATIVE_W, y: Math.random()*NATIVE_H, vy: 15+Math.random()*20, s:1+Math.random() });
+      }
+      for (let p of this.snow) {
+        p.y += p.vy * dt;
+        p.x += (Math.random()-.5) * 10 * dt;
+        if (p.y > NATIVE_H) { p.y = 0; p.x = Math.random()*NATIVE_W; }
+      }
+    } else {
+      this.snow = [];
+    }
+    // rain
+    if (ph.name === 'rain') {
+      while (this.rain.length < 80) {
+        this.rain.push({ x: Math.random()*NATIVE_W, y: Math.random()*NATIVE_H, vy: 80+Math.random()*60, vx: -8-Math.random()*6 });
+      }
+      for (let p of this.rain) {
+        p.y += p.vy * dt;
+        p.x += p.vx * dt;
+        if (p.y > NATIVE_H || p.x < 0) { p.y = Math.random() * NATIVE_H * 0.5; p.x = Math.random()*NATIVE_W; }
+      }
+    } else {
+      this.rain = [];
+    }
+  }
+
+  crash() {
+    if (this.invincible) return;
+    this.crashed    = true;
+    this.crashT     = 1.8;        // recovery time (seconds)
+    this.invincible = true;
+    this.invincT    = 2.5;        // invincibility window after crash
+    this.crashSpeed = this.speed; // remember speed before crash
+    this.speed      = 0.15;       // drop to near-zero
+    this.pVel       = 0;
+    this.flashT     = 0;          // screen flash timer
+    // time penalty: advance dayTime (makes goal harder)
+    this.dayTime = Math.min(this.dayDuration - 1, this.dayTime + 6);
+    audio.crash();
+    // deduct 2 passed cars, but not below 0
+    this.passedToday  = Math.max(0, this.passedToday - 2);
+    this.totalPassed  = Math.max(0, this.totalPassed - 2);
+    this.score        = Math.max(0, this.score - 20);
+  }
+
+  spawnEnemy() {
+    // random lateral position within road (z=1 = far/horizon)
+    const laneT = Math.random() * 0.8 + 0.1; // 0.1..0.9 across road width
+    this.enemies.push({
+      laneT,
+      z: 0.97,
+      color: ENEMY_COLORS[Math.floor(Math.random() * ENEMY_COLORS.length)],
+      passed: false,
+      done: false
+    });
+  }
+
+  gameOver() {
+    this.stop();
+    this.over = true;
+    document.getElementById('go1').textContent = `TAGE: ${this.day + 1}`;
+    document.getElementById('go2').textContent = `ÜBERHOLT: ${this.totalPassed}`;
+    document.getElementById('go3').textContent = `SCORE: ${this.score}`;
+    document.getElementById('gameover').style.display = 'flex';
+    audio.stop();
+  }
+
+  // ── road geometry (scanline-based curved road) ───────────────────────
+  // For each screen row we accumulate lateral offset driven by curvature.
+  // This gives genuinely curved lines, not straight diagonals.
+
+  buildRoadTable() {
+    const rows = GROUND_Y - HORIZON_Y;
+    this._road = new Array(rows + 1);
+    let cx  = CX;
+    let vel = 0;
+    for (let i = 0; i <= rows; i++) {
+      const t    = i / rows; // 0=bottom, 1=horizon
+      const half = ROAD_BOTTOM_HALF * Math.pow(1 - t, 1.1) + ROAD_TOP_HALF * t;
+      // curvature effect: strongest near horizon (t near 1)
+      vel += this.curvature * t * 0.9;
+      cx  += vel * 0.10;
+      this._road[i] = { cx, half };
+    }
+  }
+
+  roadAtRow(y) {
+    const i = Math.round(GROUND_Y - y);
+    if (!this._road) return { cx: CX, half: ROAD_BOTTOM_HALF };
+    const idx = Math.max(0, Math.min(this._road.length - 1, i));
+    return this._road[idx];
+  }
+
+  roadEdgesAtY(y) {
+    const r = this.roadAtRow(y);
+    return { lx: r.cx - r.half, rx: r.cx + r.half };
+  }
+
+  zToY(z) {
+    return GROUND_Y - (GROUND_Y - HORIZON_Y) * z;
+  }
+
+  enemyScreen(e) {
+    const y  = this.zToY(e.z);
+    const { lx, rx } = this.roadEdgesAtY(y);
+    const ex = lx + (rx - lx) * e.laneT;
+    const scale = (1 - e.z);
+    const ew = Math.max(2, PLAYER_W * scale * 1.1);
+    const eh = Math.max(1, PLAYER_H * scale * 1.1);
+    return { ex, ey: y, ew, eh };
+  }
+
+  // ── draw ─────────────────────────────────────────────────────────────
+  draw() {
+    const ph = PHASES[this.phaseIdx];
+    const W = NATIVE_W, H = NATIVE_H;
+    ctx.clearRect(0, 0, W, H);
+
+    this.drawSky(ph, W, H);
+    this.drawGround(ph, W, H);
+    this.drawRoadLines(ph, W, H);
+    this.drawEnemies(ph);
+    this.drawPlayer(ph);
+    this.drawSnow(ph);
+    this.drawRain(ph);
+    this.drawHUD(ph, W, H);
+    this.drawCrashFlash();
+  }
+
+  drawSky(ph, W, H) {
+    ctx.fillStyle = PAL[ph.sky];
+    ctx.fillRect(0, 0, W, HORIZON_Y);
+
+    // stars for night/dusk
+    if (ph.name === 'night' || ph.name === 'dusk') {
+      for (let s of this.stars) {
+        const a = ph.name === 'night' ? 0.7 + s.b * 0.3 : 0.3 + s.b * 0.3;
+        ctx.fillStyle = `rgba(255,255,255,${a.toFixed(2)})`;
+        ctx.fillRect(Math.round(s.x), Math.round(s.y), 1, 1);
+      }
+    }
+
+    // hills: scrollendes panorama — wandern mit horizonOffset mit
+    ctx.fillStyle = PAL[ph.hill];
+    // Definiere ein breites, sich wiederholendes Panorama (3x Bildbreite)
+    const panorama = [
+      {ox:0.05, w:80,  h:14},
+      {ox:0.22, w:55,  h:10},
+      {ox:0.38, w:70,  h:16},
+      {ox:0.55, w:50,  h:11},
+      {ox:0.68, w:90,  h:13},
+      {ox:0.82, w:60,  h:9 },
+      {ox:0.95, w:75,  h:15},
+      {ox:1.12, w:55,  h:12},
+      {ox:1.28, w:80,  h:14},
+      {ox:1.45, w:65,  h:10},
+      {ox:1.60, w:50,  h:16},
+      {ox:1.75, w:70,  h:11},
+      {ox:1.90, w:85,  h:13},
+    ];
+    const panW = NATIVE_W * 2; // Panoramabreite = 2x Bildbreite (nahtlose Wiederholung)
+    const off  = ((this.horizonOffset % panW) + panW) % panW;
+    for (let h of panorama) {
+      // Berechne zwei Durchläufe für nahtlosen Loop
+      for (let rep = -1; rep <= 1; rep++) {
+        const hx = Math.round(h.ox * panW - off + rep * panW);
+        if (hx + h.w / 2 < -10 || hx - h.w / 2 > NATIVE_W + 10) continue;
+        this.drawPixelHill(hx, HORIZON_Y, h.w, h.h);
+      }
+    }
+  }
+
+  drawPixelHill(cx, baseY, w, maxH) {
+    // pixel‑art bump: each 4px column has height = parabola
+    const step = 4;
+    for (let x = cx - w/2; x < cx + w/2; x += step) {
+      const t  = (x - (cx - w/2)) / w;
+      const ht = Math.round(maxH * 4 * t * (1 - t)); // parabola
+      if (ht <= 0) continue;
+      ctx.fillRect(Math.round(x), baseY - ht, step, ht);
+    }
+  }
+
+  drawGround(ph, W, H) {
+    ctx.fillStyle = PAL[ph.gnd];
+    ctx.fillRect(0, HORIZON_Y, W, GROUND_Y - HORIZON_Y + 2);
+    // ground below road end
+    ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  }
+
+  drawRoadLines(ph, W, H) {
+    const period  = 14;
+    const isNight = ph.name === 'night';
+
+
+    for (let y = GROUND_Y; y >= HORIZON_Y; y--) {
+      const i = GROUND_Y - y;
+      const t = i / (GROUND_Y - HORIZON_Y); // 0=bottom, 1=horizon
+      const r = this.roadAtRow(y);
+      const lx = Math.round(r.cx - r.half);
+      const rx = Math.round(r.cx + r.half);
+      const ds = Math.max(1, 2 - Math.floor(t * 2));
+
+      // Alpha: night fades quickly with depth (headlight reach), day fades gently
+      let alpha;
+      if (isNight) {
+        const litDepth = 0.52;
+        if (t > litDepth) continue;
+        const lit = 1 - t / litDepth;
+        alpha = Math.pow(lit, 1.4) * 0.9;
+      } else {
+        alpha = ph.lineAlpha * (1 - t * 0.4);
+      }
+
+      // edge dots every 2 scanlines
+      if (i % 2 === 0) {
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = isNight ? '#ffffcc' : ph.line;
+        ctx.fillRect(lx, y, ds, 1);
+        ctx.fillRect(rx, y, ds, 1);
+      }
+
+      // centre dashes
+      const pos = (i + Math.floor(this.roadOffset)) % period;
+      if (pos < 6) {
+        ctx.globalAlpha = isNight ? alpha * 0.7 : ph.lineAlpha * 0.65 * (1 - t * 0.5);
+        ctx.fillStyle = isNight ? '#ffffbb' : ph.line;
+        const cx = Math.round(r.cx);
+        ctx.fillRect(cx, y, ds, 1);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  drawEnemies(ph) {
+    // sort far→near
+    const sorted = [...this.enemies].sort((a, b) => b.z - a.z);
+    for (let e of sorted) {
+      if (e.z > 0.96) continue;
+      const { ex, ey, ew, eh } = this.enemyScreen(e);
+      if (ew < 2) continue;
+
+      // Night: show as headlights only when far
+      if (ph.name === 'night' && e.z > 0.5) {
+        ctx.fillStyle = '#ffffcc';
+        ctx.globalAlpha = (1 - e.z) * 2;
+        ctx.fillRect(Math.round(ex - ew * 0.3), Math.round(ey), Math.round(ew * 0.15), Math.round(eh * 0.3));
+        ctx.fillRect(Math.round(ex + ew * 0.15), Math.round(ey), Math.round(ew * 0.15), Math.round(eh * 0.3));
+        ctx.globalAlpha = 1;
+        continue;
+      }
+
+      this.drawPixelCar(ex, ey, ew, eh, e.color, false, e.z);
+    }
+  }
+
+  drawPixelCar(cx, cy, w, h, color, isPlayer, z) {
+    z = z || 0;
+    cx = Math.round(cx); cy = Math.round(cy);
+    w  = Math.max(2, Math.round(w));
+    h  = Math.max(1, Math.round(h));
+
+    // body
+    ctx.fillStyle = color;
+    ctx.fillRect(cx - Math.floor(w/2), cy - Math.floor(h/2), w, h);
+
+    if (w >= 6) {
+      // cockpit (darker stripe)
+      const cw = Math.max(2, Math.round(w * 0.45));
+      const ch = Math.max(1, Math.round(h * 0.35));
+      ctx.fillStyle = isPlayer ? '#553300' : '#113333';
+      ctx.fillRect(cx - Math.floor(cw/2), cy - Math.floor(h/2) - ch + 1, cw, ch);
+
+      // wheels (dark dots)
+      ctx.fillStyle = '#111111';
+      const wr = Math.max(1, Math.round(w * 0.15));
+      const wy = cy + Math.floor(h * 0.3);
+      ctx.fillRect(cx - Math.floor(w/2),         wy, wr, wr);
+      ctx.fillRect(cx + Math.floor(w/2) - wr + 1, wy, wr, wr);
+    }
+
+    // crash: orange flicker on car
+    if (isPlayer && this.crashed) {
+      ctx.fillStyle = `rgba(255,80,0,${0.5 + Math.sin(Date.now()/60) * 0.4})`;
+      ctx.fillRect(cx - Math.floor(w/2), cy - Math.floor(h*0.8), w, Math.round(h*1.2));
+    }
+    // invincibility: skip drawing every other blink frame
+    if (isPlayer && this.invincible && !this.crashed) {
+      const blink = Math.floor(Date.now() / 120) % 2;
+      if (blink) {
+        // draw a white outline to show invincibility
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(cx - Math.floor(w/2) - 1, cy - Math.floor(h/2) - 1, w + 2, h + 2);
+      }
+    }
+  }
+
+  drawPlayer(ph) {
+    this.drawPixelCar(
+      this.px, PLAYER_Y,
+      PLAYER_W, PLAYER_H,
+      '#cccccc', true, 0
+    );
+
+  }
+
+  drawSnow(ph) {
+    if (ph.name !== 'snow') return;
+    ctx.fillStyle = '#ffffff';
+    for (let p of this.snow) {
+      ctx.fillRect(Math.round(p.x), Math.round(p.y), Math.round(p.s), Math.round(p.s));
+    }
+  }
+
+  drawRain(ph) {
+    if (ph.name !== 'rain') return;
+    ctx.strokeStyle = 'rgba(160,200,230,0.7)';
+    ctx.lineWidth = 1;
+    for (let p of this.rain) {
+      ctx.beginPath();
+      ctx.moveTo(Math.round(p.x), Math.round(p.y));
+      ctx.lineTo(Math.round(p.x + p.vx * 0.04), Math.round(p.y + p.vy * 0.04));
+      ctx.stroke();
+    }
+  }
+
+  drawCrashFlash() {
+    // White flash on crash impact, then blink during invincibility
+    if (this.crashed && this.crashT > 1.4) {
+      // Impact flash: bright white fading
+      const alpha = (this.crashT - 1.4) / 0.4;
+      ctx.fillStyle = `rgba(255,255,255,${(alpha * 0.7).toFixed(2)})`;
+      ctx.fillRect(0, 0, NATIVE_W, GROUND_Y);
+    } else if (this.invincible && !this.crashed) {
+      // Blink: player car alternates visible/invisible
+      // (handled in drawPixelCar via invincible flag — here we add a subtle tint)
+      const blink = Math.floor(Date.now() / 120) % 2;
+      if (blink) {
+        ctx.fillStyle = 'rgba(255,160,0,0.18)';
+        ctx.fillRect(0, 0, NATIVE_W, GROUND_Y);
+      }
+    }
+  }
+
+  drawHUD(ph, W, H) {
+    // Bottom panel
+    const panelY = GROUND_Y + 2;
+    const panelH = H - panelY;
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, panelY, W, panelH);
+
+    // Scoreboard panel (Atari style: red border, orange fill)
+    const bx = Math.round(W * 0.22);
+    const bw = Math.round(W * 0.56);
+    const by = panelY + 2;
+    const bh = panelH - 4;
+
+    ctx.fillStyle = '#cc3300';
+    ctx.fillRect(bx - 2, by - 1, bw + 4, bh + 2);
+
+    // Top row: TAG x  |  ZIEL: needed/goal
+    const rowH1 = Math.floor(bh * 0.52);
+    ctx.fillStyle = '#cc8822';
+    ctx.fillRect(bx, by, bw, rowH1);
+
+    // Bottom row: score + day progress bar
+    const rowH2 = bh - rowH1;
+    ctx.fillStyle = '#cc9933';
+    ctx.fillRect(bx, by + rowH1, bw, rowH2);
+
+    const fs1 = Math.max(7, Math.round(rowH1 * 0.52));
+    const fs2 = Math.max(6, Math.round(rowH2 * 0.48));
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+
+    // Top row: "TAG 3  ZIEL: 8/20"
+    ctx.font = `bold ${fs1}px 'Courier New', monospace`;
+    const needed = Math.max(0, this.goal - this.passedToday);
+    ctx.fillText(`TAG ${this.day + 1}   ZIEL: ${this.passedToday}/${this.goal}`, W/2, by + Math.round(rowH1 * 0.72));
+
+    // Bottom row: score left, day-progress bar right
+    ctx.font = `${fs2}px 'Courier New', monospace`;
+    ctx.textAlign = 'left';
+    ctx.fillText(`SCORE ${this.score}`, bx + 6, by + rowH1 + Math.round(rowH2 * 0.75));
+
+    // Day progress bar (time left in day)
+    const barX = Math.round(bx + bw * 0.48);
+    const barW = Math.round(bw * 0.46);
+    const barH = Math.round(rowH2 * 0.38);
+    const barY = by + rowH1 + Math.round((rowH2 - barH) / 2);
+    const progress = this.dayTime / this.dayDuration;
+    // background
+    ctx.fillStyle = '#886611';
+    ctx.fillRect(barX, barY, barW, barH);
+    // fill — turns red when low on time
+    const timeLeft = 1 - progress;
+    ctx.fillStyle = timeLeft > 0.25 ? '#ffdd44' : '#ff3300';
+    ctx.fillRect(barX, barY, Math.round(barW * progress), barH);
+    // label
+    ctx.fillStyle = '#111111';
+    ctx.font = `${Math.max(5, fs2 - 1)}px 'Courier New', monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText('TAG', barX + Math.round(barW / 2), barY - 1);
+
+    ctx.textAlign = 'left';
+  }
+}
+
+// ── keyboard ──────────────────────────────────────────────────────────────
+let g = null;
+document.addEventListener('keydown', e => { if (g) g.keys[e.key] = true; });
+document.addEventListener('keyup',   e => { if (g) g.keys[e.key] = false; });
+
+// touch
+let touchX = null;
+document.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; }, {passive:true});
+document.addEventListener('touchmove',  e => {
+  if (!g || touchX === null) return;
+  const dx = e.touches[0].clientX - touchX;
+  g.keys['ArrowLeft']  = dx < -8;
+  g.keys['ArrowRight'] = dx >  8;
+  e.preventDefault();
+}, {passive:false});
+document.addEventListener('touchend', () => {
+  if (g) { g.keys['ArrowLeft'] = false; g.keys['ArrowRight'] = false; }
+  touchX = null;
+});
+
+function startGame() {
+  document.getElementById('ui').style.display = 'none';
+  document.getElementById('gameover').style.display = 'none';
+  audio.init();
+  if (g) g.stop();
+  g = new Game();
+  g.start();
+}
+</script>
+</body>
+</html>
