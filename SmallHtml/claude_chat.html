@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Chat</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=Syne:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:       #0d0f12;
+    --surface:  #13161b;
+    --border:   #1e232c;
+    --border2:  #2a3040;
+    --accent:   #4af0c4;
+    --accent2:  #4a9ff0;
+    --muted:    #3a4455;
+    --text:     #c8d4e8;
+    --text-dim: #5a6a80;
+    --user-bg:  #0f1e2e;
+    --claude-bg:#111820;
+    --error:    #f05060;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Syne', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Grain overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 999; opacity: 0.4;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .logo {
+    font-family: var(--sans);
+    font-weight: 700; font-size: 15px;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .logo-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%,100% { opacity: 1; box-shadow: 0 0 8px var(--accent); }
+    50%      { opacity: 0.4; box-shadow: 0 0 2px var(--accent); }
+  }
+
+  .header-right { display: flex; align-items: center; gap: 12px; }
+
+  .model-badge {
+    font-size: 11px; color: var(--text-dim);
+    border: 1px solid var(--border2);
+    padding: 3px 8px; border-radius: 4px;
+    letter-spacing: 0.03em;
+  }
+
+  #resetBtn {
+    font-family: var(--mono); font-size: 11px;
+    color: var(--text-dim); background: none;
+    border: 1px solid var(--border2); border-radius: 4px;
+    padding: 3px 10px; cursor: pointer;
+    transition: all .15s;
+  }
+  #resetBtn:hover { color: var(--error); border-color: var(--error); }
+
+  /* ── API Key Bar ── */
+  #keyBar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  #keyBar label {
+    font-size: 11px; color: var(--text-dim);
+    white-space: nowrap; letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  #apiKeyInput {
+    flex: 1;
+    font-family: var(--mono); font-size: 12px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border2); border-radius: 4px;
+    padding: 6px 10px;
+    outline: none; transition: border-color .15s;
+    letter-spacing: 0.03em;
+  }
+  #apiKeyInput:focus { border-color: var(--accent); }
+  #apiKeyInput::placeholder { color: var(--muted); }
+
+  .key-status {
+    font-size: 11px; white-space: nowrap;
+    padding: 4px 10px; border-radius: 4px;
+    font-weight: 500;
+  }
+  .key-status.ok  { color: var(--accent);  background: rgba(74,240,196,.08); border: 1px solid rgba(74,240,196,.2); }
+  .key-status.err { color: var(--error);   background: rgba(240, 80,96,.08); border: 1px solid rgba(240,80,96,.2); }
+  .key-status.idle{ color: var(--text-dim);background: transparent;          border: 1px solid var(--border2); }
+
+  /* ── Messages ── */
+  #messages {
+    flex: 1; overflow-y: auto;
+    padding: 20px;
+    display: flex; flex-direction: column; gap: 2px;
+    scroll-behavior: smooth;
+  }
+  #messages::-webkit-scrollbar { width: 4px; }
+  #messages::-webkit-scrollbar-track { background: transparent; }
+  #messages::-webkit-scrollbar-thumb { background: var(--muted); border-radius: 2px; }
+
+  .msg {
+    display: flex; gap: 12px;
+    padding: 14px 16px; border-radius: 6px;
+    animation: fadeIn .2s ease;
+    line-height: 1.65;
+  }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(4px); } to { opacity:1; transform:none; } }
+
+  .msg.user   { background: var(--user-bg);   border: 1px solid rgba(74,159,240,.08); }
+  .msg.claude { background: var(--claude-bg); border: 1px solid rgba(74,240,196,.06); }
+  .msg.error  { background: rgba(240,80,96,.06); border: 1px solid rgba(240,80,96,.2); }
+
+  .msg-role {
+    font-size: 10px; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    padding-top: 2px; white-space: nowrap;
+    min-width: 52px;
+  }
+  .msg.user   .msg-role { color: var(--accent2); }
+  .msg.claude .msg-role { color: var(--accent); }
+  .msg.error  .msg-role { color: var(--error); }
+
+  .msg-body { flex: 1; word-break: break-word; }
+  .msg-body p + p { margin-top: .6em; }
+
+  /* Code blocks */
+  .msg-body pre {
+    background: #090b0e;
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: .6em 0;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .msg-body code:not(pre code) {
+    background: rgba(255,255,255,.05);
+    padding: 1px 5px; border-radius: 3px;
+    font-size: 13px; color: var(--accent);
+  }
+
+  .token-info {
+    font-size: 10px; color: var(--text-dim);
+    margin-top: 8px; padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+
+  /* Typing cursor */
+  .cursor {
+    display: inline-block; width: 2px; height: 14px;
+    background: var(--accent); margin-left: 2px;
+    vertical-align: middle;
+    animation: blink .7s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Empty state */
+  .empty-state {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 12px; color: var(--text-dim);
+    pointer-events: none;
+  }
+  .empty-state .big { font-size: 32px; }
+  .empty-state p { font-size: 12px; letter-spacing: 0.05em; }
+
+  /* ── Input area ── */
+  #inputArea {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    display: flex; gap: 10px; align-items: flex-end;
+    flex-shrink: 0;
+  }
+
+  #userInput {
+    flex: 1;
+    font-family: var(--mono); font-size: 13.5px;
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border2); border-radius: 6px;
+    padding: 10px 14px;
+    resize: none; outline: none;
+    max-height: 140px; min-height: 44px;
+    line-height: 1.5; transition: border-color .15s;
+    overflow-y: auto;
+  }
+  #userInput:focus { border-color: var(--accent2); }
+  #userInput::placeholder { color: var(--muted); }
+  #userInput::-webkit-scrollbar { width: 3px; }
+  #userInput::-webkit-scrollbar-thumb { background: var(--muted); }
+
+  #sendBtn {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    background: var(--accent); color: #080c10;
+    border: none; border-radius: 6px;
+    padding: 0 18px; height: 44px;
+    cursor: pointer; transition: all .15s;
+    letter-spacing: 0.05em; white-space: nowrap;
+    flex-shrink: 0;
+  }
+  #sendBtn:hover:not(:disabled) { background: #6ff8d4; }
+  #sendBtn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  #hint {
+    font-size: 10px; color: var(--text-dim);
+    text-align: right; padding: 4px 20px 2px;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    Claude Chat
+  </div>
+  <div class="header-right">
+    <span class="model-badge">claude-sonnet-4-6</span>
+    <button id="resetBtn" onclick="resetChat()">↺ Reset</button>
+  </div>
+</header>
+
+<div id="keyBar">
+  <label>API KEY</label>
+  <input id="apiKeyInput" type="password" placeholder="sk-ant-api03-..." spellcheck="false" autocomplete="off" oninput="onKeyInput()">
+  <span id="keyStatus" class="key-status idle">nicht gesetzt</span>
+</div>
+
+<div id="messages">
+  <div class="empty-state" id="emptyState">
+    <div class="big">⌁</div>
+    <p>API Key eingeben und loslegen</p>
+  </div>
+</div>
+
+<div id="inputArea">
+  <textarea id="userInput" rows="1" placeholder="Nachricht eingeben…" onkeydown="handleKey(event)" oninput="autoResize(this)"></textarea>
+  <button id="sendBtn" onclick="sendMessage()">Senden ↵</button>
+</div>
+<div id="hint">Enter = Senden &nbsp;·&nbsp; Shift+Enter = Zeilenumbruch</div>
+
+<script>
+const MODEL = 'claude-sonnet-4-6';
+const MAX_TOKENS = 8096;
+const SYSTEM = 'Du bist ein hilfreicher Assistent. Antworte auf Deutsch, wenn der Nutzer Deutsch schreibt.';
+
+let history = [];
+let busy = false;
+
+// ── API Key ──────────────────────────────────────────────────────────────────
+function getKey() { return document.getElementById('apiKeyInput').value.trim(); }
+
+function onKeyInput() {
+  const k = getKey();
+  const s = document.getElementById('keyStatus');
+  if (!k) {
+    s.textContent = 'nicht gesetzt'; s.className = 'key-status idle';
+  } else if (!k.startsWith('sk-ant')) {
+    s.textContent = 'ungültiges Format'; s.className = 'key-status err';
+  } else {
+    s.textContent = 'bereit'; s.className = 'key-status ok';
+  }
+}
+
+// ── Auto-resize textarea ──────────────────────────────────────────────────────
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+// ── Keyboard ──────────────────────────────────────────────────────────────────
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+// ── Markdown-lite renderer ────────────────────────────────────────────────────
+function renderMarkdown(text) {
+  // Code blocks
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) =>
+    `<pre><code>${escHtml(code.trim())}</code></pre>`);
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, (_, c) => `<code>${escHtml(c)}</code>`);
+  // Bold
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Paragraphs
+  const parts = text.split(/\n\n+/);
+  return parts.map(p => p.startsWith('<pre') ? p : `<p>${p.replace(/\n/g,'<br>')}</p>`).join('');
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Messages DOM ─────────────────────────────────────────────────────────────
+function addMessage(role, content, tokens) {
+  document.getElementById('emptyState')?.remove();
+  const msgs = document.getElementById('messages');
+
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+
+  const roleLabel = { user: 'Du', claude: 'Claude', error: 'Fehler' }[role] || role;
+
+  div.innerHTML = `
+    <div class="msg-role">${roleLabel}</div>
+    <div class="msg-body">
+      <div class="msg-content">${role === 'user' ? escHtml(content).replace(/\n/g,'<br>') : renderMarkdown(content)}</div>
+      ${tokens ? `<div class="token-info">↳ ${tokens.input} ein · ${tokens.output} aus · ${tokens.input+tokens.output} gesamt</div>` : ''}
+    </div>`;
+
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div.querySelector('.msg-content');
+}
+
+function addStreamingMessage() {
+  document.getElementById('emptyState')?.remove();
+  const msgs = document.getElementById('messages');
+
+  const div = document.createElement('div');
+  div.className = 'msg claude';
+  div.innerHTML = `
+    <div class="msg-role">Claude</div>
+    <div class="msg-body">
+      <div class="msg-content"></div>
+      <div class="msg-tokens" style="display:none"></div>
+    </div>`;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+// ── Send ──────────────────────────────────────────────────────────────────────
+async function sendMessage() {
+  if (busy) return;
+
+  const key = getKey();
+  if (!key || !key.startsWith('sk-ant')) {
+    document.getElementById('apiKeyInput').focus();
+    document.getElementById('keyStatus').textContent = '← Key eingeben';
+    document.getElementById('keyStatus').className = 'key-status err';
+    return;
+  }
+
+  const input = document.getElementById('userInput');
+  const text = input.value.trim();
+  if (!text) return;
+
+  input.value = '';
+  autoResize(input);
+  setBusy(true);
+
+  addMessage('user', text);
+  history.push({ role: 'user', content: text });
+
+  const msgDiv = addStreamingMessage();
+  const contentEl = msgDiv.querySelector('.msg-content');
+  const tokensEl  = msgDiv.querySelector('.msg-tokens');
+
+  // Cursor
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  contentEl.appendChild(cursor);
+
+  let fullText = '';
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        system: SYSTEM,
+        stream: true,
+        messages: history,
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err?.error?.message || `HTTP ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let inputTokens = 0, outputTokens = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const chunk = dec.decode(value, { stream: true });
+      for (const line of chunk.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const evt = JSON.parse(data);
+
+          if (evt.type === 'content_block_delta' && evt.delta?.text) {
+            fullText += evt.delta.text;
+            contentEl.innerHTML = renderMarkdown(fullText);
+            contentEl.appendChild(cursor);
+            document.getElementById('messages').scrollTop = 99999;
+          }
+
+          if (evt.type === 'message_delta' && evt.usage) {
+            outputTokens = evt.usage.output_tokens;
+          }
+          if (evt.type === 'message_start' && evt.message?.usage) {
+            inputTokens = evt.message.usage.input_tokens;
+          }
+        } catch {}
+      }
+    }
+
+    cursor.remove();
+    contentEl.innerHTML = renderMarkdown(fullText);
+
+    tokensEl.style.display = 'block';
+    tokensEl.className = 'token-info';
+    tokensEl.textContent = `↳ ${inputTokens} ein · ${outputTokens} aus · ${inputTokens+outputTokens} gesamt`;
+
+    history.push({ role: 'assistant', content: fullText });
+
+  } catch (e) {
+    cursor.remove();
+    msgDiv.remove();
+    addMessage('error', e.message || 'Unbekannter Fehler');
+    history.pop(); // remove user message on error
+  }
+
+  setBusy(false);
+  document.getElementById('messages').scrollTop = 99999;
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+function resetChat() {
+  history = [];
+  const msgs = document.getElementById('messages');
+  msgs.innerHTML = `<div class="empty-state" id="emptyState">
+    <div class="big">⌁</div>
+    <p>Gespräch zurückgesetzt</p>
+  </div>`;
+}
+
+// ── Busy state ────────────────────────────────────────────────────────────────
+function setBusy(b) {
+  busy = b;
+  document.getElementById('sendBtn').disabled = b;
+  document.getElementById('userInput').disabled = b;
+  document.getElementById('sendBtn').textContent = b ? '…' : 'Senden ↵';
+}
+</script>
+</body>
+</html>
