@@ -8,7 +8,8 @@
 // 9 : AG5/8
 // 10: AG3/4
 // 11: Gardena IG 3/4
-type = 11;
+// 12: AG 1/2
+type = 12;
 draft = false;
 
 use <threadlib.scad>;
@@ -373,4 +374,18 @@ else if ( 11 == type )
     translate ([0, 0,posGardena])GardenaConnector (r4);
     nut("G3/4", turns=5, Douter=30);
     translate([0,0,10]) rohr(15,4.5,3);
+}
+else if ( 12 == type )
+{
+    infill=6;
+    difference() 
+    {
+        union()
+        {
+            translate ([0, 0,infill])
+                bolt("G1/2", turns=10);
+            clamp_raw(infill);
+        }
+        translate ([0, 0, -0.1]) cylinder(h=l3+l4+1.2,r1=infill,r2=infill);
+    } 
 }
