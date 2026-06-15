@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Schiffeversenken — P2P</title>
+<style>
+  :root {
+    --navy: #0b2545;
+    --deep: #081a33;
+    --foam: #e8f1f5;
+    --steel: #8da9c4;
+    --hit: #c1442d;
+    --miss: #ffffff;
+    --grid-line: #1d3557;
+    --accent: #ffb703;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Courier New', monospace;
+    background: linear-gradient(180deg, var(--deep) 0%, var(--navy) 100%);
+    color: var(--foam);
+    min-height: 100vh;
+    padding: 20px;
+  }
+  h1 {
+    text-align: center;
+    letter-spacing: 0.3em;
+    font-size: 1.4rem;
+    margin: 0 0 4px;
+    text-transform: uppercase;
+  }
+  .subtitle {
+    text-align: center;
+    color: var(--steel);
+    font-size: 0.8rem;
+    margin-bottom: 24px;
+    letter-spacing: 0.1em;
+  }
+  .panel {
+    max-width: 600px;
+    margin: 0 auto 20px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--grid-line);
+    border-radius: 6px;
+    padding: 16px;
+  }
+  .panel h2 {
+    margin: 0 0 10px;
+    font-size: 0.85rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+  textarea {
+    width: 100%;
+    height: 70px;
+    background: var(--deep);
+    color: var(--foam);
+    border: 1px solid var(--grid-line);
+    border-radius: 4px;
+    padding: 8px;
+    font-family: monospace;
+    font-size: 0.7rem;
+    resize: vertical;
+  }
+  button {
+    background: var(--accent);
+    color: var(--deep);
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    font-weight: bold;
+    cursor: pointer;
+    font-family: inherit;
+    letter-spacing: 0.05em;
+    margin-top: 8px;
+    margin-right: 8px;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .status {
+    text-align: center;
+    margin: 10px auto;
+    max-width: 600px;
+    font-size: 0.9rem;
+    color: var(--accent);
+    min-height: 1.2em;
+  }
+  .boards {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .board-wrap { text-align: center; }
+  .board-wrap h3 {
+    font-size: 0.8rem;
+    letter-spacing: 0.15em;
+    color: var(--steel);
+    text-transform: uppercase;
+    margin: 0 0 8px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(10, 28px);
+    grid-template-rows: repeat(10, 28px);
+    gap: 2px;
+    background: var(--grid-line);
+    padding: 2px;
+    border-radius: 4px;
+  }
+  .cell {
+    width: 28px;
+    height: 28px;
+    background: rgba(141,169,196,0.08);
+    border-radius: 2px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: default;
+    font-size: 14px;
+    position: relative;
+  }
+  .cell.ship { background: var(--steel); }
+  .cell.placing:hover { background: rgba(255,183,3,0.3); cursor: pointer; }
+  .cell.target:hover { background: rgba(255,183,3,0.4); cursor: crosshair; }
+  .cell.hit { background: var(--hit); color: white; }
+  .cell.miss::after {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--miss);
+    opacity: 0.6;
+  }
+  .cell.sunk { background: #6e1d12; color: white; }
+  .hidden { display: none; }
+  .info {
+    font-size: 0.75rem;
+    color: var(--steel);
+    margin-top: 8px;
+    line-height: 1.5;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    background: var(--grid-line);
+    color: var(--steel);
+  }
+  .badge.active { background: var(--accent); color: var(--deep); }
+</style>
+</head>
+<body>
+
+<h1>⚓ Schiffeversenken</h1>
+<div class="subtitle">Peer-to-Peer — WebRTC mit manuellem Verbindungscode</div>
+
+<!-- Setup-Panel -->
+<div class="panel" id="setupPanel">
+  <h2>1 · Verbindung herstellen</h2>
+  <div class="row">
+    <button id="btnHost">Host (Spiel erstellen)</button>
+    <button id="btnJoin">Beitreten (Code einfügen)</button>
+  </div>
+
+  <div id="hostFlow" class="hidden">
+    <p class="info">Schritt 1: Klicke "Code generieren" und sende den Code an deinen Gegner.</p>
+    <button id="btnCreateOffer">Code generieren</button>
+    <textarea id="offerOutput" readonly placeholder="Dein Code erscheint hier..."></textarea>
+    <p class="info">Schritt 2: Füge den Antwort-Code deines Gegners hier ein.</p>
+    <textarea id="answerInput" placeholder="Antwort-Code des Gegners hier einfügen..."></textarea>
+    <button id="btnAcceptAnswer">Antwort übernehmen</button>
+  </div>
+
+  <div id="joinFlow" class="hidden">
+    <p class="info">Schritt 1: Füge den Code deines Gegners hier ein.</p>
+    <textarea id="offerInput" placeholder="Code des Gastgebers hier einfügen..."></textarea>
+    <button id="btnCreateAnswer">Antwort-Code generieren</button>
+    <p class="info">Schritt 2: Sende den generierten Antwort-Code zurück an den Gastgeber.</p>
+    <textarea id="answerOutput" readonly placeholder="Dein Antwort-Code erscheint hier..."></textarea>
+  </div>
+</div>
+
+<div class="status" id="status">Verbindung herstellen, um zu starten.</div>
+
+<!-- Spiel-Panel -->
+<div class="panel hidden" id="gamePanel">
+  <h2>2 · Schiffe platzieren <span class="badge" id="phaseBadge">Platzierung</span></h2>
+  <div class="row">
+    <button id="btnRotate">Drehen (horizontal/vertikal)</button>
+    <button id="btnRandom">Zufällig platzieren</button>
+    <button id="btnReady" disabled>Bereit!</button>
+  </div>
+  <p class="info" id="placementInfo">Platziere: Schlachtschiff (4), Kreuzer (3), Kreuzer (3), Zerstörer (2), Zerstörer (2)</p>
+
+  <div class="boards">
+    <div class="board-wrap">
+      <h3>Dein Feld</h3>
+      <div class="grid" id="myGrid"></div>
+    </div>
+    <div class="board-wrap">
+      <h3>Gegner-Feld <span class="badge" id="turnBadge">—</span></h3>
+      <div class="grid" id="enemyGrid"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const SHIP_SIZES = [4, 3, 3, 2, 2];
+const GRID_SIZE = 10;
+
+let pc, dataChannel;
+let isHost = false;
+let myBoard = Array(100).fill(0);   // 0 leer, 1 schiff
+let myHits  = Array(100).fill(0);   // 0 unbekannt, 1 treffer, 2 fehlschuss
+let enemyHits = Array(100).fill(0); // was wir beim Gegner wissen
+let myShipsRemaining = [...SHIP_SIZES];
+let placingShips = [...SHIP_SIZES];
+let currentOrientation = 'h'; // h/v
+let myTurn = false;
+let gameStarted = false;
+
+const statusEl = document.getElementById('status');
+const myGridEl = document.getElementById('myGrid');
+const enemyGridEl = document.getElementById('enemyGrid');
+const phaseBadge = document.getElementById('phaseBadge');
+const turnBadge = document.getElementById('turnBadge');
+const placementInfo = document.getElementById('placementInfo');
+
+// ---------- Grid-Aufbau ----------
+function buildGrid(el, clickable) {
+  el.innerHTML = '';
+  for (let i = 0; i < 100; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'cell';
+    cell.dataset.idx = i;
+    el.appendChild(cell);
+  }
+}
+buildGrid(myGridEl, true);
+buildGrid(enemyGridEl, false);
+
+// ---------- Platzierung ----------
+myGridEl.addEventListener('click', (e) => {
+  if (gameStarted) return;
+  const cell = e.target.closest('.cell');
+  if (!cell) return;
+  const idx = parseInt(cell.dataset.idx);
+  tryPlaceShip(idx);
+});
+
+function tryPlaceShip(startIdx) {
+  if (placingShips.length === 0) return;
+  const size = placingShips[0];
+  const row = Math.floor(startIdx / GRID_SIZE);
+  const col = startIdx % GRID_SIZE;
+  const cells = [];
+
+  for (let i = 0; i < size; i++) {
+    let r = row, c = col;
+    if (currentOrientation === 'h') c += i; else r += i;
+    if (r >= GRID_SIZE || c >= GRID_SIZE) return; // außerhalb
+    const idx = r * GRID_SIZE + c;
+    if (myBoard[idx] === 1) return; // Überlappung
+    cells.push(idx);
+  }
+
+  cells.forEach(idx => myBoard[idx] = 1);
+  placingShips.shift();
+  renderMyGrid();
+  updatePlacementInfo();
+
+  if (placingShips.length === 0) {
+    document.getElementById('btnReady').disabled = false;
+  }
+}
+
+function updatePlacementInfo() {
+  const names = {4: 'Schlachtschiff (4)', 3: 'Kreuzer (3)', 2: 'Zerstörer (2)'};
+  if (placingShips.length === 0) {
+    placementInfo.textContent = 'Alle Schiffe platziert. Klicke "Bereit!"';
+  } else {
+    placementInfo.textContent = 'Platziere: ' + placingShips.map(s => names[s]).join(', ');
+  }
+}
+
+document.getElementById('btnRotate').onclick = () => {
+  currentOrientation = currentOrientation === 'h' ? 'v' : 'h';
+  statusEl.textContent = 'Ausrichtung: ' + (currentOrientation === 'h' ? 'Horizontal' : 'Vertikal');
+};
+
+document.getElementById('btnRandom').onclick = () => {
+  myBoard = Array(100).fill(0);
+  placingShips = [...SHIP_SIZES];
+  for (const size of SHIP_SIZES) {
+    let placed = false;
+    while (!placed) {
+      const orientation = Math.random() < 0.5 ? 'h' : 'v';
+      const row = Math.floor(Math.random() * GRID_SIZE);
+      const col = Math.floor(Math.random() * GRID_SIZE);
+      const cells = [];
+      let valid = true;
+      for (let i = 0; i < size; i++) {
+        let r = row, c = col;
+        if (orientation === 'h') c += i; else r += i;
+        if (r >= GRID_SIZE || c >= GRID_SIZE || myBoard[r * GRID_SIZE + c] === 1) {
+          valid = false; break;
+        }
+        cells.push(r * GRID_SIZE + c);
+      }
+      if (valid) {
+        cells.forEach(idx => myBoard[idx] = 1);
+        placed = true;
+      }
+    }
+  }
+  placingShips = [];
+  renderMyGrid();
+  updatePlacementInfo();
+  document.getElementById('btnReady').disabled = false;
+};
+
+function renderMyGrid() {
+  const cells = myGridEl.children;
+  for (let i = 0; i < 100; i++) {
+    cells[i].className = 'cell';
+    if (myBoard[i] === 1) cells[i].classList.add('ship');
+    if (myHits[i] === 1) cells[i].classList.add('hit');
+    if (myHits[i] === 2) cells[i].classList.add('miss');
+  }
+}
+
+// ---------- Ready / Spielstart ----------
+let readySent = false;
+let opponentReady = false;
+let iAmReady = false;
+
+document.getElementById('btnReady').onclick = () => {
+  iAmReady = true;
+  document.getElementById('btnReady').disabled = true;
+  document.getElementById('btnRandom').disabled = true;
+  document.getElementById('btnRotate').disabled = true;
+  send({ type: 'ready' });
+  checkGameStart();
+};
+
+function checkGameStart() {
+  if (iAmReady && opponentReady) {
+    gameStarted = true;
+    phaseBadge.textContent = 'Spiel läuft';
+    myTurn = isHost; // Host startet
+    updateTurnUI();
+  } else {
+    statusEl.textContent = iAmReady ? 'Warte auf Gegner...' : 'Platziere deine Schiffe.';
+  }
+}
+
+function updateTurnUI() {
+  if (myTurn) {
+    turnBadge.textContent = 'Dein Zug';
+    turnBadge.classList.add('active');
+    statusEl.textContent = 'Du bist am Zug — klicke auf das Gegner-Feld.';
+    enemyGridEl.querySelectorAll('.cell').forEach((c, i) => {
+      if (enemyHits[i] === 0) c.classList.add('target');
+      else c.classList.remove('target');
+    });
+  } else {
+    turnBadge.textContent = 'Gegner zieht';
+    turnBadge.classList.remove('active');
+    statusEl.textContent = 'Warte auf den Zug des Gegners...';
+    enemyGridEl.querySelectorAll('.cell').forEach(c => c.classList.remove('target'));
+  }
+}
+
+// ---------- Schuss ----------
+enemyGridEl.addEventListener('click', (e) => {
+  if (!gameStarted || !myTurn) return;
+  const cell = e.target.closest('.cell');
+  if (!cell) return;
+  const idx = parseInt(cell.dataset.idx);
+  if (enemyHits[idx] !== 0) return;
+  send({ type: 'shot', idx });
+  myTurn = false;
+  updateTurnUI();
+});
+
+function renderEnemyGrid() {
+  const cells = enemyGridEl.children;
+  for (let i = 0; i < 100; i++) {
+    cells[i].className = 'cell';
+    if (enemyHits[i] === 1) cells[i].classList.add('hit');
+    if (enemyHits[i] === 2) cells[i].classList.add('miss');
+    if (enemyHits[i] === 3) cells[i].classList.add('sunk');
+    if (myTurn && enemyHits[i] === 0) cells[i].classList.add('target');
+  }
+}
+
+// ---------- Nachrichtenverarbeitung ----------
+function send(msg) {
+  if (dataChannel && dataChannel.readyState === 'open') {
+    dataChannel.send(JSON.stringify(msg));
+  }
+}
+
+function handleMessage(msg) {
+  const data = JSON.parse(msg);
+
+  if (data.type === 'ready') {
+    opponentReady = true;
+    checkGameStart();
+  }
+
+  if (data.type === 'shot') {
+    const idx = data.idx;
+    const wasHit = myBoard[idx] === 1;
+    myHits[idx] = wasHit ? 1 : 2;
+    renderMyGrid();
+
+    // Prüfen ob Schiff komplett gesunken / alle Schiffe weg
+    send({ type: 'result', idx, hit: wasHit, allSunk: checkAllSunk(myBoard, myHits) });
+
+    if (checkAllSunk(myBoard, myHits)) {
+      statusEl.textContent = '💥 Du hast verloren — alle deine Schiffe sind gesunken.';
+      gameStarted = false;
+    } else {
+      myTurn = wasHit ? false : true; // bei Treffer bleibt Gegner am Zug (Standard: nein, hier wechselt's normal)
+      myTurn = true; // Schütze (Gegner) hat geschossen → jetzt ist wieder Spieler dran? -> Wechsel
+      updateTurnUI();
+    }
+  }
+
+  if (data.type === 'result') {
+    const idx = data.idx;
+    enemyHits[idx] = data.hit ? 1 : 2;
+    renderEnemyGrid();
+
+    if (data.allSunk) {
+      statusEl.textContent = '🎉 Du hast gewonnen! Alle gegnerischen Schiffe versenkt.';
+      gameStarted = false;
+    } else {
+      statusEl.textContent = data.hit ? 'Treffer! Aber der Zug geht an den Gegner.' : 'Wasser! Zug geht an den Gegner.';
+      myTurn = false;
+      updateTurnUI();
+    }
+  }
+}
+
+function checkAllSunk(board, hits) {
+  for (let i = 0; i < 100; i++) {
+    if (board[i] === 1 && hits[i] !== 1) return false;
+  }
+  return true;
+}
+
+// ---------- WebRTC Setup ----------
+const offerOutput = document.getElementById('offerOutput');
+const answerInput = document.getElementById('answerInput');
+const answerOutput = document.getElementById('answerOutput');
+const offerInput = document.getElementById('offerInput');
+
+document.getElementById('btnHost').onclick = () => {
+  isHost = true;
+  document.getElementById('hostFlow').classList.remove('hidden');
+  document.getElementById('joinFlow').classList.add('hidden');
+  setupPeerConnection(true);
+};
+
+document.getElementById('btnJoin').onclick = () => {
+  isHost = false;
+  document.getElementById('joinFlow').classList.remove('hidden');
+  document.getElementById('hostFlow').classList.add('hidden');
+  setupPeerConnection(false);
+};
+
+function setupPeerConnection(asHost) {
+  pc = new RTCPeerConnection({
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  });
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate === null) {
+      // ICE-Gathering fertig -> Code ist vollständig
+      if (asHost) {
+        offerOutput.value = JSON.stringify(pc.localDescription);
+      } else {
+        answerOutput.value = JSON.stringify(pc.localDescription);
+      }
+    }
+  };
+
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') {
+      statusEl.textContent = 'Verbunden! Platziert eure Schiffe.';
+      document.getElementById('setupPanel').classList.add('hidden');
+      document.getElementById('gamePanel').classList.remove('hidden');
+    }
+    if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      statusEl.textContent = 'Verbindung getrennt.';
+    }
+  };
+
+  if (asHost) {
+    dataChannel = pc.createDataChannel('game');
+    setupDataChannel();
+  } else {
+    pc.ondatachannel = (e) => {
+      dataChannel = e.channel;
+      setupDataChannel();
+    };
+  }
+}
+
+function setupDataChannel() {
+  dataChannel.onopen = () => {
+    statusEl.textContent = 'Datenverbindung offen! Platziert eure Schiffe.';
+  };
+  dataChannel.onmessage = (e) => handleMessage(e.data);
+}
+
+document.getElementById('btnCreateOffer').onclick = async () => {
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  statusEl.textContent = 'Code wird generiert...';
+};
+
+document.getElementById('btnAcceptAnswer').onclick = async () => {
+  try {
+    const answer = JSON.parse(answerInput.value);
+    await pc.setRemoteDescription(answer);
+    statusEl.textContent = 'Verbindung wird aufgebaut...';
+  } catch (err) {
+    statusEl.textContent = 'Ungültiger Code: ' + err.message;
+  }
+};
+
+document.getElementById('btnCreateAnswer').onclick = async () => {
+  try {
+    const offer = JSON.parse(offerInput.value);
+    await pc.setRemoteDescription(offer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    statusEl.textContent = 'Antwort-Code wird generiert...';
+  } catch (err) {
+    statusEl.textContent = 'Ungültiger Code: ' + err.message;
+  }
+};
+</script>
+</body>
+</html>
