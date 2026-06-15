@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>PONG</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --fg: #39ff14;
+    --dim: #1a3a0f;
+    --accent: #ff9100;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Courier New', monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+  }
+  #title {
+    font-size: 2.5rem;
+    letter-spacing: 1rem;
+    text-shadow: 0 0 10px var(--fg);
+    margin-bottom: 10px;
+  }
+  #menu {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 16px;
+  }
+  #menu p {
+    color: var(--dim);
+    font-size: 0.9rem;
+    letter-spacing: 0.2rem;
+  }
+  .btn {
+    background: transparent;
+    border: 2px solid var(--fg);
+    color: var(--fg);
+    font-family: inherit;
+    font-size: 1.1rem;
+    letter-spacing: 0.3rem;
+    padding: 12px 28px;
+    cursor: pointer;
+    transition: 0.15s;
+    text-transform: uppercase;
+  }
+  .btn:hover, .btn:focus {
+    background: var(--fg);
+    color: var(--bg);
+    box-shadow: 0 0 15px var(--fg);
+  }
+  #gameWrap {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+  }
+  canvas {
+    background: var(--bg);
+    border: 2px solid var(--fg);
+    box-shadow: 0 0 20px rgba(57,255,20,0.4);
+  }
+  #info {
+    margin-top: 10px;
+    color: var(--dim);
+    font-size: 0.85rem;
+    letter-spacing: 0.15rem;
+    text-align: center;
+    line-height: 1.6;
+  }
+  #backBtn {
+    margin-top: 14px;
+  }
+  #overlay {
+    position: absolute;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    color: var(--fg);
+    text-shadow: 0 0 10px var(--fg);
+    background: rgba(10,10,10,0.85);
+    padding: 30px 50px;
+    border: 2px solid var(--fg);
+  }
+  #overlay h2 {
+    font-size: 1.8rem;
+    letter-spacing: 0.3rem;
+  }
+</style>
+</head>
+<body>
+
+<div id="title">P O N G</div>
+
+<div id="menu">
+  <button class="btn" id="btn1p">1 Spieler</button>
+  <button class="btn" id="btn2p">2 Spieler</button>
+  <p>1 Spieler: W/S vs. CPU &nbsp;|&nbsp; 2 Spieler: W/S vs. ↑/↓</p>
+</div>
+
+<div id="gameWrap">
+  <canvas id="canvas" width="800" height="500"></canvas>
+  <div id="info">LEERTASTE: Pause &nbsp;|&nbsp; ESC: Zurück zum Menü</div>
+  <button class="btn" id="backBtn">Zurück</button>
+</div>
+
+<div id="overlay">
+  <h2 id="overlayText">PAUSE</h2>
+  <div id="overlaySub" style="color: var(--dim); font-size: 0.9rem; letter-spacing: 0.2rem;"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const menu = document.getElementById('menu');
+const gameWrap = document.getElementById('gameWrap');
+const overlay = document.getElementById('overlay');
+const overlayText = document.getElementById('overlayText');
+const overlaySub = document.getElementById('overlaySub');
+
+let mode = null; // '1p' or '2p'
+let running = false;
+let paused = false;
+let animId = null;
+
+const PADDLE_W = 14, PADDLE_H = 90;
+const BALL_SIZE = 14;
+const WIN_SCORE = 7;
+
+let state = {};
+
+function resetState() {
+  state = {
+    leftY: H/2 - PADDLE_H/2,
+    rightY: H/2 - PADDLE_H/2,
+    ballX: W/2 - BALL_SIZE/2,
+    ballY: H/2 - BALL_SIZE/2,
+    ballVX: 0,
+    ballVY: 0,
+    leftScore: 0,
+    rightScore: 0,
+    keys: {}
+  };
+  resetBall(Math.random() < 0.5 ? -1 : 1);
+}
+
+function resetBall(direction) {
+  state.ballX = W/2 - BALL_SIZE/2;
+  state.ballY = H/2 - BALL_SIZE/2;
+  const angle = (Math.random() * 0.6 - 0.3); // leichte Variation
+  const speed = 5.5;
+  state.ballVX = direction * speed * Math.cos(angle);
+  state.ballVY = speed * Math.sin(angle);
+}
+
+const PADDLE_SPEED = 6;
+const CPU_SPEED = 4.5;
+
+function update() {
+  // Spieler 1 (links): W/S
+  if (state.keys['w']) state.leftY -= PADDLE_SPEED;
+  if (state.keys['s']) state.leftY += PADDLE_SPEED;
+
+  if (mode === '2p') {
+    if (state.keys['ArrowUp']) state.rightY -= PADDLE_SPEED;
+    if (state.keys['ArrowDown']) state.rightY += PADDLE_SPEED;
+  } else {
+    // CPU rechts
+    const target = state.ballY + BALL_SIZE/2 - PADDLE_H/2;
+    if (Math.abs(target - state.rightY) > 4) {
+      if (target > state.rightY) state.rightY += CPU_SPEED;
+      else state.rightY -= CPU_SPEED;
+    }
+  }
+
+  state.leftY = clamp(state.leftY, 0, H - PADDLE_H);
+  state.rightY = clamp(state.rightY, 0, H - PADDLE_H);
+
+  // Ball bewegen
+  state.ballX += state.ballVX;
+  state.ballY += state.ballVY;
+
+  // Wand oben/unten
+  if (state.ballY <= 0) {
+    state.ballY = 0;
+    state.ballVY *= -1;
+  } else if (state.ballY + BALL_SIZE >= H) {
+    state.ballY = H - BALL_SIZE;
+    state.ballVY *= -1;
+  }
+
+  // Linker Schläger
+  if (state.ballX <= PADDLE_W) {
+    if (state.ballY + BALL_SIZE >= state.leftY && state.ballY <= state.leftY + PADDLE_H) {
+      state.ballX = PADDLE_W;
+      const relativeIntersectY = (state.leftY + PADDLE_H/2) - (state.ballY + BALL_SIZE/2);
+      const normalized = relativeIntersectY / (PADDLE_H/2);
+      const bounceAngle = normalized * (Math.PI/3);
+      const speed = Math.min(Math.hypot(state.ballVX, state.ballVY) * 1.05, 14);
+      state.ballVX = Math.cos(bounceAngle) * speed;
+      state.ballVY = -Math.sin(bounceAngle) * speed;
+    } else if (state.ballX < -BALL_SIZE) {
+      state.rightScore++;
+      checkWin();
+      if (running) resetBall(-1);
+    }
+  }
+
+  // Rechter Schläger
+  if (state.ballX + BALL_SIZE >= W - PADDLE_W) {
+    if (state.ballY + BALL_SIZE >= state.rightY && state.ballY <= state.rightY + PADDLE_H) {
+      state.ballX = W - PADDLE_W - BALL_SIZE;
+      const relativeIntersectY = (state.rightY + PADDLE_H/2) - (state.ballY + BALL_SIZE/2);
+      const normalized = relativeIntersectY / (PADDLE_H/2);
+      const bounceAngle = normalized * (Math.PI/3);
+      const speed = Math.min(Math.hypot(state.ballVX, state.ballVY) * 1.05, 14);
+      state.ballVX = -Math.cos(bounceAngle) * speed;
+      state.ballVY = -Math.sin(bounceAngle) * speed;
+    } else if (state.ballX > W + BALL_SIZE) {
+      state.leftScore++;
+      checkWin();
+      if (running) resetBall(1);
+    }
+  }
+}
+
+function checkWin() {
+  if (state.leftScore >= WIN_SCORE || state.rightScore >= WIN_SCORE) {
+    running = false;
+    const winner = state.leftScore >= WIN_SCORE
+      ? (mode === '2p' ? 'SPIELER 1' : 'SPIELER')
+      : (mode === '2p' ? 'SPIELER 2' : 'CPU');
+    showOverlay(winner + ' GEWINNT!', 'LEERTASTE für neue Runde');
+  }
+}
+
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function draw() {
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Mittellinie
+  ctx.strokeStyle = '#1a3a0f';
+  ctx.setLineDash([10, 14]);
+  ctx.beginPath();
+  ctx.moveTo(W/2, 0);
+  ctx.lineTo(W/2, H);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Schläger
+  ctx.fillStyle = '#39ff14';
+  ctx.shadowColor = '#39ff14';
+  ctx.shadowBlur = 10;
+  ctx.fillRect(0, state.leftY, PADDLE_W, PADDLE_H);
+  ctx.fillRect(W - PADDLE_W, state.rightY, PADDLE_W, PADDLE_H);
+
+  // Ball
+  ctx.fillRect(state.ballX, state.ballY, BALL_SIZE, BALL_SIZE);
+  ctx.shadowBlur = 0;
+
+  // Punktestand
+  ctx.font = '48px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(state.leftScore, W/2 - 80, 70);
+  ctx.fillText(state.rightScore, W/2 + 80, 70);
+}
+
+function loop() {
+  if (!paused && running) {
+    update();
+  }
+  draw();
+  if (running || paused) {
+    animId = requestAnimationFrame(loop);
+  }
+}
+
+function showOverlay(text, sub) {
+  overlayText.textContent = text;
+  overlaySub.textContent = sub || '';
+  overlay.style.display = 'flex';
+}
+
+function hideOverlay() {
+  overlay.style.display = 'none';
+}
+
+function startGame(selectedMode) {
+  mode = selectedMode;
+  menu.style.display = 'none';
+  gameWrap.style.display = 'flex';
+  resetState();
+  running = true;
+  paused = false;
+  hideOverlay();
+  if (animId) cancelAnimationFrame(animId);
+  loop();
+}
+
+function backToMenu() {
+  running = false;
+  paused = false;
+  hideOverlay();
+  if (animId) cancelAnimationFrame(animId);
+  gameWrap.style.display = 'none';
+  menu.style.display = 'flex';
+}
+
+document.getElementById('btn1p').addEventListener('click', () => startGame('1p'));
+document.getElementById('btn2p').addEventListener('click', () => startGame('2p'));
+document.getElementById('backBtn').addEventListener('click', backToMenu);
+
+window.addEventListener('keydown', (e) => {
+  state.keys = state.keys || {};
+  state.keys[e.key] = true;
+
+  if (e.key === ' ') {
+    e.preventDefault();
+    if (!running && overlay.style.display === 'flex' && overlayText.textContent.includes('GEWINNT')) {
+      // Neue Runde nach Sieg
+      resetState();
+      running = true;
+      hideOverlay();
+      if (animId) cancelAnimationFrame(animId);
+      loop();
+    } else if (running) {
+      paused = !paused;
+      if (paused) {
+        showOverlay('PAUSE', 'LEERTASTE zum Fortsetzen');
+      } else {
+        hideOverlay();
+      }
+    }
+  }
+
+  if (e.key === 'Escape') {
+    backToMenu();
+  }
+
+  if (['w','s','W','S','ArrowUp','ArrowDown',' '].includes(e.key)) {
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  state.keys = state.keys || {};
+  state.keys[e.key] = false;
+  if (e.key === 'w') state.keys['w'] = false;
+});
+
+// Normalize w/s keys regardless of case
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'W') state.keys = state.keys || {}, state.keys['w'] = true;
+  if (e.key === 'S') state.keys = state.keys || {}, state.keys['s'] = true;
+});
+window.addEventListener('keyup', (e) => {
+  if (e.key === 'W') state.keys['w'] = false;
+  if (e.key === 'S') state.keys['s'] = false;
+});
+</script>
+</body>
+</html>
