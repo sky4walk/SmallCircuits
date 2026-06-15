@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CSV → SEPA Lastschrift Konverter</title>
+<style>
+  :root{
+    --bg:#0f1115;
+    --panel:#171a21;
+    --panel-border:#2a2f3a;
+    --text:#e6e8ec;
+    --muted:#8b93a3;
+    --accent:#4f8cff;
+    --accent-dark:#2f5fc4;
+    --ok:#3ddc97;
+    --warn:#f5b942;
+    --err:#ff6b6b;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);
+    color:var(--text);
+    padding:2rem 1rem;
+    line-height:1.5;
+  }
+  .wrap{max-width:880px;margin:0 auto;}
+  h1{font-size:1.6rem;margin:0 0 .25rem;}
+  .sub{color:var(--muted);margin:0 0 1.5rem;font-size:.95rem;}
+  .card{
+    background:var(--panel);
+    border:1px solid var(--panel-border);
+    border-radius:10px;
+    padding:1.25rem 1.5rem;
+    margin-bottom:1.25rem;
+  }
+  .card h2{font-size:1.05rem;margin:0 0 .75rem;}
+  .drop{
+    border:2px dashed var(--panel-border);
+    border-radius:8px;
+    padding:2rem 1rem;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .drop.dragover{border-color:var(--accent);background:#1c2230;}
+  .drop p{margin:.25rem 0;color:var(--muted);}
+  .drop .fname{color:var(--text);font-weight:600;}
+  input[type=file]{display:none;}
+  button{
+    background:var(--accent);
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    padding:.6rem 1.1rem;
+    font-size:.95rem;
+    cursor:pointer;
+    font-weight:600;
+    transition:background .15s;
+  }
+  button:hover{background:var(--accent-dark);}
+  button:disabled{background:#384156;color:var(--muted);cursor:not-allowed;}
+  button.secondary{background:transparent;border:1px solid var(--panel-border);color:var(--text);}
+  button.secondary:hover{background:#1c2230;}
+  .row{display:flex;gap:.6rem;flex-wrap:wrap;align-items:center;margin-top:.75rem;}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:.75rem;margin-top:.5rem;}
+  .stat{background:#1c2230;border:1px solid var(--panel-border);border-radius:8px;padding:.7rem .9rem;}
+  .stat .k{color:var(--muted);font-size:.8rem;display:block;margin-bottom:.2rem;}
+  .stat .v{font-size:1.05rem;font-weight:600;}
+  table{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:.75rem;}
+  th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid var(--panel-border);}
+  th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em;}
+  tr.skip{opacity:.55;}
+  tr.skip td{text-decoration:line-through;}
+  .badge{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.72rem;font-weight:700;text-transform:uppercase;}
+  .badge.ok{background:rgba(61,220,151,.15);color:var(--ok);}
+  .badge.skip{background:rgba(139,147,163,.15);color:var(--muted);}
+  .badge.err{background:rgba(255,107,107,.15);color:var(--err);}
+  .msg{border-radius:8px;padding:.7rem 1rem;margin-top:.75rem;font-size:.9rem;}
+  .msg.err{background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.3);color:var(--err);}
+  .msg.warn{background:rgba(245,185,66,.1);border:1px solid rgba(245,185,66,.3);color:var(--warn);}
+  .msg.ok{background:rgba(61,220,151,.1);border:1px solid rgba(61,220,151,.3);color:var(--ok);}
+  details{margin-top:.75rem;}
+  summary{cursor:pointer;color:var(--accent);font-size:.85rem;}
+  pre{
+    background:#0b0d12;
+    border:1px solid var(--panel-border);
+    border-radius:8px;
+    padding:1rem;
+    overflow:auto;
+    font-family:var(--mono);
+    font-size:.78rem;
+    max-height:400px;
+    white-space:pre;
+  }
+  label.field{display:block;font-size:.85rem;color:var(--muted);margin-top:.6rem;margin-bottom:.2rem;}
+  select{
+    background:#0b0d12;border:1px solid var(--panel-border);color:var(--text);
+    border-radius:6px;padding:.4rem .6rem;font-size:.85rem;
+  }
+  .hint{color:var(--muted);font-size:.8rem;margin-top:.4rem;}
+  a.example-link{color:var(--accent);font-size:.85rem;cursor:pointer;text-decoration:underline;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>CSV → SEPA Lastschrift (pain.008)</h1>
+  <p class="sub">CSV-Datei mit Gläubiger- und Mitgliederdaten in eine SEPA-Lastschrift-XML konvertieren — alles läuft lokal im Browser, es werden keine Daten übertragen.</p>
+
+  <div class="card">
+    <h2>1. CSV-Datei laden</h2>
+    <div class="drop" id="drop">
+      <p class="fname" id="fname">Datei hierher ziehen oder klicken zum Auswählen</p>
+      <p>Erwartet: #creditor-Block und #debitors-Block (semikolon- oder kommagetrennt)</p>
+    </div>
+    <input type="file" id="fileInput" accept=".csv,text/csv">
+    <div class="row">
+      <a class="example-link" id="exampleLink">Beispiel-CSV laden</a>
+    </div>
+  </div>
+
+  <div class="card" id="optionsCard" style="display:none;">
+    <h2>2. Einstellungen</h2>
+    <label class="field">Einzugsdatum</label>
+    <input type="date" id="collectionDate" style="background:#0b0d12;border:1px solid var(--panel-border);color:var(--text);border-radius:6px;padding:.4rem .6rem;font-size:.85rem;">
+    <div class="hint" id="dateHint"></div>
+
+    <label class="field">PAIN-Version</label>
+    <select id="painVersion">
+      <option value="pain.008.003.02">pain.008.003.02 (Standard)</option>
+      <option value="pain.008.001.02">pain.008.001.02</option>
+    </select>
+  </div>
+
+  <div class="card" id="resultsCard" style="display:none;">
+    <h2>3. Ergebnis</h2>
+    <div id="messages"></div>
+    <div class="summary-grid" id="summary"></div>
+    <div id="tableWrap"></div>
+    <div class="row">
+      <button id="downloadBtn" disabled>SEPA-XML herunterladen</button>
+      <button class="secondary" id="showXmlBtn" disabled>XML anzeigen</button>
+    </div>
+    <details id="xmlDetails" style="display:none;">
+      <summary>XML-Vorschau</summary>
+      <pre id="xmlPreview"></pre>
+    </details>
+  </div>
+</div>
+
+<script>
+/* ===================== Konstanten ===================== */
+const PAIN_VERSIONS = {
+  "pain.008.003.02": {
+    namespace: "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02",
+    schemaLocation: "urn:iso:std:iso:20022:tech:xsd:pain.008.003.02 pain.008.003.02.xsd"
+  },
+  "pain.008.001.02": {
+    namespace: "urn:iso:std:iso:20022:tech:xsd:pain.008.001.02",
+    schemaLocation: "urn:iso:std:iso:20022:tech:xsd:pain.008.001.02 pain.008.001.02.xsd"
+  }
+};
+const XSI_NAMESPACE = "http://www.w3.org/2001/XMLSchema-instance";
+const LEAD_DAYS = {FRST:5, RCUR:2, OOFF:5, FNAL:2};
+
+const EXAMPLE_CSV =
+`#creditor
+creditor_name,creditor_iban,creditor_bic,creditor_id,collection_date,pain_version
+Mein Unternehmen GmbH,DE12500105170648489890,INGDDEFFXXX,DE98ZZZ09999999999,2025-06-01,pain.008.003.02
+
+#debitors
+Mitglieds-Nr.,Name,Vorname,Ansprechpart-ner bei Firmen,Mitglied seit,Zahler ab,geboren,Straße,PLZ,Ort,Adresse geändert seit Beitritt,Telefon,Handy,e-mail,Zustimmung Fotos,Änderung Bank seit Beitritt?,abweichender Zahler,Mandats-datum,IBAN,BIC,Bank,Betrag,Ausgetreten
+1001,Mustermann,Max,,2020-01-01,,1985-03-12,Musterstraße 1,12345,Musterstadt,,0911123456,,max@example.de,Ja,Nein,,2020-01-01,DE89370400440532013000,COBADEFFXXX,Commerzbank,49.00,
+1002,Musterfrau,Erika,,2019-06-01,,1990-07-22,Beispielweg 5,54321,Beispielort,,,,erika@example.de,Nein,Nein,,2019-06-01,DE75512108001245126199,SSKMDEMMXXX,Sparkasse,49.00,
+1003,Schmidt,Hans,,2018-03-15,,1978-11-05,Testgasse 9,99999,Teststadt,,,,,,Nein,,2018-03-15,,,,,2023-05-01
+1004,Bauer,Anna,,2021-09-01,,1995-02-28,Hauptstr. 3,10115,Berlin,,030987654,,anna@example.de,Ja,Nein,,2021-09-01,DE91100000000123456789,BELADEBEXXX,Berliner Bank,49.00,
+`;
+
+class ValidationError extends Error {}
+
+/* ===================== Validatoren ===================== */
+
+function validateIban(ibanStr, label) {
+  ibanStr = ibanStr.trim().replace(/\s+/g, "").toUpperCase();
+  if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]{1,30}$/.test(ibanStr)) {
+    throw new ValidationError(`${label}: IBAN '${ibanStr}' hat ungültiges Format`);
+  }
+  const rearranged = ibanStr.slice(4) + ibanStr.slice(0, 4);
+  let numeric = "";
+  for (const c of rearranged) {
+    if (/[A-Z]/.test(c)) numeric += (c.charCodeAt(0) - 55).toString();
+    else numeric += c;
+  }
+  // mod-97 via chunked BigInt-free arithmetic
+  let remainder = 0;
+  for (const ch of numeric) {
+    remainder = (remainder * 10 + parseInt(ch, 10)) % 97;
+  }
+  if (remainder !== 1) {
+    throw new ValidationError(`${label}: IBAN '${ibanStr}' hat ungültige Prüfziffer`);
+  }
+  return ibanStr;
+}
+
+function validateBic(bicStr, label) {
+  bicStr = bicStr.trim().toUpperCase();
+  if (!/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bicStr)) {
+    throw new ValidationError(`${label}: ungültiger BIC '${bicStr}'`);
+  }
+  return bicStr;
+}
+
+function validateDate(dateStr, label) {
+  dateStr = dateStr.trim();
+  // YYYY-MM-DD
+  let m = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    const d = new Date(Date.UTC(+m[1], +m[2]-1, +m[3]));
+    if (!isNaN(d.getTime())) return d;
+  }
+  // DD.MM.YYYY
+  m = dateStr.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
+  if (m) {
+    const d = new Date(Date.UTC(+m[3], +m[2]-1, +m[1]));
+    if (!isNaN(d.getTime())) return d;
+  }
+  throw new ValidationError(`${label}: Datum '${dateStr}' muss im Format YYYY-MM-DD oder DD.MM.YYYY sein`);
+}
+
+function validateAmount(amountStr, label) {
+  const cleaned = amountStr.trim().replace(",", ".");
+  const amount = parseFloat(cleaned);
+  if (isNaN(amount) || !/^-?\d+(\.\d+)?$/.test(cleaned)) {
+    throw new ValidationError(`${label}: ungültiger Betrag '${amountStr}'`);
+  }
+  if (amount <= 0) {
+    throw new ValidationError(`${label}: Betrag muss > 0 sein`);
+  }
+  return Math.round(amount * 100) / 100;
+}
+
+function validateCreditorId(cid, label) {
+  cid = cid.trim();
+  if (!/^[A-Z]{2}[0-9]{2}[A-Z0-9]{3}[A-Z0-9]{1,28}$/.test(cid)) {
+    throw new ValidationError(`${label}: Gläubiger-ID '${cid}' hat unerwartetes Format (erwartet z.B. DE98ZZZ09999999999)`);
+  }
+  return cid;
+}
+
+function fmtDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+/* ===================== CSV-Parser ===================== */
+
+// Simple CSV line splitter supporting quoted fields, auto-detect delimiter
+function detectDelimiter(line) {
+  const counts = {",": 0, ";": 0, "\t": 0};
+  for (const ch of line) {
+    if (ch in counts) counts[ch]++;
+  }
+  let best = ",", bestCount = -1;
+  for (const d in counts) {
+    if (counts[d] > bestCount) { bestCount = counts[d]; best = d; }
+  }
+  return best;
+}
+
+function splitCsvLine(line, delim) {
+  const result = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i+1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += ch;
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === delim) { result.push(cur); cur = ""; }
+      else cur += ch;
+    }
+  }
+  result.push(cur);
+  return result;
+}
+
+function parseCsvBlock(lines) {
+  if (lines.length === 0) return [];
+  const delim = detectDelimiter(lines[0]);
+  const header = splitCsvLine(lines[0], delim).map(h => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    if (lines[i].trim() === "") continue;
+    const cells = splitCsvLine(lines[i], delim);
+    const row = {};
+    header.forEach((h, idx) => {
+      row[h] = (cells[idx] !== undefined ? cells[idx] : "").trim();
+    });
+    rows.push(row);
+  }
+  return rows;
+}
+
+function parseCsv(text) {
+  // strip BOM
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rawLines = text.split(/\r\n|\r|\n/);
+
+  let section = null;
+  const creditorLines = [];
+  const debitorLines = [];
+
+  for (const line of rawLines) {
+    const stripped = line.trim();
+    if (stripped.toLowerCase() === "#creditor") { section = "creditor"; continue; }
+    if (stripped.toLowerCase() === "#debitors") { section = "debitors"; continue; }
+    if (stripped === "") continue;
+    if (stripped.startsWith("#")) continue;
+    if (section === "creditor") creditorLines.push(line);
+    else if (section === "debitors") debitorLines.push(line);
+  }
+
+  if (creditorLines.length === 0) throw new ValidationError("CSV enthält keinen #creditor Block");
+  if (debitorLines.length === 0) throw new ValidationError("CSV enthält keinen #debitors Block");
+
+  // Creditor
+  const credRows = parseCsvBlock(creditorLines);
+  if (credRows.length !== 1) {
+    throw new ValidationError(`#creditor Block muss genau eine Datenzeile haben (gefunden: ${credRows.length})`);
+  }
+  const rawC = credRows[0];
+
+  const requiredC = ["creditor_name", "creditor_iban", "creditor_bic", "creditor_id", "collection_date"];
+  for (const field of requiredC) {
+    if (!rawC[field]) throw new ValidationError(`Pflichtfeld '${field}' fehlt im #creditor Block`);
+  }
+
+  let painVersion = (rawC.pain_version || "pain.008.003.02").trim();
+  if (!(painVersion in PAIN_VERSIONS)) {
+    throw new ValidationError(`Unbekannte pain_version '${painVersion}' – erlaubt: ${Object.keys(PAIN_VERSIONS).sort().join(", ")}`);
+  }
+
+  const creditorDateRaw = rawC.collection_date;
+  const creditor = {
+    name: rawC.creditor_name,
+    iban: validateIban(rawC.creditor_iban, "Gläubiger IBAN"),
+    bic: validateBic(rawC.creditor_bic, "Gläubiger BIC"),
+    creditorId: validateCreditorId(rawC.creditor_id, "Gläubiger-ID"),
+    collectionDateRaw: validateDate(creditorDateRaw, "Einzugsdatum"),
+    painVersion: painVersion
+  };
+
+  // Debitors
+  const debRows = parseCsvBlock(debitorLines);
+  if (debRows.length === 0) throw new ValidationError("Keine Schuldner-Zeilen gefunden");
+
+  const debitors = [];
+  const skipped = [];
+
+  debRows.forEach((row, idx0) => {
+    const i = idx0 + 1;
+    const vorname = (row["Vorname"] || "").trim();
+    const nachname = (row["Name"] || "").trim();
+    const fullName = `${vorname} ${nachname}`.trim() || `Zeile ${i}`;
+    const label = `Zeile ${i} ('${fullName}')`;
+
+    const ausgetreten = (row["Ausgetreten"] || "").trim();
+    if (ausgetreten) {
+      skipped.push({row: i, name: fullName, reason: `ausgetreten am ${ausgetreten}`});
+      return;
+    }
+
+    const ibanRaw = (row["IBAN"] || "").trim();
+    if (!ibanRaw) {
+      skipped.push({row: i, name: fullName, reason: "keine IBAN vorhanden"});
+      return;
+    }
+
+    let ibanValidated;
+    try {
+      ibanValidated = validateIban(ibanRaw, label);
+    } catch (e) {
+      skipped.push({row: i, name: fullName, reason: `ungültige IBAN '${ibanRaw}'`});
+      return;
+    }
+
+    const mandateIdRaw = (row["Mitglieds-Nr."] || "").trim();
+    const mandateDateRaw = (row["Mandats-datum"] || "").trim();
+    let bicRaw = (row["BIC"] || "").trim();
+    const amountRaw = (row["Betrag"] || "").trim();
+
+    if (bicRaw && !/^[A-Za-z]{6}[A-Za-z0-9]{2}([A-Za-z0-9]{3})?$/.test(bicRaw)) {
+      bicRaw = "";
+    }
+
+    if (!mandateIdRaw) throw new ValidationError(`${label}: Pflichtfeld 'Mitglieds-Nr.' fehlt`);
+    if (!mandateDateRaw) throw new ValidationError(`${label}: Pflichtfeld 'Mandats-datum' fehlt`);
+    if (!amountRaw) throw new ValidationError(`${label}: Pflichtfeld 'Betrag' fehlt`);
+
+    const entry = {
+      row: i,
+      name: fullName,
+      iban: ibanValidated,
+      bic: bicRaw ? validateBic(bicRaw, `${label} BIC`) : "",
+      amount: validateAmount(amountRaw, label),
+      mandateId: mandateIdRaw,
+      mandateDate: validateDate(mandateDateRaw, `${label} Mandats-datum`),
+      sequenceType: "RCUR",
+      description: "Jahresbeitrag"
+    };
+    debitors.push(entry);
+  });
+
+  if (debitors.length === 0) throw new ValidationError("Keine gültigen Schuldner-Einträge nach Filterung gefunden");
+
+  return {creditor, debitors, skipped};
+}
+
+/* ===================== XML-Builder ===================== */
+
+function esc(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function uuidHex(len) {
+  let s = "";
+  for (let i = 0; i < len; i++) s += Math.floor(Math.random()*16).toString(16);
+  return s.toUpperCase();
+}
+
+function nowIso() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function buildXml(creditor, debitors, collectionDate) {
+  const nowStr = nowIso();
+  const msgId = `MSG-${uuidHex(16)}`;
+  const totalAmount = debitors.reduce((s,d) => s + d.amount, 0);
+  const nbOfTxs = debitors.length;
+  const collectionDt = collectionDate;
+
+  const groups = {};
+  for (const d of debitors) {
+    (groups[d.sequenceType] = groups[d.sequenceType] || []).push(d);
+  }
+
+  const versionCfg = PAIN_VERSIONS[creditor.painVersion];
+
+  let xml = "";
+  const lines = [];
+  const push = (s) => lines.push(s);
+
+  push(`<Document xmlns="${esc(versionCfg.namespace)}" xmlns:xsi="${esc(XSI_NAMESPACE)}" xsi:schemaLocation="${esc(versionCfg.schemaLocation)}">`);
+  push(`  <CstmrDrctDbtInitn>`);
+  push(`    <GrpHdr>`);
+  push(`      <MsgId>${esc(msgId)}</MsgId>`);
+  push(`      <CreDtTm>${esc(nowStr)}</CreDtTm>`);
+  push(`      <NbOfTxs>${nbOfTxs}</NbOfTxs>`);
+  push(`      <CtrlSum>${totalAmount.toFixed(2)}</CtrlSum>`);
+  push(`      <InitgPty>`);
+  push(`        <Nm>${esc(creditor.name)}</Nm>`);
+  push(`      </InitgPty>`);
+  push(`    </GrpHdr>`);
+
+  for (const [seqType, txs] of Object.entries(groups)) {
+    const grpAmount = txs.reduce((s,d) => s + d.amount, 0);
+    const pmtId = `PMT-${seqType}-${uuidHex(8)}`;
+
+    push(`    <PmtInf>`);
+    push(`      <PmtInfId>${esc(pmtId)}</PmtInfId>`);
+    push(`      <PmtMtd>DD</PmtMtd>`);
+    push(`      <NbOfTxs>${txs.length}</NbOfTxs>`);
+    push(`      <CtrlSum>${grpAmount.toFixed(2)}</CtrlSum>`);
+    push(`      <PmtTpInf>`);
+    push(`        <SvcLvl>`);
+    push(`          <Cd>SEPA</Cd>`);
+    push(`        </SvcLvl>`);
+    push(`        <LclInstrm>`);
+    push(`          <Cd>CORE</Cd>`);
+    push(`        </LclInstrm>`);
+    push(`        <SeqTp>${esc(seqType)}</SeqTp>`);
+    push(`      </PmtTpInf>`);
+    push(`      <ReqdColltnDt>${esc(collectionDt)}</ReqdColltnDt>`);
+    push(`      <Cdtr>`);
+    push(`        <Nm>${esc(creditor.name)}</Nm>`);
+    push(`      </Cdtr>`);
+    push(`      <CdtrAcct>`);
+    push(`        <Id>`);
+    push(`          <IBAN>${esc(creditor.iban)}</IBAN>`);
+    push(`        </Id>`);
+    push(`      </CdtrAcct>`);
+    push(`      <CdtrAgt>`);
+    push(`        <FinInstnId>`);
+    push(`          <BIC>${esc(creditor.bic)}</BIC>`);
+    push(`        </FinInstnId>`);
+    push(`      </CdtrAgt>`);
+    push(`      <CdtrSchmeId>`);
+    push(`        <Id>`);
+    push(`          <PrvtId>`);
+    push(`            <Othr>`);
+    push(`              <Id>${esc(creditor.creditorId)}</Id>`);
+    push(`              <SchmeNm>`);
+    push(`                <Prtry>SEPA</Prtry>`);
+    push(`              </SchmeNm>`);
+    push(`            </Othr>`);
+    push(`          </PrvtId>`);
+    push(`        </Id>`);
+    push(`      </CdtrSchmeId>`);
+
+    for (const tx of txs) {
+      const e2eId = `E2E-${tx.mandateId}`.slice(0, 35);
+      push(`      <DrctDbtTxInf>`);
+      push(`        <PmtId>`);
+      push(`          <EndToEndId>${esc(e2eId)}</EndToEndId>`);
+      push(`        </PmtId>`);
+      push(`        <InstdAmt Ccy="EUR">${tx.amount.toFixed(2)}</InstdAmt>`);
+      push(`        <DrctDbtTx>`);
+      push(`          <MndtRltdInf>`);
+      push(`            <MndtId>${esc(tx.mandateId)}</MndtId>`);
+      push(`            <DtOfSgntr>${fmtDate(tx.mandateDate)}</DtOfSgntr>`);
+      push(`          </MndtRltdInf>`);
+      push(`        </DrctDbtTx>`);
+      push(`        <DbtrAgt>`);
+      push(`          <FinInstnId>`);
+      if (tx.bic) {
+        push(`            <BIC>${esc(tx.bic)}</BIC>`);
+      } else {
+        push(`            <Othr>`);
+        push(`              <Id>NOTPROVIDED</Id>`);
+        push(`            </Othr>`);
+      }
+      push(`          </FinInstnId>`);
+      push(`        </DbtrAgt>`);
+      push(`        <Dbtr>`);
+      push(`          <Nm>${esc(tx.name)}</Nm>`);
+      push(`        </Dbtr>`);
+      push(`        <DbtrAcct>`);
+      push(`          <Id>`);
+      push(`            <IBAN>${esc(tx.iban)}</IBAN>`);
+      push(`          </Id>`);
+      push(`        </DbtrAcct>`);
+      push(`        <RmtInf>`);
+      push(`          <Ustrd>${esc(tx.description.slice(0,140))}</Ustrd>`);
+      push(`        </RmtInf>`);
+      push(`      </DrctDbtTxInf>`);
+    }
+
+    push(`    </PmtInf>`);
+  }
+
+  push(`  </CstmrDrctDbtInitn>`);
+  push(`</Document>`);
+
+  xml = '<?xml version="1.0" encoding="UTF-8"?>\n' + lines.join("\n") + "\n";
+  return xml;
+}
+
+/* ===================== UI-Logik ===================== */
+
+let parsedData = null;
+let generatedXml = null;
+
+const drop = document.getElementById("drop");
+const fileInput = document.getElementById("fileInput");
+const fname = document.getElementById("fname");
+const exampleLink = document.getElementById("exampleLink");
+const optionsCard = document.getElementById("optionsCard");
+const resultsCard = document.getElementById("resultsCard");
+const collectionDateInput = document.getElementById("collectionDate");
+const dateHint = document.getElementById("dateHint");
+const painVersionSelect = document.getElementById("painVersion");
+const messagesDiv = document.getElementById("messages");
+const summaryDiv = document.getElementById("summary");
+const tableWrap = document.getElementById("tableWrap");
+const downloadBtn = document.getElementById("downloadBtn");
+const showXmlBtn = document.getElementById("showXmlBtn");
+const xmlDetails = document.getElementById("xmlDetails");
+const xmlPreview = document.getElementById("xmlPreview");
+
+drop.addEventListener("click", () => fileInput.click());
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("dragover"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("dragover"));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  drop.classList.remove("dragover");
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener("change", e => {
+  if (e.target.files.length) loadFile(e.target.files[0]);
+});
+
+exampleLink.addEventListener("click", () => {
+  fname.textContent = "Beispiel-CSV geladen";
+  processCsv(EXAMPLE_CSV);
+});
+
+function loadFile(file) {
+  fname.textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = e => processCsv(e.target.result);
+  reader.onerror = () => showError("Datei konnte nicht gelesen werden.");
+  reader.readAsText(file, "utf-8");
+}
+
+function processCsv(text) {
+  resultsCard.style.display = "block";
+  optionsCard.style.display = "none";
+  messagesDiv.innerHTML = "";
+  summaryDiv.innerHTML = "";
+  tableWrap.innerHTML = "";
+  downloadBtn.disabled = true;
+  showXmlBtn.disabled = true;
+  xmlDetails.style.display = "none";
+  generatedXml = null;
+
+  try {
+    parsedData = parseCsv(text);
+  } catch (e) {
+    if (e instanceof ValidationError) {
+      showError("Validierungsfehler: " + e.message);
+    } else {
+      showError("Fehler beim Verarbeiten der CSV: " + e.message);
+    }
+    parsedData = null;
+    return;
+  }
+
+  optionsCard.style.display = "block";
+  painVersionSelect.value = parsedData.creditor.painVersion;
+
+  // default collection date: from CSV, or today+7
+  let defaultDate = parsedData.creditor.collectionDateRaw;
+  collectionDateInput.value = fmtDate(defaultDate);
+
+  renderResults();
+}
+
+collectionDateInput.addEventListener("change", renderResults);
+painVersionSelect.addEventListener("change", renderResults);
+
+function showError(msg) {
+  messagesDiv.innerHTML = `<div class="msg err">${esc(msg)}</div>`;
+}
+
+function renderResults() {
+  if (!parsedData) return;
+  messagesDiv.innerHTML = "";
+  summaryDiv.innerHTML = "";
+  tableWrap.innerHTML = "";
+
+  const {creditor, debitors, skipped} = parsedData;
+
+  // apply UI overrides
+  let collDate;
+  try {
+    collDate = validateDate(collectionDateInput.value, "Einzugsdatum");
+  } catch (e) {
+    showError(e.message);
+    downloadBtn.disabled = true;
+    showXmlBtn.disabled = true;
+    return;
+  }
+  const painVersion = painVersionSelect.value;
+  creditor.painVersion = painVersion;
+
+  const totalAmount = debitors.reduce((s,d) => s + d.amount, 0);
+
+  // Lead-time check
+  const today = new Date();
+  today.setUTCHours(0,0,0,0);
+  const todayUtc = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
+  const seqTypes = new Set(debitors.map(d => d.sequenceType));
+  const requiredDays = Math.max(...[...seqTypes].map(s => LEAD_DAYS[s]));
+  const deltaDays = Math.round((collDate - todayUtc) / 86400000);
+
+  let msgs = [];
+  if (collDate <= todayUtc) {
+    msgs.push(`<div class="msg warn">⚠️ Einzugsdatum ${fmtDate(collDate)} liegt in der Vergangenheit oder ist heute.</div>`);
+  } else if (deltaDays < requiredDays) {
+    const earliest = new Date(todayUtc.getTime() + requiredDays*86400000);
+    msgs.push(`<div class="msg warn">⚠️ Einzugsdatum ${fmtDate(collDate)} unterschreitet die empfohlene Vorlaufzeit (mind. ${requiredDays} Kalendertage, frühestens ${fmtDate(earliest)}). Bankarbeitstage/Feiertage werden hier nicht berücksichtigt — bitte manuell prüfen.</div>`);
+  }
+
+  if (skipped.length) {
+    const items = skipped.map(s => `Zeile ${s.row} ('${esc(s.name)}') – ${esc(s.reason)}`).join("<br>");
+    msgs.push(`<div class="msg warn">⏭ ${skipped.length} Einträge übersprungen:<br>${items}</div>`);
+  }
+
+  msgs.push(`<div class="msg ok">✅ ${debitors.length} gültige Schuldner-Einträge, Gesamtbetrag ${totalAmount.toFixed(2)} EUR.</div>`);
+  messagesDiv.innerHTML = msgs.join("");
+
+  // Summary stats
+  summaryDiv.innerHTML = `
+    <div class="stat"><span class="k">Gläubiger</span><span class="v">${esc(creditor.name)}</span></div>
+    <div class="stat"><span class="k">Gläubiger-IBAN</span><span class="v">${esc(creditor.iban)}</span></div>
+    <div class="stat"><span class="k">Format</span><span class="v">${esc(painVersion)}</span></div>
+    <div class="stat"><span class="k">Einzugsdatum</span><span class="v">${fmtDate(collDate)}</span></div>
+    <div class="stat"><span class="k">Anzahl Lastschriften</span><span class="v">${debitors.length}</span></div>
+    <div class="stat"><span class="k">Gesamtbetrag</span><span class="v">${totalAmount.toFixed(2)} EUR</span></div>
+  `;
+
+  // Table
+  let rows = "";
+  for (const d of debitors) {
+    rows += `<tr>
+      <td>${d.row}</td>
+      <td>${esc(d.name)}</td>
+      <td>${esc(d.iban)}</td>
+      <td>${esc(d.bic) || "<em>NOTPROVIDED</em>"}</td>
+      <td>${d.amount.toFixed(2)}</td>
+      <td>${esc(d.mandateId)}</td>
+      <td>${fmtDate(d.mandateDate)}</td>
+      <td><span class="badge ok">OK</span></td>
+    </tr>`;
+  }
+  for (const s of skipped) {
+    rows += `<tr class="skip">
+      <td>${s.row}</td>
+      <td>${esc(s.name)}</td>
+      <td colspan="5">${esc(s.reason)}</td>
+      <td><span class="badge skip">SKIP</span></td>
+    </tr>`;
+  }
+  tableWrap.innerHTML = `<table>
+    <thead><tr>
+      <th>Zeile</th><th>Name</th><th>IBAN</th><th>BIC</th><th>Betrag</th><th>Mandats-Nr.</th><th>Mandatsdatum</th><th>Status</th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+
+  // Generate XML
+  try {
+    generatedXml = buildXml(creditor, debitors, fmtDate(collDate));
+    downloadBtn.disabled = false;
+    showXmlBtn.disabled = false;
+  } catch (e) {
+    showError("Fehler beim Erzeugen der XML: " + e.message);
+    generatedXml = null;
+  }
+}
+
+downloadBtn.addEventListener("click", () => {
+  if (!generatedXml) return;
+  const blob = new Blob([generatedXml], {type: "application/xml"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "sepa_lastschrift.xml";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+showXmlBtn.addEventListener("click", () => {
+  if (!generatedXml) return;
+  xmlPreview.textContent = generatedXml;
+  xmlDetails.style.display = xmlDetails.style.display === "none" ? "block" : "none";
+  xmlDetails.open = true;
+});
+</script>
+</body>
+</html>
