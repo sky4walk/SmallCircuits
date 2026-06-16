@@ -60,6 +60,7 @@
   .btn:focus-visible{outline:2px solid var(--accent-info);outline-offset:2px;}
   .btn.primary{background:var(--accent-info);border-color:var(--accent-info);color:#0D1416;}
   .btn.primary:hover{filter:brightness(1.08);}
+  .btn:disabled{opacity:.55;cursor:default;}
   input[type=file]{display:none;}
 
   select.btn{
@@ -195,6 +196,11 @@
     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;">
       <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>
     </svg><span id="rotateLabel">0°</span>
+  </button>
+  <button class="btn" id="exportPngBtn" title="Aktuellen Kartenausschnitt als PNG-Datei speichern">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;">
+      <path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/>
+    </svg>PNG speichern
   </button>
   <div class="filebar">
     <span class="filename" id="filename"></span>
@@ -456,6 +462,175 @@
     updateAngleButtons();
   }
 
+  // Exports the visible map section (tiles + track + markers) as a PNG.
+  // Deliberately does NOT use html2canvas: that library re-implements layout
+  // itself and gets confused by Leaflet's panes, which are positioned with
+  // CSS transforms — the result was a cropped/offset image. Instead this
+  // draws the actually-loaded tile <img> elements and the overlay <svg>
+  // (track line + start/end markers) straight onto a canvas, using their
+  // real on-screen position from getBoundingClientRect(), which the browser
+  // always computes correctly regardless of any transforms involved.
+  // Export always happens north-up (rotation temporarily reset to 0°),
+  // since a rotated tile's true shape can't be reconstructed from its
+  // (axis-aligned) bounding box.
+  function exportMapAsPNG(){
+    var btn = document.getElementById('exportPngBtn');
+    btn.disabled = true;
+
+    var savedAngle = currentAngle;
+    if (savedAngle !== 0){
+      currentAngle = 0;
+      applyMapFrame();
+    }
+
+    function restoreAndFinish(){
+      if (savedAngle !== 0){
+        currentAngle = savedAngle;
+        applyMapFrame();
+      }
+      btn.disabled = false;
+    }
+
+    // Give the browser one tick to finish re-layout after un-rotating.
+    setTimeout(function(){
+      try {
+        captureMapToCanvas(restoreAndFinish);
+      } catch(err){
+        console.error('PNG-Export fehlgeschlagen:', err);
+        alert('Export fehlgeschlagen: ' + (err && err.message ? err.message : err));
+        restoreAndFinish();
+      }
+    }, 50);
+  }
+
+  function captureMapToCanvas(done){
+    var mapOuter = document.getElementById('mapOuter');
+    var rect = mapOuter.getBoundingClientRect();
+    var outW = Math.max(1, Math.round(rect.width));
+    var outH = Math.max(1, Math.round(rect.height));
+
+    var canvas = document.createElement('canvas');
+    canvas.width = outW;
+    canvas.height = outH;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#14181B';
+    ctx.fillRect(0, 0, outW, outH);
+
+    var tileImgs = Array.prototype.slice.call(
+      document.querySelectorAll('#map .leaflet-tile-pane img.leaflet-tile-loaded')
+    );
+    var tileJobs = tileImgs.map(function(img){
+      var r = img.getBoundingClientRect();
+      return { src: img.currentSrc || img.src, x: r.left - rect.left, y: r.top - rect.top, w: r.width, h: r.height };
+    });
+
+    function loadImg(src){
+      return new Promise(function(resolve){
+        var im = new Image();
+        im.crossOrigin = 'anonymous';
+        im.onload = function(){ resolve(im); };
+        im.onerror = function(){ resolve(null); };
+        im.src = src;
+      });
+    }
+
+    Promise.all(tileJobs.map(function(t){ return loadImg(t.src); })).then(function(images){
+      var anyMissing = false;
+      images.forEach(function(im, i){
+        if (!im){ anyMissing = true; return; }
+        var t = tileJobs[i];
+        try { ctx.drawImage(im, t.x, t.y, t.w, t.h); } catch(e){ anyMissing = true; }
+      });
+
+      // #map sits at offset (0,0) within #mapOuter whenever currentAngle is 0
+      // (see applyMapFrame), so Leaflet's own container-point coordinates can
+      // be used as canvas coordinates directly, with no further translation.
+      drawVectorOverlay(ctx);
+
+      var blobFailed = false;
+      try {
+        canvas.toBlob(function(blob){
+          if (!blob){
+            alert('Konnte keine Bilddatei erzeugen.');
+            done();
+            return;
+          }
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement('a');
+          var base = (document.getElementById('filename').textContent || 'kartenausschnitt').replace(/\.[^/.]+$/, '') || 'kartenausschnitt';
+          var ts = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+          a.href = url;
+          a.download = base + '_' + ts + '.png';
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+          if (anyMissing){
+            console.warn('PNG-Export: einzelne Kacheln konnten wegen CORS-Beschränkungen des Kartendienstes nicht eingebettet werden.');
+          }
+          done();
+        }, 'image/png');
+      } catch(err){
+        blobFailed = true;
+      }
+      if (blobFailed){
+        alert('Export fehlgeschlagen: Der gewählte Kartendienst erlaubt aus Sicherheitsgründen (CORS) keinen Bildexport. Bitte mit "CARTO Voyager" oder einem anderen CARTO-Stil erneut versuchen.');
+        done();
+      }
+    });
+  }
+
+  // Draws the track polyline and the start/end circle markers straight onto
+  // the export canvas using Leaflet's own latLngToContainerPoint(), reading
+  // each layer's live style options. This replaced an earlier approach that
+  // rasterized Leaflet's internal SVG overlay via XMLSerializer + <img> —
+  // that silently dropped the circle markers (the line rendered fine, but
+  // the markers never appeared in the output), so drawing directly is both
+  // simpler and more reliable.
+  function drawVectorOverlay(ctx){
+    if (trackLayer){
+      var latlngs = trackLayer.getLatLngs();
+      if (latlngs && latlngs.length > 1){
+        ctx.save();
+        ctx.strokeStyle = '#FF6600';
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.globalAlpha = 0.95;
+        ctx.beginPath();
+        latlngs.forEach(function(ll, i){
+          var p = map.latLngToContainerPoint(ll);
+          if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        });
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+    if (markerLayer){
+      markerLayer.eachLayer(function(layer){
+        if (typeof layer.getLatLng !== 'function') return;
+        var p = map.latLngToContainerPoint(layer.getLatLng());
+        var radius = layer.getRadius ? layer.getRadius() : 8;
+        var opts = layer.options || {};
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+        if (opts.fill !== false){
+          ctx.globalAlpha = (opts.fillOpacity != null) ? opts.fillOpacity : 1;
+          ctx.fillStyle = opts.fillColor || opts.color || '#000';
+          ctx.fill();
+        }
+        if (opts.stroke !== false){
+          ctx.globalAlpha = (opts.opacity != null) ? opts.opacity : 1;
+          ctx.strokeStyle = opts.color || '#000';
+          ctx.lineWidth = opts.weight != null ? opts.weight : 2;
+          ctx.stroke();
+        }
+        ctx.restore();
+      });
+    }
+  }
+
   function initMap(){
     if (map) return;
     applyMapFrame();
@@ -517,6 +692,8 @@
         backdrop.classList.remove('open');
       });
     });
+
+    document.getElementById('exportPngBtn').addEventListener('click', exportMapAsPNG);
 
     window.addEventListener('resize', function(){ applyMapFrame(); });
   }
