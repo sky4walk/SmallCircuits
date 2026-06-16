@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KML Track Viewer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<style>
+  :root{
+    --bg-deep:#14181B;
+    --panel:#1C2226;
+    --panel-border:#2A3338;
+    --text-primary:#E7E5DF;
+    --text-muted:#8B9296;
+    --accent-track:#FF6600;
+    --accent-start:#00CC44;
+    --accent-end:#CC2200;
+    --accent-info:#4FA8C9;
+    --font-ui:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --font-mono:ui-monospace,SFMono-Regular,"SF Mono","Cascadia Code","Roboto Mono",Menlo,Consolas,monospace;
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg-deep);color:var(--text-primary);font-family:var(--font-ui);}
+
+  #mapOuter{position:fixed;inset:0;overflow:hidden;background:var(--bg-deep);}
+  #map{position:absolute;background:var(--bg-deep);transform-origin:50% 50%;}
+
+  .map-attribution{
+    position:absolute;left:50%;bottom:8px;transform:translateX(-50%);z-index:1000;
+    font-size:10.5px;color:var(--text-muted);background:rgba(20,24,27,.6);
+    padding:2px 9px;border-radius:6px;white-space:nowrap;
+  }
+  .map-attribution a{color:var(--accent-info);text-decoration:none;}
+
+  header{
+    position:absolute;top:0;left:0;right:0;z-index:1000;
+    display:flex;align-items:center;gap:14px;
+    padding:12px 18px;
+    background:linear-gradient(180deg,rgba(20,24,27,.92),rgba(20,24,27,0));
+    pointer-events:none;
+  }
+  header > *{pointer-events:auto;}
+  .brand{display:flex;align-items:center;gap:9px;font-weight:600;letter-spacing:.2px;}
+  .brand svg{width:20px;height:20px;flex-shrink:0;}
+  .brand-name{font-family:var(--font-mono);font-size:14px;color:var(--text-primary);}
+  .brand-name b{color:var(--accent-track);}
+
+  .filebar{margin-left:auto;display:flex;align-items:center;gap:10px;}
+  .filename{
+    font-family:var(--font-mono);font-size:12.5px;color:var(--text-muted);
+    max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .btn{
+    appearance:none;border:1px solid var(--panel-border);background:var(--panel);
+    color:var(--text-primary);font-family:var(--font-ui);font-size:13px;font-weight:500;
+    padding:8px 14px;border-radius:7px;cursor:pointer;transition:border-color .15s,background .15s;
+  }
+  .btn:hover{border-color:var(--accent-info);}
+  .btn:focus-visible{outline:2px solid var(--accent-info);outline-offset:2px;}
+  .btn.primary{background:var(--accent-info);border-color:var(--accent-info);color:#0D1416;}
+  .btn.primary:hover{filter:brightness(1.08);}
+  input[type=file]{display:none;}
+
+  select.btn{
+    -webkit-appearance:none;-moz-appearance:none;appearance:none;
+    background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><path d="M0 0l5 6 5-6" fill="%238B9296"/></svg>');
+    background-repeat:no-repeat;background-position:right 10px center;
+    padding-right:28px;
+  }
+
+  /* --- Custom zoom cluster (replaces Leaflet's built-in control, since it must stay outside the rotated map element) --- */
+  .zoom-cluster{
+    position:absolute;z-index:1000;right:18px;bottom:18px;
+    background:var(--panel);border:1px solid var(--panel-border);border-radius:9px;
+    display:flex;align-items:center;overflow:hidden;
+  }
+  .zoom-cluster .zbtn{
+    appearance:none;border:none;background:transparent;color:var(--text-primary);
+    width:34px;height:34px;font-size:18px;line-height:1;cursor:pointer;
+  }
+  .zoom-cluster .zbtn:hover{background:rgba(255,255,255,.07);}
+  .zoom-cluster .zbtn:focus-visible{outline:2px solid var(--accent-info);outline-offset:-2px;}
+  .zoom-cluster input{
+    width:48px;height:34px;background:transparent;border:none;
+    border-left:1px solid var(--panel-border);border-right:1px solid var(--panel-border);
+    color:var(--text-primary);font-family:var(--font-mono);font-size:12.5px;text-align:center;
+  }
+  .zoom-cluster input:focus{outline:none;color:var(--accent-info);}
+
+  /* --- Rotation dialog --- */
+  .modal-backdrop{
+    position:fixed;inset:0;z-index:2000;background:rgba(10,12,13,.6);
+    display:none;align-items:center;justify-content:center;padding:20px;
+  }
+  .modal-backdrop.open{display:flex;}
+  .modal-card{
+    background:var(--panel);border:1px solid var(--panel-border);border-radius:14px;
+    padding:22px 24px;width:min(360px,92vw);
+  }
+  .modal-card-head{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px;}
+  .modal-card h2{margin:0;font-size:16px;font-weight:600;}
+  .modal-card .hint{margin:6px 0 16px;font-size:12.5px;color:var(--text-muted);line-height:1.5;}
+  .modal-close{padding:4px 10px;font-size:15px;line-height:1;}
+  .angle-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}
+  .angle-btn{padding:9px 0;text-align:center;font-family:var(--font-mono);}
+  .angle-btn.active{background:var(--accent-info);border-color:var(--accent-info);color:#0D1416;font-weight:700;}
+
+  #mapOuter.custom-pan{cursor:grab;}
+  #mapOuter.custom-pan.grabbing{cursor:grabbing;user-select:none;}
+
+  /* --- Empty / drop state --- */
+  .dropzone{
+    position:absolute;inset:0;z-index:900;
+    display:flex;align-items:center;justify-content:center;
+    background:var(--bg-deep);
+    transition:background .15s;
+  }
+  .dropzone::before{
+    content:"";position:absolute;inset:0;pointer-events:none;
+    background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240"><g fill="none" stroke="%234FA8C9" stroke-width="1.4"><path d="M20 120 C20 70 70 30 120 30 C170 30 220 70 220 120 C220 170 170 210 120 210 C70 210 20 170 20 120 Z"/><path d="M45 120 C45 85 82 55 120 55 C158 55 195 85 195 120 C195 155 158 185 120 185 C82 185 45 155 45 120 Z"/><path d="M70 120 C70 100 93 80 120 80 C147 80 170 100 170 120 C170 140 147 160 120 160 C93 160 70 140 70 120 Z"/></g></svg>');
+    background-repeat:repeat;background-size:240px 240px;opacity:.10;
+  }
+  .dropzone.dragging{background:#171D20;}
+  .dropzone.dragging .dropcard{border-color:var(--accent-info);}
+  .dropcard{
+    position:relative;z-index:1;
+    width:min(420px,86vw);text-align:center;
+    border:1.5px dashed var(--panel-border);border-radius:14px;
+    padding:42px 28px;background:rgba(28,34,38,.55);
+    transition:border-color .15s;
+  }
+  .dropcard svg{width:38px;height:38px;color:var(--accent-track);margin-bottom:14px;}
+  .dropcard h1{font-size:17px;margin:0 0 6px;font-weight:600;color:var(--text-primary);}
+  .dropcard p{font-size:13px;color:var(--text-muted);margin:0 0 20px;line-height:1.5;}
+  .dropcard label.btn{display:inline-block;}
+
+  .error-msg{
+    margin-top:16px;font-family:var(--font-mono);font-size:12px;color:var(--accent-end);
+    background:rgba(204,34,0,.08);border:1px solid rgba(204,34,0,.35);border-radius:7px;padding:8px 12px;
+  }
+
+  /* --- Stats panel --- */
+  .stats{
+    position:absolute;left:18px;bottom:18px;z-index:1000;
+    background:rgba(28,34,38,.88);border:1px solid var(--panel-border);
+    border-radius:12px;padding:14px 18px;
+    display:none;
+    backdrop-filter:blur(4px);
+    min-width:200px;
+  }
+  .stats.visible{display:block;}
+  .stats .row{display:flex;justify-content:space-between;gap:18px;font-family:var(--font-mono);font-size:12.5px;padding:3px 0;}
+  .stats .row .label{color:var(--text-muted);}
+  .stats .row .value{color:var(--text-primary);font-weight:600;}
+  .stats .row .value.track{color:var(--accent-track);}
+  .stats hr{border:none;border-top:1px solid var(--panel-border);margin:7px 0;}
+
+  @media (max-width:560px){
+    header{flex-wrap:wrap;row-gap:8px;}
+    .brand-name{display:none;}
+    .filename{max-width:120px;}
+    select.btn{font-size:12px;padding:7px 24px 7px 10px;}
+    .stats{left:10px;right:10px;bottom:10px;min-width:auto;}
+    .zoom-cluster{right:10px;bottom:10px;}
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    *{transition:none!important;}
+  }
+</style>
+</head>
+<body>
+
+<div id="mapOuter"><div id="map"></div></div>
+
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent-track)">
+      <path d="M3 18c2-1 4-3 5-6s2-7 4-9 4 3 5 6 3 5 5 6"/>
+      <circle cx="3" cy="18" r="1.6" fill="var(--accent-start)" stroke="none"/>
+      <circle cx="22" cy="15" r="1.6" fill="var(--accent-end)" stroke="none"/>
+    </svg>
+    <span class="brand-name">kml<b>•</b>viewer</span>
+  </div>
+  <select class="btn" id="basemapSelect" aria-label="Kartendienst wählen">
+    <option value="voyager">CARTO Voyager (hell)</option>
+    <option value="positron">CARTO Positron (minimal)</option>
+    <option value="dark">CARTO Dark Matter (dunkel)</option>
+    <option value="topo">OpenTopoMap (Relief)</option>
+    <option value="esriTopo">Esri World Topo</option>
+    <option value="esriSat">Esri Satellit</option>
+  </select>
+  <button class="btn" id="rotateBtn" aria-haspopup="dialog" title="Kartenausrichtung ändern">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;">
+      <path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/>
+    </svg><span id="rotateLabel">0°</span>
+  </button>
+  <div class="filebar">
+    <span class="filename" id="filename"></span>
+    <label class="btn" for="fileInputHeader" id="loadBtnHeader" style="display:none;">Andere Datei laden</label>
+    <input type="file" id="fileInputHeader" accept=".kml,application/vnd.google-earth.kml+xml">
+  </div>
+</header>
+
+<div class="dropzone" id="dropzone">
+  <div class="dropcard">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 17c2-1 4-4 5-7s2-7 4-8 4 4 5 7 3 6 5 7"/>
+      <circle cx="3" cy="17" r="1.4"/><circle cx="22" cy="17" r="1.4"/>
+    </svg>
+    <h1>KML-Track laden</h1>
+    <p>Datei hier ablegen oder auswählen.<br>Unterstützt gx:Track-Punkte und Standard-KML-Koordinaten.</p>
+    <label class="btn primary" for="fileInput">Datei auswählen</label>
+    <input type="file" id="fileInput" accept=".kml,application/vnd.google-earth.kml+xml">
+    <div id="errorBox"></div>
+  </div>
+</div>
+
+<div class="stats" id="stats">
+  <div class="row"><span class="label">Punkte</span><span class="value" id="statPoints">–</span></div>
+  <div class="row"><span class="label">Distanz</span><span class="value track" id="statDistance">–</span></div>
+  <div class="row" id="rowDuration"><span class="label">Dauer</span><span class="value" id="statDuration">–</span></div>
+  <div class="row" id="rowSpeed"><span class="label">Ø Geschwindigkeit</span><span class="value" id="statSpeed">–</span></div>
+  <hr id="elevHr">
+  <div class="row" id="rowAscent"><span class="label">Anstieg</span><span class="value" id="statAscent">–</span></div>
+  <div class="row" id="rowDescent"><span class="label">Abstieg</span><span class="value" id="statDescent">–</span></div>
+</div>
+
+<div class="zoom-cluster">
+  <button class="zbtn" id="zoomOutBtn" aria-label="Verkleinern">−</button>
+  <input type="number" id="zoomInput" step="0.1" min="0" max="20" title="Zoomstufe direkt eingeben">
+  <button class="zbtn" id="zoomInBtn" aria-label="Vergrößern">+</button>
+</div>
+
+<div class="map-attribution" id="mapAttribution"></div>
+
+<div class="modal-backdrop" id="rotateModalBackdrop">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rotateModalTitle">
+    <div class="modal-card-head">
+      <h2 id="rotateModalTitle">Kartenausrichtung</h2>
+      <button class="btn modal-close" id="rotateModalClose" aria-label="Schließen">×</button>
+    </div>
+    <p class="hint">Dreht die Ansicht in 45°-Schritten. Verschieben per Maus und Zoomen per Mausrad funktionieren auch bei aktiver Drehung.</p>
+    <div class="angle-grid" id="angleGrid">
+      <button class="btn angle-btn" data-angle="0">0°</button>
+      <button class="btn angle-btn" data-angle="45">45°</button>
+      <button class="btn angle-btn" data-angle="90">90°</button>
+      <button class="btn angle-btn" data-angle="135">135°</button>
+      <button class="btn angle-btn" data-angle="180">180°</button>
+      <button class="btn angle-btn" data-angle="225">225°</button>
+      <button class="btn angle-btn" data-angle="270">270°</button>
+      <button class="btn angle-btn" data-angle="315">315°</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+<script>
+(function(){
+  "use strict";
+
+  var map = null;
+  var trackLayer = null;
+  var markerLayer = null;
+  var baseLayer = null;
+  var currentAngle = 0;
+
+  var cartoAttr = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
+
+  var basemaps = {
+    voyager: {
+      url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+    },
+    positron: {
+      url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+    },
+    dark: {
+      url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+    },
+    topo: {
+      url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+      options: { subdomains:['a','b','c'], maxZoom:17, attribution:
+        'Kartendaten: &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende, SRTM | Darstellung: &copy; <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a> (CC-BY-SA)' }
+    },
+    esriTopo: {
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+      options: { maxZoom:19, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>' }
+    },
+    esriSat: {
+      url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      options: { maxZoom:19, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> — Esri, Maxar, Earthstar Geographics, GIS-Community' }
+    }
+  };
+
+  function setBasemap(key){
+    var cfg = basemaps[key];
+    if (!cfg) return;
+    if (baseLayer) map.removeLayer(baseLayer);
+    baseLayer = L.tileLayer(cfg.url, cfg.options).addTo(map);
+    document.getElementById('mapAttribution').innerHTML = cfg.options.attribution;
+  }
+
+  function syncZoomInput(){
+    var zi = document.getElementById('zoomInput');
+    if (document.activeElement !== zi) zi.value = Math.round(map.getZoom() * 100) / 100;
+  }
+
+  // Sizes/positions/rotates the #map element. At 0° it exactly matches the
+  // visible viewport (normal Leaflet behaviour). At any other angle it is
+  // blown up to the viewport's diagonal length and centered, so that after
+  // rotation there are no empty corners inside the clipping #mapOuter.
+  // The previous center/zoom is always restored afterwards so rotating
+  // never changes what is shown, only the angle it's shown at.
+  function applyMapFrame(){
+    var mapEl = document.getElementById('map');
+    var w = window.innerWidth, h = window.innerHeight;
+    var savedCenter = (map && map._loaded) ? map.getCenter() : null;
+    var savedZoom = (map && map._loaded) ? map.getZoom() : null;
+
+    if (currentAngle === 0){
+      mapEl.style.width = '100%';
+      mapEl.style.height = '100%';
+      mapEl.style.top = '0';
+      mapEl.style.left = '0';
+      mapEl.style.transform = 'none';
+    } else {
+      var diag = Math.ceil(Math.sqrt(w*w + h*h)) + 80;
+      mapEl.style.width = diag + 'px';
+      mapEl.style.height = diag + 'px';
+      mapEl.style.left = Math.round((w - diag) / 2) + 'px';
+      mapEl.style.top = Math.round((h - diag) / 2) + 'px';
+      mapEl.style.transform = 'rotate(' + currentAngle + 'deg)';
+    }
+
+    if (map){
+      map.invalidateSize(false);
+      if (savedCenter && savedZoom !== null){
+        map.setView(savedCenter, savedZoom, { animate:false });
+      }
+    }
+  }
+
+  // Computes the fit while the frame is temporarily un-rotated/un-oversized
+  // (so the fit is based on what's actually visible), then restores rotation.
+  function fitTrackBounds(bounds){
+    var savedAngle = currentAngle;
+    if (savedAngle !== 0){
+      currentAngle = 0;
+      applyMapFrame();
+    }
+    map.fitBounds(bounds, { padding:[40,40] });
+    if (savedAngle !== 0){
+      currentAngle = savedAngle;
+      applyMapFrame();
+    }
+  }
+
+  function updateAngleButtons(){
+    document.querySelectorAll('.angle-btn').forEach(function(b){
+      b.classList.toggle('active', parseInt(b.dataset.angle, 10) === currentAngle);
+    });
+  }
+
+  // Custom rotation-aware pan & scroll-zoom: since the visual rotation is a
+  // pure CSS transform that Leaflet knows nothing about, its native drag/
+  // wheel handlers would misinterpret screen-space mouse movement once the
+  // map is rotated. While rotated, we disable Leaflet's own handlers and
+  // drive panBy()/setZoomAround() ourselves, rotating the screen-space
+  // vectors back into the map's own (unrotated) coordinate frame first.
+  var dragState = { active:false, lastX:0, lastY:0 };
+  var customListenersAttached = false;
+
+  function toLocalVector(dx, dy){
+    var rad = currentAngle * Math.PI / 180;
+    return {
+      x: Math.cos(rad) * dx + Math.sin(rad) * dy,
+      y: -Math.sin(rad) * dx + Math.cos(rad) * dy
+    };
+  }
+
+  function onCustomMouseDown(e){
+    if (e.button !== 0) return;
+    dragState.active = true;
+    dragState.lastX = e.clientX;
+    dragState.lastY = e.clientY;
+    document.getElementById('mapOuter').classList.add('grabbing');
+    e.preventDefault();
+  }
+  function onCustomMouseMove(e){
+    if (!dragState.active) return;
+    var dx = e.clientX - dragState.lastX;
+    var dy = e.clientY - dragState.lastY;
+    dragState.lastX = e.clientX;
+    dragState.lastY = e.clientY;
+    var v = toLocalVector(dx, dy);
+    map.panBy([v.x, v.y], { animate:false });
+  }
+  function onCustomMouseUp(){
+    if (dragState.active){
+      dragState.active = false;
+      document.getElementById('mapOuter').classList.remove('grabbing');
+    }
+  }
+  function onCustomWheel(e){
+    e.preventDefault();
+    var rect = document.getElementById('mapOuter').getBoundingClientRect();
+    var relX = (e.clientX - rect.left) - rect.width / 2;
+    var relY = (e.clientY - rect.top) - rect.height / 2;
+    var v = toLocalVector(relX, relY);
+    var size = map.getSize();
+    var localPoint = L.point(size.x / 2 + v.x, size.y / 2 + v.y);
+    var latlng = map.containerPointToLatLng(localPoint);
+    var delta = Math.max(-1, Math.min(1, -e.deltaY / 250));
+    var newZoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), map.getZoom() + delta));
+    map.setZoomAround(latlng, newZoom, { animate:false });
+  }
+
+  function setCustomInteraction(enable){
+    var mo = document.getElementById('mapOuter');
+    if (enable && !customListenersAttached){
+      mo.addEventListener('mousedown', onCustomMouseDown);
+      document.addEventListener('mousemove', onCustomMouseMove);
+      document.addEventListener('mouseup', onCustomMouseUp);
+      mo.addEventListener('wheel', onCustomWheel, { passive:false });
+      mo.classList.add('custom-pan');
+      customListenersAttached = true;
+    } else if (!enable && customListenersAttached){
+      mo.removeEventListener('mousedown', onCustomMouseDown);
+      document.removeEventListener('mousemove', onCustomMouseMove);
+      document.removeEventListener('mouseup', onCustomMouseUp);
+      mo.removeEventListener('wheel', onCustomWheel);
+      mo.classList.remove('custom-pan', 'grabbing');
+      dragState.active = false;
+      customListenersAttached = false;
+    }
+  }
+
+  function setRotation(angle){
+    currentAngle = angle;
+    applyMapFrame();
+    document.getElementById('rotateLabel').textContent = angle + '°';
+    if (map){
+      var mode = angle !== 0 ? 'disable' : 'enable';
+      map.dragging[mode]();
+      map.scrollWheelZoom[mode]();
+      map.doubleClickZoom[mode]();
+      map.touchZoom[mode]();
+      if (map.boxZoom) map.boxZoom[mode]();
+      if (map.keyboard) map.keyboard[mode]();
+      setCustomInteraction(angle !== 0);
+    }
+    updateAngleButtons();
+  }
+
+  function initMap(){
+    if (map) return;
+    applyMapFrame();
+    map = L.map('map', {
+      zoomControl:false,
+      attributionControl:false,
+      zoomSnap: 0,
+      zoomDelta: 0.25,
+      wheelPxPerZoomLevel: 100
+    }).setView([48.14, 11.58], 6);
+
+    setBasemap('voyager');
+
+    map.on('zoom', syncZoomInput);
+    syncZoomInput();
+
+    document.getElementById('basemapSelect').addEventListener('change', function(e){
+      setBasemap(e.target.value);
+    });
+
+    var zoomInput = document.getElementById('zoomInput');
+    function applyZoomInput(){
+      var v = parseFloat(zoomInput.value);
+      if (!isNaN(v)){
+        v = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), v));
+        map.setZoom(v);
+      }
+    }
+    zoomInput.addEventListener('change', applyZoomInput);
+    zoomInput.addEventListener('keydown', function(e){
+      if (e.key === 'Enter'){ applyZoomInput(); zoomInput.blur(); }
+    });
+    document.getElementById('zoomOutBtn').addEventListener('click', function(){
+      map.setZoom(Math.max(map.getMinZoom(), map.getZoom() - 0.25));
+    });
+    document.getElementById('zoomInBtn').addEventListener('click', function(){
+      map.setZoom(Math.min(map.getMaxZoom(), map.getZoom() + 0.25));
+    });
+
+    // Rotation dialog
+    var rotateBtn = document.getElementById('rotateBtn');
+    var backdrop = document.getElementById('rotateModalBackdrop');
+    rotateBtn.addEventListener('click', function(){
+      updateAngleButtons();
+      backdrop.classList.add('open');
+    });
+    document.getElementById('rotateModalClose').addEventListener('click', function(){
+      backdrop.classList.remove('open');
+    });
+    backdrop.addEventListener('click', function(e){
+      if (e.target === backdrop) backdrop.classList.remove('open');
+    });
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape') backdrop.classList.remove('open');
+    });
+    document.querySelectorAll('.angle-btn').forEach(function(b){
+      b.addEventListener('click', function(){
+        setRotation(parseInt(b.dataset.angle, 10));
+        backdrop.classList.remove('open');
+      });
+    });
+
+    window.addEventListener('resize', function(){ applyMapFrame(); });
+  }
+
+  function haversineKm(lat1, lon1, lat2, lon2){
+    var R = 6371;
+    var dLat = (lat2-lat1) * Math.PI/180;
+    var dLon = (lon2-lon1) * Math.PI/180;
+    var a = Math.sin(dLat/2)*Math.sin(dLat/2) +
+            Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180) *
+            Math.sin(dLon/2)*Math.sin(dLon/2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  }
+
+  function parseKML(xmlText){
+    var parser = new DOMParser();
+    var xml = parser.parseFromString(xmlText, "application/xml");
+    if (xml.getElementsByTagName('parsererror').length){
+      throw new Error('Die Datei konnte nicht als XML gelesen werden.');
+    }
+
+    var points = [];
+
+    // Primary: gx:Track (gx:coord [+ optional <when> timestamps])
+    var trackEls = xml.getElementsByTagNameNS('*', 'Track');
+    var usedTrack = false;
+    for (var t=0; t<trackEls.length; t++){
+      var track = trackEls[t];
+      var whens = Array.prototype.map.call(track.getElementsByTagNameNS('*','when'), function(e){ return e.textContent.trim(); });
+      var coordEls = track.getElementsByTagNameNS('*','coord');
+      if (coordEls.length >= 2){
+        for (var i=0; i<coordEls.length; i++){
+          var parts = coordEls[i].textContent.trim().split(/\s+/).map(Number);
+          if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])){
+            points.push({
+              lon: parts[0], lat: parts[1],
+              alt: (parts.length >= 3 && !isNaN(parts[2])) ? parts[2] : null,
+              time: whens[i] || null
+            });
+          }
+        }
+        usedTrack = true;
+      }
+    }
+
+    // Fallback: standard <coordinates> (LineString / Track / Point), take the longest one
+    if (!usedTrack){
+      var coordinatesEls = xml.getElementsByTagNameNS('*', 'coordinates');
+      var best = null;
+      for (var c=0; c<coordinatesEls.length; c++){
+        var tokens = coordinatesEls[c].textContent.trim().split(/\s+/).filter(Boolean);
+        if (tokens.length >= 2 && (!best || tokens.length > best.length)){
+          best = tokens;
+        }
+      }
+      if (best){
+        for (var k=0; k<best.length; k++){
+          var p = best[k].split(',').map(Number);
+          if (p.length >= 2 && !isNaN(p[0]) && !isNaN(p[1])){
+            points.push({
+              lon: p[0], lat: p[1],
+              alt: (p.length >= 3 && !isNaN(p[2])) ? p[2] : null,
+              time: null
+            });
+          }
+        }
+      }
+    }
+
+    return points;
+  }
+
+  function computeStats(points){
+    var distanceKm = 0;
+    for (var i=1; i<points.length; i++){
+      distanceKm += haversineKm(points[i-1].lat, points[i-1].lon, points[i].lat, points[i].lon);
+    }
+
+    var durationSec = null;
+    var first = points[0], last = points[points.length-1];
+    if (first.time && last.time){
+      var t0 = Date.parse(first.time), t1 = Date.parse(last.time);
+      if (!isNaN(t0) && !isNaN(t1) && t1 > t0) durationSec = (t1 - t0) / 1000;
+    }
+
+    var ascent = 0, descent = 0, hasAlt = false;
+    for (var j=1; j<points.length; j++){
+      var a0 = points[j-1].alt, a1 = points[j].alt;
+      if (a0 !== null && a1 !== null){
+        hasAlt = true;
+        var diff = a1 - a0;
+        if (diff > 0) ascent += diff; else descent += -diff;
+      }
+    }
+
+    return {
+      count: points.length,
+      distanceKm: distanceKm,
+      durationSec: durationSec,
+      ascent: hasAlt ? ascent : null,
+      descent: hasAlt ? descent : null
+    };
+  }
+
+  function formatDuration(sec){
+    var h = Math.floor(sec/3600);
+    var m = Math.floor((sec%3600)/60);
+    if (h > 0) return h + ' h ' + m + ' min';
+    var s = Math.floor(sec%60);
+    return m + ' min ' + s + ' s';
+  }
+
+  function showError(msg){
+    var box = document.getElementById('errorBox');
+    box.innerHTML = '<div class="error-msg">' + msg + '</div>';
+  }
+  function clearError(){
+    document.getElementById('errorBox').innerHTML = '';
+  }
+
+  function renderTrack(points, fileName){
+    if (points.length < 2){
+      showError('Keine ausreichenden Koordinaten in dieser Datei gefunden.');
+      return;
+    }
+    clearError();
+    initMap();
+
+    if (trackLayer) map.removeLayer(trackLayer);
+    if (markerLayer) map.removeLayer(markerLayer);
+
+    var latlngs = points.map(function(p){ return [p.lat, p.lon]; });
+
+    trackLayer = L.polyline(latlngs, { color:'#FF6600', weight:4, opacity:0.95 }).addTo(map);
+
+    markerLayer = L.layerGroup([
+      L.circleMarker(latlngs[0], { radius:8, color:'#00CC44', fillColor:'#00CC44', fillOpacity:1, weight:2 })
+        .bindTooltip('Start', {permanent:false}),
+      L.circleMarker(latlngs[latlngs.length-1], { radius:8, color:'#CC2200', fillColor:'#CC2200', fillOpacity:1, weight:2 })
+        .bindTooltip('Ziel', {permanent:false})
+    ]).addTo(map);
+
+    fitTrackBounds(trackLayer.getBounds());
+
+    var stats = computeStats(points);
+    document.getElementById('statPoints').textContent = stats.count;
+    document.getElementById('statDistance').textContent = stats.distanceKm.toFixed(2) + ' km';
+
+    var rowDuration = document.getElementById('rowDuration');
+    var rowSpeed = document.getElementById('rowSpeed');
+    if (stats.durationSec){
+      rowDuration.style.display = '';
+      document.getElementById('statDuration').textContent = formatDuration(stats.durationSec);
+      var speed = stats.distanceKm / (stats.durationSec/3600);
+      rowSpeed.style.display = '';
+      document.getElementById('statSpeed').textContent = speed.toFixed(1) + ' km/h';
+    } else {
+      rowDuration.style.display = 'none';
+      rowSpeed.style.display = 'none';
+    }
+
+    var rowAscent = document.getElementById('rowAscent');
+    var rowDescent = document.getElementById('rowDescent');
+    var elevHr = document.getElementById('elevHr');
+    if (stats.ascent !== null){
+      elevHr.style.display = '';
+      rowAscent.style.display = '';
+      rowDescent.style.display = '';
+      document.getElementById('statAscent').textContent = '+' + Math.round(stats.ascent) + ' m';
+      document.getElementById('statDescent').textContent = '−' + Math.round(stats.descent) + ' m';
+    } else {
+      elevHr.style.display = 'none';
+      rowAscent.style.display = 'none';
+      rowDescent.style.display = 'none';
+    }
+
+    document.getElementById('stats').classList.add('visible');
+    document.getElementById('dropzone').style.display = 'none';
+    document.getElementById('filename').textContent = fileName;
+    document.getElementById('loadBtnHeader').style.display = '';
+  }
+
+  function handleFile(file){
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e){
+      try {
+        var points = parseKML(e.target.result);
+        renderTrack(points, file.name);
+      } catch(err){
+        showError(err.message || 'Datei konnte nicht verarbeitet werden.');
+      }
+    };
+    reader.onerror = function(){
+      showError('Datei konnte nicht gelesen werden.');
+    };
+    reader.readAsText(file);
+  }
+
+  // Wiring: file inputs
+  document.getElementById('fileInput').addEventListener('change', function(e){
+    handleFile(e.target.files[0]);
+  });
+  document.getElementById('fileInputHeader').addEventListener('change', function(e){
+    handleFile(e.target.files[0]);
+  });
+
+  // Wiring: drag & drop on dropzone
+  var dz = document.getElementById('dropzone');
+  ['dragenter','dragover'].forEach(function(evt){
+    dz.addEventListener(evt, function(e){
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.add('dragging');
+    });
+  });
+  ['dragleave','dragend'].forEach(function(evt){
+    dz.addEventListener(evt, function(e){
+      e.preventDefault(); e.stopPropagation();
+      dz.classList.remove('dragging');
+    });
+  });
+  dz.addEventListener('drop', function(e){
+    e.preventDefault(); e.stopPropagation();
+    dz.classList.remove('dragging');
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+  });
+
+  // Allow dropping a new file anywhere on the page once a track is loaded
+  document.addEventListener('dragover', function(e){ e.preventDefault(); });
+  document.addEventListener('drop', function(e){
+    if (dz.style.display === 'none'){
+      e.preventDefault();
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+    }
+  });
+
+  initMap();
+})();
+</script>
+</body>
+</html>
