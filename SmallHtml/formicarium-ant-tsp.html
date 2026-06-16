@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Formicarium — Ant Colony TSP</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    /* --- token system --- */
+    --sand-1: #ECE0C4;
+    --sand-2: #DCC89A;
+    --sand-3: #C7A86E;
+    --soil:   #4A3526;
+    --soil-deep: #2E1F16;
+    --walnut: #3D2B1F;
+    --walnut-dark: #261A12;
+    --ant-body: #2A1B10;
+    --pher: #2DD4BF;
+    --pher-dim: rgba(45, 212, 191, 0.18);
+    --gold: #E8A33D;
+    --gold-bright: #FFC868;
+    --lcd-bg: #0E2A22;
+    --lcd-fg: #8FFFC4;
+    --lcd-fg-dim: #3E7A63;
+    --paper: #F7F1E3;
+    --ink: #2E1F16;
+    --ink-soft: #6B5740;
+    --danger: #B5482F;
+
+    --font-display: "Fraunces", serif;
+    --font-body: "Inter", system-ui, sans-serif;
+    --font-mono: "IBM Plex Mono", monospace;
+  }
+
+  *{ box-sizing: border-box; }
+  html, body{ margin:0; padding:0; }
+
+  body{
+    background: var(--walnut-dark);
+    background-image:
+      radial-gradient(ellipse at 20% -10%, rgba(232,163,61,0.10), transparent 55%),
+      radial-gradient(ellipse at 100% 110%, rgba(45,212,191,0.06), transparent 50%);
+    color: var(--paper);
+    font-family: var(--font-body);
+    min-height: 100vh;
+    padding: clamp(14px, 3vw, 32px);
+  }
+
+  .app{
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+
+  /* ---------- header ---------- */
+  header.top{
+    display:flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
+    padding: 0 4px;
+  }
+  .brand{
+    display:flex;
+    align-items:baseline;
+    gap: 12px;
+  }
+  .brand h1{
+    font-family: var(--font-display);
+    font-optical-sizing: auto;
+    font-weight: 600;
+    font-size: clamp(26px, 3.4vw, 38px);
+    letter-spacing: 0.2px;
+    margin: 0;
+    color: var(--sand-1);
+  }
+  .brand .sub{
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--sand-3);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .colony-tag{
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--pher);
+    border: 1px solid rgba(45,212,191,0.35);
+    background: var(--pher-dim);
+    padding: 6px 11px;
+    border-radius: 100px;
+    display:flex;
+    align-items:center;
+    gap: 7px;
+    white-space: nowrap;
+  }
+  .colony-tag .dot{
+    width:7px; height:7px; border-radius:50%;
+    background: var(--pher);
+    box-shadow: 0 0 8px var(--pher);
+  }
+  .colony-tag.idle .dot{ background: var(--sand-3); box-shadow:none; animation:none; }
+  .colony-tag .dot.live{ animation: blink 1.4s ease-in-out infinite; }
+  @keyframes blink{ 0%,100%{opacity:1;} 50%{opacity:0.35;} }
+
+  /* ---------- layout ---------- */
+  .layout{
+    display: grid;
+    grid-template-columns: 1fr 332px;
+    gap: 18px;
+    align-items: start;
+  }
+  @media (max-width: 880px){
+    .layout{ grid-template-columns: 1fr; }
+  }
+
+  /* ---------- viewport (the formicarium case) ---------- */
+  .viewport-frame{
+    background: linear-gradient(180deg, var(--walnut), var(--walnut-dark));
+    border-radius: 18px;
+    padding: 14px;
+    box-shadow:
+      0 1px 0 rgba(255,255,255,0.06) inset,
+      0 20px 50px -20px rgba(0,0,0,0.6);
+    position: relative;
+  }
+  .viewport-frame::before{
+    content:"";
+    position:absolute; inset: 8px;
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 12px;
+    pointer-events:none;
+  }
+  .glass{
+    position: relative;
+    border-radius: 10px;
+    overflow: hidden;
+    background:
+      repeating-linear-gradient(
+        180deg,
+        var(--sand-1) 0px, var(--sand-1) 60px,
+        var(--sand-2) 60px, var(--sand-2) 120px,
+        var(--sand-1) 120px, var(--sand-1) 165px,
+        var(--sand-3) 165px, var(--sand-3) 210px
+      );
+    box-shadow: inset 0 0 60px rgba(74,53,38,0.35), inset 0 2px 18px rgba(0,0,0,0.25);
+  }
+  canvas#stage{
+    display:block;
+    width: 100%;
+    height: clamp(420px, 62vh, 640px);
+    cursor: crosshair;
+    touch-action: none;
+  }
+  .glass.locked canvas#stage{ cursor: default; }
+
+  .hint-bar{
+    display:flex;
+    justify-content: space-between;
+    align-items:center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 6px 2px;
+    font-size: 12.5px;
+    color: var(--sand-3);
+  }
+  .hint-bar .legend{
+    display:flex; gap:16px; flex-wrap:wrap;
+  }
+  .legend span{ display:inline-flex; align-items:center; gap:6px; }
+  .legend .sw{ width:14px; height:3px; border-radius:2px; display:inline-block; }
+  .legend .ant-sw{ width:8px; height:8px; border-radius:50%; background:var(--ant-body); display:inline-block;}
+
+  /* ---------- sidebar ---------- */
+  .panel{
+    background: linear-gradient(180deg, var(--walnut), var(--walnut-dark));
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 20px 50px -20px rgba(0,0,0,0.6);
+    display:flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .readout{
+    background: var(--lcd-bg);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display:grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px 16px;
+    box-shadow: inset 0 0 0 1px rgba(143,255,196,0.08), inset 0 10px 24px rgba(0,0,0,0.35);
+  }
+  .readout .cell{ display:flex; flex-direction:column; gap:2px; }
+  .readout .cell.wide{ grid-column: 1 / -1; }
+  .readout label{
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--lcd-fg-dim);
+  }
+  .readout .val{
+    font-family: var(--font-mono);
+    font-size: 19px;
+    color: var(--lcd-fg);
+    text-shadow: 0 0 9px rgba(143,255,196,0.45);
+    font-weight: 500;
+    letter-spacing: 0.01em;
+  }
+  .readout .val.small{ font-size: 14px; }
+
+  fieldset.group{
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 14px 14px 12px;
+    margin: 0;
+  }
+  fieldset.group legend{
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--gold);
+    padding: 0 6px;
+  }
+
+  .ctrl-row{
+    display:flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 13px;
+  }
+  .ctrl-row:last-child{ margin-bottom: 0; }
+  .ctrl-row .top{
+    display:flex; justify-content: space-between; align-items:baseline;
+  }
+  .ctrl-row .top .label{
+    font-size: 13px; color: var(--sand-1); font-weight:500;
+    display:flex; align-items:center; gap:5px;
+  }
+  .ctrl-row .top .label .sym{ font-family: var(--font-display); font-style:italic; color: var(--gold); }
+  .ctrl-row .top .value{
+    font-family: var(--font-mono); font-size: 12.5px; color: var(--pher);
+  }
+  .ctrl-row .help{
+    font-size: 11px;
+    color: var(--sand-3);
+    line-height: 1.4;
+  }
+
+  input[type=range]{
+    -webkit-appearance:none; appearance:none;
+    width: 100%;
+    height: 4px;
+    border-radius: 3px;
+    background: linear-gradient(90deg, var(--gold), rgba(255,255,255,0.12));
+    outline:none;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;
+    width: 15px; height:15px; border-radius:50%;
+    background: var(--sand-1);
+    border: 2px solid var(--gold);
+    cursor:pointer;
+    margin-top:-1px;
+    box-shadow: 0 0 0 3px rgba(232,163,61,0.18);
+  }
+  input[type=range]::-moz-range-thumb{
+    width: 13px; height:13px; border-radius:50%;
+    background: var(--sand-1);
+    border: 2px solid var(--gold);
+    cursor:pointer;
+  }
+  input[type=range]:focus-visible::-webkit-slider-thumb{ box-shadow: 0 0 0 4px var(--pher); }
+  input[type=range]:focus-visible::-moz-range-thumb{ box-shadow: 0 0 0 4px var(--pher); }
+
+  input[type=number]{
+    width: 72px;
+    background: rgba(0,0,0,0.25);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px;
+    color: var(--sand-1);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    padding: 5px 7px;
+  }
+  input[type=number]:focus-visible{ outline: 2px solid var(--pher); }
+
+  .check-row{
+    display:flex;
+    align-items:flex-start;
+    gap: 9px;
+  }
+  .check-row input[type=checkbox]{
+    width:16px; height:16px; margin-top:2px;
+    accent-color: var(--pher);
+    cursor:pointer;
+  }
+  .check-row .txt .label{ font-size: 13px; color: var(--sand-1); font-weight:500; }
+  .check-row .txt .help{ font-size: 11px; color: var(--sand-3); line-height:1.4; margin-top:2px; }
+  label.check-row{ cursor:pointer; }
+
+  .num-inline{
+    display:flex; align-items:center; justify-content: space-between; gap:10px;
+  }
+
+  .buttons{
+    display:flex;
+    gap: 9px;
+    flex-wrap: wrap;
+  }
+  button{
+    font-family: var(--font-body);
+    font-weight: 600;
+    font-size: 13.5px;
+    border: none;
+    border-radius: 10px;
+    padding: 10px 16px;
+    cursor: pointer;
+    transition: transform 0.08s ease, filter 0.15s ease;
+    flex: 1 1 auto;
+  }
+  button:active{ transform: translateY(1px); }
+  button:focus-visible{ outline: 2px solid var(--pher); outline-offset:2px; }
+
+  button.primary{
+    background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+    color: var(--walnut-dark);
+  }
+  button.primary:hover{ filter: brightness(1.06); }
+  button.primary.stop{
+    background: linear-gradient(180deg, #E07A5F, var(--danger));
+    color: #FFF6F0;
+  }
+  button.ghost{
+    background: rgba(255,255,255,0.06);
+    color: var(--sand-1);
+    border: 1px solid rgba(255,255,255,0.12);
+  }
+  button.ghost:hover{ background: rgba(255,255,255,0.1); }
+  button.full{ flex: 1 1 100%; padding: 12px 16px; font-size: 14.5px; }
+
+  footer.note{
+    font-size: 11.5px;
+    color: var(--sand-3);
+    line-height: 1.5;
+    padding: 0 4px;
+  }
+  footer.note a{ color: var(--pher); text-decoration: none; border-bottom: 1px dotted rgba(45,212,191,0.5); }
+
+  @media (prefers-reduced-motion: reduce){
+    .colony-tag .dot{ animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <header class="top">
+    <div class="brand">
+      <h1>Formicarium</h1>
+      <span class="sub">Ant Colony System · Traveling Salesman</span>
+    </div>
+    <div class="colony-tag idle" id="colonyTag">
+      <span class="dot" id="colonyDot"></span>
+      <span id="colonyTagText">Colony resting</span>
+    </div>
+  </header>
+
+  <div class="layout">
+
+    <!-- VIEWPORT -->
+    <div class="viewport-frame">
+      <div class="glass" id="glass">
+        <canvas id="stage"></canvas>
+      </div>
+      <div class="hint-bar">
+        <span id="editHint">Click the sand to place a city · click a city to remove it</span>
+        <span class="legend">
+          <span><i class="sw" style="background:var(--pher)"></i>pheromone trail</span>
+          <span><i class="sw" style="background:var(--gold)"></i>best tour found</span>
+          <span><i class="ant-sw"></i>ant</span>
+        </span>
+      </div>
+    </div>
+
+    <!-- CONTROL PANEL -->
+    <div class="panel">
+
+      <div class="readout">
+        <div class="cell">
+          <label>Cycle</label>
+          <div class="val" id="readCycle">0</div>
+        </div>
+        <div class="cell">
+          <label>Ants out</label>
+          <div class="val" id="readAnts">0</div>
+        </div>
+        <div class="cell wide">
+          <label>Best tour length</label>
+          <div class="val" id="readBest">—</div>
+        </div>
+        <div class="cell wide">
+          <label>Found at cycle</label>
+          <div class="val small" id="readBestCycle">—</div>
+        </div>
+      </div>
+
+      <fieldset class="group">
+        <legend>Colony parameters</legend>
+
+        <div class="ctrl-row">
+          <div class="top">
+            <span class="label"><span class="sym">α</span> Alpha — pheromone weight</span>
+            <span class="value" id="vAlpha">1.0</span>
+          </div>
+          <input type="range" id="alpha" min="0" max="5" step="0.1" value="1.0">
+          <div class="help">How strongly ants favor trails other ants have already reinforced.</div>
+        </div>
+
+        <div class="ctrl-row">
+          <div class="top">
+            <span class="label"><span class="sym">β</span> Beta — distance weight</span>
+            <span class="value" id="vBeta">3.0</span>
+          </div>
+          <input type="range" id="beta" min="0" max="6" step="0.1" value="3.0">
+          <div class="help">How strongly ants favor the nearest unvisited city.</div>
+        </div>
+
+        <div class="ctrl-row">
+          <div class="top">
+            <span class="label"><span class="sym">ρ</span> Rho — evaporation</span>
+            <span class="value" id="vRho">0.30</span>
+          </div>
+          <input type="range" id="rho" min="0.01" max="0.9" step="0.01" value="0.30">
+          <div class="help">Fraction of every trail's scent that fades each cycle.</div>
+        </div>
+
+        <label class="check-row" for="adaptAlpha">
+          <input type="checkbox" id="adaptAlpha">
+          <span class="txt">
+            <span class="label">Adapt α over time</span>
+            <span class="help">Gradually sharpens α as cycles pass, so the colony shifts from exploring to exploiting its best trails.</span>
+          </span>
+        </label>
+      </fieldset>
+
+      <fieldset class="group">
+        <legend>Simulation</legend>
+
+        <div class="ctrl-row">
+          <div class="num-inline">
+            <span class="label">Ants per cycle</span>
+            <input type="number" id="antCount" min="1" max="80" value="20">
+          </div>
+        </div>
+
+        <div class="ctrl-row">
+          <div class="num-inline">
+            <span class="label">Stop after cycles</span>
+            <input type="number" id="cycleLimit" min="0" value="0">
+          </div>
+          <div class="help">0 lets the colony run indefinitely.</div>
+        </div>
+
+        <div class="ctrl-row">
+          <div class="top">
+            <span class="label">Ant speed</span>
+            <span class="value" id="vSpeed">1.0×</span>
+          </div>
+          <input type="range" id="speed" min="0.2" max="4" step="0.1" value="1.0">
+        </div>
+      </fieldset>
+
+      <div class="buttons">
+        <button class="primary full" id="startBtn">Release the colony</button>
+      </div>
+      <div class="buttons">
+        <button class="ghost" id="randomizeBtn">Randomize cities</button>
+        <button class="ghost" id="clearCitiesBtn">Clear all cities</button>
+        <button class="ghost" id="resetBtn">Reset trails</button>
+      </div>
+
+      <footer class="note">
+        Ant System with light elitism: every edge fades by ρ each cycle, then each ant deposits scent proportional to <code style="font-family:var(--font-mono)">1 / tour length</code>, with a small bonus laid down on the best tour found so far.
+      </footer>
+
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  // ---------------------------------------------------------------
+  // DOM references
+  // ---------------------------------------------------------------
+  const canvas      = document.getElementById('stage');
+  const glassEl      = document.getElementById('glass');
+  const ctx          = canvas.getContext('2d');
+
+  const elAlpha       = document.getElementById('alpha');
+  const elBeta         = document.getElementById('beta');
+  const elRho           = document.getElementById('rho');
+  const elAdaptAlpha     = document.getElementById('adaptAlpha');
+  const elAntCount        = document.getElementById('antCount');
+  const elCycleLimit        = document.getElementById('cycleLimit');
+  const elSpeed               = document.getElementById('speed');
+
+  const vAlpha = document.getElementById('vAlpha');
+  const vBeta = document.getElementById('vBeta');
+  const vRho = document.getElementById('vRho');
+  const vSpeed = document.getElementById('vSpeed');
+
+  const readCycle = document.getElementById('readCycle');
+  const readAnts = document.getElementById('readAnts');
+  const readBest = document.getElementById('readBest');
+  const readBestCycle = document.getElementById('readBestCycle');
+
+  const startBtn      = document.getElementById('startBtn');
+  const randomizeBtn  = document.getElementById('randomizeBtn');
+  const clearCitiesBtn= document.getElementById('clearCitiesBtn');
+  const resetBtn      = document.getElementById('resetBtn');
+
+  const editHint     = document.getElementById('editHint');
+  const colonyTag    = document.getElementById('colonyTag');
+  const colonyDot    = document.getElementById('colonyDot');
+  const colonyTagText= document.getElementById('colonyTagText');
+
+  // ---------------------------------------------------------------
+  // World state
+  // ---------------------------------------------------------------
+  let cities = [];        // {x, y}
+  let dist = [];          // n x n
+  let pher = [];          // n x n
+  let avgEdge = 1;         // typical edge length, used to scale deposits
+  let n = 0;
+
+  let cycle = 0;
+  let running = false;
+  let editable = true;     // can the sand be clicked to add/remove cities?
+  let alphaRuntime = parseFloat(elAlpha.value);
+
+  let best = { tour: null, length: Infinity, cycle: null };
+
+  let ants = [];           // active ants this cycle
+  let antsRemaining = 0;
+
+  let lastTime = null;
+  let pulseT = 0;
+
+  const CITY_RADIUS = 6;
+  const BASE_PX_PER_SEC = 150;
+  const MIN_CITY_SPACING = 26;
+
+  // ---------------------------------------------------------------
+  // Canvas sizing (crisp on hi-dpi screens)
+  // ---------------------------------------------------------------
+  function resizeCanvas(){
+    const rect = glassEl.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.round(rect.width  * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    canvas.style.width  = rect.width + 'px';
+    canvas.style.height = rect.height + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  const ro = new ResizeObserver(resizeCanvas);
+  ro.observe(glassEl);
+  resizeCanvas();
+
+  // ---------------------------------------------------------------
+  // Geometry helpers
+  // ---------------------------------------------------------------
+  function dst(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
+
+  function rectSize(){
+    const r = glassEl.getBoundingClientRect();
+    return { w: r.width, h: r.height };
+  }
+
+  function randomCities(count){
+    const { w, h } = rectSize();
+    const pad = 36;
+    const pts = [];
+    let attempts = 0;
+    while (pts.length < count && attempts < count * 60){
+      attempts++;
+      const p = {
+        x: pad + Math.random() * Math.max(10, (w - pad*2)),
+        y: pad + Math.random() * Math.max(10, (h - pad*2))
+      };
+      if (pts.every(q => dst(p,q) > MIN_CITY_SPACING)) pts.push(p);
+    }
+    return pts;
+  }
+
+  // ---------------------------------------------------------------
+  // Matrix (re)building
+  // ---------------------------------------------------------------
+  function rebuildMatrices(){
+    n = cities.length;
+    dist = Array.from({length:n}, () => new Array(n).fill(0));
+    for (let i=0;i<n;i++){
+      for (let j=i+1;j<n;j++){
+        const d = dst(cities[i], cities[j]) || 0.0001;
+        dist[i][j] = d; dist[j][i] = d;
+      }
+    }
+    let sum = 0, cnt = 0;
+    for (let i=0;i<n;i++) for (let j=i+1;j<n;j++){ sum += dist[i][j]; cnt++; }
+    avgEdge = cnt ? (sum / cnt) : 1;
+    resetPheromone();
+  }
+
+  function resetPheromone(){
+    pher = Array.from({length:n}, () => new Array(n).fill(1));
+  }
+
+  // ---------------------------------------------------------------
+  // City editing
+  // ---------------------------------------------------------------
+  function setEditable(state){
+    editable = state;
+    glassEl.classList.toggle('locked', !editable);
+    editHint.textContent = editable
+      ? 'Click the sand to place a city · click a city to remove it'
+      : 'Reset trails to edit cities again';
+  }
+
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (!editable) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = ev.clientX - rect.left;
+    const y = ev.clientY - rect.top;
+
+    let hitIdx = -1;
+    for (let i=0;i<cities.length;i++){
+      if (dst(cities[i], {x,y}) <= CITY_RADIUS + 6){ hitIdx = i; break; }
+    }
+    if (hitIdx >= 0){
+      cities.splice(hitIdx, 1);
+    } else {
+      cities.push({x, y});
+    }
+    rebuildMatrices();
+    renderStatic();
+  });
+
+  // ---------------------------------------------------------------
+  // Controls: live value labels
+  // ---------------------------------------------------------------
+  function syncLabels(){
+    vAlpha.textContent = (running && elAdaptAlpha.checked ? alphaRuntime : parseFloat(elAlpha.value)).toFixed(2);
+    vBeta.textContent  = parseFloat(elBeta.value).toFixed(1);
+    vRho.textContent   = parseFloat(elRho.value).toFixed(2);
+    vSpeed.textContent = parseFloat(elSpeed.value).toFixed(1) + '×';
+  }
+  [elAlpha, elBeta, elRho, elSpeed].forEach(el => el.addEventListener('input', syncLabels));
+  syncLabels();
+
+  // ---------------------------------------------------------------
+  // ACO core
+  // ---------------------------------------------------------------
+  function chooseNext(fromIdx, visited){
+    const alpha = alphaRuntime;
+    const beta  = parseFloat(elBeta.value);
+    const candidates = [];
+    let total = 0;
+    for (let j=0;j<n;j++){
+      if (visited.has(j)) continue;
+      const tau = pher[fromIdx][j];
+      const d   = dist[fromIdx][j];
+      const score = Math.pow(tau, alpha) * Math.pow(1/d, beta);
+      candidates.push({ j, score });
+      total += score;
+    }
+    if (!candidates.length) return -1;
+    if (!isFinite(total) || total <= 0){
+      return candidates[Math.floor(Math.random()*candidates.length)].j;
+    }
+    let r = Math.random() * total;
+    for (const c of candidates){
+      r -= c.score;
+      if (r <= 0) return c.j;
+    }
+    return candidates[candidates.length-1].j;
+  }
+
+  function spawnAnts(){
+    const count = Math.max(1, Math.min(80, parseInt(elAntCount.value,10) || 1));
+    ants = [];
+    for (let i=0;i<count;i++){
+      const start = Math.floor(Math.random()*n);
+      const visited = new Set([start]);
+      const a = {
+        id: i,
+        from: start,
+        to: -1,
+        visited,
+        tour: [start],
+        progress: 0,
+        tourLength: 0,
+        done: false,
+        pos: { x: cities[start].x, y: cities[start].y },
+        heading: 0
+      };
+      const nxt = chooseNext(start, visited);
+      if (nxt === -1){ a.done = true; }
+      else { a.to = nxt; }
+      ants.push(a);
+    }
+    antsRemaining = ants.filter(a => !a.done).length;
+    readAnts.textContent = antsRemaining;
+  }
+
+  function startCycle(){
+    cycle += 1;
+    readCycle.textContent = cycle;
+    spawnAnts();
+    updateColonyTag();
+  }
+
+  function finishCycle(){
+    const rho = parseFloat(elRho.value);
+    // evaporation
+    for (let i=0;i<n;i++) for (let j=0;j<n;j++) if (i!==j) pher[i][j] *= (1 - rho);
+
+    // deposit per ant
+    const Q = avgEdge;
+    for (const a of ants){
+      if (!a.tourLength || a.tourLength <= 0) continue;
+      const dep = Q / a.tourLength;
+      for (let k=0;k<a.tour.length;k++){
+        const c1 = a.tour[k];
+        const c2 = a.tour[(k+1)%a.tour.length];
+        pher[c1][c2] += dep;
+        pher[c2][c1] += dep;
+      }
+      if (a.tourLength < best.length){
+        best = { tour: a.tour.slice(), length: a.tourLength, cycle };
+        readBest.textContent = best.length.toFixed(1) + ' px';
+        readBestCycle.textContent = 'Cycle ' + best.cycle;
+      }
+    }
+
+    // light elitism: extra reinforcement on the best tour found so far
+    if (best.tour){
+      const eliteWeight = Math.max(1, Math.floor(ants.length / 4));
+      const dep = (eliteWeight * Q) / best.length;
+      for (let k=0;k<best.tour.length;k++){
+        const c1 = best.tour[k];
+        const c2 = best.tour[(k+1)%best.tour.length];
+        pher[c1][c2] += dep;
+        pher[c2][c1] += dep;
+      }
+    }
+
+    if (elAdaptAlpha.checked){
+      alphaRuntime = Math.min(5, alphaRuntime + 0.015);
+    } else {
+      alphaRuntime = parseFloat(elAlpha.value);
+    }
+    syncLabels();
+
+    const limit = parseInt(elCycleLimit.value, 10) || 0;
+    if (limit > 0 && cycle >= limit){
+      running = false;
+      startBtn.textContent = 'Release the colony';
+      startBtn.classList.remove('stop');
+      updateColonyTag();
+      return;
+    }
+    startCycle();
+  }
+
+  // ---------------------------------------------------------------
+  // Animation loop
+  // ---------------------------------------------------------------
+  function stepAnts(dtSec){
+    const speed = BASE_PX_PER_SEC * parseFloat(elSpeed.value);
+    let stillOut = 0;
+
+    for (const a of ants){
+      if (a.done) continue;
+
+      const from = cities[a.from];
+      const to   = cities[a.to];
+      const segLen = dist[a.from][a.to] || 0.0001;
+
+      a.progress += (dtSec * speed) / segLen;
+      a.heading = Math.atan2(to.y - from.y, to.x - from.x);
+
+      if (a.progress >= 1){
+        a.progress = 0;
+        a.from = a.to;
+        a.pos = { x: cities[a.from].x, y: cities[a.from].y };
+        a.visited.add(a.from);
+        a.tour.push(a.from);
+
+        const nxt = chooseNext(a.from, a.visited);
+        if (nxt === -1){
+          // tour complete — close the loop back to the start city
+          a.tourLength = 0;
+          for (let k=0;k<a.tour.length;k++){
+            const c1 = a.tour[k];
+            const c2 = a.tour[(k+1)%a.tour.length];
+            a.tourLength += dist[c1][c2];
+          }
+          a.done = true;
+        } else {
+          a.to = nxt;
+        }
+      } else {
+        a.pos = {
+          x: from.x + (to.x - from.x) * a.progress,
+          y: from.y + (to.y - from.y) * a.progress
+        };
+      }
+      if (!a.done) stillOut++;
+    }
+
+    readAnts.textContent = stillOut;
+    if (stillOut === 0 && ants.length){
+      finishCycle();
+    }
+  }
+
+  function maxPheromone(){
+    let m = 0.0001;
+    for (let i=0;i<n;i++) for (let j=i+1;j<n;j++) if (pher[i][j] > m) m = pher[i][j];
+    return m;
+  }
+
+  function renderStatic(){
+    drawFrame(0);
+  }
+
+  function drawFrame(dtSec){
+    pulseT += dtSec;
+    const { w, h } = rectSize();
+    ctx.clearRect(0, 0, w, h);
+
+    // pheromone trails
+    if (n > 1){
+      const m = maxPheromone();
+      for (let i=0;i<n;i++){
+        for (let j=i+1;j<n;j++){
+          const intensity = Math.min(1, pher[i][j] / m);
+          if (intensity < 0.04) continue;
+          ctx.beginPath();
+          ctx.moveTo(cities[i].x, cities[i].y);
+          ctx.lineTo(cities[j].x, cities[j].y);
+          ctx.strokeStyle = 'rgba(45, 212, 191,' + (0.10 + intensity * 0.62) + ')';
+          ctx.lineWidth = 1 + intensity * 4.5;
+          ctx.shadowColor = 'rgba(45, 212, 191, 0.65)';
+          ctx.shadowBlur = 2 + intensity * 9;
+          ctx.stroke();
+        }
+      }
+      ctx.shadowBlur = 0;
+    }
+
+    // best tour, pulsing gold
+    if (best.tour && best.tour.length > 1){
+      const pulse = 0.55 + 0.45 * Math.sin(pulseT * 2.4);
+      ctx.beginPath();
+      for (let k=0;k<best.tour.length;k++){
+        const c = cities[best.tour[k]];
+        if (!c) break;
+        if (k===0) ctx.moveTo(c.x, c.y); else ctx.lineTo(c.x, c.y);
+      }
+      if (cities[best.tour[0]]) ctx.lineTo(cities[best.tour[0]].x, cities[best.tour[0]].y);
+      ctx.strokeStyle = 'rgba(232, 163, 61,' + (0.55 + pulse*0.35) + ')';
+      ctx.lineWidth = 2.4;
+      ctx.shadowColor = 'rgba(255, 200, 104, 0.9)';
+      ctx.shadowBlur = 6 + pulse * 8;
+      ctx.setLineDash([9, 7]);
+      ctx.lineDashOffset = -pulseT * 18;
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.shadowBlur = 0;
+    }
+
+    // cities
+    for (let i=0;i<cities.length;i++){
+      const c = cities[i];
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, CITY_RADIUS, 0, Math.PI*2);
+      ctx.fillStyle = '#4A3526';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#ECE0C4';
+      ctx.stroke();
+    }
+
+    // ants
+    for (const a of ants){
+      drawAnt(a.pos.x, a.pos.y, a.heading);
+    }
+  }
+
+  function drawAnt(x, y, heading){
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(heading);
+    ctx.fillStyle = '#2A1B10';
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 4.2, 2.4, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.ellipse(4.6, 0, 1.9, 1.6, 0, 0, Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle = '#2A1B10';
+    ctx.lineWidth = 0.7;
+    ctx.beginPath();
+    ctx.moveTo(5.6, -0.4); ctx.lineTo(8, -2.2);
+    ctx.moveTo(5.6, 0.4);  ctx.lineTo(8, 2.2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function tick(t){
+    if (lastTime === null) lastTime = t;
+    let dtSec = (t - lastTime) / 1000;
+    lastTime = t;
+    dtSec = Math.min(dtSec, 0.08); // guard against tab-switch jumps
+
+    if (running) stepAnts(dtSec);
+    drawFrame(dtSec);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  // ---------------------------------------------------------------
+  // Colony status tag
+  // ---------------------------------------------------------------
+  function updateColonyTag(){
+    colonyTag.classList.toggle('idle', !running);
+    colonyDot.classList.toggle('live', running);
+    colonyTagText.textContent = running ? ('Colony foraging — cycle ' + cycle) : 'Colony resting';
+  }
+
+  // ---------------------------------------------------------------
+  // Buttons
+  // ---------------------------------------------------------------
+  startBtn.addEventListener('click', () => {
+    if (!running){
+      if (cities.length < 3){
+        editHint.textContent = 'Place at least 3 cities first';
+        return;
+      }
+      if (cycle === 0 && ants.length === 0){
+        alphaRuntime = parseFloat(elAlpha.value);
+        startCycle();
+      }
+      running = true;
+      setEditable(false);
+      startBtn.textContent = 'Pause colony';
+      startBtn.classList.add('stop');
+    } else {
+      running = false;
+      startBtn.textContent = 'Resume colony';
+      startBtn.classList.remove('stop');
+    }
+    updateColonyTag();
+  });
+
+  randomizeBtn.addEventListener('click', () => {
+    running = false;
+    cycle = 0;
+    ants = [];
+    best = { tour: null, length: Infinity, cycle: null };
+    cities = randomCities(16);
+    rebuildMatrices();
+    readCycle.textContent = '0';
+    readAnts.textContent = '0';
+    readBest.textContent = '—';
+    readBestCycle.textContent = '—';
+    alphaRuntime = parseFloat(elAlpha.value);
+    syncLabels();
+    setEditable(true);
+    startBtn.textContent = 'Release the colony';
+    startBtn.classList.remove('stop');
+    updateColonyTag();
+    renderStatic();
+  });
+
+  clearCitiesBtn.addEventListener('click', () => {
+    running = false;
+    cycle = 0;
+    ants = [];
+    best = { tour: null, length: Infinity, cycle: null };
+    cities = [];
+    rebuildMatrices();
+    readCycle.textContent = '0';
+    readAnts.textContent = '0';
+    readBest.textContent = '—';
+    readBestCycle.textContent = '—';
+    alphaRuntime = parseFloat(elAlpha.value);
+    syncLabels();
+    setEditable(true);
+    startBtn.textContent = 'Release the colony';
+    startBtn.classList.remove('stop');
+    updateColonyTag();
+    renderStatic();
+  });
+
+  resetBtn.addEventListener('click', () => {
+    running = false;
+    cycle = 0;
+    ants = [];
+    best = { tour: null, length: Infinity, cycle: null };
+    resetPheromone();
+    readCycle.textContent = '0';
+    readAnts.textContent = '0';
+    readBest.textContent = '—';
+    readBestCycle.textContent = '—';
+    alphaRuntime = parseFloat(elAlpha.value);
+    syncLabels();
+    setEditable(true);
+    startBtn.textContent = 'Release the colony';
+    startBtn.classList.remove('stop');
+    updateColonyTag();
+    renderStatic();
+  });
+
+  // ---------------------------------------------------------------
+  // Boot — field starts empty so cities can be placed one by one
+  // ---------------------------------------------------------------
+  cities = [];
+  rebuildMatrices();
+  setEditable(true);
+  renderStatic();
+
+})();
+</script>
+</body>
+</html>
