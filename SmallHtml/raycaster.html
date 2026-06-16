@@ -2,6 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>3D Engine - Raycaster</title>
 <style>
     html, body {
@@ -100,6 +101,75 @@
         0%   { background: rgba(255,0,0,0.9); }
         100% { background: rgba(60,0,0,0.78); }
     }
+
+    /* Canvas auf kleinen Screens herunterskalieren, Pixel-Look bleibt erhalten */
+    #screen {
+        max-width: 100vw;
+        max-height: 70vh;
+        height: auto;
+    }
+
+    /* ---------- Touch-Steuerung (nur auf Touch-Geräten sichtbar) ---------- */
+    #touchControls {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 5;
+        pointer-events: none;
+    }
+    @media (hover: none), (pointer: coarse) {
+        #touchControls { display: block; }
+        #info .kbHint { display: none; }
+        #info .touchHint { display: inline; }
+    }
+    #info .touchHint { display: none; }
+
+    .tc-pad {
+        position: absolute;
+        bottom: 14px;
+        pointer-events: auto;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+    }
+    .tc-btn {
+        width: 52px;
+        height: 52px;
+        border-radius: 50%;
+        background: rgba(255,255,255,0.12);
+        border: 2px solid rgba(255,255,255,0.45);
+        color: #fff;
+        font-size: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-tap-highlight-color: transparent;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+    }
+    .tc-btn.tc-active {
+        background: rgba(255,255,255,0.35);
+        border-color: #fff;
+    }
+
+    #tc-move {
+        left: 14px;
+        display: grid;
+        grid-template-columns: 52px 52px 52px;
+        grid-template-rows: 52px 52px 52px;
+        grid-template-areas:
+            ".    up    ."
+            "left .     right"
+            ".    down  .";
+        gap: 6px;
+    }
+    #tc-turn {
+        right: 14px;
+        display: flex;
+        gap: 10px;
+        bottom: 28px;
+    }
 </style>
 </head>
 <body>
@@ -111,13 +181,26 @@
             <div id="gameOverText">DU WURDEST GESCHNAPPT</div>
             <button id="restartBtn">Neu starten</button>
         </div>
+        <div id="touchControls">
+            <div class="tc-pad" id="tc-move">
+                <button class="tc-btn" data-action="forward" style="grid-area: up;">&#9650;</button>
+                <button class="tc-btn" data-action="strafeLeft" style="grid-area: left;">&#9664;</button>
+                <button class="tc-btn" data-action="strafeRight" style="grid-area: right;">&#9654;</button>
+                <button class="tc-btn" data-action="backward" style="grid-area: down;">&#9660;</button>
+            </div>
+            <div class="tc-pad" id="tc-turn">
+                <button class="tc-btn" data-action="rotateLeft">&#8634;</button>
+                <button class="tc-btn" data-action="rotateRight">&#8635;</button>
+            </div>
+        </div>
     </div>
     <div id="info">
-        Bewegen: <kbd>&#8593;</kbd> <kbd>&#8595;</kbd> &nbsp; Drehen: <kbd>&#8592;</kbd> <kbd>&#8594;</kbd>
+        <span class="kbHint">Bewegen: <kbd>&#8593;</kbd> <kbd>&#8595;</kbd> &nbsp; Drehen: <kbd>&#8592;</kbd> <kbd>&#8594;</kbd>
         &nbsp;|&nbsp; auch <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>
-        <br>Seitlich strafen: <kbd>Shift</kbd> + <kbd>&#8592;</kbd> <kbd>&#8594;</kbd> (bzw. <kbd>A</kbd> <kbd>D</kbd>)
+        <br>Seitlich strafen: <kbd>Shift</kbd> + <kbd>&#8592;</kbd> <kbd>&#8594;</kbd> (bzw. <kbd>A</kbd> <kbd>D</kbd>)</span>
+        <span class="touchHint">Links: Pad zum Bewegen/Strafen &nbsp;|&nbsp; Rechts: Buttons zum Drehen</span>
         <br>Irgendwo im Labyrinth lauert etwas. Lauf nicht zu langsam...
-        <br><span style="opacity:0.7;">🔊 Ton wird mit der ersten Taste aktiviert &middot; wird mit der Zeit gefährlicher</span>
+        <br><span style="opacity:0.7;">🔊 Ton wird mit der ersten Taste/Berührung aktiviert &middot; wird mit der Zeit gefährlicher</span>
     </div>
 </div>
 <div id="fps"></div>
@@ -1189,6 +1272,39 @@ const TEX_DATA = {
     }
     window.addEventListener('keydown', (e) => handleKey(e, true));
     window.addEventListener('keyup',   (e) => handleKey(e, false));
+
+    // ---------- Touch-Steuerung ----------
+    // Mappt die data-action der Buttons auf die gleichen world-Methoden,
+    // die auch von der Tastatursteuerung genutzt werden.
+    const touchActionMap = {
+        forward:      () => world.moveForward,
+        backward:     () => world.moveBackward,
+        strafeLeft:   () => world.strafeLeft,
+        strafeRight:  () => world.strafeRight,
+        rotateLeft:   () => world.rotateLeft,
+        rotateRight:  () => world.rotateRight
+    };
+
+    document.querySelectorAll('.tc-btn').forEach((btn) => {
+        const fnGetter = touchActionMap[btn.dataset.action];
+        if (!fnGetter) return;
+
+        const setActive = (isDown) => (e) => {
+            e.preventDefault();
+            sound.ensureStarted(); // erste Berührung startet Audio (Autoplay-Policy)
+            sound.resume();
+            if (world.isGameOver()) return;
+            fnGetter().call(world, isDown);
+            btn.classList.toggle('tc-active', isDown);
+        };
+
+        btn.addEventListener('pointerdown', setActive(true));
+        btn.addEventListener('pointerup', setActive(false));
+        btn.addEventListener('pointercancel', setActive(false));
+        btn.addEventListener('pointerleave', setActive(false));
+        // Verhindert Kontextmenü bei langem Drücken auf Touch-Geräten
+        btn.addEventListener('contextmenu', (e) => e.preventDefault());
+    });
 
     const overlay = document.getElementById('gameOverOverlay');
     const restartBtn = document.getElementById('restartBtn');
