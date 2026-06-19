@@ -157,6 +157,19 @@ _sprung2 = _make([
     [W, W, W, W, W, W, W, W, W],
 ])
 
+# --- 10: Start  (gerade horizontale Linie mit kleinem Kreis-Ring in der Mitte) ---
+_start = _make([
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, BK,BK,BK,W, W, W],
+    [W, W, BK,W, W, W, BK,W, W],
+    [BK,BK,BK,W, W, W, BK,BK,BK],
+    [W, W, BK,W, W, W, BK,W, W],
+    [W, W, W, BK,BK,BK,W, W, W],
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, W, W, W, W, W, W],
+])
+
 # ---------------------------------------------------------------------------
 # Mapping: ElementNr → (Array, Name)
 # ---------------------------------------------------------------------------
@@ -170,6 +183,7 @@ ELEMENTS = {
     7: (_line1,     "line1"),
     8: (_sprung1,   "Sprung1"),
     9: (_sprung2,   "Sprung2"),
+    10:(_start,     "Start"),
 }
 
 # ---------------------------------------------------------------------------
@@ -1177,6 +1191,176 @@ def ShellA_mit_Bogen(anzahl: int, zustand: int,
     m = [row[schnitt:] for row in m]
     return m, eingangszeilen
 
+
+# ---------------------------------------------------------------------------
+# ShellA_verbunden – ShellA_mit_Bogen + Verbindung der ShellB-Ausgänge
+# ---------------------------------------------------------------------------
+
+def ShellA_verbunden(anzahl: int, zustand: int,
+                     schalter: list = None,
+                     richtungen: list = None,
+                     zustaende: list = None,
+                     transitionen_map: dict = None) -> tuple:
+    """
+    Vollständige ShellA mit verbundenen ShellB-Ausgängen.
+
+    Die 2n Routing-Ausgänge von ShellB werden über vertikale und horizontale
+    Leitungen mit den 9:r1V/9:r1HV-Kreuzungspunkten der Eingangsweichen verbunden.
+
+    Slot-Indizes (generisch für beliebiges n):
+      L-Ausgang k (zi=k//2, sym=k%2): slot = (n-1-zi)*2 + sym  in neun_v[ez[zi]]
+      R-Ausgang k:                     slot = zi*2               in neun_hv[ez[zi]]
+
+    Verbindungszeile:
+      L-Ausgang: ry+1 (eine Zeile unter dem Routing-Ausgang)
+      R-Ausgang: ry-1 (eine Zeile über dem Routing-Ausgang)
+
+    Parameter:
+        anzahl          : Anzahl Zustände (n)
+        zustand         : aktuelles Bandsymbol (0 oder 1)
+        schalter        : [0/1] × 2n
+        richtungen      : ['L'/'R'] × 2n
+        zustaende       : Liste der Zustands-IDs (für Haltezustand-Erkennung)
+        transitionen_map: dict (zustand, symbol) → Transition (für Haltezustand-Check)
+
+    Rückgabe: (matrix, eingangszeilen)
+    """
+    m, eingangszeilen = ShellA_mit_Bogen(anzahl, zustand,
+                                          schalter=schalter,
+                                          richtungen=richtungen)
+    n = anzahl
+
+    # 9:r1V (links) und 9:r1HV (rechts) pro Eingangszeile
+    neun_v  = {y: sorted([x for x,v in enumerate(row) if v == '9:r1V'])
+               for y, row in enumerate(m) if any(v == '9:r1V' for v in row)}
+    neun_hv = {}
+    for y, row in enumerate(m):
+        cols = sorted([x for x, v in enumerate(row) if v == '9:r1HV'])
+        if cols:
+            neun_hv[y] = cols
+
+    # Die 2n Routing-Ausgänge (letzte 2n 2:r1V/2:r1HV unterhalb der Eingangszeilen)
+    routing = [(y, x, v)
+               for y, row in enumerate(m)
+               for x, v in enumerate(row)
+               if v in ('2:r1V', '2:r1HV') and y > eingangszeilen[-1]][-2*n:]
+
+    def _z(y, x):
+        if 0 <= y < len(m) and 0 <= x < len(m[y]): return m[y][x]
+        return '0'
+    def _s(y, x, v):
+        # Matrix nach unten erweitern falls nötig
+        while y >= len(m):
+            m.append(['0'] * len(m[0]))
+        while x >= len(m[y]):
+            m[y].append('0')
+        m[y][x] = v
+
+    for k, (ry, rx, rv) in enumerate(routing):
+        zi  = k // 2
+        sym = k % 2
+        ez_y = eingangszeilen[zi]  # Eingangszeile des aktuellen Zustands
+
+        # Haltezustand-Check
+        if zustaende is not None and transitionen_map is not None:
+            z = zustaende[zi]
+            t = transitionen_map.get((z, sym))
+            if t is None or t.neuer_zustand not in zustaende:
+                continue
+
+        # Slot-Index: zi*2+sym (Zustand 1f=0, Zustand 1t=1, Zustand 2f=2, Zustand 2t=3)
+        idx = zi * 2 + sym
+
+        # conn_y: ry+1 wenn sym=0, ry-1 wenn sym=1
+        conn_y = ry + 1 if sym == 0 else ry - 1
+
+        # Richtung aus richtungen-Liste bestimmt die Verbindungsseite
+        richt = richtungen[k] if richtungen else ('L' if rv == '2:r1HV' else 'R')
+        if richt == 'L':  # Verbindung zu linker Eingangsseite (9:r1V)
+            if ez_y not in neun_v: continue
+            if idx >= len(neun_v[ez_y]): continue
+            vx = neun_v[ez_y][idx]
+
+            # Senkrechte von ry (inkl. wenn sym=0) nach oben bis ez_y
+            y_start = ry if sym == 0 else ry - 1
+            for y in range(y_start, ez_y, -1):
+                c = _z(y, vx)
+                if c == '0':                   _s(y, vx, '7:r2')
+                elif c == '7:r1':              _s(y, vx, '1:r1')
+                elif c in ('9:r1V','9:r1HV'): _s(y, vx, '1:r1')
+
+            # Kurve + Horizontale in conn_y (nach rechts bis erstem belegten Nicht-Vertikalen)
+            _s(conn_y, vx, '2:r1HV')
+            x = vx + 1
+            while x < len(m[conn_y]) and _z(conn_y, x) in ('0', '7:r2'):
+                c = _z(conn_y, x)
+                if c == '0':      _s(conn_y, x, '7:r1')
+                elif c == '7:r2': _s(conn_y, x, '1:r1')
+                x += 1
+            # End-Kurve: falls Routing-Ausgang des gepaarten k, korrigieren zu 2:r1V
+            if x < len(m[conn_y]) and _z(conn_y, x) in ('2:r1V', '2:r1HV', '2:r1', '2:r1H'):
+                _s(conn_y, x, '2:r1V')
+
+        else:  # R → rechte Eingangsseite (9:r1HV)
+            if ez_y not in neun_hv: continue
+            if idx >= len(neun_hv[ez_y]): continue
+            vx = neun_hv[ez_y][idx]
+
+            # Senkrechte von conn_y nach oben bis ez_y
+            for y in range(conn_y, ez_y, -1):
+                c = _z(y, vx)
+                if c == '0':                   _s(y, vx, '7:r2')
+                elif c == '7:r1':              _s(y, vx, '1:r1')
+                elif c in ('9:r1V','9:r1HV'): _s(y, vx, '1:r1')
+
+            # Kurve + Horizontale in conn_y (nach links bis erstem belegten Nicht-Vertikalen)
+            _s(conn_y, vx, '2:r1V')
+            x = vx - 1
+            while x >= 0 and _z(conn_y, x) in ('0', '7:r2'):
+                c = _z(conn_y, x)
+                if c == '0':      _s(conn_y, x, '7:r1')
+                elif c == '7:r2': _s(conn_y, x, '1:r1')
+                x -= 1
+            # End-Kurve: falls Routing-Ausgang des gepaarten k, korrigieren zu 2:r1HV
+            if x >= 0 and _z(conn_y, x) in ('2:r1V', '2:r1HV', '2:r1', '2:r1H'):
+                _s(conn_y, x, '2:r1HV')
+
+    # --- Cleanup: verwaiste Routing-Tails und Kreuzungen bereinigen ---
+    cleanup_start_y = 5 * n + 3  # unterhalb der letzten ShellB-Hauptzeile
+    changed = True
+    while changed:
+        changed = False
+        for y in range(cleanup_start_y, len(m)):
+            w = len(m[y])
+            # 7:r1 ohne horizontale Anbindung links → 0
+            for x in range(w):
+                if m[y][x] == '7:r1':
+                    has_h_left = False
+                    for xl in range(x - 1, -1, -1):
+                        if m[y][xl] in ('0', '7:r2'):
+                            continue
+                        has_h_left = True
+                        break
+                    if not has_h_left:
+                        m[y][x] = '0'
+                        changed = True
+            # 1:r1 Kreuzungen ohne Horizontalverkehr → 7:r2
+            for x in range(1, w - 1):
+                if m[y][x] == '1:r1':
+                    left = m[y][x - 1]
+                    right = m[y][x + 1] if x + 1 < w else '0'
+                    if left in ('0', '7:r2') or right in ('0', '7:r2'):
+                        m[y][x] = '7:r2'
+                        changed = True
+
+    # Alle Zeilen auf einheitliche Breite auffüllen
+    max_w = max(len(row) for row in m)
+    for row in m:
+        while len(row) < max_w:
+            row.append('0')
+
+    return m, eingangszeilen
+
 # ---------------------------------------------------------------------------
 # print_matrix – Matrix übersichtlich ausgeben
 # ---------------------------------------------------------------------------
@@ -1323,6 +1507,19 @@ class TuringMaschine:
                     schalter.append(1 if t.symbol != t.schreib else 0)
         return schalter
 
+    def richtungen_fuer_shellb(self):
+        """
+        Gibt die Richtungs-Liste für ShellB zurück.
+        Pro Zustand 2 Richtungen: [richtung_sym0, richtung_sym1]
+        Kein Übergang → 'L' als Default.
+        """
+        richtungen = []
+        for z in self.zustaende:
+            for sym in [0, 1]:
+                t = self.get_transition(z, sym)
+                richtungen.append(t.richtung if t is not None else 'L')
+        return richtungen
+
     def __repr__(self):
         return (f"TuringMaschine(start=({self.start_zustand},{self.start_position}), "
                 f"band={self.band}, n={self.n}, "
@@ -1331,242 +1528,135 @@ class TuringMaschine:
 
 
 # ---------------------------------------------------------------------------
+# kaskadiere_TM – mehrere ShellA horizontal zur kompletten TM verbinden
+# ---------------------------------------------------------------------------
+def kaskadiere_TM(tm, spalt: int = 3) -> tuple:
+    """
+    Erzeugt das vollständige TM-Layout: pro Bandzelle eine ShellA,
+    horizontal nebeneinander, verbunden durch n gerade Leitungen.
+
+    Jede ShellA speichert das Bandsymbol ihrer Zelle (tm.band[i]).
+    Alle ShellA sind strukturell identisch (gleiche Schalter/Richtungen),
+    nur das gespeicherte Symbol unterscheidet sich.
+
+    Verbindung: Eingangszeile i (Zustand i) der linken ShellA wird auf
+    gleicher Höhe mit Eingangszeile i der rechten ShellA verbunden
+    (n gerade horizontale Leitungen pro Spalt).
+
+    Vor der ersten ShellA wird zusätzlich ein Spalt eingefügt, damit das
+    Startsymbol auch bei bandPos=0 davor platziert werden kann.
+
+    Startsymbol (10:r1): wird im Spalt LINKS von ShellA[start_position]
+    auf der Eingangszeile des Startzustands (start_zustand) gesetzt.
+
+    Parameter:
+        tm    : TuringMaschine
+        spalt : Anzahl Spalten zwischen benachbarten ShellA (und vor der ersten)
+
+    Rückgabe: (matrix, info)
+    """
+    n = tm.n
+    s = tm.schalter_fuer_shellb()
+    r = tm.richtungen_fuer_shellb()
+
+    # Eine ShellA pro Bandzelle erzeugen
+    shells = []
+    for symbol in tm.band:
+        m_a, ez = ShellA_verbunden(n, symbol, schalter=s, richtungen=r)
+        shells.append(m_a)
+
+    if not shells:
+        return [], {}
+
+    hoehe       = len(shells[0])
+    a_breite    = len(shells[0][0])
+    eingangszeilen = ez  # identisch für alle (gleiche Struktur)
+
+    # Gesamtbreite: führender Spalt + k ShellA + (k-1) Spalte
+    k = len(shells)
+    gesamt_breite = spalt + k * a_breite + (k - 1) * spalt
+
+    # Leere Gesamtmatrix
+    m = [['0'] * gesamt_breite for _ in range(hoehe)]
+
+    # ShellA einsetzen (alle um den führenden Spalt nach rechts verschoben)
+    x_offsets = []
+    for idx, shell in enumerate(shells):
+        x0 = spalt + idx * (a_breite + spalt)
+        x_offsets.append(x0)
+        for y in range(hoehe):
+            for x in range(a_breite):
+                if shell[y][x] != '0':
+                    m[y][x0 + x] = shell[y][x]
+
+    # Verbindungsleitungen in den Spalten zwischen den ShellA
+    for idx in range(k - 1):
+        x_gap_start = x_offsets[idx] + a_breite       # erste Spalt-Spalte
+        x_gap_end   = x_offsets[idx + 1]              # exklusiv
+        for ey in eingangszeilen:                     # n gerade Leitungen
+            for x in range(x_gap_start, x_gap_end):
+                m[ey][x] = '7:r1'
+
+    # Startsymbol im Spalt links von ShellA[start_position]
+    start_pos = tm.start_position if tm.start_position is not None else 0
+    start_z   = tm.start_zustand   if tm.start_zustand   is not None else tm.zustaende[0]
+    if 0 <= start_pos < k and start_z in tm.zustaende:
+        zi = tm.zustaende.index(start_z)         # Index des Startzustands
+        start_y = eingangszeilen[zi]
+        # x-Bereich des Spalts links von ShellA[start_pos]
+        gap_start = x_offsets[start_pos] - spalt
+        gap_end   = x_offsets[start_pos]
+        # gerade Leitung im Spalt füllen, Symbol in die Mitte
+        for x in range(gap_start, gap_end):
+            m[start_y][x] = '7:r1'
+        mitte = (gap_start + gap_end) // 2
+        m[start_y][mitte] = '10:r1'
+
+    info = {
+        'shellA_breite':  a_breite,
+        'eingangszeilen': eingangszeilen,
+        'spalt':          spalt,
+        'x_offsets':      x_offsets,
+        'start_position': start_pos,
+        'start_zustand':  start_z,
+    }
+    return m, info
+
+
+# ---------------------------------------------------------------------------
 # main – Test aller Elemente
 # ---------------------------------------------------------------------------
 def main():
-    import sys
-
+    """Gibt alle 16 Varianten für n=2 als Bilder und Matrizen aus."""
+    import os, sys
     out_dir = "element_output"
     os.makedirs(out_dir, exist_ok=True)
 
-    print("=" * 60)
-    print("TM2Train Bildelement-Bibliothek – Testlauf")
-    print("=" * 60)
-
-    # 1) Alle 8 Elemente, alle 4 Drehungen, kein Flip → 32 Dateien
-    print("\n[1] Alle Elemente in allen Drehungen (kein Flip):")
-    for nr, (_, name) in sorted(ELEMENTS.items()):
-        for d in [1, 2, 3, 4]:
-            fname = os.path.join(out_dir, f"el{nr}_{name}_rot{d}.png")
-            getElement(nr, d, False, False, ausgabe_datei=fname, scale=8)
-
-    # 2) Flip-Kombinationen für Element 2 (Kurve) – gut sichtbarer Effekt
-    print("\n[2] Element 2 (Kurve) – alle Flip-Kombinationen:")
-    combos = [
-        (False, False, "noFlip"),
-        (True,  False, "hFlip"),
-        (False, True,  "vFlip"),
-        (True,  True,  "hvFlip"),
+    varianten = [
+        ('LLLL', [0,0,0,0], ['L','L','L','L']),
+        ('LLLR', [0,0,0,1], ['L','L','L','R']),
+        ('LLRL', [0,0,1,0], ['L','L','R','L']),
+        ('LLRR', [0,0,1,1], ['L','L','R','R']),
+        ('LRLL', [0,1,0,0], ['L','R','L','L']),
+        ('LRLR', [0,1,0,1], ['L','R','L','R']),
+        ('LRRL', [0,1,1,0], ['L','R','R','L']),
+        ('LRRR', [0,1,1,1], ['L','R','R','R']),
+        ('RLLL', [1,0,0,0], ['R','L','L','L']),
+        ('RLLR', [1,0,0,1], ['R','L','L','R']),
+        ('RLRL', [1,0,1,0], ['R','L','R','L']),
+        ('RLRR', [1,0,1,1], ['R','L','R','R']),
+        ('RRLL', [1,1,0,0], ['R','R','L','L']),
+        ('RRLR', [1,1,0,1], ['R','R','L','R']),
+        ('RRRL', [1,1,1,0], ['R','R','R','L']),
+        ('RRRR', [1,1,1,1], ['R','R','R','R']),
     ]
-    for h, v, tag in combos:
-        fname = os.path.join(out_dir, f"el2_curve_{tag}.png")
-        getElement(2, 1, h, v, ausgabe_datei=fname, scale=8)
 
-    # 3) Einzelner Aufruf wie gewünscht
-    print("\n[3] Beispiel: getElement(5, 2, True, False)")
-    img = getElement(5, 2, True, False,
-                     ausgabe_datei=os.path.join(out_dir, "beispiel_el5_rot2_hflip.png"),
-                     scale=8)
-    print(f"    Bildgröße: {img.size}, Modus: {img.mode}")
-
-    # 4) Übersichtsbild
-    print("\n[4] Erzeuge Übersichtsbild:")
-    erzeuge_uebersicht(os.path.join(out_dir, "uebersicht.png"), scale=6)
-
-    # 5) Matrix-Renderer – Beispiel (entspricht ShellC Zustand 1)
-    print("\n[5] Matrix-Renderer:")
-    render_matrix(
-        _SHELLC_MATRIX_1,
-        ausgabe_datei=os.path.join(out_dir, "matrix_beispiel.png"),
-        scale=8,
-    )
-
-    # 6) ShellC + matrix_to_png – beide Zustände
-    print("\n[6] ShellC + matrix_to_png:")
-    matrix_to_png(ShellC(0), ausgabe_datei=os.path.join(out_dir, "ShellC_zustand0.png"), scale=8)
-    matrix_to_png(ShellC(1), ausgabe_datei=os.path.join(out_dir, "ShellC_zustand1.png"), scale=8)
-
-    # 7) stack_shellc
-    print("\n[7] stack_shellc:")
-    matrix_to_png(stack_shellc(3, 0), ausgabe_datei=os.path.join(out_dir, "stack_3x_zustand0.png"), scale=8)
-    matrix_to_png(stack_shellc(2, 1), ausgabe_datei=os.path.join(out_dir, "stack_2x_zustand1.png"), scale=8)
-
-    # 8) ShellB
-    print("\n[8] ShellB:")
-    for titel, args, kwargs, fname in [
-        ("ShellB(3, 0)",               (3, 0), {},                          "ShellB_3x_z0.png"),
-        ("ShellB(2, 1)",               (2, 1), {},                          "ShellB_2x_z1.png"),
-        ("ShellB(4, 0)",               (4, 0), {},                          "ShellB_4x_z0.png"),
-        ("ShellB(2,1 s=[0,0,1,1])",    (2, 1), {"schalter":[0,0, 1,1]},    "ShellB_2x_s0011.png"),
-        ("ShellB(2,1 s=[1,0,0,1])",    (2, 1), {"schalter":[1,0, 0,1]},    "ShellB_2x_s1001.png"),
-        ("ShellB(3,0 s=[0,1,1,0,0,0])",(3, 0), {"schalter":[0,1, 1,0,0,0]},"ShellB_3x_s011000.png"),
-    ]:
-        print_matrix(ShellB(*args, **kwargs), titel=titel)
-        matrix_to_png(ShellB(*args, **kwargs), ausgabe_datei=os.path.join(out_dir, fname), scale=8, koordinaten=True)
-
-    # 8c) ShellB_mit_Kurven
-    print("\n[8c] ShellB_mit_Kurven:")
-    for titel, args, kwargs, fname in [
-        ("ShellB_mit_Kurven(3, 0)",               (3, 0), {},                           "kurven_n3_z0.png"),
-        ("ShellB_mit_Kurven(2, 1)",               (2, 1), {},                           "kurven_n2_z1.png"),
-        ("ShellB_mit_Kurven(4, 0)",               (4, 0), {},                           "kurven_n4_z0.png"),
-        ("ShellB_mit_Kurven(2,1 s=[0,0,1,1])",    (2, 1), {"schalter":[0,0, 1,1]},     "kurven_n2_z1_s0011.png"),
-        ("ShellB_mit_Kurven(2,1 s=[1,0,0,1])",    (2, 1), {"schalter":[1,0, 0,1]},     "kurven_n2_z1_s1001.png"),
-        ("ShellB_mit_Kurven(3,0 s=[0,1,1,0,0,0])",(3, 0), {"schalter":[0,1, 1,0,0,0]},"kurven_n3_z0_s011000.png"),
-    ]:
-        print(f"  {titel}")
-        m, _ = ShellB_mit_Kurven(*args, **kwargs)
-        matrix_to_png(m, ausgabe_datei=os.path.join(out_dir, fname), scale=8, koordinaten=True)
-
-    # 8d) ShellB_mit_Routing
-    print("\n[8d] ShellB_mit_Routing:")
-    for titel, args, kwargs, fname in [
-        ("ShellB_mit_Routing(2,1 LRLR)",         (2,1), {"richtungen":["L","R","L","R"]},                           "routing_n2_z1_LRLR.png"),
-        ("ShellB_mit_Routing(2,1 s=0101 LRLR)",  (2,1), {"schalter":[0,1,0,1],"richtungen":["L","R","L","R"]},     "routing_n2_z1_s0101_LRLR.png"),
-        ("ShellB_mit_Routing(2,1 LLRR)",         (2,1), {"richtungen":["L","L","R","R"]},                           "routing_n2_z1_LLRR.png"),
-        ("ShellB_mit_Routing(3,0 LRLRLR)",       (3,0), {"richtungen":["L","R","L","R","L","R"]},                   "routing_n3_z0_LRLRLR.png"),
-    ]:
-        print(f"  {titel}")
-        m = ShellB_mit_Routing(*args, **kwargs)
-        matrix_to_png(m, ausgabe_datei=os.path.join(out_dir, fname), scale=8, koordinaten=True)
-
-
-    # 8e) ShellA_links
-    print("\n[8e] ShellA_links:")
-    for titel, args, kwargs, fname in [
-        ("ShellA_links(2,1 LRLR)",         (2,1), {"richtungen":["L","R","L","R"]},                       "shellA_n2_z1_LRLR.png"),
-        ("ShellA_links(2,1 s=0101 LRLR)",  (2,1), {"schalter":[0,1,0,1],"richtungen":["L","R","L","R"]}, "shellA_n2_z1_s0101_LRLR.png"),
-        ("ShellA_links(3,0 LRLRLR)",       (3,0), {"richtungen":["L","R","L","R","L","R"]},               "shellA_n3_z0_LRLRLR.png"),
-        ("ShellA_links(6,0)",              (6,0), {"richtungen":["L","R"]*6},                             "shellA_n6_z0.png"),
-    ]:
-        print(f"  {titel}")
-        m, _ = ShellA_links(*args, **kwargs)
-        matrix_to_png(m, ausgabe_datei=os.path.join(out_dir, fname), scale=5, koordinaten=True)
-
-
-    # 8f) ShellA (links + rechts)
-    print("\n[8f] ShellA:")
-    for titel, args, kwargs, fname in [
-        ("ShellA(2,1 LRLR)",        (2,1), {"richtungen":["L","R","L","R"]},                       "shellA_full_n2_z1_LRLR.png"),
-        ("ShellA(2,1 s=0101 LRLR)", (2,1), {"schalter":[0,1,0,1],"richtungen":["L","R","L","R"]}, "shellA_full_n2_z1_s0101_LRLR.png"),
-        ("ShellA(3,0 LRLRLR)",      (3,0), {"richtungen":["L","R","L","R","L","R"]},               "shellA_full_n3_z0_LRLRLR.png"),
-    ]:
-        print(f"  {titel}")
-        m, _ = ShellA(*args, **kwargs)
-        matrix_to_png(m, ausgabe_datei=os.path.join(out_dir, fname), scale=5, koordinaten=True)
-
-
-    # 8g) ShellA_mit_Bogen
-    print("\n[8g] ShellA_mit_Bogen:")
-    for titel, args, kwargs, fname in [
-        ("ShellA_mit_Bogen(2,1 LRLR)",        (2,1), {"richtungen":["L","R","L","R"]},                       "shellA_bogen_n2_z1_LRLR.png"),
-        ("ShellA_mit_Bogen(2,1 s=0101 LRLR)", (2,1), {"schalter":[0,1,0,1],"richtungen":["L","R","L","R"]}, "shellA_bogen_n2_s0101_LRLR.png"),
-        ("ShellA_mit_Bogen(3,0 LRLRLR)",      (3,0), {"richtungen":["L","R","L","R","L","R"]},               "shellA_bogen_n3_z0_LRLRLR.png"),
-    ]:
-        print(f"  {titel}")
-        m, _ = ShellA_mit_Bogen(*args, **kwargs)
-        matrix_to_png(m, ausgabe_datei=os.path.join(out_dir, fname), scale=5, koordinaten=True)
-
-    # 8b) ShellB + ShellB_mit_Kurven + ShellB_mit_Routing aus TM-Datei
-    print("\n[8b] ShellB aus Demo2.tm:")
-    tm_pfad = next((p for p in [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "Demo2.tm"),
-        "/mnt/user-data/uploads/Demo2.tm",
-    ] if os.path.exists(p)), None)
-    tm = TuringMaschine(datei=tm_pfad)
-    if tm.transitionen:
-        s  = tm.schalter_fuer_shellb()
-        rl = [tm.get_transition(z, sym).richtung
-              for z in tm.zustaende for sym in [0, 1]]
-        band_sym = tm.band[tm.start_position]
-
-        # ShellB (beide Zustände)
-        for zsym in [0, 1]:
-            print_matrix(ShellB(tm.n, zsym, schalter=s),
-                         titel=f"ShellB Demo2 z={zsym} (n={tm.n}, s={s})")
-            matrix_to_png(ShellB(tm.n, zsym, schalter=s),
-                          ausgabe_datei=os.path.join(out_dir, f"ShellB_Demo2_z{zsym}.png"),
-                          scale=8, koordinaten=True)
-
-        # ShellB_mit_Kurven (beide Zustände)
-        for zsym in [0, 1]:
-            mk, _ = ShellB_mit_Kurven(tm.n, zsym, schalter=s)
-            matrix_to_png(mk,
-                          ausgabe_datei=os.path.join(out_dir, f"kurven_Demo2_z{zsym}.png"),
-                          scale=8, koordinaten=True)
-
-        # ShellB_mit_Routing – nur das aktuelle Bandsymbol
-        mr = ShellB_mit_Routing(tm.n, band_sym, schalter=s, richtungen=rl)
-        matrix_to_png(mr,
-                      ausgabe_datei=os.path.join(out_dir, "routing_Demo2.png"),
-                      scale=8, koordinaten=True)
-
-        # ShellA_links – linke Eingangsleitungen
-        ma, _ = ShellA_links(tm.n, band_sym, schalter=s, richtungen=rl)
-        matrix_to_png(ma,
-                      ausgabe_datei=os.path.join(out_dir, "shellA_Demo2.png"),
-                      scale=8, koordinaten=True)
-        print(f"  Demo2: n={tm.n}, band_sym={band_sym}, s={s}, richtungen={rl}")
-
-        # ShellA_mit_Bogen
-        mB, _ = ShellA_mit_Bogen(tm.n, band_sym, schalter=s, richtungen=rl)
-        matrix_to_png(mB,
-                      ausgabe_datei=os.path.join(out_dir, "shellA_bogen_Demo2.png"),
-                      scale=8, koordinaten=True)
-
-    # 9) Kommandozeilen-Modus:
-    #    python elements.py <datei.tm> [ausgabe_verzeichnis]
-    #    python elements.py <nr> <drehen> <hFlip> <vFlip> [datei]
-    if len(sys.argv) >= 2 and sys.argv[1].endswith(".tm"):
-        tm_pfad  = sys.argv[1]
-        tm_out   = sys.argv[2] if len(sys.argv) >= 3 else out_dir
-        if not os.path.exists(tm_pfad):
-            print(f"Fehler: '{tm_pfad}' nicht gefunden.")
-            sys.exit(1)
-        os.makedirs(tm_out, exist_ok=True)
-        name = os.path.splitext(os.path.basename(tm_pfad))[0]
-        tm2  = TuringMaschine(datei=tm_pfad)
-        s2   = tm2.schalter_fuer_shellb()
-        rl2  = [tm2.get_transition(z, sym).richtung
-                for z in tm2.zustaende for sym in [0, 1]]
-        bs2  = tm2.band[tm2.start_position]
-        print(f"\n[TM] {tm_pfad}: n={tm2.n}, band_sym={bs2}, s={s2}, richtungen={rl2}")
-        for zsym in [0, 1]:
-            matrix_to_png(ShellB(tm2.n, zsym, schalter=s2),
-                          ausgabe_datei=os.path.join(tm_out, f"{name}_ShellB_z{zsym}.png"),
-                          scale=8, koordinaten=True)
-            mk, _ = ShellB_mit_Kurven(tm2.n, zsym, schalter=s2)
-            matrix_to_png(mk,
-                          ausgabe_datei=os.path.join(tm_out, f"{name}_kurven_z{zsym}.png"),
-                          scale=8, koordinaten=True)
-        mr = ShellB_mit_Routing(tm2.n, bs2, schalter=s2, richtungen=rl2)
-        matrix_to_png(mr,
-                      ausgabe_datei=os.path.join(tm_out, f"{name}_routing.png"),
-                      scale=8, koordinaten=True)
-        ma, _ = ShellA_links(tm2.n, bs2, schalter=s2, richtungen=rl2)
-        matrix_to_png(ma,
-                      ausgabe_datei=os.path.join(tm_out, f"{name}_shellA.png"),
-                      scale=8, koordinaten=True)
-        mA, _ = ShellA(tm2.n, bs2, schalter=s2, richtungen=rl2)
-        matrix_to_png(mA,
-                      ausgabe_datei=os.path.join(tm_out, f"{name}_shellA_full.png"),
-                      scale=8, koordinaten=True)
-        mB, _ = ShellA_mit_Bogen(tm2.n, bs2, schalter=s2, richtungen=rl2)
-        matrix_to_png(mB,
-                      ausgabe_datei=os.path.join(tm_out, f"{name}_shellA_bogen.png"),
-                      scale=8, koordinaten=True)
-        print(f"Fertig. Ausgaben in: {tm_out}/")
-    elif len(sys.argv) >= 5:
-        print("\n[9] Kommandozeilen-Aufruf:")
-        nr  = int(sys.argv[1])
-        rot = int(sys.argv[2])
-        hf  = sys.argv[3].lower() in ("1", "true", "ja", "yes")
-        vf  = sys.argv[4].lower() in ("1", "true", "ja", "yes")
-        out = sys.argv[5] if len(sys.argv) >= 6 else os.path.join(out_dir, "cmd_output.png")
-        img = getElement(nr, rot, hf, vf, ausgabe_datei=out, scale=8)
-        print(f"    Element {nr}, Drehen={rot}, hFlip={hf}, vFlip={vf} -> {out}")
-
-    print(f"\nAlle Ausgaben in: ./{out_dir}/")
+    for name, schalter, richtungen in varianten:
+        m, _ = ShellA_verbunden(2, 1, schalter=schalter, richtungen=richtungen)
+        print_matrix(m, titel=f"n2_{name} s={schalter} r={richtungen}")
+        matrix_to_png(m,
+                      ausgabe_datei=os.path.join(out_dir, f"n2_{name}.png"),
+                      scale=6, koordinaten=True)
 
 
 if __name__ == "__main__":
