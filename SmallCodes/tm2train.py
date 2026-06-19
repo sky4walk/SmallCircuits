@@ -19,7 +19,7 @@ getElement(ElementNr, drehen, horizontalFlip, vertikalFlip)
   Rückgabe: PIL.Image (9x9, RGBA)
 """
 
-from PIL import Image
+from PIL import Image, ImageDraw
 import numpy as np
 import os
 
@@ -1623,15 +1623,354 @@ def kaskadiere_TM(tm, spalt: int = 3) -> tuple:
     return m, info
 
 
+# ===========================================================================
+# ZUG-SIMULATION
+# ===========================================================================
+# Eine "grüne Kugel" (der Zug) fährt von Matrixzelle zu Matrixzelle über das
+# Schienen-Gitter. Jedes Tile lenkt den Zug entsprechend seiner Geometrie und
+# (bei Weichen) seinem Schaltzustand ab. Lazy- und FlipFlop-Weichen ändern
+# ihren Zustand während der Fahrt – das ist die Turingmaschinen-Berechnung.
+#
+# Richtungs-Konvention (Bild-Koordinaten, y wächst nach UNTEN):
+#     N=oben (dy=-1), S=unten (dy=+1), W=links (dx=-1), O=rechts (dx=+1)
+#
+# Weichen-Semantik (aus TMTrain.odt), Grundstellung r1:
+#     F = W(links), S1 = N(oben), S2 = O(rechts)
+#     Variante 1 (xxx1): Strecke F<->S1 aktiv (Diagonale)
+#     Variante 2 (xxx2): Strecke F<->S2 aktiv (Horizontale)
+#     LAZY:     F->S folgt Stellung. S->F stellt um (S1->Var1, S2->Var2).
+#     SPRUNG:   feste Stellung, ändert sich nie.
+#     FLIPFLOP: nur von F benutzt. F->S folgt Stellung, dann Toggle.
+# ---------------------------------------------------------------------------
+
+GEGEN = {'N': 'S', 'S': 'N', 'W': 'O', 'O': 'W'}
+DELTA = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'O': (1, 0)}  # (dx, dy)
+
+_CW = ['N', 'O', 'S', 'W']               # Reihenfolge im Uhrzeigersinn
+_DREHEN_CW = {1: 0, 2: 1, 3: 2, 4: 3}    # drehen-Wert -> Anzahl 90°-CW-Schritte
+
+
+def _rot_cw(d, times):
+    return _CW[(_CW.index(d) + times) % 4]
+
+
+def _flip_h_dir(d):
+    return {'O': 'W', 'W': 'O', 'N': 'N', 'S': 'S'}[d]
+
+
+def _flip_v_dir(d):
+    return {'N': 'S', 'S': 'N', 'O': 'O', 'W': 'W'}[d]
+
+
+def lokal_zu_welt(d, drehen, h_flip, v_flip):
+    """Lokale Richtung (r1) -> Welt-Richtung nach getElement-Transformation."""
+    d = _rot_cw(d, _DREHEN_CW[drehen])
+    if h_flip:
+        d = _flip_h_dir(d)
+    if v_flip:
+        d = _flip_v_dir(d)
+    return d
+
+
+def welt_zu_lokal(d, drehen, h_flip, v_flip):
+    """Welt-Richtung -> lokale Richtung (Umkehrung von lokal_zu_welt)."""
+    if v_flip:
+        d = _flip_v_dir(d)
+    if h_flip:
+        d = _flip_h_dir(d)
+    d = _rot_cw(d, (-_DREHEN_CW[drehen]) % 4)
+    return d
+
+
+# Tile-Typen
+PORT_F, PORT_S1, PORT_S2 = 'W', 'N', 'O'   # Weichen-Ports in lokalen Richtungen
+WEICHEN_TYP = {3: 'flipflop', 4: 'flipflop',
+               5: 'lazy',     6: 'lazy',
+               8: 'sprung',   9: 'sprung'}
+WEICHEN_VAR = {3: 1, 4: 2, 5: 1, 6: 2, 8: 1, 9: 2}  # 1=Diag aktiv, 2=Horiz aktiv
+
+# Umkehrung: (Typ, Variante) -> ElementNr  (zum Aktualisieren des Tile-Symbols)
+TYP_VAR_ZU_NR = {
+    ('flipflop', 1): 3, ('flipflop', 2): 4,
+    ('lazy', 1): 5,     ('lazy', 2): 6,
+    ('sprung', 1): 8,   ('sprung', 2): 9,
+}
+
+
+def _token_mit_nr(alter_token, neue_nr):
+    """Ersetzt nur die ElementNr im Token, behält Drehung/Flips: '4:r4HV' -> '3:r4HV'."""
+    rest = alter_token.split(':', 1)[1]
+    return f"{neue_nr}:{rest}"
+
+
+class TrainSimulation:
+    """Simuliert einen Zug, der über das Tile-Gitter fährt."""
+
+    def __init__(self, matrix):
+        self.matrix = [list(row) for row in matrix]
+        self.hoehe = len(self.matrix)
+        self.breite = len(self.matrix[0]) if self.matrix else 0
+        self.switch_state = {}
+        for y in range(self.hoehe):
+            for x in range(self.breite):
+                p = parse_zelle(self.matrix[y][x])
+                if p and p[0] in WEICHEN_TYP:
+                    self.switch_state[(y, x)] = WEICHEN_VAR[p[0]]
+
+    def _tile(self, y, x):
+        if 0 <= y < self.hoehe and 0 <= x < self.breite:
+            return parse_zelle(self.matrix[y][x])
+        return None
+
+    def schritt(self, y, x, fahrt):
+        """
+        Zug betritt Tile (y,x) fahrend in Richtung 'fahrt'.
+        Gibt (neue_fahrt, beschreibung) oder (None, grund) zurück.
+        Modifiziert ggf. switch_state.
+        """
+        p = self._tile(y, x)
+        if p is None:
+            return None, 'leeres Feld / außerhalb'
+
+        elem_nr, drehen, h_flip, v_flip = p
+        entry_welt = GEGEN[fahrt]
+        entry_lok = welt_zu_lokal(entry_welt, drehen, h_flip, v_flip)
+
+        # LINIE / START: gerade durch (W<->O)
+        if elem_nr in (7, 10):
+            exit_lok = {'W': 'O', 'O': 'W'}.get(entry_lok)
+            if exit_lok is None:
+                return None, f'Linie: ungültige Einfahrt {entry_lok}'
+            return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), 'Linie'
+
+        # KURVE: W<->S (lokal)
+        if elem_nr == 2:
+            exit_lok = {'W': 'S', 'S': 'W'}.get(entry_lok)
+            if exit_lok is None:
+                return None, f'Kurve: ungültige Einfahrt {entry_lok}'
+            return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), 'Kurve'
+
+        # KREUZUNG: W<->O und N<->S unabhängig
+        if elem_nr == 1:
+            exit_lok = {'W': 'O', 'O': 'W', 'N': 'S', 'S': 'N'}.get(entry_lok)
+            if exit_lok is None:
+                return None, f'Kreuzung: ungültige Einfahrt {entry_lok}'
+            return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), 'Kreuzung'
+
+        # WEICHEN
+        if elem_nr in WEICHEN_TYP:
+            typ = WEICHEN_TYP[elem_nr]
+            var = self.switch_state[(y, x)]
+
+            if entry_lok == PORT_F:
+                port = 'F'
+            elif entry_lok == PORT_S1:
+                port = 'S1'
+            elif entry_lok == PORT_S2:
+                port = 'S2'
+            else:
+                return None, f'Weiche: ungültige Einfahrt {entry_lok}'
+
+            if typ == 'sprung':
+                exit_lok = (PORT_S1 if var == 1 else PORT_S2) if port == 'F' else PORT_F
+                return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), \
+                    f'Sprung(Var{var}) {port}->{exit_lok}'
+
+            if typ == 'lazy':
+                if port == 'F':
+                    exit_lok = PORT_S1 if var == 1 else PORT_S2
+                    return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), \
+                        f'Lazy F->{exit_lok}(Var{var})'
+                else:
+                    self.switch_state[(y, x)] = 1 if port == 'S1' else 2
+                    return lokal_zu_welt(PORT_F, drehen, h_flip, v_flip), \
+                        f'Lazy {port}->F(stellt Var{self.switch_state[(y,x)]})'
+
+            if typ == 'flipflop':
+                if port == 'F':
+                    exit_lok = PORT_S1 if var == 1 else PORT_S2
+                    self.switch_state[(y, x)] = 2 if var == 1 else 1
+                    return lokal_zu_welt(exit_lok, drehen, h_flip, v_flip), \
+                        f'FlipFlop F->{exit_lok}(jetzt Var{self.switch_state[(y,x)]})'
+                else:
+                    return lokal_zu_welt(PORT_F, drehen, h_flip, v_flip), \
+                        f'FlipFlop {port}->F'
+
+        return None, f'unbekanntes Element {elem_nr}'
+
+    def fahre(self, start_y, start_x, start_fahrt, max_schritte=10000,
+              verbose=False, mit_zustand=False):
+        """
+        Lässt den Zug fahren, bis er das Gitter verlässt oder max_schritte erreicht.
+
+        Gibt die Liste [(y, x, fahrt), ...] zurück.
+        Bei mit_zustand=True zusätzlich eine parallele Liste von Schaltzustands-
+        Schnappschüssen (dict-Kopie NACH dem jeweiligen Schritt).
+        """
+        pfad = []
+        zustaende = []
+        y, x, fahrt = start_y, start_x, start_fahrt
+        for schritt_nr in range(max_schritte):
+            if not (0 <= y < self.hoehe and 0 <= x < self.breite):
+                if verbose:
+                    print(f"  STOPP: außerhalb bei ({y},{x})")
+                break
+            neue_fahrt, beschr = self.schritt(y, x, fahrt)
+            pfad.append((y, x, fahrt))
+            if mit_zustand:
+                zustaende.append(dict(self.switch_state))
+            if verbose:
+                print(f"  [{schritt_nr:3d}] ({y:2d},{x:2d}) "
+                      f"{self.matrix[y][x]:8s} {fahrt} -> {beschr}")
+            if neue_fahrt is None:
+                if verbose:
+                    print(f"  STOPP: {beschr}")
+                break
+            dx, dy = DELTA[neue_fahrt]
+            y, x, fahrt = y + dy, x + dx, neue_fahrt
+        if mit_zustand:
+            return pfad, zustaende
+        return pfad
+
+
+def finde_start(matrix):
+    """Sucht das Startsymbol (10:...) und gibt (y, x) zurück, oder None."""
+    for y, row in enumerate(matrix):
+        for x, tok in enumerate(row):
+            if tok.startswith('10:'):
+                return (y, x)
+    return None
+
+
+def erzeuge_einzelbilder(matrix, pfad, ausgabe_prefix, anzahl_schritte, scale=10,
+                         zustaende=None):
+    """
+    Erzeugt einzelne PNG-Bilder, eines pro Schritt (ohne Spur), in der
+    angegebenen Skalierung. Dateien: <prefix>_step_000.png, _001.png, ...
+
+    Wenn 'zustaende' (Liste von switch_state-Schnappschüssen pro Schritt)
+    übergeben wird, zeigen die Weichen-Symbole ihre AKTUELLE Stellung
+    (FlipFlop/Lazy springen im Bild um).
+
+    Rückgabe: Liste der erzeugten Dateinamen
+    """
+    cell = 9 * scale
+    kugel_r = max(3, scale)
+
+    n = min(anzahl_schritte, len(pfad))
+    dateien = []
+    breite = max(3, len(str(max(n - 1, 0))))
+
+    # Basis-Bild nur einmal rendern, wenn keine Zustandsänderung visualisiert wird
+    base_static = None
+    if zustaende is None:
+        base_static = render_matrix(matrix, scale=scale).convert('RGBA')
+
+    for i in range(n):
+        y, x, _ = pfad[i]
+
+        if zustaende is not None:
+            # Matrix-Kopie mit aktualisierten Weichen-Symbolen für diesen Schritt
+            akt = [row[:] for row in matrix]
+            for (wy, wx), var in zustaende[i].items():
+                alter = akt[wy][wx]
+                p = parse_zelle(alter)
+                if p and p[0] in WEICHEN_TYP:
+                    typ = WEICHEN_TYP[p[0]]
+                    neue_nr = TYP_VAR_ZU_NR[(typ, var)]
+                    akt[wy][wx] = _token_mit_nr(alter, neue_nr)
+            frame = render_matrix(akt, scale=scale).convert('RGBA')
+        else:
+            frame = base_static.copy()
+
+        draw = ImageDraw.Draw(frame, 'RGBA')
+        cx, cy = x * cell + cell // 2, y * cell + cell // 2
+        draw.ellipse([cx - kugel_r, cy - kugel_r, cx + kugel_r, cy + kugel_r],
+                     fill=(0, 220, 0, 255), outline=(0, 100, 0, 255))
+        datei = f"{ausgabe_prefix}_step_{i:0{breite}d}.png"
+        frame.save(datei)
+        dateien.append(datei)
+
+    return dateien
+
+
+def erzeuge_gif(matrix, pfad, ausgabe_datei, scale=8, duration=80,
+                jeder_schritt=1, spur=False):
+    """
+    Erzeugt ein animiertes GIF: die grüne Kugel rollt Schritt für Schritt
+    über die Schienen (ohne Spur, sofern spur=False).
+    """
+    base = render_matrix(matrix, scale=scale).convert('RGBA')
+    cell = 9 * scale
+    kugel_r = max(3, scale)
+    schritte = pfad[::jeder_schritt]
+
+    frames = []
+    for i, (y, x, _) in enumerate(schritte):
+        frame = base.copy()
+        draw = ImageDraw.Draw(frame, 'RGBA')
+        if spur and i > 0:
+            pts = [(px * cell + cell // 2, py * cell + cell // 2)
+                   for (py, px, _) in schritte[:i + 1]]
+            draw.line(pts, fill=(0, 180, 0, 120), width=max(2, scale // 2))
+        cx, cy = x * cell + cell // 2, y * cell + cell // 2
+        draw.ellipse([cx - kugel_r, cy - kugel_r, cx + kugel_r, cy + kugel_r],
+                     fill=(0, 220, 0, 255), outline=(0, 100, 0, 255))
+        frames.append(frame.convert('P', palette=Image.ADAPTIVE))
+
+    if frames:
+        frames[0].save(ausgabe_datei, save_all=True, append_images=frames[1:],
+                       duration=duration, loop=0, optimize=True)
+    return len(frames)
+
+
+def simuliere_tm_einzelbilder(tm_datei, anzahl_schritte, scale=10,
+                              ausgabe_prefix=None, spalt=3):
+    """
+    Komplett-Pipeline: liest .tm-Datei, baut Layout, simuliert den Zug und
+    erzeugt einzelne PNG-Bilder (eins pro Schritt) in Originalskalierung.
+
+    Rückgabe: (matrix, pfad, dateien, info)
+    """
+    tm = TuringMaschine(datei=tm_datei)
+    matrix, info = kaskadiere_TM(tm, spalt=spalt)
+
+    start = finde_start(matrix)
+    if start is None:
+        raise ValueError("Kein Startsymbol (10:...) in der Matrix gefunden")
+
+    sim = TrainSimulation(matrix)
+    pfad, zustaende = sim.fahre(start[0], start[1], 'O',
+                                max_schritte=max(anzahl_schritte, 1),
+                                mit_zustand=True)
+
+    if ausgabe_prefix is None:
+        ausgabe_prefix = os.path.splitext(os.path.basename(tm_datei))[0]
+    dateien = erzeuge_einzelbilder(matrix, pfad, ausgabe_prefix,
+                                   anzahl_schritte, scale=scale,
+                                   zustaende=zustaende)
+    return matrix, pfad, dateien, info
+
+
 # ---------------------------------------------------------------------------
 # main – Test aller Elemente
 # ---------------------------------------------------------------------------
 def main():
-    """Gibt alle 16 Varianten für n=2 als Bilder und Matrizen aus."""
-    import os, sys
+    """Erzeugt alle Element-Bilder: Übersicht, Einzelelemente und n=2-Varianten."""
+    import os
     out_dir = "element_output"
     os.makedirs(out_dir, exist_ok=True)
 
+    # 1) Übersichtsbild: alle 10 Elemente in allen Drehungen/Flips
+    erzeuge_uebersicht(ausgabe_datei=os.path.join(out_dir, "uebersicht.png"), scale=6)
+    print(f"Übersicht gespeichert: {os.path.join(out_dir, 'uebersicht.png')}")
+
+    # 2) Einzelne Element-Bilder (Grundstellung r1), inkl. Weichen + Start
+    for elem_nr, (_, elem_name) in sorted(ELEMENTS.items()):
+        datei = os.path.join(out_dir, f"element_{elem_nr:02d}_{elem_name}.png")
+        getElement(elem_nr, 1, False, False, ausgabe_datei=datei, scale=16)
+
+    # 3) Alle 16 ShellA-Varianten für n=2
     varianten = [
         ('LLLL', [0,0,0,0], ['L','L','L','L']),
         ('LLLR', [0,0,0,1], ['L','L','L','R']),
@@ -1653,11 +1992,35 @@ def main():
 
     for name, schalter, richtungen in varianten:
         m, _ = ShellA_verbunden(2, 1, schalter=schalter, richtungen=richtungen)
-        print_matrix(m, titel=f"n2_{name} s={schalter} r={richtungen}")
         matrix_to_png(m,
                       ausgabe_datei=os.path.join(out_dir, f"n2_{name}.png"),
                       scale=6, koordinaten=True)
 
+    print(f"Alle Bilder in '{out_dir}/' erzeugt "
+          f"({len(ELEMENTS)} Elemente + Übersicht + {len(varianten)} ShellA-Varianten)")
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+    # Modus 1: tm_simulation  ->  elements.py <turingmachine.tm> <anzahl schritte>
+    if len(sys.argv) >= 3 and sys.argv[1].endswith('.tm'):
+        tm_datei = sys.argv[1]
+        try:
+            anzahl_schritte = int(sys.argv[2])
+        except ValueError:
+            print(f"Fehler: '{sys.argv[2]}' ist keine gültige Schrittzahl")
+            sys.exit(1)
+
+        SCALE = 10  # Originalskalierung der Einzelbilder
+        print(f"Simuliere {tm_datei} ({anzahl_schritte} Schritte) ...")
+        matrix, pfad, dateien, info = simuliere_tm_einzelbilder(
+            tm_datei, anzahl_schritte, scale=SCALE)
+        print(f"  Layout:  {len(matrix)}x{len(matrix[0])}")
+        print(f"  Start:   Zustand {info['start_zustand']}, Bandposition {info['start_position']}")
+        print(f"  Pfad:    {len(pfad)} Schritte verfügbar")
+        print(f"  Bilder:  {len(dateien)} PNGs erzeugt (scale {SCALE})")
+        if dateien:
+            print(f"           {dateien[0]} ... {dateien[-1]}")
+    else:
+        # Modus 2: ohne .tm-Argument -> Element-Testbilder erzeugen
+        main()
