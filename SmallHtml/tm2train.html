@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>TM2Train Simulator</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: monospace; font-size: 13px; }
+#app { display: flex; flex-direction: column; height: 100vh; }
+#toolbar {
+  background: #16213e; border-bottom: 2px solid #0f3460;
+  padding: 8px 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+button {
+  padding: 5px 13px; border: 1px solid #0f3460; border-radius: 4px;
+  background: #0f3460; color: #e0e0e0; cursor: pointer;
+  font-family: monospace; font-size: 12px; transition: background 0.15s;
+}
+button:hover { background: #1a5276; }
+button:disabled { opacity: 0.35; cursor: default; }
+#btn-play  { background: #1a6b3a; border-color: #27ae60; }
+#btn-stop  { background: #7b241c; border-color: #c0392b; }
+input[type=range]{ width: 90px; cursor: pointer; vertical-align: middle; }
+input[type=file] { display: none; }
+select {
+  background: #0f3460; color: #e0e0e0; border: 1px solid #1a5276;
+  border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 12px; cursor: pointer;
+}
+#status { font-size: 11px; color: #7fb3d3; padding: 2px 10px; border-left: 2px solid #0f3460; min-width: 200px; }
+#info-bar {
+  background: #0d1b2a; padding: 4px 12px; font-size: 11px; color: #7fb3d3;
+  border-bottom: 1px solid #0f3460; display: flex; gap: 18px;
+}
+#info-bar span { white-space: nowrap; }
+#canvas-wrap {
+  flex: 1; overflow: auto; background: #0d1b2a; padding: 16px;
+}
+canvas { image-rendering: pixelated; cursor: crosshair; }
+.sep { width: 1px; height: 26px; background: #0f3460; margin: 0 2px; }
+label.lbl { color: #a0c4ff; font-size: 11px; line-height: 1.4; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <button onclick="document.getElementById('fi').click()">📂 .tm laden</button>
+    <input type="file" id="fi" accept=".tm">
+    <div class="sep"></div>
+    <button id="btn-step"  onclick="stepOnce()"  disabled>⏭ Step</button>
+    <button id="btn-play"  onclick="startPlay()" disabled>▶ Play</button>
+    <button id="btn-stop"  onclick="stopPlay()"  disabled>⏹ Stop</button>
+    <button id="btn-reset" onclick="resetSim()"  disabled>↺ Reset</button>
+    <div class="sep"></div>
+    <label class="lbl">Geschwindigkeit<br>
+      <input type="range" id="speed" min="1" max="200" value="15" oninput="updateSpeed()">
+      <span id="speed-val">15 fps</span>
+    </label>
+    <div class="sep"></div>
+    <label class="lbl">Zoom<br>
+      <select id="zoom-sel" onchange="changeZoom()">
+        <option value="1">1×</option>
+        <option value="2">2×</option>
+        <option value="3" selected>3×</option>
+        <option value="4">4×</option>
+        <option value="6">6×</option>
+        <option value="8">8×</option>
+        <option value="10">10×</option>
+        <option value="12">12×</option>
+      </select>
+    </label>
+    <div class="sep"></div>
+    <button onclick="fitZoom()" title="Zoom ans Fenster anpassen">⊡ Fit</button>
+    <button onclick="savePng()">💾 PNG</button>
+    <div id="status">Keine TM geladen</div>
+  </div>
+  <div id="info-bar">
+    <span id="i-step">Schritt: —</span>
+    <span id="i-tile">Tile: —</span>
+    <span id="i-dir">Richtung: —</span>
+    <span id="i-band">Band: —</span>
+    <span id="i-tok">Token: —</span>
+  </div>
+  <div id="canvas-wrap"><canvas id="C"></canvas></div>
+</div>
+<script>
+// =============================================================
+// COLORS (RGBA arrays)
+// =============================================================
+const W=[255,255,255,255],BK=[0,0,0,255],GR=[0,188,0,255],RE=[149,0,0,255],BL=[0,0,220,255];
+
+// =============================================================
+// PIXEL DATA  9×9 per element
+// =============================================================
+const ED={};
+const M=(r)=>r;
+ED[1]=M([[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[BK,BK,BK,BK,BK,BK,BK,BK,BK],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W]]);
+ED[2]=M([[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[BK,BK,BK,W,W,W,W,W,W],[W,W,W,BK,W,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W],[W,W,W,W,BK,W,W,W,W]]);
+ED[3]=M([[W,W,W,W,GR,W,W,W,W],[W,W,W,GR,W,W,W,W,W],[W,W,GR,W,W,W,W,W,W],[W,GR,W,W,W,W,W,W,W],[BK,BK,BK,BK,BK,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[4]=M([[W,W,W,W,BK,W,W,W,W],[W,W,W,BK,W,W,W,W,W],[W,W,BK,W,W,W,W,W,W],[W,BK,W,W,W,W,W,W,W],[BK,GR,GR,GR,GR,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[5]=M([[W,W,W,W,RE,W,W,W,W],[W,W,W,RE,W,W,W,W,W],[W,W,RE,W,W,W,W,W,W],[W,RE,W,W,W,W,W,W,W],[BK,BK,BK,BK,BK,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[6]=M([[W,W,W,W,BK,W,W,W,W],[W,W,W,BK,W,W,W,W,W],[W,W,BK,W,W,W,W,W,W],[W,BK,W,W,W,W,W,W,W],[BK,RE,RE,RE,RE,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[7]=M([[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[BK,BK,BK,BK,BK,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[8]=M([[W,W,W,W,BL,W,W,W,W],[W,W,W,BL,W,W,W,W,W],[W,W,BL,W,W,W,W,W,W],[W,BL,W,W,W,W,W,W,W],[BK,BK,BK,BK,BK,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[9]=M([[W,W,W,W,BK,W,W,W,W],[W,W,W,BK,W,W,W,W,W],[W,W,BK,W,W,W,W,W,W],[W,BK,W,W,W,W,W,W,W],[BK,BL,BL,BL,BL,BK,BK,BK,BK],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[10]=M([[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,BK,BK,BK,W,W,W],[W,W,BK,W,W,W,BK,W,W],[BK,BK,BK,W,W,W,BK,BK,BK],[W,W,BK,W,W,W,BK,W,W],[W,W,W,BK,BK,BK,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+ED[11]=M([[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,BK,W],[W,W,W,W,W,W,W,BK,W],[BK,BK,BK,BK,BK,BK,BK,BK,W],[W,W,W,W,W,W,W,BK,W],[W,W,W,W,W,W,W,BK,W],[W,W,W,W,W,W,W,W,W],[W,W,W,W,W,W,W,W,W]]);
+
+// =============================================================
+// TOKEN PARSING
+// =============================================================
+function parseTok(tok){
+  tok=(tok||'').trim();
+  if(!tok||tok==='0')return null;
+  const ci=tok.indexOf(':');
+  if(ci<0)return null;
+  const nr=parseInt(tok.slice(0,ci));
+  const rest=tok.slice(ci+1);
+  if(!rest.startsWith('r'))return null;
+  const drehen=parseInt(rest[1]);
+  const s=rest.slice(2);
+  if(!ED[nr]||![1,2,3,4].includes(drehen))return null;
+  return{nr,drehen,hFlip:s.includes('H'),vFlip:s.includes('V')};
+}
+
+// =============================================================
+// PIXEL TRANSFORMS
+// =============================================================
+function rot90CW(a){
+  const n=9,o=Array.from({length:n},()=>Array(n));
+  for(let r=0;r<n;r++)for(let c=0;c<n;c++)o[c][n-1-r]=a[r][c];
+  return o;
+}
+function flipH(a){return a.map(r=>[...r].reverse());}
+function flipV(a){return[...a].reverse();}
+
+function getPixels(nr,drehen,hFlip,vFlip){
+  let a=ED[nr].map(r=>r.map(p=>[...p]));
+  const steps={1:0,2:1,3:2,4:3}[drehen];
+  for(let i=0;i<steps;i++)a=rot90CW(a);
+  if(hFlip)a=flipH(a);
+  if(vFlip)a=flipV(a);
+  return a;
+}
+
+// =============================================================
+// RENDER
+// =============================================================
+let SCALE=3;
+const canvas=document.getElementById('C');
+const ctx=canvas.getContext('2d');
+
+function renderMatrix(matrix,switchState){
+  const nR=matrix.length,nC=matrix.reduce((m,r)=>Math.max(m,r.length),0);
+  const cell=9*SCALE;
+  const W_px=nC*cell,H_px=nR*cell;
+  const buf=new Uint8ClampedArray(W_px*H_px*4);
+  buf.fill(255);
+  for(let r=0;r<nR;r++){
+    const row=matrix[r];
+    for(let c=0;c<row.length;c++){
+      let p=parseTok(row[c]);
+      if(!p)continue;
+      let{nr,drehen,hFlip,vFlip}=p;
+      // switch state override
+      if(switchState){
+        const v=switchState[r+'_'+c];
+        if(v!==undefined){
+          const rmp={3:v===1?3:4,4:v===1?3:4,5:v===1?5:6,6:v===1?5:6,8:v===1?8:9,9:v===1?8:9};
+          if(rmp[nr]!==undefined)nr=rmp[nr];
+        }
+      }
+      const px=getPixels(nr,drehen,hFlip,vFlip);
+      const ox=c*cell,oy=r*cell;
+      for(let py=0;py<9;py++)for(let px2=0;px2<9;px2++){
+        const col=px[py][px2];
+        for(let sy=0;sy<SCALE;sy++)for(let sx=0;sx<SCALE;sx++){
+          const gx=ox+px2*SCALE+sx,gy=oy+py*SCALE+sy;
+          const i=(gy*W_px+gx)*4;
+          buf[i]=col[0];buf[i+1]=col[1];buf[i+2]=col[2];buf[i+3]=col[3];
+        }
+      }
+    }
+  }
+  return new ImageData(buf,W_px,H_px);
+}
+
+function drawTrain(c2,y,x){
+  const cell=9*SCALE,cx=x*cell+cell/2,cy=y*cell+cell/2,r=Math.max(3,SCALE);
+  c2.beginPath();c2.arc(cx,cy,r,0,2*Math.PI);
+  c2.fillStyle='rgba(0,220,0,0.92)';c2.strokeStyle='rgba(0,80,0,1)';c2.lineWidth=1.5;
+  c2.fill();c2.stroke();
+}
+function drawHLite(c2,y,x){
+  const cell=9*SCALE;
+  c2.strokeStyle='rgba(255,220,0,0.75)';c2.lineWidth=2;
+  c2.strokeRect(x*cell+1,y*cell+1,cell-2,cell-2);
+}
+
+// =============================================================
+// TM PARSER
+// =============================================================
+function parseTM(text){
+  const tm={startZ:null,startPos:null,band:[],trans:[],tmap:new Map()};
+  for(const line of text.split('\n').map(l=>l.trim()).filter(l=>l&&!l.startsWith('#'))){
+    let m=line.match(/^\((\d+),(\d+)\)$/);
+    if(m){tm.startZ=+m[1];tm.startPos=+m[2];continue;}
+    m=line.match(/^\(([tf]+)\)$/);
+    if(m){tm.band=[...m[1]].map(c=>c==='t'?1:0);continue;}
+    const re=/\((\d+),([tf]),(\d+),([tf]),([LR])\)/g;
+    let t;
+    while((t=re.exec(line))){
+      const tr={z:+t[1],sym:t[2]==='t'?1:0,nz:+t[3],sch:t[4]==='t'?1:0,r:t[5]};
+      tm.trans.push(tr);
+      tm.tmap.set(tr.z+'_'+tr.sym, tr);
+    }
+  }
+  tm.zustaende=[...new Set(tm.trans.map(t=>t.z))].sort((a,b)=>a-b);
+  tm.n=tm.zustaende.length;
+  tm.getT=(z,sym)=>tm.tmap.get(z+'_'+sym)||null;
+  tm.schalter=()=>{
+    const s=[];
+    for(const z of tm.zustaende)for(const sym of[0,1]){
+      const t=tm.getT(z,sym);s.push(t?(t.sym!==t.sch?1:0):0);
+    }
+    return s;
+  };
+  tm.richtungen=()=>{
+    const r=[];
+    for(const z of tm.zustaende)for(const sym of[0,1]){
+      const t=tm.getT(z,sym);r.push(t?t.r:'L');
+    }
+    return r;
+  };
+  return tm;
+}
+
+// =============================================================
+// LAYOUT BUILDER  (faithful JS port of Python)
+// =============================================================
+const mW=(m)=>m.reduce((mx,r)=>Math.max(mx,r.length),0);
+const padR=(r,w)=>{while(r.length<w)r.push('0');};
+const padM=(m,w)=>{for(const r of m)padR(r,w);};
+
+// ShellC matrices
+function parseMS(s){return s.trim().split('\n').map(l=>l.trim().split(',').map(c=>c.trim()));}
+const SC0=parseMS(`7:r2,0,0,3:r4HV,2:r1
+7:r2,0,2:r1H,9:r1,1:r1
+7:r2,0,7:r2,0,7:r2
+1:r1,8:r1HV,5:r1,7:r1,9:r1
+7:r2,2:r1HV,7:r1,2:r1,0`);
+const SC1=parseMS(`7:r2,0,0,4:r4HV,2:r1
+7:r2,0,2:r1H,9:r1,1:r1
+7:r2,0,7:r2,0,7:r2
+1:r1,8:r1HV,6:r1,7:r1,9:r1
+7:r2,2:r1HV,7:r1,2:r1,0`);
+
+function ShellC(z){return(z===0?SC0:SC1).map(r=>[...r]);}
+
+function stackShellC(n,z){
+  const m=[['2:r1H','7:r1','7:r1','7:r1','2:r1'],['7:r2','0','0','2:r1H','9:r1H']];
+  const sc=z===0?SC0:SC1;
+  for(let i=0;i<n;i++)for(const r of sc)m.push([...r]);
+  m.push(['2:r1HV','7:r1','7:r1','2:r1V','0']);
+  return m;
+}
+
+function ShellB(n,z,sch){
+  if(!sch)sch=Array(n*2).fill(1);
+  const m=stackShellC(n,z);
+  const H=2,SH=5;
+  function _s(y,x,v){while(m.length<=y)m.push([]);while(m[y].length<=x)m[y].push('0');m[y][x]=v;}
+
+  // step1
+  for(let i=0;i<n*2;i++)m[1].push(sch[i]===1?'6:r1V':'7:r1');
+
+  // step2
+  for(let i=0;i<n;i++){
+    const b=H+i*SH,sa=5+2*i,sb=6+2*i;
+    if(sch[i*2]===1){_s(b,sa,'8:r4HV');_s(b+1,sa,'8:r1');}
+    if(sch[i*2+1]===1){_s(b+2,sb,'8:r4HV');_s(b+3,sb,'8:r1');}
+  }
+
+  // step3
+  const GZ=new Set();
+  function _sg(y,x,v){_s(y,x,v);GZ.add(y+'_'+x);}
+  for(let i=0;i<n;i++){
+    const b=H+i*SH,sa=5+2*i,sb=6+2*i;
+    if(sch[i*2]===0){
+      _sg(b+1,sa,'7:r1');_sg(b+3,sa,'7:r1');
+      for(let j=i+1;j<n;j++){const bj=H+j*SH;_sg(bj+1,sa,'7:r1');_sg(bj+3,sa,'7:r1');}
+      for(let j=i+1;j<n;j++){
+        const spa=5+2*j,spb=6+2*j;
+        if(sch[j*2]===1){_s(b,spa,'7:r2');_s(b+2,spa,'7:r2');}
+        if(sch[j*2+1]===1){_s(b,spb,'7:r2');_s(b+2,spb,'7:r2');}
+      }
+    }
+    if(sch[i*2+1]===0){
+      _sg(b+3,sb,'7:r1');
+      for(let j=i+1;j<n;j++){const bj=H+j*SH;_sg(bj+1,sb,'7:r1');_sg(bj+3,sb,'7:r1');}
+      for(let j=i+1;j<n;j++){
+        const spa=5+2*j,spb=6+2*j;
+        if(sch[j*2]===1)_s(b+2,spa,'7:r2');
+        if(sch[j*2+1]===1)_s(b+2,spb,'7:r2');
+      }
+    }
+  }
+
+  // step4: pad + fill
+  const maxB=mW(m);
+  for(let yi=0;yi<m.length;yi++){
+    const row=m[yi];
+    const hw=row.slice(5).some(c=>['8:r4HV','8:r1','9:r1'].includes(c));
+    const hg=!hw&&row.slice(5).some(c=>c==='7:r1');
+    if(hw){
+      const pr=row.findIndex((c,i)=>i>=5&&['8:r1','9:r1'].includes(c));
+      const p4=row.findIndex((c,i)=>i>=5&&c==='8:r4HV');
+      if(pr>=0){
+        for(let j=5;j<pr;j++)if(row[j]==='0')row[j]='7:r1';
+        row.splice(pr+1);
+        while(row.length<maxB){const x=row.length;row.push(GZ.has(yi+'_'+x)?'7:r1':'0');}
+      }else if(p4>=0){
+        row.splice(p4+1);
+        while(row.length<maxB)row.push('7:r1');
+      }
+    }else if(hg){
+      for(let j=5;j<row.length;j++){if(row[j]==='0'){row[j]='7:r1';GZ.add(yi+'_'+j);}else if(row[j]==='7:r1')GZ.add(yi+'_'+j);}
+      while(row.length<maxB){row.push('7:r1');GZ.add(yi+'_'+(row.length-1));}
+    }else{while(row.length<maxB)row.push('0');}
+  }
+
+  // step5
+  const WS=new Set();
+  for(const row of m)for(let x=0;x<row.length;x++)if(row[x]==='8:r4HV')WS.add(x);
+  for(let i=0;i<n-1;i++){
+    const zi=H+i*SH+(SH-1),nb=H+(i+1)*SH;
+    let ss=maxB;
+    for(let x=0;x<(m[nb]||[]).length;x++)if(m[nb][x]==='8:r4HV'){ss=x;break;}
+    padR(m[zi],maxB);
+    for(let j=ss;j<maxB;j++)if(m[zi][j]==='0'&&WS.has(j))m[zi][j]='7:r2';
+  }
+
+  // step6
+  const AZ=new Set();
+  for(let y=0;y<m.length;y++)for(const v of m[y])if(v==='8:r1'||v==='9:r1')AZ.add(y);
+  for(let y=0;y<m.length;y++){
+    for(let x=0;x<m[y].length;x++){
+      if(m[y][x]==='8:r4HV'){
+        for(let yy=y-1;yy>=1;yy--){
+          padR(m[yy],x+1);
+          const c=m[yy][x];
+          if(c==='0'){m[yy][x]='7:r2';}
+          else if(c==='7:r1'){
+            const row=m[yy];
+            const pr=row.findIndex((v,i)=>i>=5&&['8:r1','9:r1'].includes(v));
+            const p4=row.findIndex((v,i)=>i>=5&&v==='8:r4HV');
+            if(GZ.has(yy+'_'+x)){m[yy][x]='1:r1';}
+            else if(AZ.has(yy)){
+              const bel=(yy+1<m.length&&x<m[yy+1].length)?m[yy+1][x]:'0';
+              m[yy][x]=(bel==='8:r4HV')?'7:r2':'1:r1';
+            }else if(pr>=0&&x>pr){m[yy][x]='7:r2';}
+            else if(p4>=0&&x>p4){m[yy][x]='1:r1';}
+          }
+        }
+      }
+    }
+  }
+  return m;
+}
+
+function ShellBmK(n,z,sch){
+  const m=ShellB(n,z,sch);
+  const sn=sch||Array(2*n).fill(1);
+  const bA=mW(m),hA=m.length,nB=bA+2*n;
+  padM(m,nB);
+  function _z(y,x){return(y>=0&&y<m.length&&x>=0&&x<(m[y]||[]).length)?m[y][x]:'0';}
+
+  const wz=[];
+  for(let y=0;y<m.length;y++)for(const v of m[y])if(['3:r4HV','4:r4HV'].includes(v)){wz.push(y);break;}
+
+  const kz=[];
+  for(let i=0;i<wz.length;i++){
+    const wy=wz[i];
+    kz.push(wy+(sn[i*2]===1?0:1));
+    kz.push(wy+2+(sn[i*2+1]===1?0:1));
+  }
+
+  for(let k=0;k<kz.length;k++){
+    const ky=kz[k],kx=bA+(2*n-1-k);
+    for(let x=bA;x<kx;x++){const c=_z(ky,x);if(c==='0')m[ky][x]='7:r1';else if(c==='7:r2')m[ky][x]='1:r1';}
+    m[ky][kx]='2:r1';
+    for(let y=ky+1;y<hA;y++){const c=_z(y,kx);if(c==='0')m[y][kx]='7:r2';else if(c==='7:r1')m[y][kx]='1:r1';}
+  }
+  return[m,kz];
+}
+
+function ShellBmR(n,z,sch,richt){
+  if(!richt)richt=Array(2*n).fill('R');
+  const[m,kz]=ShellBmK(n,z,sch);
+  const hA=m.length,bA=mW(m),bSB=bA-2*n;
+  padM(m,bA);
+  for(let i=0;i<2*n;i++)m.push(Array(bA).fill('0'));
+  function _z(y,x){return(y>=0&&y<m.length&&x>=0&&x<(m[y]||[]).length)?m[y][x]:'0';}
+  const kxs=Array.from({length:2*n},(_,k)=>bSB+(2*n-1-k));
+  for(let k=0;k<2*n;k++){
+    const kx=kxs[k],by=hA+(2*n-1-k),r=richt[k];
+    for(let y=hA;y<by;y++){const c=_z(y,kx);if(c==='0')m[y][kx]='7:r2';else if(c==='7:r1')m[y][kx]='1:r1';}
+    if(r==='L'){
+      m[by][kx]='2:r1V';
+      for(let x=kx-1;x>=0;x--){const c=_z(by,x);if(c==='0')m[by][x]='7:r1';else if(c==='7:r2')m[by][x]='1:r1';}
+    }else{
+      m[by][kx]='2:r1HV';
+      for(let x=kx+1;x<bA;x++){const c=_z(by,x);if(c==='0')m[by][x]='7:r1';else if(c==='7:r2')m[by][x]='1:r1';}
+    }
+  }
+  return m;
+}
+
+function ShellA_links(n,z,sch,richt){
+  const m=ShellBmR(n,z,sch,richt);
+  const ez=Array.from({length:n},(_,i)=>5*(i+1));
+  const vs=2*n+1,lb=n*vs,ob=mW(m),nb=lb+ob;
+  for(const r of m){for(let i=0;i<lb;i++)r.unshift('0');while(r.length<nb)r.push('0');}
+  for(let i=0;i<ez.length;i++){
+    const y=ez[i],x0=i*vs;
+    for(let x=0;x<lb;x++)if(m[y][x]==='0')m[y][x]='7:r1';
+    m[y][x0]='9:r1H';
+    for(let k=0;k<2*n;k++)m[y][x0+1+k]='9:r1V';
+  }
+  return[m,ez];
+}
+
+function ShellA_mB(n,z,sch,richt){
+  let[m,ez]=ShellA_links(n,z,sch,richt);
+  const vs=2*n+1,rb=n*vs,ob=mW(m),nb=ob+rb;
+  padM(m,nb);
+  function _z(y,x){return(y>=0&&y<m.length&&x>=0&&x<(m[y]||[]).length)?m[y][x]:'0';}
+  function _s(y,x,v){m[y][x]=v;}
+  const rp=[];
+  for(let i=0;i<ez.length;i++){
+    const y=ez[ez.length-1-i],x0=ob+i*vs;
+    rp.push([y,x0]);_s(y,x0,'2:r1HV');
+    for(let k=0;k<2*n;k++)_s(y,x0+1+k,'9:r1HV');
+    for(let x=x0+vs;x<nb;x++)if(m[y][x]==='0')_s(y,x,'7:r1');
+  }
+  const lp=ez.map((y,i)=>[y,i*vs]);
+  const nb2=n;
+  for(const r of m)for(let i=0;i<nb2;i++)r.unshift('0');
+  for(let i=0;i<nb2;i++)m.unshift(Array(nb+nb2).fill('0'));
+  ez=ez.map(y=>y+nb2);
+  const srp=rp.map(([y,x])=>[y+nb2,x]);
+  const slp=lp.map(([y,x])=>[y+nb2,x]);
+
+  const nr1h=new Set();
+  for(let y=0;y<m.length;y++)for(let x=0;x<m[y].length;x++)if(m[y][x]==='9:r1H')nr1h.add(y+'_'+x);
+
+  for(let i=0;i<n;i++){
+    const by=nb2-1-i;
+    const[ry,rx]=srp[i];
+    const[ly,lx]=slp[n-1-i];
+    const blx=lx+nb2,rvt=rx+nb2,brx=rx+nb2;
+    m[by][blx]='2:r1H';
+    for(let y=by+1;y<ly;y++){
+      const c=_z(y,blx);
+      if(nr1h.has(y+'_'+blx))m[y][blx]='1:r1';
+      else if(c==='0')m[y][blx]='7:r2';
+      else if(c==='7:r1')m[y][blx]='1:r1';
+    }
+    for(let y=ry-1;y>by;y--){
+      const c=_z(y,rvt);
+      if(c==='0')m[y][rvt]='7:r2';else if(c==='7:r1')m[y][rvt]='1:r1';
+    }
+    m[by][brx]='2:r1';
+    for(let x=brx-1;x>blx;x--){const c=_z(by,x);if(c==='0')m[by][x]='7:r1';else if(c==='7:r2')m[by][x]='1:r1';}
+  }
+  for(let i=0;i<m.length;i++)m[i]=m[i].slice(nb2);
+  return[m,ez];
+}
+
+function ShellA_v(n,z,sch,richt,zustaende,tmap){
+  let[m,ez]=ShellA_mB(n,z,sch,richt);
+  function _z(y,x){return(y>=0&&y<m.length&&x>=0&&x<(m[y]||[]).length)?m[y][x]:'0';}
+  function _s(y,x,v){while(m.length<=y)m.push([]);while(m[y].length<=x)m[y].push('0');m[y][x]=v;}
+
+  const nv={},nhv={};
+  for(let y=0;y<m.length;y++){
+    const vc=[],hvc=[];
+    for(let x=0;x<m[y].length;x++){if(m[y][x]==='9:r1V')vc.push(x);if(m[y][x]==='9:r1HV')hvc.push(x);}
+    if(vc.length)nv[y]=vc;if(hvc.length)nhv[y]=hvc;
+  }
+
+  const lastEz=ez[ez.length-1];
+  const rc=[];
+  for(let y=lastEz+1;y<m.length;y++)
+    for(let x=0;x<m[y].length;x++){const v=m[y][x];if(v==='2:r1V'||v==='2:r1HV')rc.push([y,x,v]);}
+  let routing=[...rc.slice(-2*n)].reverse();
+
+  const vb=[];
+  for(let k=0;k<routing.length;k++){
+    const[ry,rx,rv]=routing[k];
+    const zi=Math.floor(k/2),sym=k%2;
+    let isH=false,t=null;
+    if(zustaende&&tmap){
+      const z2=zustaende[zi];
+      t=tmap.get(z2+'_'+sym)||null;
+      isH=(t===null||!zustaende.includes(t.nz));
+    }
+    if(isH){
+      const hr=rv==='2:r1V'?'L':'R';
+      vb.push({ry,rx,zy:null,vx:null,ri:hr,sym,h:true});continue;
+    }
+    let zi2=zi,ri2=richt?richt[k]:(rv==='2:r1HV'?'L':'R');
+    if(t){zi2=zustaende.indexOf(t.nz);ri2=t.r;}
+    const zy=ez[zi2],pl=zi*2+sym;
+    let vx;
+    if(ri2==='L'){
+      if(!nv[zy]||pl>=nv[zy].length)continue;
+      vx=nv[zy][pl];
+    }else{
+      const idx=(2*n-1)-pl;
+      if(!nhv[zy]||idx<0||idx>=nhv[zy].length)continue;
+      vx=nhv[zy][idx];
+    }
+    vb.push({ry,rx,zy,vx,ri:ri2,sym,h:false});
+  }
+
+  // Phase 1 horizontal
+  function kH(y,x){const c=_z(y,x);if(c==='0')_s(y,x,'7:r1');else if(c==='7:r2')_s(y,x,'1:r1');}
+  for(const{ry,rx,zy,vx,ri,h}of vb){
+    if(h){if(ri==='L')_s(ry,rx-1,'11:r3');else _s(ry,rx+1,'11:r1');continue;}
+    if(vx>rx)for(let x=rx+1;x<vx;x++)kH(ry,x);
+    else if(vx<rx)for(let x=rx-1;x>vx;x--)kH(ry,x);
+  }
+  for(const{ry,vx,ri,h}of vb){if(h)continue;_s(ry,vx,ri==='R'?'2:r1V':'2:r1HV');}
+
+  // Phase 2 vertical
+  function kV(y,x){const c=_z(y,x);if(c==='0')_s(y,x,'7:r2');else if(c==='7:r1')_s(y,x,'1:r1');}
+  for(const{ry,zy,vx,h}of vb){if(h)continue;for(let y=ry-1;y>zy;y--)kV(y,vx);}
+
+  // Cleanup
+  const cs=5*n+3;const GP=new Set(ez);
+  let ch=true;
+  while(ch){
+    ch=false;
+    for(let y=cs;y<m.length;y++){
+      if(GP.has(y))continue;
+      const w=m[y].length;
+      for(let x=0;x<w;x++){
+        if(m[y][x]==='7:r1'){
+          let hl=false;
+          for(let xl=x-1;xl>=0;xl--){if(m[y][xl]==='0'||m[y][xl]==='7:r2')continue;hl=true;break;}
+          if(!hl){m[y][x]='0';ch=true;}
+        }
+      }
+      for(let x=1;x<w-1;x++){
+        if(m[y][x]==='1:r1'){
+          const l=m[y][x-1],r2=(x+1<w)?m[y][x+1]:'0';
+          if((l==='0'||l==='7:r2')||(r2==='0'||r2==='7:r2')){m[y][x]='7:r2';ch=true;}
+        }
+      }
+    }
+  }
+  const mxw=mW(m);for(const r of m)while(r.length<mxw)r.push('0');
+  return[m,ez];
+}
+
+function kaskadiereТМ(tm,spalt=3){
+  const n=tm.n,s=tm.schalter(),r=tm.richtungen();
+  const shells=[];
+  for(const sym of tm.band){
+    const[ma,ez]=ShellA_v(n,sym,s,r,tm.zustaende,tm.tmap);
+    shells.push([ma,ez]);
+  }
+  if(!shells.length)return[null,null];
+  const[sh0,ez]=shells[0];
+  const h=sh0.length,ab=mW(sh0),k=shells.length;
+  const gb=spalt+k*ab+(k-1)*spalt;
+  const mat=Array.from({length:h},()=>Array(gb).fill('0'));
+  const xo=[];
+  for(let i=0;i<k;i++){
+    const[sh]=shells[i],x0=spalt+i*(ab+spalt);xo.push(x0);
+    for(let y=0;y<h;y++)for(let x=0;x<(sh[y]||[]).length;x++)if(sh[y][x]!=='0')mat[y][x0+x]=sh[y][x];
+  }
+  for(let i=0;i<k-1;i++){
+    const xs=xo[i]+ab,xe=xo[i+1];
+    for(const ey of ez)for(let x=xs;x<xe;x++)mat[ey][x]='7:r1';
+  }
+  const sp=tm.startPos!==null?tm.startPos:0,sz=tm.startZ!==null?tm.startZ:tm.zustaende[0];
+  if(sp>=0&&sp<k&&tm.zustaende.includes(sz)){
+    const zi=tm.zustaende.indexOf(sz),sy2=ez[zi];
+    const gs=xo[sp]-spalt,ge=xo[sp];
+    for(let x=gs;x<ge;x++)mat[sy2][x]='7:r1';
+    mat[sy2][Math.floor((gs+ge)/2)]='10:r1';
+  }
+  return[mat,{ez,spalt,xo,ab,sp,sz}];
+}
+
+// =============================================================
+// TRAIN SIMULATION
+// =============================================================
+const GEGEN={N:'S',S:'N',W:'O',O:'W'};
+const DELTA={N:[0,-1],S:[0,1],W:[-1,0],O:[1,0]};
+const CW=['N','O','S','W'];
+const WT={3:'ff',4:'ff',5:'la',6:'la',8:'sp',9:'sp'};
+const WV={3:1,4:2,5:1,6:2,8:1,9:2};
+
+function rotCW(d,t){return CW[(CW.indexOf(d)+t)%4];}
+function fHd(d){return{O:'W',W:'O',N:'N',S:'S'}[d];}
+function fVd(d){return{N:'S',S:'N',O:'O',W:'W'}[d];}
+function l2w(d,dr,h,v){const s={1:0,2:1,3:2,4:3}[dr];d=rotCW(d,s);if(h)d=fHd(d);if(v)d=fVd(d);return d;}
+function w2l(d,dr,h,v){const s={1:0,2:1,3:2,4:3}[dr];if(v)d=fVd(d);if(h)d=fHd(d);d=rotCW(d,(4-s)%4);return d;}
+
+class Sim{
+  constructor(mat){
+    this.m=mat.map(r=>[...r]);this.H=mat.length;
+    this.B=mat.reduce((mx,r)=>Math.max(mx,r.length),0);
+    this.ss={};
+    for(let y=0;y<this.H;y++)for(let x=0;x<(mat[y]||[]).length;x++){
+      const p=parseTok(mat[y][x]);if(p&&WT[p.nr])this.ss[y+'_'+x]=WV[p.nr];
+    }
+  }
+  tile(y,x){if(y<0||y>=this.H||x<0||x>=(this.m[y]||[]).length)return null;return parseTok(this.m[y][x]);}
+  step(y,x,f){
+    const p=this.tile(y,x);if(!p)return[null,'leer'];
+    const{nr,drehen,hFlip,vFlip}=p;
+    const el=w2l(GEGEN[f],drehen,hFlip,vFlip);
+    if(nr===7||nr===10){const e={W:'O',O:'W'}[el];if(!e)return[null,'Linie?'];return[l2w(e,drehen,hFlip,vFlip),'Linie'];}
+    if(nr===2){const e={W:'S',S:'W'}[el];if(!e)return[null,'Kurve?'];return[l2w(e,drehen,hFlip,vFlip),'Kurve'];}
+    if(nr===1){const e={W:'O',O:'W',N:'S',S:'N'}[el];if(!e)return[null,'Kreuz?'];return[l2w(e,drehen,hFlip,vFlip),'Kreuz'];}
+    if(nr===11)return[null,'Endpuffer'];
+    if(WT[nr]){
+      const typ=WT[nr],key=y+'_'+x,v=this.ss[key]||WV[nr];
+      let port=el==='W'?'F':el==='N'?'S1':el==='O'?'S2':null;
+      if(!port)return[null,'Weiche?'+el];
+      if(typ==='sp'){const e=port==='F'?(v===1?'N':'O'):'W';return[l2w(e,drehen,hFlip,vFlip),`Sp${v}${port}`];}
+      if(typ==='la'){
+        if(port==='F'){const e=v===1?'N':'O';return[l2w(e,drehen,hFlip,vFlip),`La F->${e}(v${v})`];}
+        else{this.ss[key]=port==='S1'?1:2;return[l2w('W',drehen,hFlip,vFlip),`La ${port}->F(v${this.ss[key]})`];}
+      }
+      if(typ==='ff'){
+        if(port==='F'){const e=v===1?'N':'O';this.ss[key]=v===1?2:1;return[l2w(e,drehen,hFlip,vFlip),`FF F->${e}(v${this.ss[key]})`];}
+        else return[l2w('W',drehen,hFlip,vFlip),`FF ${port}->F`];
+      }
+    }
+    return[null,'?'+nr];
+  }
+  fahre(sy,sx,sf,maxS=100000){
+    const pfad=[];let y=sy,x=sx,f=sf;
+    for(let i=0;i<maxS;i++){
+      if(y<0||y>=this.H||x<0||x>=(this.m[y]||[]).length)break;
+      const[nf,desc]=this.step(y,x,f);
+      pfad.push({y,x,f,ss:{...this.ss},desc});
+      if(!nf)break;
+      const[dx,dy]=DELTA[nf];y+=dy;x+=dx;f=nf;
+    }
+    return pfad;
+  }
+}
+
+function findStart(mat){
+  for(let y=0;y<mat.length;y++)for(let x=0;x<(mat[y]||[]).length;x++)
+    if((mat[y][x]||'').startsWith('10:'))return[y,x];
+  return null;
+}
+
+// =============================================================
+// APP STATE
+// =============================================================
+const st={tm:null,mat:null,info:null,pfad:null,si:-1,timer:null,fps:15};
+
+function setStatus(m){document.getElementById('status').textContent=m;}
+
+function updateInfo(){
+  if(!st.pfad||st.si<0){
+    ['i-step','i-tile','i-dir','i-band','i-tok'].forEach(id=>document.getElementById(id).textContent=id.replace('i-','').replace('-',' ')+': —');
+    return;
+  }
+  const s=st.pfad[st.si];
+  document.getElementById('i-step').textContent=`Schritt: ${st.si+1}/${st.pfad.length}`;
+  document.getElementById('i-tile').textContent=`(${s.y},${s.x})`;
+  document.getElementById('i-dir').textContent=`→${s.f}`;
+  document.getElementById('i-tok').textContent=(st.mat[s.y]||[])[s.x]||'0';
+  if(st.info){
+    const ez=st.info.ez,xo=st.info.xo,ab=st.info.ab;
+    const band=[];
+    for(let c=0;c<xo.length;c++){
+      let sym=null;
+      for(const ey of ez){
+        for(let x=xo[c];x<xo[c]+ab&&sym===null;x++){
+          const p=parseTok((st.mat[ey]||[])[x]);
+          if(p&&(p.nr===5||p.nr===6)){const v=s.ss[ey+'_'+x];if(v!==undefined)sym=v===1?0:1;}
+        }
+        if(sym!==null)break;
+      }
+      band.push(sym!==null?(sym?'t':'f'):'?');
+    }
+    document.getElementById('i-band').textContent='Band: '+band.join('');
+  }
+}
+
+function renderFrame(){
+  if(!st.mat)return;
+  const sw=st.si>=0&&st.pfad?st.pfad[st.si].ss:null;
+  const id=renderMatrix(st.mat,sw);
+  canvas.width=id.width;canvas.height=id.height;
+  ctx.putImageData(id,0,0);
+  if(st.si>=0&&st.pfad){const s=st.pfad[st.si];drawHLite(ctx,s.y,s.x);drawTrain(ctx,s.y,s.x);}
+  updateInfo();
+}
+
+function loadTM(text){
+  stopPlay();
+  try{
+    st.tm=parseTM(text);
+    if(!st.tm.n)throw new Error('Keine Zustände mit Übergängen');
+    setStatus(`Parsen OK (n=${st.tm.n}). Baue Layout...`);
+    setTimeout(()=>{
+      try{
+        const[mat,info]=kaskadiereТМ(st.tm);
+        if(!mat)throw new Error('Layout leer');
+        st.mat=mat;st.info=info;
+        const start=findStart(mat);
+        if(!start)throw new Error('Kein Startsymbol');
+        const sim=new Sim(mat);
+        st.pfad=sim.fahre(start[0],start[1],'O');
+        st.si=0;
+        fitZoom();
+        setStatus(`Bereit – ${st.pfad.length} Schritte · Band: ${st.tm.band.map(b=>b?'t':'f').join('')}`);
+        ['btn-step','btn-play','btn-reset'].forEach(id=>document.getElementById(id).disabled=false);
+      }catch(e){setStatus('Fehler: '+e.message);console.error(e);}
+    },10);
+  }catch(e){setStatus('Parse-Fehler: '+e.message);console.error(e);}
+}
+
+function stepOnce(){
+  if(!st.pfad)return;
+  if(st.si<st.pfad.length-1){st.si++;renderFrame();}
+  else{setStatus('Simulation beendet');stopPlay();}
+}
+
+function startPlay(){
+  if(st.timer||!st.pfad)return;
+  document.getElementById('btn-play').disabled=true;
+  document.getElementById('btn-stop').disabled=false;
+  st.timer=setInterval(()=>{
+    if(st.si>=st.pfad.length-1){stopPlay();setStatus('Simulation beendet');return;}
+    st.si++;renderFrame();
+  },Math.round(1000/st.fps));
+}
+
+function stopPlay(){
+  if(st.timer){clearInterval(st.timer);st.timer=null;}
+  document.getElementById('btn-play').disabled=false;
+  document.getElementById('btn-stop').disabled=true;
+}
+
+function resetSim(){
+  stopPlay();
+  if(!st.mat)return;
+  const s=findStart(st.mat);if(!s)return;
+  const sim=new Sim(st.mat);
+  st.pfad=sim.fahre(s[0],s[1],'O');
+  st.si=0;renderFrame();
+  setStatus(`Reset – ${st.pfad.length} Schritte`);
+}
+
+function updateSpeed(){
+  st.fps=+document.getElementById('speed').value;
+  document.getElementById('speed-val').textContent=st.fps+' fps';
+  if(st.timer){stopPlay();startPlay();}
+}
+
+function changeZoom(){
+  SCALE=+document.getElementById('zoom-sel').value;
+  renderFrame();
+}
+
+function fitZoom(){
+  if(!st.mat)return;
+  const wrap=document.getElementById('canvas-wrap');
+  const ww=wrap.clientWidth-32,wh=wrap.clientHeight-32;
+  const nC=st.mat.reduce((mx,r)=>Math.max(mx,r.length),0);
+  const nR=st.mat.length;
+  const scaleX=Math.floor(ww/(nC*9));
+  const scaleY=Math.floor(wh/(nR*9));
+  SCALE=Math.max(1,Math.min(scaleX,scaleY));
+  // update select to closest option
+  const sel=document.getElementById('zoom-sel');
+  const opts=[...sel.options].map(o=>+o.value);
+  const closest=opts.reduce((a,b)=>Math.abs(b-SCALE)<Math.abs(a-SCALE)?b:a);
+  sel.value=closest;
+  SCALE=closest;
+  renderFrame();
+}
+
+function savePng(){
+  if(!st.mat)return;
+  const sw=st.si>=0&&st.pfad?st.pfad[st.si].ss:null;
+  const id=renderMatrix(st.mat,sw);
+  const tmp=document.createElement('canvas');
+  tmp.width=id.width;tmp.height=id.height;
+  const tc=tmp.getContext('2d');tc.putImageData(id,0,0);
+  if(st.si>=0&&st.pfad){const s=st.pfad[st.si];drawTrain(tc,s.y,s.x);}
+  const a=document.createElement('a');
+  a.href=tmp.toDataURL('image/png');
+  a.download=`tm2train_step${st.si+1}.png`;a.click();
+}
+
+document.getElementById('fi').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  const r=new FileReader();r.onload=ev=>loadTM(ev.target.result);r.readAsText(f);
+  e.target.value='';
+});
+
+canvas.addEventListener('mousemove',e=>{
+  if(!st.mat)return;
+  const rect=canvas.getBoundingClientRect(),cell=9*SCALE;
+  const cx=Math.floor((e.clientX-rect.left)/cell),cy=Math.floor((e.clientY-rect.top)/cell);
+  if(cy>=0&&cy<st.mat.length&&cx>=0)canvas.title=`(${cy},${cx}): ${(st.mat[cy]||[])[cx]||'0'}`;
+});
+</script>
+</body>
+</html>
