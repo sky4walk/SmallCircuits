@@ -170,6 +170,19 @@ _start = _make([
     [W, W, W, W, W, W, W, W, W],
 ])
 
+# --- 11: Endpuffer / Prellbock  (Gerade von links, Querbalken-Anschlag rechts) ---
+_endpuffer = _make([
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, W, W, W, W, BK,W],
+    [W, W, W, W, W, W, W, BK,W],
+    [BK,BK,BK,BK,BK,BK,BK,BK,W],
+    [W, W, W, W, W, W, W, BK,W],
+    [W, W, W, W, W, W, W, BK,W],
+    [W, W, W, W, W, W, W, W, W],
+    [W, W, W, W, W, W, W, W, W],
+])
+
 # ---------------------------------------------------------------------------
 # Mapping: ElementNr → (Array, Name)
 # ---------------------------------------------------------------------------
@@ -184,6 +197,7 @@ ELEMENTS = {
     8: (_sprung1,   "Sprung1"),
     9: (_sprung2,   "Sprung2"),
     10:(_start,     "Start"),
+    11:(_endpuffer, "Endpuffer"),
 }
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +1214,8 @@ def ShellA_verbunden(anzahl: int, zustand: int,
                      schalter: list = None,
                      richtungen: list = None,
                      zustaende: list = None,
-                     transitionen_map: dict = None) -> tuple:
+                     transitionen_map: dict = None,
+                     halt: list = None) -> tuple:
     """
     Vollständige ShellA mit verbundenen ShellB-Ausgängen.
 
@@ -1256,81 +1271,119 @@ def ShellA_verbunden(anzahl: int, zustand: int,
             m[y].append('0')
         m[y][x] = v
 
+    # routing umdrehen, damit k=(zi,sym) dem physischen Ausgang entspricht
+    # (k=0=(z1,f) am rechtesten Ausgang, k=2n-1=(zn,t) am linkesten).
+    routing = list(reversed(routing))
+
+    # Verbindungsregel (von Andre): für Transition (qz,gelesen,ziel,geschr,richtung)
+    # geht die Linie aus ShellC von qz (Ausgang=geschr) zur Sprungweiche an
+    # Position (qz,gelesen) auf der Zustandsleitung von ziel, Seite=richtung.
+    # Positions-Kodierung auf der Zielleitung von links: 1f 1t 2f 2t 3f 3t.
+
+    # Zwei-Phasen-Verlegung (verhindert Fehlrouting durch Kollisionen):
+    #   Phase 1: horizontale Linien auf der jeweiligen Kurven-Zeile bis zur Zielspalte
+    #   Phase 2: vertikale Linien von dort hoch zur Zielzustands-Leitung
+    # Kreuzt eine neue Linie eine bestehende, wird ein Kreuz (1:r1) gesetzt.
+
+    verbindungen = []  # (ry, rx, ziel_y, vx, richt, sym, halt)
     for k, (ry, rx, rv) in enumerate(routing):
         zi  = k // 2
         sym = k % 2
-        ez_y = eingangszeilen[zi]  # Eingangszeile des aktuellen Zustands
 
-        # Haltezustand-Check
+        # Transition nachschlagen
         if zustaende is not None and transitionen_map is not None:
             z = zustaende[zi]
             t = transitionen_map.get((z, sym))
-            if t is None or t.neuer_zustand not in zustaende:
+            halt = (t is None or t.neuer_zustand not in zustaende)
+        else:
+            t = None
+            halt = False
+
+        if halt:
+            # Halt-Slot: Richtung der vorhandenen L/R-Kurve merken (rv),
+            # damit der Puffer in Fahrtrichtung gesetzt werden kann.
+            halt_richt = 'L' if rv == '2:r1V' else 'R'
+            verbindungen.append((ry, rx, None, None, halt_richt, sym, True))
+            continue
+
+        if t is not None:
+            ziel_idx = zustaende.index(t.neuer_zustand)
+            richt = t.richtung
+        else:
+            ziel_idx = zi
+            richt = richtungen[k] if richtungen else ('L' if rv == '2:r1HV' else 'R')
+
+        ziel_y = eingangszeilen[ziel_idx]
+        pos_links = zi * 2 + sym
+        if richt == 'L':
+            if ziel_y not in neun_v or pos_links >= len(neun_v[ziel_y]):
                 continue
+            vx = neun_v[ziel_y][pos_links]
+        else:
+            idx = (2 * n - 1) - pos_links
+            if ziel_y not in neun_hv or idx < 0 or idx >= len(neun_hv[ziel_y]):
+                continue
+            vx = neun_hv[ziel_y][idx]
+        verbindungen.append((ry, rx, ziel_y, vx, richt, sym, False))
 
-        # Slot-Index: zi*2+sym (Zustand 1f=0, Zustand 1t=1, Zustand 2f=2, Zustand 2t=3)
-        idx = zi * 2 + sym
+    # --- Phase 1: horizontale Linien auf der Kurven-Zeile bis VOR die Zielspalte ---
+    def kreuz_h(y, x):
+        # Horizontale Linie legen; bestehende Vertikale -> Kreuz
+        c = _z(y, x)
+        if c == '0':                 _s(y, x, '7:r1')
+        elif c == '7:r2':            _s(y, x, '1:r1')   # kreuzt Vertikale
+        # 7:r1/1:r1/Weichen: bereits horizontal befahrbar, nichts tun
 
-        # conn_y: ry+1 wenn sym=0, ry-1 wenn sym=1
-        conn_y = ry + 1 if sym == 0 else ry - 1
+    for (ry, rx, ziel_y, vx, richt, sym, halt) in verbindungen:
+        if halt:
+            # Halt: direkt nach der L/R-Kurve den Endpuffer setzen
+            # (keine horizontale Linie, kein toter Strang).
+            if richt == 'L':
+                _s(ry, rx - 1, '11:r3')   # Puffer links der Kurve
+            else:
+                _s(ry, rx + 1, '11:r1')   # Puffer rechts der Kurve
+            continue
+        # horizontale Strecke von rx bis VOR vx (Zielspalte bleibt frei für Kurve)
+        if vx > rx:
+            for x in range(rx + 1, vx):
+                kreuz_h(ry, x)
+        elif vx < rx:
+            for x in range(rx - 1, vx, -1):
+                kreuz_h(ry, x)
 
-        # Richtung aus richtungen-Liste bestimmt die Verbindungsseite
-        richt = richtungen[k] if richtungen else ('L' if rv == '2:r1HV' else 'R')
-        if richt == 'L':  # Verbindung zu linker Eingangsseite (9:r1V)
-            if ez_y not in neun_v: continue
-            if idx >= len(neun_v[ez_y]): continue
-            vx = neun_v[ez_y][idx]
+    # Endstück: Kurve nach oben an der Zielspalte.
+    # Seite R (von links angefahren) -> 2:r1V (lenkt nach N);
+    # Seite L (von rechts angefahren) -> 2:r1HV (lenkt nach N).
+    for (ry, rx, ziel_y, vx, richt, sym, halt) in verbindungen:
+        if halt:
+            continue
+        _s(ry, vx, '2:r1V' if richt == 'R' else '2:r1HV')
 
-            # Senkrechte von ry (inkl. wenn sym=0) nach oben bis ez_y
-            y_start = ry if sym == 0 else ry - 1
-            for y in range(y_start, ez_y, -1):
-                c = _z(y, vx)
-                if c == '0':                   _s(y, vx, '7:r2')
-                elif c == '7:r1':              _s(y, vx, '1:r1')
-                elif c in ('9:r1V','9:r1HV'): _s(y, vx, '1:r1')
+    # --- Phase 2: vertikale Linien von der Kurven-Zeile hoch zur Zielleitung ---
+    def kreuz_v(y, x):
+        c = _z(y, x)
+        if c == '0':                 _s(y, x, '7:r2')
+        elif c == '7:r1':            _s(y, x, '1:r1')   # kreuzt Horizontale
+        elif c in ('9:r1V', '9:r1HV'):  pass            # Zielweiche: stehen lassen
 
-            # Kurve + Horizontale in conn_y (nach rechts bis erstem belegten Nicht-Vertikalen)
-            _s(conn_y, vx, '2:r1HV')
-            x = vx + 1
-            while x < len(m[conn_y]) and _z(conn_y, x) in ('0', '7:r2'):
-                c = _z(conn_y, x)
-                if c == '0':      _s(conn_y, x, '7:r1')
-                elif c == '7:r2': _s(conn_y, x, '1:r1')
-                x += 1
-            # End-Kurve: falls Routing-Ausgang des gepaarten k, korrigieren zu 2:r1V
-            if x < len(m[conn_y]) and _z(conn_y, x) in ('2:r1V', '2:r1HV', '2:r1', '2:r1H'):
-                _s(conn_y, x, '2:r1V')
-
-        else:  # R → rechte Eingangsseite (9:r1HV)
-            if ez_y not in neun_hv: continue
-            if idx >= len(neun_hv[ez_y]): continue
-            vx = neun_hv[ez_y][idx]
-
-            # Senkrechte von conn_y nach oben bis ez_y
-            for y in range(conn_y, ez_y, -1):
-                c = _z(y, vx)
-                if c == '0':                   _s(y, vx, '7:r2')
-                elif c == '7:r1':              _s(y, vx, '1:r1')
-                elif c in ('9:r1V','9:r1HV'): _s(y, vx, '1:r1')
-
-            # Kurve + Horizontale in conn_y (nach links bis erstem belegten Nicht-Vertikalen)
-            _s(conn_y, vx, '2:r1V')
-            x = vx - 1
-            while x >= 0 and _z(conn_y, x) in ('0', '7:r2'):
-                c = _z(conn_y, x)
-                if c == '0':      _s(conn_y, x, '7:r1')
-                elif c == '7:r2': _s(conn_y, x, '1:r1')
-                x -= 1
-            # End-Kurve: falls Routing-Ausgang des gepaarten k, korrigieren zu 2:r1HV
-            if x >= 0 and _z(conn_y, x) in ('2:r1V', '2:r1HV', '2:r1', '2:r1H'):
-                _s(conn_y, x, '2:r1HV')
+    for (ry, rx, ziel_y, vx, richt, sym, halt) in verbindungen:
+        if halt:
+            continue
+        # vertikale Strecke von ry-1 hoch bis ziel_y (exklusiv, Weiche bleibt)
+        for y in range(ry - 1, ziel_y, -1):
+            kreuz_v(y, vx)
 
     # --- Cleanup: verwaiste Routing-Tails und Kreuzungen bereinigen ---
+    # Zustandsleitungen (eingangszeilen) müssen links aus der ShellA herauslaufen
+    # und werden daher vom Cleanup ausgenommen.
     cleanup_start_y = 5 * n + 3  # unterhalb der letzten ShellB-Hauptzeile
+    geschuetzt = set(eingangszeilen)
     changed = True
     while changed:
         changed = False
         for y in range(cleanup_start_y, len(m)):
+            if y in geschuetzt:
+                continue  # Zustandsleitung nicht antasten
             w = len(m[y])
             # 7:r1 ohne horizontale Anbindung links → 0
             for x in range(w):
@@ -1360,6 +1413,90 @@ def ShellA_verbunden(anzahl: int, zustand: int,
             row.append('0')
 
     return m, eingangszeilen
+
+
+def _setze_halt_puffer(m, eingangszeilen, halt_slots,
+                       anzahl, schalter, richtungen):
+    """
+    Ersetzt für jeden Halt-Slot die Abbiegekurve durch den Endpuffer und
+    entfernt den toten Verbindungsstrang, der früher zur Zielzustands-Leitung
+    führte.
+
+    Da alle ShellAs strukturell identisch sind, sitzt der Halt-Puffer in JEDER
+    ShellA an derselben Stelle. Position und toter Strang werden per Simulation
+    auf einer Referenz-ShellA (mit passendem Symbol, ohne Halt) ermittelt:
+      - Der Zug fährt von der Eingangszeile des Slot-Zustands los.
+      - Die letzte S->W/O-Abbiegung ist die Stelle für den Puffer.
+      - Alles NACH dieser Abbiegung ist der tote Strang.
+    Tote Zellen, die KEIN anderer (Nicht-Halt-)Pfad mitbenutzt, werden entfernt;
+    geteilte Zellen (Kreuzungen, Zustandsleitungen) bleiben erhalten.
+    """
+    # 1) Alle Zellen sammeln, die Nicht-Halt-Pfade benutzen (pro Symbol)
+    benutzt_andere = set()
+    for symbol in (0, 1):
+        m_ref, ez_ref = ShellA_verbunden(anzahl, symbol,
+                                         schalter=schalter, richtungen=richtungen)
+        for zi in range(anzahl):
+            k = zi * 2 + symbol
+            if k < len(halt_slots) and halt_slots[k]:
+                continue  # Halt-Pfad nicht mitzählen
+            p = TrainSimulation(m_ref).fahre(ez_ref[zi], 0, 'O', max_schritte=1000)
+            for (yy, xx, _f) in p:
+                benutzt_andere.add((yy, xx))
+
+    # 2) Pro Halt-Slot: Puffer setzen und toten Strang entfernen
+    for k, ist_halt in enumerate(halt_slots):
+        if not ist_halt:
+            continue
+        zi, sym = k // 2, k % 2
+
+        m_ref, ez_ref = ShellA_verbunden(anzahl, sym,
+                                         schalter=schalter, richtungen=richtungen)
+        pfad = TrainSimulation(m_ref).fahre(ez_ref[zi], 0, 'O', max_schritte=1000)
+
+        # Letzte S->W/O-Abbiegung finden (Index der Kurve)
+        abb_idx = None
+        for i in range(1, len(pfad)):
+            if pfad[i - 1][2] == 'S' and pfad[i][2] in ('W', 'O'):
+                abb_idx = i - 1
+        if abb_idx is None:
+            continue
+
+        ay, ax = pfad[abb_idx][0], pfad[abb_idx][1]
+        # Puffer an die Abbiegekurve setzen (vertikaler Strang von oben, Anschlag unten)
+        if 0 <= ay < len(m) and 0 <= ax < len(m[ay]):
+            m[ay][ax] = '11:r2'
+
+        # Toten Strang (alles nach der Abbiegung) entfernen, sofern exklusiv
+        for (ty, tx, _f) in pfad[abb_idx + 1:]:
+            if (ty, tx) in benutzt_andere:
+                continue  # von anderem Pfad genutzt -> behalten
+            if 0 <= ty < len(m) and 0 <= tx < len(m[ty]):
+                m[ty][tx] = '0'
+
+        # Verwaiste Kreuzungen entlang des toten Strangs bereinigen:
+        # Eine 1:r1-Kreuzung, die durch das Entfernen nur noch EINE Achse hat,
+        # wird zur reinen Durchgangsleitung (horizontal 7:r1 / vertikal 7:r2).
+        for (ty, tx, _f) in pfad[abb_idx:]:
+            for (cy, cx) in ((ty, tx),
+                             (ty, tx - 1), (ty, tx + 1),
+                             (ty - 1, tx), (ty + 1, tx)):
+                if not (0 <= cy < len(m) and 0 <= cx < len(m[cy])):
+                    continue
+                if m[cy][cx] != '1:r1':
+                    continue
+                left  = m[cy][cx - 1] if cx > 0 else '0'
+                right = m[cy][cx + 1] if cx + 1 < len(m[cy]) else '0'
+                up    = m[cy - 1][cx] if cy > 0 else '0'
+                down  = m[cy + 1][cx] if cy + 1 < len(m) else '0'
+                h_belegt = left not in ('0', '7:r2') or right not in ('0', '7:r2')
+                v_belegt = up not in ('0', '7:r1') or down not in ('0', '7:r1')
+                if h_belegt and not v_belegt:
+                    m[cy][cx] = '7:r1'   # nur noch horizontal
+                elif v_belegt and not h_belegt:
+                    m[cy][cx] = '7:r2'   # nur noch vertikal
+
+    return m
 
 # ---------------------------------------------------------------------------
 # print_matrix – Matrix übersichtlich ausgeben
@@ -1520,6 +1657,23 @@ class TuringMaschine:
                 richtungen.append(t.richtung if t is not None else 'L')
         return richtungen
 
+    def halt_fuer_shellb(self):
+        """
+        Gibt pro Slot True zurück, wenn der Übergang in einen Haltezustand führt
+        (Ziel-Zustand hat selbst keine ausgehenden Transitionen / existiert nicht
+        in self.zustaende). Reihenfolge wie schalter/richtungen: pro Zustand
+        [sym0, sym1].
+        """
+        halt = []
+        for z in self.zustaende:
+            for sym in [0, 1]:
+                t = self.get_transition(z, sym)
+                if t is None:
+                    halt.append(False)
+                else:
+                    halt.append(t.neuer_zustand not in self.zustaende)
+        return halt
+
     def __repr__(self):
         return (f"TuringMaschine(start=({self.start_zustand},{self.start_position}), "
                 f"band={self.band}, n={self.n}, "
@@ -1558,11 +1712,14 @@ def kaskadiere_TM(tm, spalt: int = 3) -> tuple:
     n = tm.n
     s = tm.schalter_fuer_shellb()
     r = tm.richtungen_fuer_shellb()
+    h = tm.halt_fuer_shellb()
+    tmap = {(t.zustand, t.symbol): t for t in tm.transitionen}
 
     # Eine ShellA pro Bandzelle erzeugen
     shells = []
     for symbol in tm.band:
-        m_a, ez = ShellA_verbunden(n, symbol, schalter=s, richtungen=r)
+        m_a, ez = ShellA_verbunden(n, symbol, schalter=s, richtungen=r, halt=h,
+                                   zustaende=tm.zustaende, transitionen_map=tmap)
         shells.append(m_a)
 
     if not shells:
@@ -1952,6 +2109,150 @@ def simuliere_tm_einzelbilder(tm_datei, anzahl_schritte, scale=10,
     return matrix, pfad, dateien, info
 
 
+# ===========================================================================
+# VERIFIKATOR – Bahn-Simulation gegen unabhängigen TM-Interpreter prüfen
+# ===========================================================================
+# Vergleicht die Bahn-Anlage gegen einen unabhängigen Interpreter, der direkt
+# die Transitionstabelle anwendet und keine Geometrie kennt. So lässt sich
+# objektiv prüfen, ob die Anlage wirklich die TM berechnet – für beliebige n.
+#
+# Repräsentation im Layout:
+#   Bandsymbol  = Stellung der Lazy-Weiche auf einer Zustandsleitung
+#                 (Var1=f/0, Var2=t/1)
+#   Richtung    = Abbiegung in der L/R-Kurve unterhalb von ShellB
+#   Folgezustand= Zustandsleitung, auf der der Zug die ShellA verlässt
+#   Ein TM-Schritt = ein kompletter ShellA-Durchlauf
+# ---------------------------------------------------------------------------
+
+def tm_interpret(tm, max_schritte=1000):
+    """
+    Unabhängiger TM-Interpreter (kennt nur die Transitionstabelle).
+    Gibt die Liste der Konfigurationen (zustand, kopfposition, band-tupel) zurück.
+    """
+    z = tm.start_zustand
+    pos = tm.start_position
+    band = list(tm.band)
+    konfigs = [(z, pos, tuple(band))]
+    for _ in range(max_schritte):
+        if not (0 <= pos < len(band)):
+            break
+        t = tm.get_transition(z, band[pos])
+        if t is None:
+            break
+        band[pos] = t.schreib
+        z = t.neuer_zustand
+        pos += 1 if t.richtung == 'R' else -1
+        konfigs.append((z, pos, tuple(band)))
+        if z not in tm.zustaende:
+            break
+    return konfigs
+
+
+def lies_band_aus_switches(sim, info, anzahl_zellen):
+    """
+    Liest den Bandinhalt aus den Symbol-Lazy-Weichen der Simulation.
+    Die Symbol-Lazy-Weiche ist generisch die Lazy-Weiche AUF einer Zustands-
+    leitung (Position aus Geometrie, nicht hartkodiert). Var1->0(f), Var2->1(t).
+    """
+    ez = info['eingangszeilen']
+    xoffs = info['x_offsets']
+    bw = info['shellA_breite']
+    m = sim.matrix
+    band = []
+    for c in range(anzahl_zellen):
+        sym = None
+        for ey in ez:
+            for x in range(xoffs[c], xoffs[c] + bw):
+                p = parse_zelle(m[ey][x])
+                if p and p[0] in (5, 6):
+                    var = sim.switch_state.get((ey, x))
+                    if var is not None:
+                        sym = 0 if var == 1 else 1
+                    break
+            if sym is not None:
+                break
+        band.append(sym)
+    return band
+
+
+def verifiziere(tm, max_schritte=2000, verbose=False):
+    """
+    Lässt den Zug durch die Kaskade fahren, liest das Endband aus den Weichen
+    und vergleicht es mit dem unabhängigen Interpreter.
+    Rückgabe: dict mit 'ok', 'band_sim', 'band_interp', ...
+    """
+    m, info = kaskadiere_TM(tm)
+    start = finde_start(m)
+    if start is None:
+        return {'ok': False, 'fehler': 'kein Startsymbol'}
+
+    sim = TrainSimulation(m)
+    pfad = sim.fahre(start[0], start[1], 'O', max_schritte=max_schritte)
+
+    band_sim = lies_band_aus_switches(sim, info, len(tm.band))
+    konfigs = tm_interpret(tm)
+    band_interp = list(konfigs[-1][2])
+    ok = (band_sim == band_interp)
+
+    if verbose:
+        bs = ''.join('t' if x == 1 else ('f' if x == 0 else '?') for x in band_sim)
+        bi = ''.join('t' if x == 1 else 'f' for x in band_interp)
+        print(f"  Band Simulation:  {bs}")
+        print(f"  Band Interpreter: {bi}")
+        print(f"  Übereinstimmung:  {'JA ✓' if ok else 'NEIN ✗'}")
+        print(f"  Interpreter-Schritte: {len(konfigs)-1}, Zug-Pfad: {len(pfad)} Zellen")
+
+    return {'ok': ok, 'band_sim': band_sim, 'band_interp': band_interp,
+            'interp_schritte': len(konfigs) - 1, 'pfad_laenge': len(pfad)}
+
+
+def teste_einzeluebergaenge(tm, verbose=True):
+    """
+    Testet jeden Übergang (zustand, symbol) isoliert: ShellA bauen, Zug auf der
+    Zustandsleitung eintreten lassen, Folgezustand + Richtung gegen die
+    Transitionstabelle prüfen. Lokalisiert Konstruktionsfehler pro Übergang.
+    Rückgabe: Liste von dicts mit 'ok'.
+    """
+    n = tm.n
+    s = tm.schalter_fuer_shellb()
+    r = tm.richtungen_fuer_shellb()
+    tmap = {(t.zustand, t.symbol): t for t in tm.transitionen}
+
+    ergebnisse = []
+    for symbol in (0, 1):
+        m, ez = ShellA_verbunden(n, symbol, schalter=s, richtungen=r,
+                                 zustaende=tm.zustaende, transitionen_map=tmap)
+        z_aus = {ez[i]: tm.zustaende[i] for i in range(n)}
+        for zi in range(n):
+            z = tm.zustaende[zi]
+            t = tm.get_transition(z, symbol)
+            pfad = TrainSimulation(m).fahre(ez[zi], 0, 'O', max_schritte=1000)
+            ende = pfad[-1]
+            if ende[0] in z_aus:
+                ist = (z_aus[ende[0]], 'R' if ende[2] == 'O' else 'L')
+            else:
+                ist = None
+            if t is not None and t.neuer_zustand in tm.zustaende:
+                erw = (t.neuer_zustand, t.richtung)
+            else:
+                erw = 'HALT'
+            ok = (ist == erw) or (erw == 'HALT' and ist is None)
+            ergebnisse.append({'zustand': z, 'symbol': symbol,
+                               'erwartet': erw, 'tatsaechlich': ist, 'ok': ok})
+
+    if verbose:
+        print(f"  {'(Zustand,Sym)':14s} {'Erwartet':10s} {'Tatsächlich':12s} OK")
+        for e in ergebnisse:
+            sym_s = 't' if e['symbol'] else 'f'
+            erw = 'HALT' if e['erwartet'] == 'HALT' else f"z{e['erwartet'][0]},{e['erwartet'][1]}"
+            ist = '-' if e['tatsaechlich'] is None else f"z{e['tatsaechlich'][0]},{e['tatsaechlich'][1]}"
+            print(f"  (z{e['zustand']},{sym_s})          {erw:10s} {ist:12s} {'✓' if e['ok'] else '✗'}")
+        n_ok = sum(1 for e in ergebnisse if e['ok'])
+        print(f"  -> {n_ok}/{len(ergebnisse)} Übergänge korrekt")
+
+    return ergebnisse
+
+
 # ---------------------------------------------------------------------------
 # main – Test aller Elemente
 # ---------------------------------------------------------------------------
@@ -2002,8 +2303,21 @@ def main():
 
 if __name__ == "__main__":
     import sys
-    # Modus 1: tm_simulation  ->  elements.py <turingmachine.tm> <anzahl schritte>
-    if len(sys.argv) >= 3 and sys.argv[1].endswith('.tm'):
+
+    # Modus: Verifikator  ->  elements.py --verify <turingmachine.tm>
+    if len(sys.argv) >= 3 and sys.argv[1] in ('--verify', '-v'):
+        tm_datei = sys.argv[2]
+        tm = TuringMaschine(datei=tm_datei)
+        band_str = ''.join('t' if x else 'f' for x in tm.band)
+        print(f"Verifiziere {tm_datei} "
+              f"(start z{tm.start_zustand} pos{tm.start_position} band {band_str}):")
+        print("\n[1] Endband-Vergleich (komplette Kaskade):")
+        verifiziere(tm, verbose=True)
+        print("\n[2] Einzelübergang-Test (pro Zustand/Symbol):")
+        teste_einzeluebergaenge(tm, verbose=True)
+
+    # Modus: Simulation  ->  elements.py <turingmachine.tm> <anzahl schritte>
+    elif len(sys.argv) >= 3 and sys.argv[1].endswith('.tm'):
         tm_datei = sys.argv[1]
         try:
             anzahl_schritte = int(sys.argv[2])
@@ -2022,5 +2336,5 @@ if __name__ == "__main__":
         if dateien:
             print(f"           {dateien[0]} ... {dateien[-1]}")
     else:
-        # Modus 2: ohne .tm-Argument -> Element-Testbilder erzeugen
+        # Modus: ohne Argument -> Element-Testbilder erzeugen
         main()
