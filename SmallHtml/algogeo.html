@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AlgoGeo — Andre Betz 2006 (JS Port)</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:sans-serif;background:#f0f0f0;display:flex;flex-direction:column;height:100vh}
+#menubar{display:flex;align-items:center;gap:4px;padding:5px 10px;background:#e8e8e8;border-bottom:1px solid #ccc;flex-wrap:wrap}
+#menubar span{font-size:13px;font-weight:bold;color:#333;margin-right:6px}
+.mbtn{font-size:12px;padding:4px 10px;border:1px solid #bbb;border-radius:4px;background:#fff;color:#222;cursor:pointer}
+.mbtn:hover{background:#d8eaff}
+.mbtn.active{background:#b3d4f5;border-color:#5599dd}
+#canvas-wrap{flex:1;position:relative;overflow:hidden}
+#cvs{display:block;width:100%;height:100%;cursor:crosshair}
+#statusbar{display:flex;align-items:center;gap:16px;padding:4px 10px;background:#e8e8e8;border-top:1px solid #ccc;font-size:12px;color:#555}
+#coords{min-width:90px}
+</style>
+</head>
+<body>
+
+<div id="menubar">
+  <span>AlgoGeo</span>
+  <button class="mbtn" id="btn-reset">Reset</button>
+  <button class="mbtn" id="btn-load">Punkte laden (.pts)</button>
+  <button class="mbtn" id="btn-save">Punkte speichern</button>
+  <button class="mbtn" id="btn-lines">Linien erstellen</button>
+  <button class="mbtn" id="btn-polygon">Polygon erstellen</button>
+  <button class="mbtn" id="btn-delaunay">Delaunay-Triangulation</button>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="cvs"></canvas>
+</div>
+
+<div id="statusbar">
+  <span id="coords">(-, -)</span>
+  <span id="info">Klick zum Hinzufügen von Punkten · 0 Punkte</span>
+</div>
+
+<input type="file" id="file-in" accept=".pts" style="display:none">
+
+<script>
+const cvs = document.getElementById('cvs');
+const ctx = cvs.getContext('2d');
+const wrap = document.getElementById('canvas-wrap');
+const coordsEl = document.getElementById('coords');
+const infoEl = document.getElementById('info');
+
+let pnts = [], lines = [], circles = [];
+
+function resize() {
+  const r = wrap.getBoundingClientRect();
+  cvs.width = r.width;
+  cvs.height = r.height;
+  repaint();
+}
+window.addEventListener('resize', resize);
+
+function repaint() {
+  const W = cvs.width, H = cvs.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x < W; x += 20) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 20) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+  // Lines (green)
+  ctx.strokeStyle = '#1a8a1a';
+  ctx.lineWidth = 1.5;
+  for (const l of lines) {
+    ctx.beginPath(); ctx.moveTo(l.p1.x, l.p1.y); ctx.lineTo(l.p2.x, l.p2.y); ctx.stroke();
+  }
+
+  // Circles (blue)
+  ctx.strokeStyle = '#185FA5';
+  ctx.lineWidth = 1;
+  for (const c of circles) {
+    ctx.beginPath(); ctx.arc(c.x, c.y, 4, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // Points (red X)
+  ctx.strokeStyle = '#cc2222';
+  ctx.lineWidth = 1.5;
+  for (const p of pnts) {
+    ctx.beginPath(); ctx.moveTo(p.x - 4, p.y - 4); ctx.lineTo(p.x + 4, p.y + 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x - 4, p.y + 4); ctx.lineTo(p.x + 4, p.y - 4); ctx.stroke();
+  }
+
+  infoEl.textContent = pnts.length + ' Punkte · ' + lines.length + ' Linien · Klick zum Hinzufügen';
+}
+
+cvs.addEventListener('mousemove', e => {
+  const r = cvs.getBoundingClientRect();
+  coordsEl.textContent = '(' + Math.round(e.clientX - r.left) + ', ' + Math.round(e.clientY - r.top) + ')';
+});
+cvs.addEventListener('mouseleave', () => { coordsEl.textContent = '(-, -)'; });
+
+cvs.addEventListener('click', e => {
+  const r = cvs.getBoundingClientRect();
+  pnts.push({ x: e.clientX - r.left, y: e.clientY - r.top });
+  repaint();
+});
+
+// Reset
+document.getElementById('btn-reset').onclick = () => {
+  pnts = []; lines = []; circles = [];
+  repaint();
+};
+
+// Linien erstellen (CreateLines_plugin)
+document.getElementById('btn-lines').onclick = () => {
+  lines = [];
+  for (let i = 1; i < pnts.length; i += 2) {
+    lines.push({ p1: pnts[i - 1], p2: pnts[i] });
+  }
+  repaint();
+};
+
+// Polygon erstellen (CreatePolygon_plugin)
+document.getElementById('btn-polygon').onclick = () => {
+  lines = [];
+  for (let i = 1; i < pnts.length; i++) {
+    lines.push({ p1: pnts[i - 1], p2: pnts[i] });
+  }
+  if (pnts.length > 1) {
+    lines.push({ p1: pnts[0], p2: pnts[pnts.length - 1] });
+  }
+  repaint();
+};
+
+// Punkte laden (LoadPoints_plugin)
+document.getElementById('btn-load').onclick = () => document.getElementById('file-in').click();
+document.getElementById('file-in').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const fr = new FileReader();
+  fr.onload = ev => {
+    const txt = ev.target.result;
+    const re = /\((\d+),(\d+)\)/g;
+    let m;
+    while ((m = re.exec(txt)) !== null) {
+      pnts.push({ x: parseInt(m[1]), y: parseInt(m[2]) });
+    }
+    repaint();
+  };
+  fr.readAsText(f);
+  e.target.value = '';
+};
+
+// Punkte speichern (SavePoints_plugin)
+document.getElementById('btn-save').onclick = () => {
+  let s = '';
+  for (const p of pnts) s += '(' + Math.round(p.x) + ',' + Math.round(p.y) + ')\r\n';
+  const blob = new Blob([s], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'points.pts';
+  a.click();
+};
+
+// Hilfsfunktionen für Delaunay
+function circumcenter(a, b, c) {
+  const ax = a.x, ay = a.y, bx = b.x, by = b.y, cx = c.x, cy = c.y;
+  const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(D) < 1e-10) return null;
+  const ux = ((ax*ax + ay*ay) * (by - cy) + (bx*bx + by*by) * (cy - ay) + (cx*cx + cy*cy) * (ay - by)) / D;
+  const uy = ((ax*ax + ay*ay) * (cx - bx) + (bx*bx + by*by) * (ax - cx) + (cx*cx + cy*cy) * (bx - ax)) / D;
+  return { x: ux, y: uy };
+}
+
+function dist2(a, b) { return (a.x - b.x) ** 2 + (a.y - b.y) ** 2; }
+
+function bowyer_watson(pts) {
+  if (pts.length < 3) return [];
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const dx = maxX - minX, dy = maxY - minY;
+  const delta = Math.max(dx, dy) * 3;
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const sp = [
+    { x: cx, y: cy - 2 * delta },
+    { x: cx - 2 * delta, y: cy + delta },
+    { x: cx + 2 * delta, y: cy + delta }
+  ];
+  let tris = [{ a: sp[0], b: sp[1], c: sp[2] }];
+  for (const p of pts) {
+    let bad = [];
+    for (const t of tris) {
+      const cc = circumcenter(t.a, t.b, t.c);
+      if (!cc) continue;
+      if (dist2(cc, p) <= dist2(cc, t.a) + 1e-8) bad.push(t);
+    }
+    let boundary = [];
+    for (const bt of bad) {
+      const edges = [[bt.a, bt.b], [bt.b, bt.c], [bt.c, bt.a]];
+      for (const e of edges) {
+        let shared = false;
+        for (const bt2 of bad) {
+          if (bt2 === bt) continue;
+          const e2 = [[bt2.a, bt2.b], [bt2.b, bt2.c], [bt2.c, bt2.a]];
+          for (const f of e2) {
+            if ((e[0] === f[0] && e[1] === f[1]) || (e[0] === f[1] && e[1] === f[0])) { shared = true; break; }
+          }
+          if (shared) break;
+        }
+        if (!shared) boundary.push(e);
+      }
+    }
+    tris = tris.filter(t => !bad.includes(t));
+    for (const e of boundary) tris.push({ a: e[0], b: e[1], c: p });
+  }
+  return tris.filter(t => ![t.a, t.b, t.c].some(v => sp.includes(v)));
+}
+
+// Delaunay-Triangulation (DelaunayTriang_plugin)
+document.getElementById('btn-delaunay').onclick = () => {
+  lines = [];
+  if (pnts.length < 3) {
+    infoEl.textContent = 'Mindestens 3 Punkte benötigt.';
+    return;
+  }
+  const tris = bowyer_watson(pnts);
+  for (const t of tris) {
+    lines.push({ p1: t.a, p2: t.b });
+    lines.push({ p1: t.b, p2: t.c });
+    lines.push({ p1: t.c, p2: t.a });
+  }
+  infoEl.textContent = 'Delaunay: ' + tris.length + ' Dreiecke, ' + lines.length + ' Kanten';
+  repaint();
+};
+
+resize();
+</script>
+</body>
+</html>
