@@ -6,54 +6,225 @@
 <title>AlgoGeo — Andre Betz 2006 (JS Port)</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:sans-serif;background:#f0f0f0;display:flex;flex-direction:column;height:100vh}
-#menubar{display:flex;align-items:center;gap:4px;padding:5px 10px;background:#e8e8e8;border-bottom:1px solid #ccc;flex-wrap:wrap}
-#menubar span{font-size:13px;font-weight:bold;color:#333;margin-right:6px}
-.mbtn{font-size:12px;padding:4px 10px;border:1px solid #bbb;border-radius:4px;background:#fff;color:#222;cursor:pointer}
-.mbtn:hover{background:#d8eaff}
-.mbtn.active{background:#b3d4f5;border-color:#5599dd}
+body{font-family:sans-serif;background:#f0f0f0;display:flex;flex-direction:column;height:100vh;overflow:hidden}
+#menubar{display:flex;align-items:center;gap:4px;padding:5px 10px;background:#e0e0e0;border-bottom:1px solid #bbb;flex-wrap:wrap}
+#menubar .group{display:flex;align-items:center;gap:3px;padding:0 6px;border-right:1px solid #bbb}
+#menubar .group:last-child{border-right:none}
+#menubar .glabel{font-size:11px;color:#888;margin-right:2px;white-space:nowrap}
+.mbtn{font-size:12px;padding:4px 9px;border:1px solid #bbb;border-radius:4px;background:#fff;color:#222;cursor:pointer;white-space:nowrap}
+.mbtn:hover{background:#d8eaff;border-color:#88aadd}
 #canvas-wrap{flex:1;position:relative;overflow:hidden}
 #cvs{display:block;width:100%;height:100%;cursor:crosshair}
-#statusbar{display:flex;align-items:center;gap:16px;padding:4px 10px;background:#e8e8e8;border-top:1px solid #ccc;font-size:12px;color:#555}
-#coords{min-width:90px}
+#statusbar{display:flex;align-items:center;gap:16px;padding:4px 10px;background:#e0e0e0;border-top:1px solid #bbb;font-size:12px;color:#555}
+#coords{min-width:90px;font-family:monospace}
+#avl-panel{position:absolute;top:8px;right:8px;width:260px;background:rgba(255,255,255,0.96);border:1px solid #bbb;border-radius:6px;padding:8px;font-size:11px;font-family:monospace;display:none;max-height:340px;overflow-y:auto;box-shadow:2px 2px 8px rgba(0,0,0,0.1)}
+#avl-panel h3{font-size:12px;font-weight:bold;margin-bottom:6px;color:#333;font-family:sans-serif}
+#avl-tree-vis{white-space:pre;line-height:1.4;color:#333}
 </style>
 </head>
 <body>
 
 <div id="menubar">
-  <span>AlgoGeo</span>
-  <button class="mbtn" id="btn-reset">Reset</button>
-  <button class="mbtn" id="btn-load">Punkte laden (.pts)</button>
-  <button class="mbtn" id="btn-save">Punkte speichern</button>
-  <button class="mbtn" id="btn-lines">Linien erstellen</button>
-  <button class="mbtn" id="btn-polygon">Polygon erstellen</button>
-  <button class="mbtn" id="btn-delaunay">Delaunay-Triangulation</button>
+  <div class="group">
+    <span class="glabel">Datei</span>
+    <button class="mbtn" id="btn-reset">Reset</button>
+    <button class="mbtn" id="btn-load">Laden (.pts)</button>
+    <button class="mbtn" id="btn-save">Speichern</button>
+  </div>
+  <div class="group">
+    <span class="glabel">Grundformen</span>
+    <button class="mbtn" id="btn-lines">Linien</button>
+    <button class="mbtn" id="btn-polygon">Polygon</button>
+  </div>
+  <div class="group">
+    <span class="glabel">Algorithmen</span>
+    <button class="mbtn" id="btn-convex">Konvexe Hülle</button>
+    <button class="mbtn" id="btn-triang">Triangulation</button>
+    <button class="mbtn" id="btn-delaunay">Delaunay</button>
+    <button class="mbtn" id="btn-intersect">Linienschnittpunkte</button>
+  </div>
+  <div class="group">
+    <span class="glabel">Datenstruktur</span>
+    <button class="mbtn" id="btn-avl">AVL-Baum</button>
+  </div>
 </div>
 
 <div id="canvas-wrap">
   <canvas id="cvs"></canvas>
+  <div id="avl-panel">
+    <h3>AVL-Baum (X-Koordinaten)</h3>
+    <div id="avl-tree-vis"></div>
+  </div>
 </div>
 
 <div id="statusbar">
   <span id="coords">(-, -)</span>
-  <span id="info">Klick zum Hinzufügen von Punkten · 0 Punkte</span>
+  <span id="info">Klick zum Hinzufügen von Punkten</span>
 </div>
 
 <input type="file" id="file-in" accept=".pts" style="display:none">
 
 <script>
-const cvs = document.getElementById('cvs');
-const ctx = cvs.getContext('2d');
+// ─── AVL-Baum (portiert aus AVLTree.java) ──────────────────────────────────
+class AVLNode {
+  constructor(obj) {
+    this.obj = obj;
+    this.left = null;
+    this.right = null;
+    this.parent = null;
+    this.height = 0;
+    this.isRight = false;
+    this.deleted = false;
+  }
+}
+
+class AVLTree {
+  constructor(cmp) {
+    this.cmp = cmp;  // function(a,b) -> number
+    this.root = null;
+    this.activeCount = 0;
+  }
+
+  clear() { this.root = null; this.activeCount = 0; }
+  size()  { return this.activeCount; }
+
+  _height(n) { return n == null ? -1 : n.height; }
+  _max(a, b) { return a > b ? a : b; }
+
+  insert(obj) {
+    this.root = this._insert(obj, this.root);
+    if (this.root) this.root.parent = null;
+  }
+
+  _insert(obj, n) {
+    if (n == null) {
+      this.activeCount++;
+      return new AVLNode(obj);
+    }
+    const c = this.cmp(obj, n.obj);
+    if (c >= 0) {
+      n.right = this._insert(obj, n.right);
+      if (n.right) { n.right.isRight = true; n.right.parent = n; }
+      if (this._height(n.right) - this._height(n.left) === 2) {
+        if (this.cmp(obj, n.right.obj) >= 0) n = this._rotateWithRightChild(n);
+        else n = this._doubleWithRightChild(n);
+      }
+    } else {
+      n.left = this._insert(obj, n.left);
+      if (n.left) { n.left.isRight = false; n.left.parent = n; }
+      if (this._height(n.left) - this._height(n.right) === 2) {
+        if (this.cmp(obj, n.left.obj) < 0) n = this._rotateWithLeftChild(n);
+        else n = this._doubleWithLeftChild(n);
+      }
+    }
+    n.height = this._max(this._height(n.left), this._height(n.right)) + 1;
+    return n;
+  }
+
+  _rotateWithLeftChild(k2) {
+    const k1 = k2.left;
+    k2.left = k1.right;
+    if (k1.right) { k1.right.parent = k2; k1.right.isRight = false; }
+    k1.right = k2;
+    k2.height = this._max(this._height(k2.left), this._height(k2.right)) + 1;
+    k1.height = this._max(this._height(k1.left), k2.height) + 1;
+    return k1;
+  }
+
+  _rotateWithRightChild(k1) {
+    const k2 = k1.right;
+    k1.right = k2.left;
+    if (k2.left) { k2.left.parent = k1; k2.left.isRight = true; }
+    k2.left = k1;
+    k1.height = this._max(this._height(k1.left), this._height(k1.right)) + 1;
+    k2.height = this._max(this._height(k2.right), k1.height) + 1;
+    return k2;
+  }
+
+  _doubleWithLeftChild(k)  { k.left  = this._rotateWithRightChild(k.left);  return this._rotateWithLeftChild(k); }
+  _doubleWithRightChild(k) { k.right = this._rotateWithLeftChild(k.right); return this._rotateWithRightChild(k); }
+
+  softDelete(node) {
+    if (node && !node.deleted) { node.deleted = true; this.activeCount--; }
+  }
+
+  smallest() { return this._smallest(this.root); }
+  greatest() { return this._greatest(this.root); }
+  _smallest(n) { let r=null; while(n){r=n;n=n.left;} return r; }
+  _greatest(n) { let r=null; while(n){r=n;n=n.right;} return r; }
+
+  next(n) {
+    if (!n) return null;
+    if (n.right) return this._smallest(n.right);
+    // go up while we came from the right
+    let p = n.parent;
+    while (p && n === p.right) { n = p; p = p.parent; }
+    return p;
+  }
+
+  prev(n) {
+    if (!n) return null;
+    if (n.left) return this._greatest(n.left);
+    let p = n.parent;
+    while (p && n === p.left) { n = p; p = p.parent; }
+    return p;
+  }
+
+  getFirst() {
+    let n = this.smallest();
+    while (n && n.deleted) n = this.next(n);
+    return n;
+  }
+
+  getNext(n) {
+    n = this.next(n);
+    while (n && n.deleted) n = this.next(n);
+    return n;
+  }
+
+  find(obj) {
+    let n = this.root;
+    while (n) {
+      const c = this.cmp(obj, n.obj);
+      if (c < 0) n = n.left;
+      else if (c > 0) n = n.right;
+      else return n;
+    }
+    return null;
+  }
+
+  // In-order traversal for display
+  toStringLines() {
+    const lines = [];
+    this._inorder(this.root, 0, lines);
+    return lines;
+  }
+  _inorder(n, depth, lines) {
+    if (!n) return;
+    this._inorder(n.left, depth+1, lines);
+    const prefix = '  '.repeat(depth);
+    const del = n.deleted ? ' [del]' : '';
+    const bal = this._height(n.right) - this._height(n.left);
+    lines.push(prefix + String(n.obj).padEnd(6) + '  h:' + n.height + ' b:' + (bal>=0?'+':'')+bal + del);
+    this._inorder(n.right, depth+1, lines);
+  }
+}
+
+// ─── Canvas Setup ──────────────────────────────────────────────────────────
+const cvs  = document.getElementById('cvs');
+const ctx  = cvs.getContext('2d');
 const wrap = document.getElementById('canvas-wrap');
 const coordsEl = document.getElementById('coords');
-const infoEl = document.getElementById('info');
+const infoEl   = document.getElementById('info');
+const avlPanel = document.getElementById('avl-panel');
+const avlVis   = document.getElementById('avl-tree-vis');
 
-let pnts = [], lines = [], circles = [];
+let pnts = [], lines = [], circles = [], highlights = [];
+let avlVisible = false;
 
 function resize() {
   const r = wrap.getBoundingClientRect();
-  cvs.width = r.width;
-  cvs.height = r.height;
+  cvs.width = r.width; cvs.height = r.height;
   repaint();
 }
 window.addEventListener('resize', resize);
@@ -63,177 +234,265 @@ function repaint() {
   ctx.clearRect(0, 0, W, H);
 
   // Grid
-  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  ctx.strokeStyle = 'rgba(0,0,0,0.09)';
   ctx.lineWidth = 0.5;
-  for (let x = 0; x < W; x += 20) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
-  for (let y = 0; y < H; y += 20) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  for (let x=0; x<W; x+=20) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y=0; y<H; y+=20) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
 
-  // Lines (green)
+  // Lines (grün)
   ctx.strokeStyle = '#1a8a1a';
   ctx.lineWidth = 1.5;
   for (const l of lines) {
-    ctx.beginPath(); ctx.moveTo(l.p1.x, l.p1.y); ctx.lineTo(l.p2.x, l.p2.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(l.p1.x,l.p1.y); ctx.lineTo(l.p2.x,l.p2.y); ctx.stroke();
   }
 
-  // Circles (blue)
-  ctx.strokeStyle = '#185FA5';
+  // Highlight-Linien (z.B. konvexe Hülle — blau, dicker)
+  ctx.strokeStyle = '#1155cc';
+  ctx.lineWidth = 2.5;
+  for (const l of highlights) {
+    ctx.beginPath(); ctx.moveTo(l.p1.x,l.p1.y); ctx.lineTo(l.p2.x,l.p2.y); ctx.stroke();
+  }
+
+  // Schnittpunkte (orange Kreis)
+  ctx.strokeStyle = '#cc6600';
+  ctx.fillStyle   = '#ffaa44';
   ctx.lineWidth = 1;
   for (const c of circles) {
-    ctx.beginPath(); ctx.arc(c.x, c.y, 4, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(c.x,c.y,5,0,Math.PI*2);
+    ctx.fill(); ctx.stroke();
   }
 
-  // Points (red X)
+  // Punkte (rotes X)
   ctx.strokeStyle = '#cc2222';
   ctx.lineWidth = 1.5;
   for (const p of pnts) {
-    ctx.beginPath(); ctx.moveTo(p.x - 4, p.y - 4); ctx.lineTo(p.x + 4, p.y + 4); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(p.x - 4, p.y + 4); ctx.lineTo(p.x + 4, p.y - 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x-4,p.y-4); ctx.lineTo(p.x+4,p.y+4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x-4,p.y+4); ctx.lineTo(p.x+4,p.y-4); ctx.stroke();
   }
 
-  infoEl.textContent = pnts.length + ' Punkte · ' + lines.length + ' Linien · Klick zum Hinzufügen';
+  infoEl.textContent = pnts.length + ' Punkte · ' + lines.length + ' Linien'
+    + (circles.length ? ' · ' + circles.length + ' Schnittpunkte' : '')
+    + (highlights.length ? ' · Hülle aktiv' : '');
 }
 
 cvs.addEventListener('mousemove', e => {
   const r = cvs.getBoundingClientRect();
-  coordsEl.textContent = '(' + Math.round(e.clientX - r.left) + ', ' + Math.round(e.clientY - r.top) + ')';
+  coordsEl.textContent = '(' + Math.round(e.clientX-r.left) + ', ' + Math.round(e.clientY-r.top) + ')';
 });
-cvs.addEventListener('mouseleave', () => { coordsEl.textContent = '(-, -)'; });
-
+cvs.addEventListener('mouseleave', () => coordsEl.textContent = '(-, -)');
 cvs.addEventListener('click', e => {
   const r = cvs.getBoundingClientRect();
-  pnts.push({ x: e.clientX - r.left, y: e.clientY - r.top });
+  pnts.push({ x: e.clientX-r.left, y: e.clientY-r.top });
+  if (avlVisible) updateAvlDisplay();
   repaint();
 });
 
-// Reset
+// ─── Datei I/O ─────────────────────────────────────────────────────────────
 document.getElementById('btn-reset').onclick = () => {
-  pnts = []; lines = []; circles = [];
+  pnts=[]; lines=[]; circles=[]; highlights=[];
+  avlPanel.style.display='none'; avlVisible=false;
   repaint();
 };
 
-// Linien erstellen (CreateLines_plugin)
-document.getElementById('btn-lines').onclick = () => {
-  lines = [];
-  for (let i = 1; i < pnts.length; i += 2) {
-    lines.push({ p1: pnts[i - 1], p2: pnts[i] });
-  }
-  repaint();
-};
-
-// Polygon erstellen (CreatePolygon_plugin)
-document.getElementById('btn-polygon').onclick = () => {
-  lines = [];
-  for (let i = 1; i < pnts.length; i++) {
-    lines.push({ p1: pnts[i - 1], p2: pnts[i] });
-  }
-  if (pnts.length > 1) {
-    lines.push({ p1: pnts[0], p2: pnts[pnts.length - 1] });
-  }
-  repaint();
-};
-
-// Punkte laden (LoadPoints_plugin)
 document.getElementById('btn-load').onclick = () => document.getElementById('file-in').click();
 document.getElementById('file-in').onchange = e => {
-  const f = e.target.files[0];
-  if (!f) return;
+  const f = e.target.files[0]; if (!f) return;
   const fr = new FileReader();
   fr.onload = ev => {
-    const txt = ev.target.result;
-    const re = /\((\d+),(\d+)\)/g;
-    let m;
-    while ((m = re.exec(txt)) !== null) {
-      pnts.push({ x: parseInt(m[1]), y: parseInt(m[2]) });
-    }
+    const re = /\((\d+),(\d+)\)/g; let m;
+    while ((m=re.exec(ev.target.result))!==null)
+      pnts.push({x:parseInt(m[1]),y:parseInt(m[2])});
     repaint();
   };
-  fr.readAsText(f);
-  e.target.value = '';
+  fr.readAsText(f); e.target.value='';
 };
 
-// Punkte speichern (SavePoints_plugin)
 document.getElementById('btn-save').onclick = () => {
-  let s = '';
-  for (const p of pnts) s += '(' + Math.round(p.x) + ',' + Math.round(p.y) + ')\r\n';
-  const blob = new Blob([s], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'points.pts';
-  a.click();
+  let s='';
+  for (const p of pnts) s+='('+Math.round(p.x)+','+Math.round(p.y)+')\r\n';
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([s],{type:'text/plain'}));
+  a.download='points.pts'; a.click();
 };
 
-// Hilfsfunktionen für Delaunay
-function circumcenter(a, b, c) {
-  const ax = a.x, ay = a.y, bx = b.x, by = b.y, cx = c.x, cy = c.y;
-  const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
-  if (Math.abs(D) < 1e-10) return null;
-  const ux = ((ax*ax + ay*ay) * (by - cy) + (bx*bx + by*by) * (cy - ay) + (cx*cx + cy*cy) * (ay - by)) / D;
-  const uy = ((ax*ax + ay*ay) * (cx - bx) + (bx*bx + by*by) * (ax - cx) + (cx*cx + cy*cy) * (bx - ax)) / D;
-  return { x: ux, y: uy };
+// ─── Grundformen ───────────────────────────────────────────────────────────
+document.getElementById('btn-lines').onclick = () => {
+  lines=[]; highlights=[]; circles=[];
+  for (let i=1;i<pnts.length;i+=2) lines.push({p1:pnts[i-1],p2:pnts[i]});
+  repaint();
+};
+
+document.getElementById('btn-polygon').onclick = () => {
+  lines=[]; highlights=[]; circles=[];
+  for (let i=1;i<pnts.length;i++) lines.push({p1:pnts[i-1],p2:pnts[i]});
+  if (pnts.length>1) lines.push({p1:pnts[0],p2:pnts[pnts.length-1]});
+  repaint();
+};
+
+// ─── Konvexe Hülle (Graham Scan) ──────────────────────────────────────────
+function convexHull(pts) {
+  if (pts.length < 3) return pts.slice();
+  // Unterster (dann linkster) Punkt
+  let pivot = pts.reduce((a,b) => b.y > a.y || (b.y===a.y && b.x<a.x) ? b : a);
+  const rest = pts.filter(p => p!==pivot);
+  rest.sort((a,b) => {
+    const angA = Math.atan2(a.y-pivot.y, a.x-pivot.x);
+    const angB = Math.atan2(b.y-pivot.y, b.x-pivot.x);
+    if (angA !== angB) return angA - angB;
+    return (a.x-pivot.x)**2+(a.y-pivot.y)**2 - ((b.x-pivot.x)**2+(b.y-pivot.y)**2);
+  });
+  const hull = [pivot, rest[0]];
+  for (let i=1;i<rest.length;i++) {
+    while (hull.length>1) {
+      const a=hull[hull.length-2], b=hull[hull.length-1], c=rest[i];
+      const cross=(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);
+      if (cross<=0) hull.pop(); else break;
+    }
+    hull.push(rest[i]);
+  }
+  return hull;
 }
 
-function dist2(a, b) { return (a.x - b.x) ** 2 + (a.y - b.y) ** 2; }
+document.getElementById('btn-convex').onclick = () => {
+  highlights=[]; circles=[];
+  if (pnts.length<3) { infoEl.textContent='Mindestens 3 Punkte benötigt.'; return; }
+  const hull = convexHull(pnts);
+  highlights=[];
+  for (let i=0;i<hull.length;i++) highlights.push({p1:hull[i],p2:hull[(i+1)%hull.length]});
+  infoEl.textContent='Konvexe Hülle: '+hull.length+' Eckpunkte';
+  repaint();
+};
 
-function bowyer_watson(pts) {
-  if (pts.length < 3) return [];
-  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-  const minX = Math.min(...xs), maxX = Math.max(...xs);
-  const minY = Math.min(...ys), maxY = Math.max(...ys);
-  const dx = maxX - minX, dy = maxY - minY;
-  const delta = Math.max(dx, dy) * 3;
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const sp = [
-    { x: cx, y: cy - 2 * delta },
-    { x: cx - 2 * delta, y: cy + delta },
-    { x: cx + 2 * delta, y: cy + delta }
-  ];
-  let tris = [{ a: sp[0], b: sp[1], c: sp[2] }];
+// ─── Triangulation (naiv: Fan vom ersten Punkt) ────────────────────────────
+document.getElementById('btn-triang').onclick = () => {
+  lines=[]; highlights=[]; circles=[];
+  if (pnts.length<3) { infoEl.textContent='Mindestens 3 Punkte benötigt.'; return; }
+  // Ear-clipping / Fan-Triangulation vom konvexen Punkt aus
+  const hull = convexHull(pnts);
+  for (let i=1;i<hull.length-1;i++) {
+    lines.push({p1:hull[0],p2:hull[i]});
+    lines.push({p1:hull[i],p2:hull[i+1]});
+    lines.push({p1:hull[i+1],p2:hull[0]});
+  }
+  infoEl.textContent='Triangulation: '+(hull.length-2)+' Dreiecke';
+  repaint();
+};
+
+// ─── Delaunay-Triangulation (Bowyer-Watson) ────────────────────────────────
+function circumcenter(a,b,c) {
+  const D=2*(a.x*(b.y-c.y)+b.x*(c.y-a.y)+c.x*(a.y-b.y));
+  if (Math.abs(D)<1e-10) return null;
+  const ux=((a.x*a.x+a.y*a.y)*(b.y-c.y)+(b.x*b.x+b.y*b.y)*(c.y-a.y)+(c.x*c.x+c.y*c.y)*(a.y-b.y))/D;
+  const uy=((a.x*a.x+a.y*a.y)*(c.x-b.x)+(b.x*b.x+b.y*b.y)*(a.x-c.x)+(c.x*c.x+c.y*c.y)*(b.x-a.x))/D;
+  return {x:ux,y:uy};
+}
+function dist2(a,b){ return (a.x-b.x)**2+(a.y-b.y)**2; }
+
+function bowyerWatson(pts) {
+  if (pts.length<3) return [];
+  const xs=pts.map(p=>p.x), ys=pts.map(p=>p.y);
+  const minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys);
+  const delta=Math.max(maxX-minX,maxY-minY)*3;
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+  const sp=[{x:cx,y:cy-2*delta},{x:cx-2*delta,y:cy+delta},{x:cx+2*delta,y:cy+delta}];
+  let tris=[{a:sp[0],b:sp[1],c:sp[2]}];
   for (const p of pts) {
-    let bad = [];
+    let bad=[];
     for (const t of tris) {
-      const cc = circumcenter(t.a, t.b, t.c);
+      const cc=circumcenter(t.a,t.b,t.c);
       if (!cc) continue;
-      if (dist2(cc, p) <= dist2(cc, t.a) + 1e-8) bad.push(t);
+      if (dist2(cc,p)<=dist2(cc,t.a)+1e-8) bad.push(t);
     }
-    let boundary = [];
+    let boundary=[];
     for (const bt of bad) {
-      const edges = [[bt.a, bt.b], [bt.b, bt.c], [bt.c, bt.a]];
-      for (const e of edges) {
-        let shared = false;
+      for (const e of [[bt.a,bt.b],[bt.b,bt.c],[bt.c,bt.a]]) {
+        let shared=false;
         for (const bt2 of bad) {
-          if (bt2 === bt) continue;
-          const e2 = [[bt2.a, bt2.b], [bt2.b, bt2.c], [bt2.c, bt2.a]];
-          for (const f of e2) {
-            if ((e[0] === f[0] && e[1] === f[1]) || (e[0] === f[1] && e[1] === f[0])) { shared = true; break; }
-          }
+          if (bt2===bt) continue;
+          for (const f of [[bt2.a,bt2.b],[bt2.b,bt2.c],[bt2.c,bt2.a]])
+            if ((e[0]===f[0]&&e[1]===f[1])||(e[0]===f[1]&&e[1]===f[0])){shared=true;break;}
           if (shared) break;
         }
         if (!shared) boundary.push(e);
       }
     }
-    tris = tris.filter(t => !bad.includes(t));
-    for (const e of boundary) tris.push({ a: e[0], b: e[1], c: p });
+    tris=tris.filter(t=>!bad.includes(t));
+    for (const e of boundary) tris.push({a:e[0],b:e[1],c:p});
   }
-  return tris.filter(t => ![t.a, t.b, t.c].some(v => sp.includes(v)));
+  return tris.filter(t=>![t.a,t.b,t.c].some(v=>sp.includes(v)));
 }
 
-// Delaunay-Triangulation (DelaunayTriang_plugin)
 document.getElementById('btn-delaunay').onclick = () => {
-  lines = [];
-  if (pnts.length < 3) {
-    infoEl.textContent = 'Mindestens 3 Punkte benötigt.';
-    return;
-  }
-  const tris = bowyer_watson(pnts);
-  for (const t of tris) {
-    lines.push({ p1: t.a, p2: t.b });
-    lines.push({ p1: t.b, p2: t.c });
-    lines.push({ p1: t.c, p2: t.a });
-  }
-  infoEl.textContent = 'Delaunay: ' + tris.length + ' Dreiecke, ' + lines.length + ' Kanten';
+  lines=[]; highlights=[]; circles=[];
+  if (pnts.length<3){infoEl.textContent='Mindestens 3 Punkte benötigt.';return;}
+  const tris=bowyerWatson(pnts);
+  for (const t of tris){lines.push({p1:t.a,p2:t.b});lines.push({p1:t.b,p2:t.c});lines.push({p1:t.c,p2:t.a});}
+  infoEl.textContent='Delaunay: '+tris.length+' Dreiecke, '+lines.length+' Kanten';
   repaint();
 };
 
+// ─── Linienschnittpunkte (MyLine.Cut portiert, O(n²)) ─────────────────────
+function ptPos(p1, p2, r) {
+  // Portiert aus MyLine.PointPosition
+  const det=(p1.x*p2.y + p1.y*r.x + p2.x*r.y - r.x*p2.y - r.y*p1.x - p2.x*p1.y)*0.5;
+  return det>0?1:(det<0?-1:0);
+}
+
+function linesCut(l1, l2) {
+  // Portiert aus MyLine.Cut
+  const D1=ptPos(l1.p1,l1.p2,l2.p1);
+  const D2=ptPos(l1.p1,l1.p2,l2.p2);
+  const D3=ptPos(l2.p1,l2.p2,l1.p1);
+  const D4=ptPos(l2.p1,l2.p2,l1.p2);
+  return (D1!==D2 && D3!==D4);
+}
+
+function intersectionPoint(l1, l2) {
+  const x1=l1.p1.x,y1=l1.p1.y,x2=l1.p2.x,y2=l1.p2.y;
+  const x3=l2.p1.x,y3=l2.p1.y,x4=l2.p2.x,y4=l2.p2.y;
+  const denom=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4);
+  if (Math.abs(denom)<1e-10) return null;
+  const t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/denom;
+  return {x:x1+t*(x2-x1), y:y1+t*(y2-y1)};
+}
+
+document.getElementById('btn-intersect').onclick = () => {
+  circles=[];
+  if (lines.length<2){infoEl.textContent='Zuerst Linien erstellen.';return;}
+  for (let i=0;i<lines.length;i++){
+    for (let j=i+1;j<lines.length;j++){
+      if (linesCut(lines[i],lines[j])){
+        const ip=intersectionPoint(lines[i],lines[j]);
+        if (ip) circles.push(ip);
+      }
+    }
+  }
+  // AVL-Baum für Schnittpunkte nach X sortiert aufbauen und anzeigen
+  const avl=new AVLTree((a,b)=>a.x-b.x);
+  for (const c of circles) avl.insert(Math.round(c.x));
+  infoEl.textContent=circles.length+' Schnittpunkt(e) gefunden · AVL-Baum: '+avl.size()+' X-Werte';
+  repaint();
+};
+
+// ─── AVL-Baum Visualisierung ───────────────────────────────────────────────
+function updateAvlDisplay() {
+  const avl=new AVLTree((a,b)=>a-b);
+  for (const p of pnts) avl.insert(Math.round(p.x));
+  const lines2=avl.toStringLines();
+  avlVis.textContent=lines2.length ? lines2.join('\n') : '(leer)';
+  // Zeige auch Iteration
+  let iter=''; let n=avl.getFirst();
+  while(n){ iter+=n.obj+(avl.getNext(n)?' → ':''); n=avl.getNext(n); }
+  avlVis.textContent += '\n\nIn-Order:\n'+( iter||'–');
+}
+
+document.getElementById('btn-avl').onclick = () => {
+  avlVisible = !avlVisible;
+  avlPanel.style.display = avlVisible ? 'block' : 'none';
+  if (avlVisible) updateAvlDisplay();
+};
+
+// ─── Start ──────────────────────────────────────────────────────────────────
 resize();
 </script>
 </body>
