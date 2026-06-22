@@ -1,0 +1,1625 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANSI C → MOS 6510 Compiler</title>
+<style>
+  :root {
+    --bg: #0d0f14;
+    --panel: #161921;
+    --panel2: #1c2030;
+    --border: #2a2f42;
+    --accent: #4f9ef8;
+    --accent2: #e06c4a;
+    --accent3: #5ec478;
+    --accent4: #c678dd;
+    --text: #c8d0e0;
+    --text-dim: #6b748a;
+    --text-head: #e8edf5;
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    --font-ui: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-ui);
+    height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 0 20px; height: 52px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  header h1 {
+    font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+    color: var(--text-head); letter-spacing: 0.04em;
+  }
+  header h1 span { color: var(--accent); }
+  header h1 small { color: var(--accent2); font-size: 11px; }
+  .spacer { flex: 1; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 14px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--panel2);
+    color: var(--text); font-family: var(--font-ui); font-size: 13px;
+    cursor: pointer; transition: background .15s, border-color .15s; white-space: nowrap;
+  }
+  .btn:hover { background: #252a3a; border-color: #3a4060; }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 600; }
+  .btn.primary:hover { background: #3a8de8; }
+  .btn.secondary { border-color: var(--accent2); color: var(--accent2); }
+  .btn.secondary:hover { background: rgba(224,108,74,0.1); }
+
+  #status-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 20px; height: 32px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    font-size: 12px; color: var(--text-dim); flex-shrink: 0;
+  }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; flex-shrink: 0; }
+  .status-dot.ready { background: var(--accent3); }
+  .status-dot.error { background: var(--accent2); }
+
+  main {
+    display: grid; grid-template-columns: 1fr 300px 1fr 1fr;
+    flex: 1; overflow: hidden; min-height: 0;
+  }
+  .pane {
+    display: flex; flex-direction: column; overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+  .pane:last-child { border-right: none; }
+  .pane-header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-dim); flex-shrink: 0;
+  }
+  .pane-header .pill {
+    margin-left: auto; padding: 2px 8px; border-radius: 10px;
+    font-size: 10px; background: var(--panel2); border: 1px solid var(--border);
+  }
+  .pane-actions { margin-left: auto; display: flex; gap: 6px; }
+
+  .editor-container {
+    position: relative; flex: 1; overflow: hidden; background: #0a0c10;
+  }
+  #editor, #editor-highlight {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    padding: 14px 16px; tab-size: 4; white-space: pre;
+    overflow: auto; margin: 0; border: none;
+  }
+  #editor {
+    background: transparent; color: transparent; caret-color: #abb2bf;
+    outline: none; resize: none; z-index: 2; overflow-wrap: normal;
+    -webkit-text-fill-color: transparent;
+  }
+  #editor::selection { background: rgba(79,158,248,0.25); -webkit-text-fill-color: transparent; }
+  #editor-highlight {
+    z-index: 1; pointer-events: none; color: #abb2bf; overflow-wrap: normal;
+  }
+  /* C Syntax colors */
+  .c-keyword { color: #c678dd; font-weight: 600; }
+  .c-type { color: #e5c07b; }
+  .c-number { color: #d19a66; }
+  .c-string { color: #98c379; }
+  .c-comment { color: #5c6370; font-style: italic; }
+  .c-operator { color: #56b6c2; }
+  .c-function { color: #61afef; }
+  .c-paren { color: #abb2bf; }
+  .c-preproc { color: #e06c4a; }
+
+  .tab-bar { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .tab {
+    padding: 8px 16px; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+    cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s;
+  }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab:hover:not(.active) { color: var(--text); }
+  .tab-content { display: none; flex: 1; overflow: auto; }
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  #token-table { width: 100%; border-collapse: collapse; font-family: var(--font-mono); font-size: 11px; }
+  #token-table th {
+    position: sticky; top: 0; background: var(--panel); color: var(--text-dim);
+    font-weight: 600; text-align: left; padding: 4px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  #token-table td { padding: 2px 8px; vertical-align: top; }
+  #token-table tr:hover td { background: rgba(255,255,255,0.03); }
+  .tok-line { color: var(--text-dim); }
+  .tok-type { color: var(--accent); font-weight: 600; font-size: 10px; }
+  .tok-val { color: var(--accent3); }
+
+  #ast-pre {
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+    white-space: pre; color: var(--text); padding: 10px;
+  }
+
+  .code-wrap { flex: 1; overflow: auto; padding: 14px 16px; }
+  .code-out {
+    font-family: var(--font-mono); font-size: 13px; line-height: 1.6;
+    white-space: pre; color: #abb2bf;
+  }
+  #hex-out { font-size: 12px; line-height: 1.55; }
+
+  .asm-comment { color: #5c6370; font-style: italic; }
+  .asm-label { color: var(--accent2); font-weight: 700; }
+  .asm-mnemonic { color: var(--accent); font-weight: 600; }
+  .asm-operand { color: var(--accent3); }
+
+  .hex-addr { color: var(--accent4); font-weight: 600; }
+  .hex-bytes { color: var(--accent3); }
+  .hex-ascii { color: var(--text-dim); }
+  .hex-source { color: #5c6370; }
+
+  #error-box {
+    display: none; margin: 10px; padding: 10px 14px;
+    background: rgba(224,108,74,0.12); border: 1px solid rgba(224,108,74,0.4);
+    border-radius: 6px; font-family: var(--font-mono); font-size: 12px;
+    color: var(--accent2); white-space: pre-wrap;
+  }
+
+  .btn-icon {
+    display: inline-flex; align-items: center; padding: 4px 10px;
+    border-radius: 5px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-dim);
+    font-size: 11px; cursor: pointer; font-family: var(--font-ui); transition: background .15s;
+  }
+  .btn-icon:hover { background: var(--panel2); color: var(--text); }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #3a4060; }
+
+  /* ── Emulator Panel ── */
+  #emu-panel {
+    flex-shrink: 0; background: var(--panel);
+    border-top: 2px solid var(--accent4);
+    display: flex; flex-direction: column;
+    height: 0; overflow: hidden;
+    transition: height .3s ease;
+  }
+  #emu-panel.open { height: 260px; }
+  #emu-toggle {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 20px; background: var(--panel2);
+    border-top: 1px solid var(--border);
+    cursor: pointer; flex-shrink: 0; user-select: none;
+  }
+  #emu-toggle:hover { background: #252a3a; }
+  #emu-toggle .emu-title {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    color: var(--accent4); letter-spacing: 0.06em;
+  }
+  #emu-toggle .emu-arrow {
+    font-size: 10px; color: var(--text-dim);
+    transition: transform .3s;
+  }
+  #emu-panel.open + script { display: none; } /* dummy */
+  #emu-toggle.open .emu-arrow { transform: rotate(180deg); }
+
+  #emu-body {
+    display: grid;
+    grid-template-columns: 200px 1fr 260px;
+    gap: 0; flex: 1; overflow: hidden;
+  }
+
+  .emu-section {
+    padding: 10px 14px; overflow: auto;
+    border-right: 1px solid var(--border);
+  }
+  .emu-section:last-child { border-right: none; }
+  .emu-section h3 {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    color: var(--text-dim); letter-spacing: 0.1em; text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  /* Registers */
+  .reg-grid {
+    display: grid; grid-template-columns: 1fr 1fr;
+    gap: 4px 12px; font-family: var(--font-mono); font-size: 13px;
+  }
+  .reg-grid .reg-label { color: var(--text-dim); font-size: 11px; }
+  .reg-grid .reg-val { color: var(--accent3); font-weight: 600; }
+  .reg-grid .reg-val.changed { color: var(--accent2); }
+  .reg-pc { grid-column: 1 / -1; }
+
+  .flags-row {
+    display: flex; gap: 3px; margin-top: 10px;
+    font-family: var(--font-mono); font-size: 11px;
+  }
+  .flag-bit {
+    width: 20px; height: 20px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 3px; background: var(--panel2);
+    color: var(--text-dim); border: 1px solid var(--border);
+  }
+  .flag-bit.set { background: rgba(198,120,221,0.2); color: var(--accent4); border-color: var(--accent4); font-weight: 700; }
+
+  /* Execution trace */
+  #emu-trace {
+    font-family: var(--font-mono); font-size: 12px;
+    line-height: 1.6; white-space: pre; color: var(--text-dim);
+  }
+  #emu-trace .trace-current {
+    color: var(--text-head); background: rgba(198,120,221,0.12);
+    display: inline-block; width: 100%; border-left: 2px solid var(--accent4);
+    padding-left: 6px; margin-left: -8px;
+  }
+  #emu-trace .trace-past { color: #3a4060; }
+  #emu-trace .trace-addr { color: var(--accent4); }
+  #emu-trace .trace-bytes { color: var(--accent3); }
+  #emu-trace .trace-mnem { color: var(--accent); font-weight: 600; }
+
+  /* Memory viewer */
+  #emu-mem {
+    font-family: var(--font-mono); font-size: 11px; line-height: 1.55;
+    color: var(--text-dim);
+  }
+  #emu-mem .mem-addr { color: var(--accent4); }
+  #emu-mem .mem-val { color: var(--text); }
+  #emu-mem .mem-val.nonzero { color: var(--accent3); font-weight: 600; }
+  #emu-mem .mem-val.changed { color: var(--accent2); font-weight: 600; }
+
+  /* Controls */
+  #emu-controls {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 14px; background: var(--panel2);
+    border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .emu-btn {
+    padding: 4px 12px; border-radius: 5px;
+    border: 1px solid var(--border); background: var(--panel);
+    color: var(--text); font-family: var(--font-mono); font-size: 11px;
+    cursor: pointer; transition: background .15s;
+  }
+  .emu-btn:hover { background: #252a3a; border-color: #3a4060; }
+  .emu-btn.accent { border-color: var(--accent4); color: var(--accent4); }
+  .emu-btn.accent:hover { background: rgba(198,120,221,0.1); }
+  .emu-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  #emu-status {
+    font-family: var(--font-mono); font-size: 11px; color: var(--text-dim);
+    margin-left: auto;
+  }
+  #emu-speed-label { font-family: var(--font-mono); font-size: 10px; color: var(--text-dim); margin-left: 12px; }
+  #emu-speed { width: 80px; accent-color: var(--accent4); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span>C</span> → <span style="color:var(--accent2)">6510</span> <small>&nbsp;MOS 6510 Compiler — Standalone</small></h1>
+  <div class="spacer"></div>
+  <button class="btn secondary" id="btn-example">📄 Beispiel</button>
+  <label class="btn" style="cursor:pointer">📂 Öffnen<input type="file" id="file-input" accept=".c,.h,.txt" style="display:none"></label>
+  <button class="btn primary" id="btn-compile">▶ Kompilieren</button>
+</header>
+
+<div id="status-bar">
+  <div class="status-dot ready" id="status-dot"></div>
+  <span id="status-text">Bereit — kein Netzwerk nötig</span>
+</div>
+
+<main>
+  <!-- 1: C Source -->
+  <div class="pane">
+    <div class="pane-header">✏️&nbsp; C Quellcode <span class="pill" id="src-stats">0 Zeilen</span></div>
+    <div class="editor-container">
+      <pre id="editor-highlight" aria-hidden="true"></pre>
+      <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+    </div>
+  </div>
+
+  <!-- 2: Tokens / AST -->
+  <div class="pane" style="background:var(--panel);">
+    <div class="tab-bar">
+      <div class="tab active" data-tab="tokens">Tokens</div>
+      <div class="tab" data-tab="ast">AST</div>
+    </div>
+    <div class="tab-content active" id="tab-tokens" style="padding:0;overflow:auto;">
+      <table id="token-table"><thead><tr><th>#</th><th>Zeile</th><th>Typ</th><th>Wert</th></tr></thead><tbody id="token-body"></tbody></table>
+    </div>
+    <div class="tab-content" id="tab-ast" style="overflow:auto;"><pre id="ast-pre">— noch nicht kompiliert —</pre></div>
+    <div id="error-box"></div>
+  </div>
+
+  <!-- 3: ASM -->
+  <div class="pane">
+    <div class="pane-header">
+      ⚙️&nbsp; Assembler
+      <div class="pane-actions">
+        <button class="btn-icon" id="btn-save-asm">💾 .asm</button>
+        <button class="btn-icon" id="btn-copy-asm">📋</button>
+      </div>
+    </div>
+    <div class="code-wrap"><div class="code-out" id="asm-out"><span style="color:var(--text-dim)">— noch nicht kompiliert —</span></div></div>
+  </div>
+
+  <!-- 4: HEX / Machine Code -->
+  <div class="pane">
+    <div class="pane-header">
+      🔢&nbsp; Maschinencode
+      <div class="pane-actions">
+        <button class="btn-icon" id="btn-save-hex">💾 .hex</button>
+        <button class="btn-icon" id="btn-save-prg">💾 .prg</button>
+        <button class="btn-icon" id="btn-copy-hex">📋</button>
+      </div>
+    </div>
+    <div class="code-wrap"><div class="code-out" id="hex-out"><span style="color:var(--text-dim)">— noch nicht kompiliert —</span></div></div>
+  </div>
+</main>
+
+<div id="emu-toggle" onclick="toggleEmulator()">
+  <span class="emu-arrow">▲</span>
+  <span class="emu-title">🖥 MOS 6502 Emulator</span>
+  <span style="font-size:11px;color:var(--text-dim)">— Maschinencode Schritt für Schritt ausführen</span>
+</div>
+<div id="emu-panel">
+  <div id="emu-body">
+    <div class="emu-section">
+      <h3>Register</h3>
+      <div class="reg-grid">
+        <span class="reg-label">A</span><span class="reg-val" id="reg-a">$00</span>
+        <span class="reg-label">X</span><span class="reg-val" id="reg-x">$00</span>
+        <span class="reg-label">Y</span><span class="reg-val" id="reg-y">$00</span>
+        <span class="reg-label">SP</span><span class="reg-val" id="reg-sp">$FD</span>
+        <span class="reg-label reg-pc">PC</span><span class="reg-val reg-pc" id="reg-pc">$C000</span>
+      </div>
+      <h3 style="margin-top:12px">Flags</h3>
+      <div class="flags-row" id="flags-row">
+        <div class="flag-bit" data-f="N">N</div>
+        <div class="flag-bit" data-f="V">V</div>
+        <div class="flag-bit" data-f="-">-</div>
+        <div class="flag-bit" data-f="B">B</div>
+        <div class="flag-bit" data-f="D">D</div>
+        <div class="flag-bit" data-f="I">I</div>
+        <div class="flag-bit" data-f="Z">Z</div>
+        <div class="flag-bit" data-f="C">C</div>
+      </div>
+      <div style="margin-top:12px;font-family:var(--font-mono);font-size:11px;color:var(--text-dim)">
+        Zyklen: <span id="reg-cyc" style="color:var(--accent3)">0</span>
+      </div>
+    </div>
+    <div class="emu-section" style="overflow:auto">
+      <h3>Ausführung</h3>
+      <div id="emu-trace">— Noch nicht geladen —</div>
+    </div>
+    <div class="emu-section" style="overflow:auto">
+      <h3>Zero-Page Speicher ($00–$FF)</h3>
+      <div id="emu-mem"></div>
+    </div>
+  </div>
+  <div id="emu-controls">
+    <button class="emu-btn accent" id="emu-step" disabled>⏭ Step</button>
+    <button class="emu-btn" id="emu-run" disabled>▶ Run</button>
+    <button class="emu-btn" id="emu-stop" disabled>⏸ Stop</button>
+    <button class="emu-btn" id="emu-reset" disabled>↻ Reset</button>
+    <span id="emu-speed-label">Speed:</span>
+    <input type="range" id="emu-speed" min="1" max="100" value="50">
+    <span id="emu-status">Bereit</span>
+  </div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+//  ANSI C → MOS 6510 Compiler + Assembler  (Pure JavaScript)
+// ════════════════════════════════════════════════════════════════
+
+// ── AST Nodes ──
+class ASTNode {}
+class Program extends ASTNode { constructor(declarations) { super(); this.declarations = declarations; } }
+class FunctionDecl extends ASTNode { constructor(returnType, name, params, body) { super(); this.returnType = returnType; this.name = name; this.params = params; this.body = body; } }
+class VarDecl extends ASTNode { constructor(varType, name, initValue) { super(); this.varType = varType; this.name = name; this.initValue = initValue || null; } }
+class CompoundStmt extends ASTNode { constructor(statements) { super(); this.statements = statements; } }
+class ReturnStmt extends ASTNode { constructor(value) { super(); this.value = value; } }
+class IfStmt extends ASTNode { constructor(condition, thenStmt, elseStmt) { super(); this.condition = condition; this.thenStmt = thenStmt; this.elseStmt = elseStmt || null; } }
+class WhileStmt extends ASTNode { constructor(condition, body) { super(); this.condition = condition; this.body = body; } }
+class ForStmt extends ASTNode { constructor(init, condition, increment, body) { super(); this.init = init; this.condition = condition; this.increment = increment; this.body = body; } }
+class BinaryOp extends ASTNode { constructor(op, left, right) { super(); this.op = op; this.left = left; this.right = right; } }
+class UnaryOp extends ASTNode { constructor(op, operand) { super(); this.op = op; this.operand = operand; } }
+class Assignment extends ASTNode { constructor(target, value) { super(); this.target = target; this.value = value; } }
+class FunctionCall extends ASTNode { constructor(name, args) { super(); this.name = name; this.args = args; } }
+class Identifier extends ASTNode { constructor(name) { super(); this.name = name; } }
+class Literal extends ASTNode { constructor(value, litType) { super(); this.value = value; this.litType = litType; } }
+class ArrayDecl extends ASTNode { constructor(elementType, name, size, initValues) { super(); this.elementType = elementType; this.name = name; this.size = size; this.initValues = initValues || null; } }
+class ArrayAccess extends ASTNode { constructor(arrayName, index) { super(); this.arrayName = arrayName; this.index = index; } }
+class StructDecl extends ASTNode { constructor(name, members) { super(); this.name = name; this.members = members; } }
+class StructVarDecl extends ASTNode { constructor(structName, varName, initValue) { super(); this.structName = structName; this.varName = varName; this.initValue = initValue || null; } }
+class MemberAccess extends ASTNode { constructor(obj, member) { super(); this.object = obj; this.member = member; } }
+class PointerDecl extends ASTNode { constructor(baseType, name, initValue) { super(); this.baseType = baseType; this.name = name; this.initValue = initValue || null; } }
+class Dereference extends ASTNode { constructor(pointer) { super(); this.pointer = pointer; } }
+class AddressOf extends ASTNode { constructor(operand) { super(); this.operand = operand; } }
+
+class Token {
+  constructor(type, value, line) { this.type = type; this.value = value; this.line = line || 0; }
+  toString() { return `Token(${this.type}, ${this.value})`; }
+}
+
+// ══════════════════════════════════════
+//  LEXER
+// ══════════════════════════════════════
+class Lexer {
+  constructor(code) {
+    this.code = code; this.pos = 0; this.tokens = []; this.line = 1;
+    this.tokenize();
+  }
+  ch() { return this.pos < this.code.length ? this.code[this.pos] : null; }
+  peek(n) { const p = this.pos + (n||1); return p < this.code.length ? this.code[p] : null; }
+  advance() { if (this.pos < this.code.length) { if (this.code[this.pos]==='\n') this.line++; this.pos++; } }
+  skipWS() { while (this.ch() && ' \t\n\r'.includes(this.ch())) this.advance(); }
+  skipSLC() { this.advance(); this.advance(); while (this.ch() && this.ch()!=='\n') this.advance(); }
+  skipMLC() { this.advance(); this.advance(); while (this.ch()) { if (this.ch()==='*'&&this.peek()==='/'){this.advance();this.advance();break;} this.advance(); } }
+  readNum() { let s=''; while(this.ch()&&(this.isDig(this.ch())||this.ch()==='.')) {s+=this.ch();this.advance();} return s; }
+  readStr() { let s=''; this.advance(); while(this.ch()&&this.ch()!=='"'){s+=this.ch();this.advance();} if(this.ch()==='"')this.advance(); return '"'+s+'"'; }
+  readId() { let s=''; while(this.ch()&&(this.isAn(this.ch())||this.ch()==='_')){s+=this.ch();this.advance();} return s; }
+  isDig(c){return c>='0'&&c<='9';} isAl(c){return(c>='a'&&c<='z')||(c>='A'&&c<='Z')||c==='_';} isAn(c){return this.isDig(c)||this.isAl(c);}
+  isKw(w){return['int','float','void','return','if','else','while','for','struct'].includes(w);}
+  tokenize() {
+    const sc={'(':'LPAREN',')':'RPAREN','{':'LBRACE','}':'RBRACE','[':'LBRACKET',']':'RBRACKET',';':'SEMICOLON',',':'COMMA','.':'DOT','=':'ASSIGN','+':'PLUS','-':'MINUS','*':'MULT','/':'DIV','<':'LT','>':'GT','&':'AMPERSAND'};
+    while(this.pos<this.code.length){
+      this.skipWS(); const c=this.ch(); if(c===null)break;
+      if(c==='/'&&this.peek()==='/'){this.skipSLC();continue;} if(c==='/'&&this.peek()==='*'){this.skipMLC();continue;}
+      if(this.isDig(c)){this.tokens.push(new Token('NUMBER',this.readNum(),this.line));continue;}
+      if(c==='"'){this.tokens.push(new Token('STRING',this.readStr(),this.line));continue;}
+      if(this.isAl(c)){const w=this.readId();this.tokens.push(new Token(this.isKw(w)?'KEYWORD':'IDENTIFIER',w,this.line));continue;}
+      if(c==='<'&&this.peek()==='='){this.tokens.push(new Token('LE','<=',this.line));this.advance();this.advance();continue;}
+      if(c==='>'&&this.peek()==='='){this.tokens.push(new Token('GE','>=',this.line));this.advance();this.advance();continue;}
+      if(c==='='&&this.peek()==='='){this.tokens.push(new Token('EQ','==',this.line));this.advance();this.advance();continue;}
+      if(c==='!'&&this.peek()==='='){this.tokens.push(new Token('NE','!=',this.line));this.advance();this.advance();continue;}
+      if(c in sc){this.tokens.push(new Token(sc[c],c,this.line));this.advance();continue;}
+      throw new SyntaxError(`Unbekanntes Zeichen: '${c}' in Zeile ${this.line}`);
+    }
+  }
+}
+
+// ══════════════════════════════════════
+//  PARSER
+// ══════════════════════════════════════
+class Parser {
+  constructor(tokens){this.tokens=tokens;this.pos=0;}
+  cur(){return this.pos<this.tokens.length?this.tokens[this.pos]:null;}
+  consume(et){const t=this.cur();if(!t)throw new SyntaxError("Unerwartetes Ende der Eingabe");if(et&&t.type!==et)throw new SyntaxError(`Erwartet ${et}, erhalten ${t.type} ('${t.value}') in Zeile ${t.line}`);this.pos++;return t;}
+  match(...ts){const t=this.cur();return t?ts.includes(t.type):false;}
+  parse(){const d=[];while(this.cur())d.push(this.parseDeclaration());return new Program(d);}
+  parseDeclaration(){
+    const t=this.cur();
+    if(t&&t.type==='KEYWORD'&&t.value==='struct')return this.parseStructDeclaration();
+    if(t&&t.type==='KEYWORD'){const tt=this.consume('KEYWORD');if(this.match('MULT'))return this.parsePtrOrVar(tt.value);const nt=this.consume('IDENTIFIER');if(this.match('LPAREN'))return this.parseFunction(tt.value,nt.value);if(this.match('LBRACKET'))return this.parseArrayDecl(tt.value,nt.value);return this.parseVariable(tt.value,nt.value);}
+    throw new SyntaxError(`Unerwartetes Token bei Deklaration: ${t}`);
+  }
+  parseFunction(rt,n){this.consume('LPAREN');const p=[];if(!this.match('RPAREN')){p.push(this.parseParam());while(this.match('COMMA')){this.consume('COMMA');p.push(this.parseParam());}}this.consume('RPAREN');return new FunctionDecl(rt,n,p,this.parseCompound());}
+  parseParam(){let vt=this.consume('KEYWORD').value;let ip=false;if(this.match('MULT')){this.consume('MULT');ip=true;}const vn=this.consume('IDENTIFIER').value;if(this.match('LBRACKET')){this.consume('LBRACKET');if(!this.match('RBRACKET'))this.parseExpr();this.consume('RBRACKET');vt+='[]';}else if(ip)vt+='*';return new VarDecl(vt,vn);}
+  parseVariable(vt,vn){let iv=null;if(this.match('ASSIGN')){this.consume('ASSIGN');iv=this.parseExpr();}this.consume('SEMICOLON');return new VarDecl(vt,vn,iv);}
+  parsePtrOrVar(vt){let ip=false;if(this.match('MULT')){this.consume('MULT');ip=true;}const vn=this.consume('IDENTIFIER').value;if(ip){let iv=null;if(this.match('ASSIGN')){this.consume('ASSIGN');iv=this.parseExpr();}this.consume('SEMICOLON');return new PointerDecl(vt,vn,iv);}return this.parseVariable(vt,vn);}
+  parseArrayDecl(et,an){this.consume('LBRACKET');let sz=null;if(!this.match('RBRACKET'))sz=this.parseExpr();this.consume('RBRACKET');let iv=null;if(this.match('ASSIGN')){this.consume('ASSIGN');this.consume('LBRACE');iv=[];if(!this.match('RBRACE')){iv.push(this.parseExpr());while(this.match('COMMA')){this.consume('COMMA');if(this.match('RBRACE'))break;iv.push(this.parseExpr());}}this.consume('RBRACE');}this.consume('SEMICOLON');return new ArrayDecl(et,an,sz,iv);}
+  parseStructDeclaration(){this.consume('KEYWORD');const sn=this.consume('IDENTIFIER').value;if(this.match('LBRACE')){this.consume('LBRACE');const m=[];while(!this.match('RBRACE')){const mt=this.consume('KEYWORD').value;const mn=this.consume('IDENTIFIER').value;if(this.match('LBRACKET')){this.consume('LBRACKET');if(!this.match('RBRACKET'))this.parseExpr();this.consume('RBRACKET');m.push(new VarDecl(mt+'[]',mn));}else m.push(new VarDecl(mt,mn));this.consume('SEMICOLON');}this.consume('RBRACE');this.consume('SEMICOLON');return new StructDecl(sn,m);}else{const vn=this.consume('IDENTIFIER').value;let iv=null;if(this.match('ASSIGN')){this.consume('ASSIGN');iv=this.parseExpr();}this.consume('SEMICOLON');return new StructVarDecl(sn,vn,iv);}}
+  parseCompound(){this.consume('LBRACE');const s=[];while(!this.match('RBRACE'))s.push(this.parseStmt());this.consume('RBRACE');return new CompoundStmt(s);}
+  parseStmt(){
+    const t=this.cur();if(!t)throw new SyntaxError("Unerwartetes Ende in Statement");
+    if(t.type==='KEYWORD'){
+      if(t.value==='return')return this.parseReturn();if(t.value==='if')return this.parseIf();if(t.value==='while')return this.parseWhile();if(t.value==='for')return this.parseFor();if(t.value==='struct')return this.parseStructDeclaration();
+      if(['int','float','void'].includes(t.value)){const tv=this.consume('KEYWORD').value;if(this.match('MULT'))return this.parsePtrOrVar(tv);const nv=this.consume('IDENTIFIER').value;if(this.match('LBRACKET'))return this.parseArrayDecl(tv,nv);return this.parseVariable(tv,nv);}
+    }
+    if(this.match('LBRACE'))return this.parseCompound();
+    if(this.match('IDENTIFIER')){
+      const n=this.cur().value;this.consume('IDENTIFIER');
+      if(this.match('LBRACKET')){this.consume('LBRACKET');const idx=this.parseExpr();this.consume('RBRACKET');if(this.match('DOT')){this.consume('DOT');const mb=this.consume('IDENTIFIER').value;this.consume('ASSIGN');const v=this.parseExpr();this.consume('SEMICOLON');return new Assignment(`${n}[index].${mb}`,v);}this.consume('ASSIGN');const v=this.parseExpr();this.consume('SEMICOLON');return new Assignment(`${n}[index]`,v);}
+      if(this.match('DOT')){const ms=[n];while(this.match('DOT')){this.consume('DOT');ms.push(this.consume('IDENTIFIER').value);}this.consume('ASSIGN');const v=this.parseExpr();this.consume('SEMICOLON');return new Assignment(ms.join('.'),v);}
+      if(this.match('ASSIGN')){this.consume('ASSIGN');const v=this.parseExpr();this.consume('SEMICOLON');return new Assignment(n,v);}
+      if(this.match('LPAREN')){this.pos--;const e=this.parseExpr();this.consume('SEMICOLON');return e;}
+    }
+    if(this.match('MULT')){this.consume('MULT');const pn=this.consume('IDENTIFIER').value;this.consume('ASSIGN');const v=this.parseExpr();this.consume('SEMICOLON');return new Assignment('*'+pn,v);}
+    throw new SyntaxError(`Unerwartetes Token: ${t}`);
+  }
+  parseReturn(){this.consume('KEYWORD');let v=null;if(!this.match('SEMICOLON'))v=this.parseExpr();this.consume('SEMICOLON');return new ReturnStmt(v);}
+  parseIf(){this.consume('KEYWORD');this.consume('LPAREN');const c=this.parseExpr();this.consume('RPAREN');const th=this.parseStmt();let el=null;if(this.match('KEYWORD')&&this.cur().value==='else'){this.consume('KEYWORD');el=this.parseStmt();}return new IfStmt(c,th,el);}
+  parseWhile(){this.consume('KEYWORD');this.consume('LPAREN');const c=this.parseExpr();this.consume('RPAREN');return new WhileStmt(c,this.parseStmt());}
+  parseFor(){this.consume('KEYWORD');this.consume('LPAREN');let ini=null;if(!this.match('SEMICOLON')){if(this.match('KEYWORD')){const tv=this.consume('KEYWORD').value;const nv=this.consume('IDENTIFIER').value;let iv=null;if(this.match('ASSIGN')){this.consume('ASSIGN');iv=this.parseExpr();}ini=new VarDecl(tv,nv,iv);}else{const nm=this.consume('IDENTIFIER').value;this.consume('ASSIGN');ini=new Assignment(nm,this.parseExpr());}}this.consume('SEMICOLON');let cond=null;if(!this.match('SEMICOLON'))cond=this.parseExpr();this.consume('SEMICOLON');let incr=null;if(!this.match('RPAREN')){const nm=this.consume('IDENTIFIER').value;if(this.match('ASSIGN')){this.consume('ASSIGN');incr=new Assignment(nm,this.parseExpr());}else{this.pos--;incr=this.parseExpr();}}this.consume('RPAREN');return new ForStmt(ini,cond,incr,this.parseStmt());}
+  parseExpr(){return this.parseCmp();}
+  parseCmp(){let l=this.parseAdd();while(this.match('LT','GT','LE','GE','EQ','NE')){const o=this.consume().value;l=new BinaryOp(o,l,this.parseAdd());}return l;}
+  parseAdd(){let l=this.parseMul();while(this.match('PLUS','MINUS')){const o=this.consume().value;l=new BinaryOp(o,l,this.parseMul());}return l;}
+  parseMul(){let l=this.parseUn();while(this.match('MULT','DIV')){const o=this.consume().value;l=new BinaryOp(o,l,this.parseUn());}return l;}
+  parseUn(){if(this.match('MINUS')){this.consume();return new UnaryOp('-',this.parseUn());}if(this.match('MULT')){this.consume('MULT');return new Dereference(this.parseUn());}if(this.match('AMPERSAND')){this.consume('AMPERSAND');return new AddressOf(this.parsePrim());}return this.parsePrim();}
+  parsePrim(){
+    const t=this.cur();
+    if(t.type==='NUMBER'){this.consume();const f=t.value.includes('.');return new Literal(f?parseFloat(t.value):parseInt(t.value,10),f?'float':'int');}
+    if(t.type==='STRING'){this.consume();return new Literal(t.value.slice(1,-1),'string');}
+    if(t.type==='IDENTIFIER'){const n=t.value;this.consume();if(this.match('LBRACKET')){this.consume('LBRACKET');const i=this.parseExpr();this.consume('RBRACKET');let r=new ArrayAccess(n,i);while(this.match('DOT')){this.consume('DOT');r=new MemberAccess(r,this.consume('IDENTIFIER').value);}return r;}if(this.match('DOT')){let r=new Identifier(n);while(this.match('DOT')){this.consume('DOT');r=new MemberAccess(r,this.consume('IDENTIFIER').value);}return r;}if(this.match('LPAREN')){this.consume('LPAREN');const a=[];if(!this.match('RPAREN')){a.push(this.parseExpr());while(this.match('COMMA')){this.consume('COMMA');a.push(this.parseExpr());}}this.consume('RPAREN');return new FunctionCall(n,a);}return new Identifier(n);}
+    if(this.match('LPAREN')){this.consume('LPAREN');const e=this.parseExpr();this.consume('RPAREN');return e;}
+    throw new SyntaxError(`Unerwartetes Token: ${t}`);
+  }
+}
+
+// ══════════════════════════════════════
+//  AST → String
+// ══════════════════════════════════════
+function astToString(node, indent) {
+  indent=indent||0; const p='  '.repeat(indent), L=[];
+  if(node instanceof Program){L.push(p+'Program:');node.declarations.forEach(d=>L.push(...astToString(d,indent+1)));}
+  else if(node instanceof FunctionDecl){L.push(`${p}FunctionDecl: ${node.returnType} ${node.name}`);L.push(p+'  Parameters:');node.params.forEach(pr=>L.push(...astToString(pr,indent+2)));L.push(p+'  Body:');L.push(...astToString(node.body,indent+2));}
+  else if(node instanceof VarDecl){L.push(`${p}VarDecl: ${node.varType} ${node.name}${node.initValue?' = ...':''}`);if(node.initValue)L.push(...astToString(node.initValue,indent+1));}
+  else if(node instanceof CompoundStmt){L.push(p+'CompoundStmt:');node.statements.forEach(s=>L.push(...astToString(s,indent+1)));}
+  else if(node instanceof ReturnStmt){L.push(p+'ReturnStmt:');if(node.value)L.push(...astToString(node.value,indent+1));}
+  else if(node instanceof IfStmt){L.push(p+'IfStmt:');L.push(p+'  Condition:');L.push(...astToString(node.condition,indent+2));L.push(p+'  Then:');L.push(...astToString(node.thenStmt,indent+2));if(node.elseStmt){L.push(p+'  Else:');L.push(...astToString(node.elseStmt,indent+2));}}
+  else if(node instanceof WhileStmt){L.push(p+'WhileStmt:');L.push(p+'  Condition:');L.push(...astToString(node.condition,indent+2));L.push(p+'  Body:');L.push(...astToString(node.body,indent+2));}
+  else if(node instanceof ForStmt){L.push(p+'ForStmt:');if(node.init){L.push(p+'  Init:');L.push(...astToString(node.init,indent+2));}if(node.condition){L.push(p+'  Condition:');L.push(...astToString(node.condition,indent+2));}if(node.increment){L.push(p+'  Increment:');L.push(...astToString(node.increment,indent+2));}L.push(p+'  Body:');L.push(...astToString(node.body,indent+2));}
+  else if(node instanceof ArrayDecl){const sz=node.size?`[${node.size instanceof Literal?node.size.value:'?'}]`:'[]';L.push(`${p}ArrayDecl: ${node.elementType} ${node.name}${sz}`);if(node.initValues){L.push(p+'  Initializers:');node.initValues.forEach(v=>L.push(...astToString(v,indent+2)));}}
+  else if(node instanceof ArrayAccess){L.push(`${p}ArrayAccess: ${node.arrayName}`);L.push(p+'  Index:');L.push(...astToString(node.index,indent+2));}
+  else if(node instanceof StructDecl){L.push(`${p}StructDecl: ${node.name}`);L.push(p+'  Members:');node.members.forEach(m=>L.push(...astToString(m,indent+2)));}
+  else if(node instanceof StructVarDecl){L.push(`${p}StructVarDecl: struct ${node.structName} ${node.varName}`);if(node.initValue){L.push(p+'  Init:');L.push(...astToString(node.initValue,indent+2));}}
+  else if(node instanceof MemberAccess){L.push(`${p}MemberAccess: .${node.member}`);L.push(p+'  Object:');L.push(...astToString(node.object,indent+2));}
+  else if(node instanceof PointerDecl){L.push(`${p}PointerDecl: ${node.baseType}* ${node.name}`);if(node.initValue){L.push(p+'  Init:');L.push(...astToString(node.initValue,indent+1));}}
+  else if(node instanceof Dereference){L.push(p+'Dereference: *');L.push(...astToString(node.pointer,indent+1));}
+  else if(node instanceof AddressOf){L.push(p+'AddressOf: &');L.push(...astToString(node.operand,indent+1));}
+  else if(node instanceof BinaryOp){L.push(`${p}BinaryOp: ${node.op}`);L.push(...astToString(node.left,indent+1));L.push(...astToString(node.right,indent+1));}
+  else if(node instanceof UnaryOp){L.push(`${p}UnaryOp: ${node.op}`);L.push(...astToString(node.operand,indent+1));}
+  else if(node instanceof Assignment){L.push(`${p}Assignment: ${node.target} =`);L.push(...astToString(node.value,indent+1));}
+  else if(node instanceof FunctionCall){L.push(`${p}FunctionCall: ${node.name}`);node.args.forEach(a=>L.push(...astToString(a,indent+1)));}
+  else if(node instanceof Identifier){L.push(`${p}Identifier: ${node.name}`);}
+  else if(node instanceof Literal){L.push(`${p}Literal: ${node.value} (${node.litType})`);}
+  return L;
+}
+
+// ══════════════════════════════════════
+//  CODE GENERATOR — MOS 6510
+// ══════════════════════════════════════
+class CodeGenerator6510 {
+  constructor(){this.code=[];this.labelCounter=0;this.zeroPageOffset=0x02;this.varToZp={};this.tempCounter=0;this.arrayBaseAddresses={};this.currentMemoryOffset=0x0400;}
+  newLabel(p){return(p||'L')+(this.labelCounter++);}
+  allocZP(vn){if(!(vn in this.varToZp)){this.varToZp[vn]=this.zeroPageOffset;this.zeroPageOffset++;if(this.zeroPageOffset>0xFF)throw new Error("Zero-Page voll!");}return this.varToZp[vn];}
+  emit(l){this.code.push(l);}
+  h2(n){return n.toString(16).toUpperCase().padStart(2,'0');}
+  h4(n){return n.toString(16).toUpperCase().padStart(4,'0');}
+
+  generate(node){
+    if(node instanceof Program){this.emit('; MOS 6510 Assembler Code');this.emit('; Generiert aus C-Code');this.emit('');node.declarations.forEach(d=>this.generate(d));return this.code.join('\n');}
+    if(node instanceof FunctionDecl){this.emit(`; Funktion: ${node.returnType} ${node.name}`);this.emit(`${node.name}:`);node.params.forEach(p=>{const z=this.allocZP(p.name);this.emit(`    ; Parameter ${p.name} bei $${this.h2(z)}`);});this.generate(node.body);this.emit('    RTS');this.emit('');return;}
+    if(node instanceof CompoundStmt){node.statements.forEach(s=>this.generate(s));return;}
+    if(node instanceof VarDecl){const z=this.allocZP(node.name);this.emit(`    ; Variable ${node.varType} ${node.name} bei $${this.h2(z)}`);if(node.initValue){this.genExpr(node.initValue);this.emit(`    STA $${this.h2(z)}    ; ${node.name} = Akkumulator`);}return;}
+    if(node instanceof ArrayDecl){let as;if(node.size&&node.size instanceof Literal)as=node.size.value;else as=node.initValues?node.initValues.length:10;this.arrayBaseAddresses[node.name]=this.currentMemoryOffset;this.emit(`    ; Array ${node.elementType} ${node.name}[${as}] bei $${this.h4(this.currentMemoryOffset)}`);const pl=this.allocZP(`${node.name}_ptr_lo`),ph=this.allocZP(`${node.name}_ptr_hi`);this.emit(`    LDA #<$${this.h4(this.currentMemoryOffset)}`);this.emit(`    STA $${this.h2(pl)}`);this.emit(`    LDA #>$${this.h4(this.currentMemoryOffset)}`);this.emit(`    STA $${this.h2(ph)}`);if(node.initValues)node.initValues.forEach((v,i)=>{if(v instanceof Literal){const a=this.currentMemoryOffset+i;this.emit(`    LDA #$${this.h2(v.value&0xFF)}`);this.emit(`    STA $${this.h4(a)}`);}});this.currentMemoryOffset+=as;return;}
+    if(node instanceof PointerDecl){const pl=this.allocZP(`${node.name}_lo`),ph=this.allocZP(`${node.name}_hi`);this.emit(`    ; Pointer ${node.baseType}* ${node.name} bei $${this.h2(pl)}/$${this.h2(ph)}`);if(node.initValue){this.genExpr(node.initValue);this.emit(`    STA $${this.h2(pl)}`);this.emit(`    STX $${this.h2(ph)}`);}return;}
+    if(node instanceof Assignment){this.genExpr(node.value);const vn=node.target;if(vn.startsWith('*')){const pn=vn.slice(1),pl=this.varToZp[pn+'_lo'],ph=this.varToZp[pn+'_hi'];if(pl!==undefined&&ph!==undefined){this.emit('    LDY #$00');this.emit(`    STA ($${this.h2(pl)}),Y    ; *${pn} = A`);}}else if(vn.includes('[')){this.emit(`    ; Array-Zuweisung ${vn}`);}else if(vn in this.varToZp){this.emit(`    STA $${this.h2(this.varToZp[vn])}    ; ${vn} = Akkumulator`);}return;}
+    if(node instanceof ReturnStmt){if(node.value){this.genExpr(node.value);this.emit('    ; Return-Wert in Akkumulator');}this.emit('    RTS');return;}
+    if(node instanceof IfStmt){const el=this.newLabel('ELSE'),en=this.newLabel('ENDIF');this.genExpr(node.condition);this.emit('    CMP #$00');this.emit(`    BEQ ${el}`);this.generate(node.thenStmt);this.emit(`    JMP ${en}`);this.emit(`${el}:`);if(node.elseStmt)this.generate(node.elseStmt);this.emit(`${en}:`);return;}
+    if(node instanceof WhileStmt){const lp=this.newLabel('WHILE'),en=this.newLabel('ENDWHILE');this.emit(`${lp}:`);this.genExpr(node.condition);this.emit('    CMP #$00');this.emit(`    BEQ ${en}`);this.generate(node.body);this.emit(`    JMP ${lp}`);this.emit(`${en}:`);return;}
+    if(node instanceof ForStmt){const lp=this.newLabel('FOR'),en=this.newLabel('ENDFOR');if(node.init)this.generate(node.init);this.emit(`${lp}:`);if(node.condition){this.genExpr(node.condition);this.emit('    CMP #$00');this.emit(`    BEQ ${en}`);}this.generate(node.body);if(node.increment)this.generate(node.increment);this.emit(`    JMP ${lp}`);this.emit(`${en}:`);return;}
+    if(node instanceof StructDecl){this.emit(`    ; Struct ${node.name} definiert`);return;}
+    if(node instanceof StructVarDecl){this.emit(`    ; Struct-Variable ${node.structName} ${node.varName}`);return;}
+    if(node instanceof FunctionCall){this.emit(`    JSR ${node.name}`);return;}
+  }
+
+  genExpr(node){
+    if(node instanceof Literal){if(node.litType==='int'){this.emit(`    LDA #$${this.h2(node.value&0xFF)}    ; Literal ${node.value}`);}return'A';}
+    if(node instanceof Identifier){if(node.name in this.varToZp)this.emit(`    LDA $${this.h2(this.varToZp[node.name])}    ; ${node.name}`);return'A';}
+    if(node instanceof BinaryOp){
+      if(node.op==='+'){this.genExpr(node.left);const t=this.allocZP(`_temp${this.tempCounter++}`);this.emit(`    STA $${this.h2(t)}    ; Temp speichern`);this.genExpr(node.right);this.emit('    CLC');this.emit(`    ADC $${this.h2(t)}    ; Addition`);return'A';}
+      if(node.op==='-'){this.genExpr(node.right);const t=this.allocZP(`_temp${this.tempCounter++}`);this.emit(`    STA $${this.h2(t)}    ; Temp speichern`);this.genExpr(node.left);this.emit('    SEC');this.emit(`    SBC $${this.h2(t)}    ; Subtraktion`);return'A';}
+      if(node.op==='*'){this.emit('    ; Multiplikation (wiederholte Addition)');this.genExpr(node.right);const mr=this.allocZP(`_mult${this.tempCounter++}`);this.emit(`    STA $${this.h2(mr)}`);this.genExpr(node.left);const mc=this.allocZP(`_mult${this.tempCounter++}`);this.emit(`    STA $${this.h2(mc)}`);const rs=this.allocZP(`_mult${this.tempCounter++}`);this.emit('    LDA #$00');this.emit(`    STA $${this.h2(rs)}`);const ll=this.newLabel('MULT_LOOP'),le=this.newLabel('MULT_END');this.emit(`${ll}:`);this.emit(`    LDA $${this.h2(mr)}`);this.emit(`    BEQ ${le}`);this.emit(`    LDA $${this.h2(rs)}`);this.emit('    CLC');this.emit(`    ADC $${this.h2(mc)}`);this.emit(`    STA $${this.h2(rs)}`);this.emit(`    DEC $${this.h2(mr)}`);this.emit(`    JMP ${ll}`);this.emit(`${le}:`);this.emit(`    LDA $${this.h2(rs)}`);return'A';}
+      if(node.op==='/'){this.emit('    ; Division (wiederholte Subtraktion)');this.genExpr(node.right);const dv=this.allocZP(`_div${this.tempCounter++}`);this.emit(`    STA $${this.h2(dv)}`);this.genExpr(node.left);const dd=this.allocZP(`_div${this.tempCounter++}`);this.emit(`    STA $${this.h2(dd)}`);const qt=this.allocZP(`_div${this.tempCounter++}`);this.emit('    LDA #$00');this.emit(`    STA $${this.h2(qt)}`);const ll=this.newLabel('DIV_LOOP'),le=this.newLabel('DIV_END');this.emit(`${ll}:`);this.emit(`    LDA $${this.h2(dd)}`);this.emit(`    CMP $${this.h2(dv)}`);this.emit(`    BCC ${le}`);this.emit('    SEC');this.emit(`    SBC $${this.h2(dv)}`);this.emit(`    STA $${this.h2(dd)}`);this.emit(`    INC $${this.h2(qt)}`);this.emit(`    JMP ${ll}`);this.emit(`${le}:`);this.emit(`    LDA $${this.h2(qt)}`);return'A';}
+      if(['<','>','<=','>=','==','!='].includes(node.op)){this.genExpr(node.left);const t=this.allocZP(`_temp${this.tempCounter++}`);this.emit(`    STA $${this.h2(t)}`);this.genExpr(node.right);this.emit(`    CMP $${this.h2(t)}`);const tl=this.newLabel('TRUE'),el=this.newLabel('ENDCMP');if(node.op==='<')this.emit(`    BCC ${tl}`);if(node.op==='>'){this.emit(`    BEQ ${el}`);this.emit(`    BCS ${tl}`);}if(node.op==='==')this.emit(`    BEQ ${tl}`);if(node.op==='!=')this.emit(`    BNE ${tl}`);if(node.op==='<='){this.emit(`    BCC ${tl}`);this.emit(`    BEQ ${tl}`);}if(node.op==='>=')this.emit(`    BCS ${tl}`);this.emit('    LDA #$00');this.emit(`    JMP ${el}`);this.emit(`${tl}:`);this.emit('    LDA #$01');this.emit(`${el}:`);return'A';}
+    }
+    if(node instanceof UnaryOp&&node.op==='-'){this.genExpr(node.operand);this.emit('    EOR #$FF    ; Bitweise invertieren');this.emit('    CLC');this.emit('    ADC #$01    ; +1 für Two\'s Complement');return'A';}
+    if(node instanceof FunctionCall){this.emit(`    JSR ${node.name}`);return'A';}
+    if(node instanceof ArrayAccess){if(node.arrayName in this.arrayBaseAddresses){this.genExpr(node.index);this.emit('    TAY');const pl=this.varToZp[node.arrayName+'_ptr_lo'],ph=this.varToZp[node.arrayName+'_ptr_hi'];if(pl!==undefined&&ph!==undefined)this.emit(`    LDA ($${this.h2(pl)}),Y    ; ${node.arrayName}[index]`);}return'A';}
+    if(node instanceof Dereference){if(node.pointer instanceof Identifier){const pn=node.pointer.name,pl=this.varToZp[pn+'_lo'],ph=this.varToZp[pn+'_hi'];if(pl!==undefined&&ph!==undefined){this.emit('    LDY #$00');this.emit(`    LDA ($${this.h2(pl)}),Y    ; *${pn}`);}}return'A';}
+    if(node instanceof AddressOf){if(node.operand instanceof Identifier){const vn=node.operand.name;if(vn in this.varToZp){const z=this.varToZp[vn];this.emit(`    LDA #$${this.h2(z)}    ; Low-Byte von &${vn}`);this.emit('    LDX #$00    ; High-Byte');return'A';}if(vn in this.arrayBaseAddresses){const a=this.arrayBaseAddresses[vn];this.emit(`    LDA #<$${this.h4(a)}    ; Low-Byte von &${vn}`);this.emit(`    LDX #>$${this.h4(a)}    ; High-Byte`);return'A';}}return'A';}
+    return null;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+//  6510 ASSEMBLER  (ASM text → bytes)
+// ══════════════════════════════════════════════════════════════
+const Assembler6510 = (() => {
+  // Opcode table: mnemonic → { mode: opcode }
+  // Modes: imp=implied, imm=immediate, zp=zero page, abs=absolute, iny=indirect-Y, rel=relative
+  const OPS = {
+    LDA:{imm:0xA9,zp:0xA5,abs:0xAD,iny:0xB1},
+    LDX:{imm:0xA2,zp:0xA6},
+    LDY:{imm:0xA0,zp:0xA4},
+    STA:{zp:0x85,abs:0x8D,iny:0x91},
+    STX:{zp:0x86},
+    STY:{zp:0x84},
+    ADC:{imm:0x69,zp:0x65},
+    SBC:{imm:0xE9,zp:0xE5},
+    CMP:{imm:0xC9,zp:0xC5},
+    CPX:{imm:0xE0,zp:0xE4},
+    CPY:{imm:0xC0,zp:0xC4},
+    AND:{imm:0x29,zp:0x25},
+    ORA:{imm:0x09,zp:0x05},
+    EOR:{imm:0x49,zp:0x45},
+    INC:{zp:0xE6},
+    DEC:{zp:0xC6},
+    INX:{imp:0xE8},INY:{imp:0xC8},DEX:{imp:0xCA},DEY:{imp:0x88},
+    TAX:{imp:0xAA},TAY:{imp:0xA8},TXA:{imp:0x8A},TYA:{imp:0x98},
+    TSX:{imp:0xBA},TXS:{imp:0x9A},
+    PHA:{imp:0x48},PLA:{imp:0x68},PHP:{imp:0x08},PLP:{imp:0x28},
+    CLC:{imp:0x18},SEC:{imp:0x38},CLI:{imp:0x58},SEI:{imp:0x78},
+    CLV:{imp:0xB8},CLD:{imp:0xD8},SED:{imp:0xF8},
+    NOP:{imp:0xEA},
+    RTS:{imp:0x60},RTI:{imp:0x40},BRK:{imp:0x00},
+    JMP:{abs:0x4C},
+    JSR:{abs:0x20},
+    BEQ:{rel:0xF0},BNE:{rel:0xD0},BCC:{rel:0x90},BCS:{rel:0xB0},
+    BMI:{rel:0x30},BPL:{rel:0x10},BVC:{rel:0x50},BVS:{rel:0x70},
+    ASL:{imp:0x0A,zp:0x06},LSR:{imp:0x4A,zp:0x46},
+    ROL:{imp:0x2A,zp:0x26},ROR:{imp:0x6A,zp:0x66},
+    BIT:{zp:0x24,abs:0x2C},
+  };
+
+  function parseLine(raw) {
+    let line = raw.trim();
+    // Strip inline comment
+    const semi = line.indexOf(';');
+    if (semi === 0) return { type: 'comment', src: raw };
+    if (semi > 0) line = line.substring(0, semi).trim();
+    if (!line) return { type: 'empty', src: raw };
+    // Label?
+    if (line.match(/^[A-Za-z_]\w*:$/)) return { type: 'label', name: line.slice(0,-1), src: raw };
+    // Instruction
+    const parts = line.split(/\s+/);
+    const mnem = parts[0].toUpperCase();
+    const operand = parts.slice(1).join(' ').trim();
+    return { type: 'instr', mnem, operand, src: raw };
+  }
+
+  function resolveOperand(operand, labels, pc) {
+    if (!operand) return { mode: 'imp', value: 0 };
+
+    // ($xx),Y  — indirect indexed
+    let m = operand.match(/^\(\$([0-9A-Fa-f]{1,2})\)\s*,\s*Y$/i);
+    if (m) return { mode: 'iny', value: parseInt(m[1],16) };
+
+    // #<$xxxx  — immediate low byte
+    m = operand.match(/^#<\$([0-9A-Fa-f]{1,4})$/i);
+    if (m) return { mode: 'imm', value: parseInt(m[1],16) & 0xFF };
+
+    // #>$xxxx  — immediate high byte
+    m = operand.match(/^#>\$([0-9A-Fa-f]{1,4})$/i);
+    if (m) return { mode: 'imm', value: (parseInt(m[1],16) >> 8) & 0xFF };
+
+    // #$xx  — immediate hex
+    m = operand.match(/^#\$([0-9A-Fa-f]{1,2})$/i);
+    if (m) return { mode: 'imm', value: parseInt(m[1],16) };
+
+    // $xx  — zero page (1-2 hex digits)
+    m = operand.match(/^\$([0-9A-Fa-f]{1,2})$/i);
+    if (m) return { mode: 'zp', value: parseInt(m[1],16) };
+
+    // $xxxx  — absolute (3-4 hex digits)
+    m = operand.match(/^\$([0-9A-Fa-f]{3,4})$/i);
+    if (m) return { mode: 'abs', value: parseInt(m[1],16) };
+
+    // Label reference (for JMP, JSR, branches)
+    if (operand in labels) {
+      const target = labels[operand];
+      return { mode: 'label', value: target };
+    }
+
+    return { mode: 'unknown', value: 0, raw: operand };
+  }
+
+  function instrSize(mnem, mode) {
+    if (!OPS[mnem]) return 0;
+    if (mode === 'imp') return 1;
+    if (mode === 'imm' || mode === 'zp' || mode === 'rel' || mode === 'iny') return 2;
+    if (mode === 'abs') return 3;
+    if (mode === 'label') {
+      // branches are 2 bytes, JMP/JSR are 3
+      if (OPS[mnem].rel !== undefined) return 2;
+      return 3;
+    }
+    return 1;
+  }
+
+  function assemble(asmText, baseAddr) {
+    baseAddr = baseAddr || 0xC000;
+    const lines = asmText.split('\n');
+    const parsed = lines.map(l => parseLine(l));
+
+    // Pass 1: resolve labels
+    const labels = {};
+    let pc = baseAddr;
+    for (const p of parsed) {
+      if (p.type === 'label') { labels[p.name] = pc; continue; }
+      if (p.type !== 'instr') continue;
+      const mnem = p.mnem;
+      if (!OPS[mnem]) continue;
+      // Estimate operand mode for sizing
+      const op = p.operand;
+      let size = 1;
+      if (!op) { size = 1; }
+      else if (op.match(/^#/)) { size = 2; }
+      else if (op.match(/^\(\$/)) { size = 2; }
+      else if (op.match(/^\$[0-9A-Fa-f]{1,2}$/i)) { size = 2; }
+      else if (op.match(/^\$[0-9A-Fa-f]{3,4}$/i)) { size = 3; }
+      else {
+        // Label: branch=2, jmp/jsr=3
+        if (OPS[mnem].rel !== undefined) size = 2; else size = 3;
+      }
+      pc += size;
+    }
+
+    // Pass 2: emit bytes
+    const result = []; // { addr, bytes[], source }
+    pc = baseAddr;
+    for (const p of parsed) {
+      if (p.type === 'label') continue;
+      if (p.type !== 'instr') { result.push({ addr: pc, bytes: [], source: p.src }); continue; }
+      const mnem = p.mnem;
+      if (!OPS[mnem]) { result.push({ addr: pc, bytes: [], source: p.src, error: `Unbekannter Mnemonic: ${mnem}` }); continue; }
+
+      const res = resolveOperand(p.operand, labels, pc);
+      let bytes = [];
+      let mode = res.mode;
+
+      // Map label to correct mode
+      if (mode === 'label') {
+        if (OPS[mnem].rel !== undefined) {
+          mode = 'rel';
+        } else if (OPS[mnem].abs !== undefined) {
+          mode = 'abs';
+        }
+      }
+
+      const opcode = OPS[mnem][mode];
+      if (opcode === undefined) {
+        // Try fallback: if zp not available, try abs
+        if (mode === 'zp' && OPS[mnem].abs !== undefined) {
+          mode = 'abs';
+        }
+        const fb = OPS[mnem][mode];
+        if (fb === undefined) {
+          result.push({ addr: pc, bytes: [], source: p.src, error: `Kein Opcode für ${mnem} ${mode}` });
+          continue;
+        }
+        bytes.push(fb);
+      } else {
+        bytes.push(opcode);
+      }
+
+      if (mode === 'imp') {
+        // 1 byte, done
+      } else if (mode === 'imm' || mode === 'zp' || mode === 'iny') {
+        bytes.push(res.value & 0xFF);
+      } else if (mode === 'rel') {
+        // relative offset
+        const target = res.value;
+        const offset = target - (pc + 2);
+        bytes.push(offset & 0xFF);
+      } else if (mode === 'abs') {
+        const val = res.value;
+        bytes.push(val & 0xFF);        // low byte
+        bytes.push((val >> 8) & 0xFF);  // high byte
+      }
+
+      result.push({ addr: pc, bytes, source: p.src });
+      pc += bytes.length;
+    }
+
+    return { lines: result, baseAddr, endAddr: pc, labels };
+  }
+
+  return { assemble };
+})();
+
+
+// ══════════════════════════════════════════════════════════════
+//  6502 CPU EMULATOR
+// ══════════════════════════════════════════════════════════════
+class CPU6502 {
+  constructor() { this.reset(); }
+
+  reset() {
+    this.mem = new Uint8Array(65536);
+    this.A = 0; this.X = 0; this.Y = 0; this.SP = 0xFD; this.PC = 0xC000;
+    this.N = 0; this.V = 0; this.B = 0; this.D = 0; this.I = 0; this.Z = 0; this.C = 0;
+    this.cycles = 0; this.halted = false; this.prevMem = null;
+    this.prevRegs = null;
+  }
+
+  load(bytes, addr) {
+    for (let i = 0; i < bytes.length; i++) this.mem[addr + i] = bytes[i];
+    this.PC = addr;
+  }
+
+  snapshot() {
+    return { A:this.A, X:this.X, Y:this.Y, SP:this.SP, PC:this.PC,
+             N:this.N, V:this.V, B:this.B, D:this.D, I:this.I, Z:this.Z, C:this.C };
+  }
+
+  read(addr) { return this.mem[addr & 0xFFFF]; }
+  read16(addr) { return this.read(addr) | (this.read(addr+1) << 8); }
+  write(addr, val) { this.mem[addr & 0xFFFF] = val & 0xFF; }
+
+  push(val) { this.write(0x0100 + this.SP, val & 0xFF); this.SP = (this.SP - 1) & 0xFF; }
+  pull() { this.SP = (this.SP + 1) & 0xFF; return this.read(0x0100 + this.SP); }
+  push16(val) { this.push((val >> 8) & 0xFF); this.push(val & 0xFF); }
+  pull16() { const lo = this.pull(); return lo | (this.pull() << 8); }
+
+  setNZ(val) { val &= 0xFF; this.N = (val & 0x80) ? 1 : 0; this.Z = (val === 0) ? 1 : 0; return val; }
+
+  getStatus() { return (this.N<<7)|(this.V<<6)|0x20|(this.B<<4)|(this.D<<3)|(this.I<<2)|(this.Z<<1)|this.C; }
+  setStatus(v) { this.N=(v>>7)&1; this.V=(v>>6)&1; this.B=(v>>4)&1; this.D=(v>>3)&1; this.I=(v>>2)&1; this.Z=(v>>1)&1; this.C=v&1; }
+
+  // Returns { mnem, operandStr, bytes, newPC } for disassembly display
+  disasmAt(addr) {
+    const op = this.read(addr);
+    const info = this._opInfo(op);
+    if (!info) return { mnem: '???', operandStr: `($${this.h2(op)})`, bytes: [op], newPC: addr+1 };
+    const { mnem, mode, size } = info;
+    const bytes = [];
+    for (let i = 0; i < size; i++) bytes.push(this.read(addr + i));
+    let operandStr = '';
+    if (mode === 'imm') operandStr = `#$${this.h2(bytes[1])}`;
+    else if (mode === 'zp') operandStr = `$${this.h2(bytes[1])}`;
+    else if (mode === 'abs') operandStr = `$${this.h4(bytes[1] | (bytes[2]<<8))}`;
+    else if (mode === 'rel') { const off = bytes[1] > 127 ? bytes[1]-256 : bytes[1]; operandStr = `$${this.h4(addr+2+off)}`; }
+    else if (mode === 'iny') operandStr = `($${this.h2(bytes[1])}),Y`;
+    else if (mode === 'zpx') operandStr = `$${this.h2(bytes[1])},X`;
+    else if (mode === 'abx') operandStr = `$${this.h4(bytes[1]|(bytes[2]<<8))},X`;
+    return { mnem, operandStr, bytes, newPC: addr + size };
+  }
+
+  h2(n) { return (n&0xFF).toString(16).toUpperCase().padStart(2,'0'); }
+  h4(n) { return (n&0xFFFF).toString(16).toUpperCase().padStart(4,'0'); }
+
+  step() {
+    if (this.halted) return false;
+    this.prevRegs = this.snapshot();
+    this.prevMem = this.mem.slice(0, 256); // snapshot zero page
+
+    const op = this.read(this.PC);
+    const info = this._opInfo(op);
+    if (!info) { this.halted = true; return false; }
+
+    const { mnem, mode, size } = info;
+    let addr = 0, val = 0;
+
+    // Decode operand address/value
+    switch(mode) {
+      case 'imp': break;
+      case 'imm': val = this.read(this.PC+1); break;
+      case 'zp':  addr = this.read(this.PC+1); val = this.read(addr); break;
+      case 'zpx': addr = (this.read(this.PC+1)+this.X)&0xFF; val = this.read(addr); break;
+      case 'abs': addr = this.read16(this.PC+1); val = this.read(addr); break;
+      case 'abx': addr = (this.read16(this.PC+1)+this.X)&0xFFFF; val = this.read(addr); break;
+      case 'aby': addr = (this.read16(this.PC+1)+this.Y)&0xFFFF; val = this.read(addr); break;
+      case 'iny': { const zp = this.read(this.PC+1); addr = (this.read16(zp)+this.Y)&0xFFFF; val = this.read(addr); break; }
+      case 'rel': { const off = this.read(this.PC+1); val = off > 127 ? off-256 : off; break; }
+      case 'ind': addr = this.read16(this.read16(this.PC+1)); break;
+    }
+
+    this.PC = (this.PC + size) & 0xFFFF;
+    this.cycles++;
+
+    // Execute
+    switch(mnem) {
+      // Load/Store
+      case 'LDA': this.A = this.setNZ(mode==='imm'?val:val); break;
+      case 'LDX': this.X = this.setNZ(mode==='imm'?val:val); break;
+      case 'LDY': this.Y = this.setNZ(mode==='imm'?val:val); break;
+      case 'STA': this.write(addr, this.A); break;
+      case 'STX': this.write(addr, this.X); break;
+      case 'STY': this.write(addr, this.Y); break;
+
+      // Arithmetic
+      case 'ADC': {
+        const sum = this.A + (mode==='imm'?val:val) + this.C;
+        this.V = ((~(this.A ^ (mode==='imm'?val:val)) & (this.A ^ sum)) & 0x80) ? 1 : 0;
+        this.C = sum > 255 ? 1 : 0;
+        this.A = this.setNZ(sum);
+        break;
+      }
+      case 'SBC': {
+        const operand = mode==='imm'?val:val;
+        const diff = this.A - operand - (1 - this.C);
+        this.V = (((this.A ^ operand) & (this.A ^ diff)) & 0x80) ? 1 : 0;
+        this.C = diff >= 0 ? 1 : 0;
+        this.A = this.setNZ(diff);
+        break;
+      }
+
+      // Compare
+      case 'CMP': { const r = this.A - (mode==='imm'?val:val); this.C = r >= 0 ? 1 : 0; this.setNZ(r); break; }
+      case 'CPX': { const r = this.X - (mode==='imm'?val:val); this.C = r >= 0 ? 1 : 0; this.setNZ(r); break; }
+      case 'CPY': { const r = this.Y - (mode==='imm'?val:val); this.C = r >= 0 ? 1 : 0; this.setNZ(r); break; }
+
+      // Logic
+      case 'AND': this.A = this.setNZ(this.A & (mode==='imm'?val:val)); break;
+      case 'ORA': this.A = this.setNZ(this.A | (mode==='imm'?val:val)); break;
+      case 'EOR': this.A = this.setNZ(this.A ^ (mode==='imm'?val:val)); break;
+      case 'BIT': this.N = (val>>7)&1; this.V = (val>>6)&1; this.Z = (this.A & val)===0?1:0; break;
+
+      // Increment/Decrement
+      case 'INC': this.write(addr, this.setNZ(val+1)); break;
+      case 'DEC': this.write(addr, this.setNZ(val-1)); break;
+      case 'INX': this.X = this.setNZ(this.X+1); break;
+      case 'INY': this.Y = this.setNZ(this.Y+1); break;
+      case 'DEX': this.X = this.setNZ(this.X-1); break;
+      case 'DEY': this.Y = this.setNZ(this.Y-1); break;
+
+      // Shifts
+      case 'ASL':
+        if (mode==='imp') { this.C=(this.A>>7)&1; this.A=this.setNZ(this.A<<1); }
+        else { this.C=(val>>7)&1; this.write(addr, this.setNZ(val<<1)); }
+        break;
+      case 'LSR':
+        if (mode==='imp') { this.C=this.A&1; this.A=this.setNZ(this.A>>1); }
+        else { this.C=val&1; this.write(addr, this.setNZ(val>>1)); }
+        break;
+      case 'ROL':
+        if (mode==='imp') { const c=this.C; this.C=(this.A>>7)&1; this.A=this.setNZ((this.A<<1)|c); }
+        else { const c=this.C; this.C=(val>>7)&1; this.write(addr, this.setNZ((val<<1)|c)); }
+        break;
+      case 'ROR':
+        if (mode==='imp') { const c=this.C; this.C=this.A&1; this.A=this.setNZ((this.A>>1)|(c<<7)); }
+        else { const c=this.C; this.C=val&1; this.write(addr, this.setNZ((val>>1)|(c<<7))); }
+        break;
+
+      // Transfers
+      case 'TAX': this.X = this.setNZ(this.A); break;
+      case 'TAY': this.Y = this.setNZ(this.A); break;
+      case 'TXA': this.A = this.setNZ(this.X); break;
+      case 'TYA': this.A = this.setNZ(this.Y); break;
+      case 'TSX': this.X = this.setNZ(this.SP); break;
+      case 'TXS': this.SP = this.X; break;
+
+      // Stack
+      case 'PHA': this.push(this.A); break;
+      case 'PLA': this.A = this.setNZ(this.pull()); break;
+      case 'PHP': this.push(this.getStatus()|0x10); break;
+      case 'PLP': this.setStatus(this.pull()); break;
+
+      // Branches
+      case 'BEQ': if (this.Z)  this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BNE': if (!this.Z) this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BCC': if (!this.C) this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BCS': if (this.C)  this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BMI': if (this.N)  this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BPL': if (!this.N) this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BVC': if (!this.V) this.PC = (this.PC + val) & 0xFFFF; break;
+      case 'BVS': if (this.V)  this.PC = (this.PC + val) & 0xFFFF; break;
+
+      // Jumps
+      case 'JMP': this.PC = addr; break;
+      case 'JSR': this.push16(this.PC - 1); this.PC = addr; break;
+      case 'RTS': this.PC = (this.pull16() + 1) & 0xFFFF; break;
+      case 'RTI': this.setStatus(this.pull()); this.PC = this.pull16(); break;
+
+      // Flags
+      case 'CLC': this.C = 0; break;
+      case 'SEC': this.C = 1; break;
+      case 'CLI': this.I = 0; break;
+      case 'SEI': this.I = 1; break;
+      case 'CLV': this.V = 0; break;
+      case 'CLD': this.D = 0; break;
+      case 'SED': this.D = 1; break;
+
+      // Misc
+      case 'NOP': break;
+      case 'BRK': this.halted = true; break;
+
+      default: this.halted = true; break;
+    }
+    return !this.halted;
+  }
+
+  _opInfo(op) {
+    // Returns { mnem, mode, size } or null
+    const T = {
+      0xA9:['LDA','imm',2],0xA5:['LDA','zp',2],0xAD:['LDA','abs',3],0xB1:['LDA','iny',2],0xB5:['LDA','zpx',2],0xBD:['LDA','abx',3],
+      0xA2:['LDX','imm',2],0xA6:['LDX','zp',2],
+      0xA0:['LDY','imm',2],0xA4:['LDY','zp',2],
+      0x85:['STA','zp',2],0x8D:['STA','abs',3],0x91:['STA','iny',2],0x95:['STA','zpx',2],0x9D:['STA','abx',3],
+      0x86:['STX','zp',2],0x84:['STY','zp',2],
+      0x69:['ADC','imm',2],0x65:['ADC','zp',2],
+      0xE9:['SBC','imm',2],0xE5:['SBC','zp',2],
+      0xC9:['CMP','imm',2],0xC5:['CMP','zp',2],
+      0xE0:['CPX','imm',2],0xE4:['CPX','zp',2],
+      0xC0:['CPY','imm',2],0xC4:['CPY','zp',2],
+      0x29:['AND','imm',2],0x25:['AND','zp',2],
+      0x09:['ORA','imm',2],0x05:['ORA','zp',2],
+      0x49:['EOR','imm',2],0x45:['EOR','zp',2],
+      0x24:['BIT','zp',2],0x2C:['BIT','abs',3],
+      0xE6:['INC','zp',2],0xC6:['DEC','zp',2],
+      0xE8:['INX','imp',1],0xC8:['INY','imp',1],0xCA:['DEX','imp',1],0x88:['DEY','imp',1],
+      0x0A:['ASL','imp',1],0x06:['ASL','zp',2],
+      0x4A:['LSR','imp',1],0x46:['LSR','zp',2],
+      0x2A:['ROL','imp',1],0x26:['ROL','zp',2],
+      0x6A:['ROR','imp',1],0x66:['ROR','zp',2],
+      0xAA:['TAX','imp',1],0xA8:['TAY','imp',1],0x8A:['TXA','imp',1],0x98:['TYA','imp',1],
+      0xBA:['TSX','imp',1],0x9A:['TXS','imp',1],
+      0x48:['PHA','imp',1],0x68:['PLA','imp',1],0x08:['PHP','imp',1],0x28:['PLP','imp',1],
+      0x18:['CLC','imp',1],0x38:['SEC','imp',1],0x58:['CLI','imp',1],0x78:['SEI','imp',1],
+      0xB8:['CLV','imp',1],0xD8:['CLD','imp',1],0xF8:['SED','imp',1],
+      0xEA:['NOP','imp',1],0x60:['RTS','imp',1],0x40:['RTI','imp',1],0x00:['BRK','imp',1],
+      0x4C:['JMP','abs',3],0x20:['JSR','abs',3],
+      0xF0:['BEQ','rel',2],0xD0:['BNE','rel',2],0x90:['BCC','rel',2],0xB0:['BCS','rel',2],
+      0x30:['BMI','rel',2],0x10:['BPL','rel',2],0x50:['BVC','rel',2],0x70:['BVS','rel',2],
+    };
+    const e = T[op];
+    return e ? { mnem: e[0], mode: e[1], size: e[2] } : null;
+  }
+}
+
+
+// ══════════════════════════════════════
+//  COMPILE WRAPPER
+// ══════════════════════════════════════
+function compileC(source) {
+  const result = { tokens: [], ast: '', asm: '', hex: null, error: null };
+  try {
+    const lexer = new Lexer(source);
+    result.tokens = lexer.tokens.map(t => ({ type: t.type, value: String(t.value), line: t.line }));
+    const parser = new Parser(lexer.tokens);
+    const ast = parser.parse();
+    result.ast = astToString(ast).join('\n');
+    const codegen = new CodeGenerator6510();
+    result.asm = codegen.generate(ast);
+    result.hex = Assembler6510.assemble(result.asm, 0xC000);
+  } catch (e) {
+    result.error = e.message || String(e);
+  }
+  return result;
+}
+
+// ══════════════════════════════════════
+//  EXAMPLE
+// ══════════════════════════════════════
+const EXAMPLE_C = `// Einfache Multiplikation
+int multiply(int a, int b) {
+    return a * b;
+}
+
+// Array-Beispiel
+int sum_array(int arr[], int size) {
+    int total = 0;
+    for (int i = 0; i < size; i = i + 1) {
+        total = total + arr[i];
+    }
+    return total;
+}
+
+// Pointer-Beispiel
+void increment_value(int* ptr) {
+    int val = *ptr;
+    val = val + 1;
+    *ptr = val;
+}
+
+// Struct-Beispiel
+struct Point {
+    int x;
+    int y;
+};
+
+int main() {
+    // Variablen und Arithmetik
+    int a = 10;
+    int b = 3;
+    int result = multiply(a, b);
+
+    // Array mit Initialisierung
+    int numbers[3] = {2, 4, 6};
+    int sum = sum_array(numbers, 3);
+
+    // Pointer-Verwendung
+    int x = 10;
+    int* px = &x;
+    increment_value(px);
+
+    // If/Else
+    if (x > 5) {
+        result = x + 1;
+    } else {
+        result = x - 1;
+    }
+
+    // While-Schleife
+    int count = 0;
+    while (count < 3) {
+        count = count + 1;
+    }
+
+    return x;
+}`;
+
+// ══════════════════════════════════════
+//  UI
+// ══════════════════════════════════════
+let lastResult = null;
+const editor = document.getElementById('editor');
+const editorHL = document.getElementById('editor-highlight');
+const tokenBody = document.getElementById('token-body');
+const astPre = document.getElementById('ast-pre');
+const asmOut = document.getElementById('asm-out');
+const hexOut = document.getElementById('hex-out');
+const errorBox = document.getElementById('error-box');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+
+// ── C Syntax Highlighter ──
+function highlightC(code) {
+  // Tokenize the C source into colored spans
+  // We process character by character to handle comments/strings correctly
+  let out = '';
+  let i = 0;
+  const len = code.length;
+  const KW = new Set(['if','else','while','for','return','struct','typedef','enum','union','switch','case','default','break','continue','do','goto','sizeof','extern','static','const','volatile','register','auto','signed','unsigned','long','short','double','char']);
+  const TY = new Set(['int','float','void','char','double','long','short','unsigned','signed']);
+
+  function isIdStart(c) { return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||c==='_'; }
+  function isIdChar(c) { return isIdStart(c)||(c>='0'&&c<='9'); }
+  function isDigit(c) { return c>='0'&&c<='9'; }
+  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  while (i < len) {
+    const c = code[i];
+    const c2 = i+1 < len ? code[i+1] : '';
+
+    // Line comment
+    if (c === '/' && c2 === '/') {
+      let end = code.indexOf('\n', i);
+      if (end === -1) end = len;
+      out += '<span class="c-comment">' + esc(code.slice(i, end)) + '</span>';
+      i = end;
+      continue;
+    }
+
+    // Block comment
+    if (c === '/' && c2 === '*') {
+      let end = code.indexOf('*/', i+2);
+      if (end === -1) end = len; else end += 2;
+      out += '<span class="c-comment">' + esc(code.slice(i, end)) + '</span>';
+      i = end;
+      continue;
+    }
+
+    // String
+    if (c === '"') {
+      let j = i+1;
+      while (j < len && code[j] !== '"') { if (code[j] === '\\') j++; j++; }
+      if (j < len) j++;
+      out += '<span class="c-string">' + esc(code.slice(i, j)) + '</span>';
+      i = j;
+      continue;
+    }
+
+    // Char literal
+    if (c === "'") {
+      let j = i+1;
+      while (j < len && code[j] !== "'") { if (code[j] === '\\') j++; j++; }
+      if (j < len) j++;
+      out += '<span class="c-string">' + esc(code.slice(i, j)) + '</span>';
+      i = j;
+      continue;
+    }
+
+    // Number (hex, decimal, float)
+    if (isDigit(c) || (c === '.' && i+1 < len && isDigit(code[i+1]))) {
+      let j = i;
+      if (c === '0' && (c2 === 'x' || c2 === 'X')) {
+        j += 2;
+        while (j < len && /[0-9a-fA-F]/.test(code[j])) j++;
+      } else {
+        while (j < len && (isDigit(code[j]) || code[j] === '.')) j++;
+      }
+      // Suffix
+      while (j < len && /[uUlLfF]/.test(code[j])) j++;
+      out += '<span class="c-number">' + esc(code.slice(i, j)) + '</span>';
+      i = j;
+      continue;
+    }
+
+    // Identifier / keyword
+    if (isIdStart(c)) {
+      let j = i;
+      while (j < len && isIdChar(code[j])) j++;
+      const word = code.slice(i, j);
+      // Look ahead for '(' to detect function calls
+      let k = j;
+      while (k < len && (code[k] === ' ' || code[k] === '\t')) k++;
+      if (TY.has(word)) {
+        out += '<span class="c-type">' + esc(word) + '</span>';
+      } else if (KW.has(word)) {
+        out += '<span class="c-keyword">' + esc(word) + '</span>';
+      } else if (k < len && code[k] === '(') {
+        out += '<span class="c-function">' + esc(word) + '</span>';
+      } else {
+        out += esc(word);
+      }
+      i = j;
+      continue;
+    }
+
+    // Preprocessor
+    if (c === '#' && (i === 0 || code[i-1] === '\n')) {
+      let end = code.indexOf('\n', i);
+      if (end === -1) end = len;
+      out += '<span class="c-preproc">' + esc(code.slice(i, end)) + '</span>';
+      i = end;
+      continue;
+    }
+
+    // Operators
+    if ('+-*/%=!<>&|^~?:'.includes(c)) {
+      // Grab multi-char operators
+      let op = c;
+      if (i+1 < len && '=<>&|+-'.includes(c2)) {
+        const two = c + c2;
+        if (['==','!=','<=','>=','&&','||','<<','>>','+=','-=','*=','/=','++','--'].includes(two)) {
+          op = two;
+        }
+      }
+      out += '<span class="c-operator">' + esc(op) + '</span>';
+      i += op.length;
+      continue;
+    }
+
+    // Braces, parens, brackets, semicolons
+    if ('(){}[];,'.includes(c)) {
+      out += '<span class="c-paren">' + esc(c) + '</span>';
+      i++;
+      continue;
+    }
+
+    // Anything else (whitespace etc)
+    out += esc(c);
+    i++;
+  }
+  // Ensure trailing newline so textarea and pre heights match
+  out += '\n';
+  return out;
+}
+
+function syncHighlight() {
+  editorHL.innerHTML = highlightC(editor.value);
+}
+
+// Scroll sync
+editor.addEventListener('scroll', () => {
+  editorHL.scrollTop = editor.scrollTop;
+  editorHL.scrollLeft = editor.scrollLeft;
+});
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+function updateStats() { document.getElementById('src-stats').textContent = editor.value.split('\n').length + ' Zeilen'; syncHighlight(); }
+function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function compile() {
+  const src = editor.value.trim();
+  if (!src) return;
+  errorBox.style.display = 'none';
+  lastResult = compileC(src);
+
+  if (lastResult.error) {
+    errorBox.textContent = '\u26A0 ' + lastResult.error;
+    errorBox.style.display = 'block';
+    statusDot.className = 'status-dot error';
+    statusText.textContent = 'Fehler beim Kompilieren';
+    astPre.textContent = '— Fehler —';
+    tokenBody.innerHTML = '';
+    asmOut.innerHTML = hexOut.innerHTML = '<span style="color:var(--accent2)">— Fehler —</span>';
+    return;
+  }
+
+  // Tokens
+  tokenBody.innerHTML = '';
+  lastResult.tokens.forEach((tok, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td class="tok-line">${i+1}</td><td class="tok-line">${tok.line}</td><td class="tok-type">${escH(tok.type)}</td><td class="tok-val">${escH(tok.value)}</td>`;
+    tokenBody.appendChild(tr);
+  });
+
+  // AST
+  astPre.innerHTML = lastResult.ast.split('\n').map(line => {
+    const m = line.match(/^(\s*)([A-Za-z]+)(:.*)?$/);
+    if (!m) return escH(line);
+    const nn=m[2], rest=m[3]?escH(m[3]):'';
+    let c='#4f9ef8';
+    if(['FunctionDecl','FunctionCall'].includes(nn))c='#c678dd';
+    if(['VarDecl','ArrayDecl','PointerDecl'].includes(nn))c='#e5c07b';
+    if(['IfStmt','WhileStmt','ForStmt','ReturnStmt'].includes(nn))c='#e06c4a';
+    if(['BinaryOp','UnaryOp','Assignment'].includes(nn))c='#56b6c2';
+    if(['Literal','Identifier'].includes(nn))c='#98c379';
+    return `${escH(m[1])}<span style="color:${c};font-weight:600">${nn}</span><span style="color:#6b748a">${rest}</span>`;
+  }).join('\n');
+
+  // ASM
+  asmOut.innerHTML = lastResult.asm.split('\n').map(line => {
+    if(line.trimStart().startsWith(';'))return `<span class="asm-comment">${escH(line)}</span>`;
+    if(line.match(/^[A-Za-z_]\w*:/)){const p=line.split(':');return `<span class="asm-label">${escH(p[0])}</span><span style="color:#555">:</span>`;}
+    const tr=line.trimStart(),si=tr.indexOf(' ');
+    if(si>0){const ind=escH(line.substring(0,line.length-tr.length)),mn=tr.substring(0,si),rest=tr.substring(si),semi=rest.indexOf(';');if(semi>=0)return`${ind}<span class="asm-mnemonic">${escH(mn)}</span><span class="asm-operand">${escH(rest.substring(0,semi))}</span><span class="asm-comment">${escH(rest.substring(semi))}</span>`;return`${ind}<span class="asm-mnemonic">${escH(mn)}</span><span class="asm-operand">${escH(rest)}</span>`;}
+    return escH(line);
+  }).join('\n') || '<span style="color:var(--text-dim)">— leer —</span>';
+
+  // HEX
+  renderHex(lastResult.hex);
+
+  // Collect total bytes
+  const totalBytes = lastResult.hex ? lastResult.hex.lines.reduce((s,l) => s + l.bytes.length, 0) : 0;
+  statusDot.className = 'status-dot ready';
+  statusText.textContent = `OK — ${lastResult.tokens.length} Tokens, ${totalBytes} Bytes Maschinencode`;
+
+  // Auto-load into emulator
+  if (lastResult.hex) {
+    loadIntoEmulator();
+    const panel=document.getElementById('emu-panel'), toggle=document.getElementById('emu-toggle');
+    if (!panel.classList.contains('open')) { panel.classList.add('open'); toggle.classList.add('open'); }
+  }
+}
+
+function renderHex(hex) {
+  if (!hex) { hexOut.innerHTML = '<span style="color:var(--text-dim)">— leer —</span>'; return; }
+  const h2 = n => n.toString(16).toUpperCase().padStart(2, '0');
+  const h4 = n => n.toString(16).toUpperCase().padStart(4, '0');
+
+  const lines = hex.lines.map(entry => {
+    if (entry.bytes.length === 0) {
+      // comment or empty — show source as dimmed
+      const src = entry.source ? entry.source.trim() : '';
+      if (!src) return '';
+      return `<span class="hex-source">                        ${escH(src)}</span>`;
+    }
+    const addrStr = `$${h4(entry.addr)}`;
+    const bytesStr = entry.bytes.map(b => h2(b)).join(' ');
+    const src = entry.source ? entry.source.trim() : '';
+    // Strip inline comment from source for cleaner display
+    const srcClean = src.replace(/\s*;.*$/, '').trim();
+    const padded = bytesStr.padEnd(12, ' ');
+    return `<span class="hex-addr">${addrStr}</span>: <span class="hex-bytes">${padded}</span> <span class="hex-source">${escH(srcClean)}</span>`;
+  }).filter(l => l !== '');
+
+  hexOut.innerHTML = lines.join('\n');
+}
+
+function getHexText() {
+  if (!lastResult || !lastResult.hex) return null;
+  const h2 = n => n.toString(16).toUpperCase().padStart(2, '0');
+  const h4 = n => n.toString(16).toUpperCase().padStart(4, '0');
+  return lastResult.hex.lines.map(e => {
+    if (e.bytes.length === 0) {
+      const s = e.source ? e.source.trim() : '';
+      return s ? `                        ${s}` : '';
+    }
+    const a = `$${h4(e.addr)}`;
+    const b = e.bytes.map(x=>h2(x)).join(' ').padEnd(12,' ');
+    const s = (e.source||'').trim().replace(/\s*;.*$/,'').trim();
+    return `${a}: ${b} ${s}`;
+  }).filter(l=>l).join('\n');
+}
+
+function getPrgBytes() {
+  if (!lastResult || !lastResult.hex) return null;
+  const allBytes = [];
+  lastResult.hex.lines.forEach(e => e.bytes.forEach(b => allBytes.push(b)));
+  // PRG format: 2-byte load address (little endian) + code
+  const base = lastResult.hex.baseAddr;
+  const prg = new Uint8Array(2 + allBytes.length);
+  prg[0] = base & 0xFF;
+  prg[1] = (base >> 8) & 0xFF;
+  allBytes.forEach((b, i) => prg[i+2] = b);
+  return prg;
+}
+
+// Editor
+editor.addEventListener('keydown', e => {
+  if (e.key === 'Tab') { e.preventDefault(); const s=editor.selectionStart; editor.value=editor.value.substring(0,s)+'    '+editor.value.substring(editor.selectionEnd); editor.selectionStart=editor.selectionEnd=s+4; syncHighlight(); }
+  if (e.ctrlKey && e.key === 'Enter') compile();
+});
+editor.addEventListener('input', updateStats);
+
+document.getElementById('btn-example').addEventListener('click', () => { editor.value = EXAMPLE_C; updateStats(); });
+document.getElementById('btn-compile').addEventListener('click', compile);
+document.getElementById('file-input').addEventListener('change', e => {
+  const f=e.target.files[0]; if(!f)return;
+  const r=new FileReader(); r.onload=ev=>{editor.value=ev.target.result;updateStats();}; r.readAsText(f); e.target.value='';
+});
+
+// Save/Copy ASM
+document.getElementById('btn-save-asm').addEventListener('click', () => {
+  if(!lastResult||!lastResult.asm){alert('Zuerst kompilieren!');return;}
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([lastResult.asm],{type:'text/plain'})); a.download='output.asm'; a.click(); URL.revokeObjectURL(a.href);
+});
+document.getElementById('btn-copy-asm').addEventListener('click', () => {
+  if(!lastResult||!lastResult.asm)return;
+  navigator.clipboard.writeText(lastResult.asm).then(()=>{const b=document.getElementById('btn-copy-asm');b.textContent='✓';setTimeout(()=>b.textContent='📋',1200);});
+});
+
+// Save/Copy HEX
+document.getElementById('btn-save-hex').addEventListener('click', () => {
+  const txt = getHexText(); if(!txt){alert('Zuerst kompilieren!');return;}
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([txt],{type:'text/plain'})); a.download='output.hex'; a.click(); URL.revokeObjectURL(a.href);
+});
+document.getElementById('btn-save-prg').addEventListener('click', () => {
+  const prg = getPrgBytes(); if(!prg){alert('Zuerst kompilieren!');return;}
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([prg],{type:'application/octet-stream'})); a.download='output.prg'; a.click(); URL.revokeObjectURL(a.href);
+});
+document.getElementById('btn-copy-hex').addEventListener('click', () => {
+  const txt = getHexText(); if(!txt)return;
+  navigator.clipboard.writeText(txt).then(()=>{const b=document.getElementById('btn-copy-hex');b.textContent='✓';setTimeout(()=>b.textContent='📋',1200);});
+});
+
+// ══════════════════════════════════════
+//  EMULATOR UI
+// ══════════════════════════════════════
+const cpu = new CPU6502();
+let emuLoaded = false;
+let emuRunning = false;
+let emuTimer = null;
+let emuBaseAddr = 0xC000;
+let emuEndAddr = 0xC000;
+let traceHistory = [];
+
+function toggleEmulator() {
+  const panel = document.getElementById('emu-panel');
+  const toggle = document.getElementById('emu-toggle');
+  panel.classList.toggle('open');
+  toggle.classList.toggle('open');
+}
+
+function loadIntoEmulator() {
+  if (!lastResult || !lastResult.hex) return;
+  cpu.reset();
+  traceHistory = [];
+  emuBaseAddr = lastResult.hex.baseAddr;
+  emuEndAddr = lastResult.hex.endAddr;
+  lastResult.hex.lines.forEach(entry => {
+    entry.bytes.forEach((b, i) => { cpu.mem[entry.addr + i] = b; });
+  });
+  cpu.PC = emuBaseAddr;
+  // Start at main() if the label exists
+  if (lastResult.hex.labels && lastResult.hex.labels['main'] !== undefined) {
+    cpu.PC = lastResult.hex.labels['main'];
+    // Place BRK sentinel so RTS from main halts cleanly
+    // Push return address (sentinelAddr - 1) so RTS lands on BRK
+    const sentinel = emuEndAddr;  // right after code
+    cpu.mem[sentinel] = 0x00;     // BRK
+    cpu.push((sentinel >> 8) & 0xFF);  // high byte
+    cpu.push(sentinel & 0xFF);         // low byte — RTS adds 1, so lands on sentinel+1? 
+    // Actually RTS pulls addr and adds 1: so push (sentinel-1)
+    cpu.SP = 0xFD; // reset SP
+    const retAddr = sentinel - 1;
+    cpu.push((retAddr >> 8) & 0xFF);
+    cpu.push(retAddr & 0xFF);
+  }
+  emuLoaded = true;
+  document.getElementById('emu-step').disabled = false;
+  document.getElementById('emu-run').disabled = false;
+  document.getElementById('emu-reset').disabled = false;
+  document.getElementById('emu-stop').disabled = true;
+  document.getElementById('emu-status').textContent = `Geladen: $${cpu.h4(emuBaseAddr)}\u2013$${cpu.h4(emuEndAddr)} (${emuEndAddr-emuBaseAddr} Bytes)`;
+  updateEmuDisplay();
+}
+
+function emuStep() {
+  if (!emuLoaded || cpu.halted) return;
+  const dis = cpu.disasmAt(cpu.PC);
+  const pcBefore = cpu.PC;
+  const ok = cpu.step();
+  traceHistory.push({ addr: pcBefore, mnem: dis.mnem, operandStr: dis.operandStr, bytes: dis.bytes });
+  if (traceHistory.length > 200) traceHistory.shift();
+  updateEmuDisplay();
+  if (!ok || cpu.halted || cpu.cycles > 100000) {
+    cpu.halted = true; stopEmu();
+    document.getElementById('emu-status').textContent = `Beendet \u2014 ${cpu.cycles} Zyklen`;
+    document.getElementById('emu-step').disabled = true;
+    document.getElementById('emu-run').disabled = true;
+  }
+}
+
+function runEmu() {
+  if (!emuLoaded || cpu.halted || emuRunning) return;
+  emuRunning = true;
+  document.getElementById('emu-run').disabled = true;
+  document.getElementById('emu-step').disabled = true;
+  document.getElementById('emu-stop').disabled = false;
+  document.getElementById('emu-status').textContent = 'L\u00e4uft\u2026';
+  const speed = parseInt(document.getElementById('emu-speed').value);
+  const stepsPerTick = Math.max(1, Math.floor(speed / 10));
+  const interval = speed > 80 ? 1 : speed > 50 ? 16 : speed > 20 ? 50 : 150;
+  emuTimer = setInterval(() => {
+    for (let i = 0; i < stepsPerTick; i++) {
+      const dis = cpu.disasmAt(cpu.PC);
+      const pcBefore = cpu.PC;
+      cpu.step();
+      traceHistory.push({ addr: pcBefore, mnem: dis.mnem, operandStr: dis.operandStr, bytes: dis.bytes });
+      if (traceHistory.length > 200) traceHistory.shift();
+      if (cpu.halted || cpu.cycles > 100000) { cpu.halted = true; stopEmu(); break; }
+    }
+    updateEmuDisplay();
+    if (cpu.halted) document.getElementById('emu-status').textContent = `Beendet \u2014 ${cpu.cycles} Zyklen`;
+  }, interval);
+}
+
+function stopEmu() {
+  emuRunning = false;
+  if (emuTimer) { clearInterval(emuTimer); emuTimer = null; }
+  document.getElementById('emu-run').disabled = cpu.halted;
+  document.getElementById('emu-step').disabled = cpu.halted;
+  document.getElementById('emu-stop').disabled = true;
+  if (!cpu.halted) document.getElementById('emu-status').textContent = `Pausiert bei $${cpu.h4(cpu.PC)} \u2014 ${cpu.cycles} Zyklen`;
+}
+
+function resetEmu() { stopEmu(); loadIntoEmulator(); }
+
+function updateEmuDisplay() {
+  const h2 = n => cpu.h2(n), h4 = n => cpu.h4(n);
+  const prev = cpu.prevRegs || {};
+  const setR = (id, val, pv) => { const el=document.getElementById(id); el.textContent='$'+h2(val); el.classList.toggle('changed', pv!==undefined&&val!==pv); };
+  setR('reg-a', cpu.A, prev.A); setR('reg-x', cpu.X, prev.X); setR('reg-y', cpu.Y, prev.Y); setR('reg-sp', cpu.SP, prev.SP);
+  const pcEl=document.getElementById('reg-pc'); pcEl.textContent='$'+h4(cpu.PC); pcEl.classList.toggle('changed',prev.PC!==undefined&&cpu.PC!==prev.PC);
+  document.getElementById('reg-cyc').textContent = cpu.cycles;
+  const flagVals=[cpu.N,cpu.V,1,cpu.B,cpu.D,cpu.I,cpu.Z,cpu.C];
+  document.querySelectorAll('#flags-row .flag-bit').forEach((el,i) => el.classList.toggle('set', flagVals[i]===1));
+
+  // Trace
+  const traceEl = document.getElementById('emu-trace');
+  let traceHtml = '';
+  traceHistory.slice(-12).forEach(t => {
+    const bs=t.bytes.map(b=>h2(b)).join(' ').padEnd(9);
+    traceHtml += `<span class="trace-past"><span class="trace-addr">$${h4(t.addr)}</span>  ${bs}  <span class="trace-mnem">${t.mnem}</span> ${t.operandStr}\n</span>`;
+  });
+  let peekPC = cpu.PC;
+  for (let i=0; i<8&&peekPC<=emuEndAddr&&peekPC>=emuBaseAddr; i++) {
+    const dis=cpu.disasmAt(peekPC);
+    const bs=dis.bytes.map(b=>h2(b)).join(' ').padEnd(9);
+    if (i===0) traceHtml += `<span class="trace-current"><span class="trace-addr">$${h4(peekPC)}</span>  <span class="trace-bytes">${bs}</span>  <span class="trace-mnem">${dis.mnem}</span> ${dis.operandStr}</span>\n`;
+    else traceHtml += `<span class="trace-addr">$${h4(peekPC)}</span>  ${bs}  <span class="trace-mnem">${dis.mnem}</span> ${dis.operandStr}\n`;
+    peekPC = dis.newPC;
+  }
+  traceEl.innerHTML = traceHtml;
+  const cur = traceEl.querySelector('.trace-current');
+  if (cur) cur.scrollIntoView({ block:'center', behavior:'auto' });
+
+  // Zero-page memory
+  let memHtml = '';
+  for (let row=0; row<16; row++) {
+    const base = row*16;
+    memHtml += `<span class="mem-addr">$${h2(base)}</span>: `;
+    for (let col=0; col<16; col++) {
+      const a=base+col, v=cpu.mem[a], pv=cpu.prevMem?cpu.prevMem[a]:0;
+      const cls = (cpu.prevMem&&v!==pv) ? 'mem-val changed' : (v?'mem-val nonzero':'mem-val');
+      memHtml += `<span class="${cls}">${h2(v)}</span> `;
+    }
+    memHtml += '\n';
+  }
+  document.getElementById('emu-mem').innerHTML = memHtml;
+}
+
+document.getElementById('emu-step').addEventListener('click', emuStep);
+document.getElementById('emu-run').addEventListener('click', runEmu);
+document.getElementById('emu-stop').addEventListener('click', stopEmu);
+document.getElementById('emu-reset').addEventListener('click', resetEmu);
+
+// Keyboard shortcut: F10 = Step
+document.addEventListener('keydown', e => {
+  if (e.key === 'F10') { e.preventDefault(); emuStep(); }
+  if (e.key === 'F5') { e.preventDefault(); if (emuRunning) stopEmu(); else runEmu(); }
+});
+
+editor.value = EXAMPLE_C;
+updateStats();
+syncHighlight();
+</script>
+</body>
+</html>
