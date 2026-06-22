@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dokument-Prüfer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:        #0f1117;
+      --surface:   #181c27;
+      --surface2:  #1e2333;
+      --border:    #252a3a;
+      --accent:    #4f8cff;
+      --accent-lo: rgba(79,140,255,.13);
+      --ok:        #3dd68c;
+      --ok-lo:     rgba(61,214,140,.1);
+      --err:       #f15f5f;
+      --err-lo:    rgba(241,95,95,.1);
+      --warn:      #f5a623;
+      --warn-lo:   rgba(245,166,35,.12);
+      --text:      #e8ecf5;
+      --muted:     #6b738a;
+      --mono:      'JetBrains Mono','Fira Mono','Cascadia Code',monospace;
+      --sans:      'Inter',system-ui,sans-serif;
+    }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+    header { text-align:center; margin-bottom:1.5rem; }
+    header .eyebrow { font-size:.7rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent); margin-bottom:.4rem; }
+    header h1 { font-size:clamp(1.6rem,5vw,2.4rem); font-weight:700; letter-spacing:-.02em; }
+    header p  { margin-top:.4rem; color:var(--muted); font-size:.86rem; }
+
+    /* ── Tab grid ── */
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: .3rem;
+      margin-bottom: 1.2rem;
+      width: 100%;
+      max-width: 660px;
+    }
+    .tab {
+      padding: .5rem .3rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      color: var(--muted);
+      font-family: var(--sans);
+      font-size: .78rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      transition: background .15s, color .15s, border-color .15s;
+      line-height: 1.3;
+    }
+    .tab:hover { color: var(--text); border-color: var(--accent); }
+    .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .tab .emoji { display:block; font-size:1.1rem; margin-bottom:.15rem; }
+
+    .card {
+      width: 100%;
+      max-width: 660px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 1.8rem;
+    }
+    .panel { display:none; }
+    .panel.active { display:block; }
+
+    label {
+      display:block; font-size:.75rem; font-weight:600;
+      letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin-bottom:.45rem;
+    }
+    .input-row { display:flex; gap:.55rem; }
+    input[type="text"] {
+      flex:1; background:var(--bg); border:1.5px solid var(--border);
+      border-radius:8px; padding:.7rem .95rem;
+      font-family:var(--mono); font-size:.95rem; color:var(--text);
+      letter-spacing:.06em; transition:border-color .15s; outline:none;
+    }
+    input::placeholder { color:var(--muted); opacity:.55; }
+    input:focus   { border-color:var(--accent); }
+    input.valid   { border-color:var(--ok); }
+    input.invalid { border-color:var(--err); }
+
+    .check-btn {
+      padding:.7rem 1.2rem; background:var(--accent); color:#fff;
+      font-family:var(--sans); font-size:.88rem; font-weight:600;
+      border:none; border-radius:8px; cursor:pointer; white-space:nowrap;
+      transition:opacity .15s,transform .1s;
+    }
+    .check-btn:hover  { opacity:.88; }
+    .check-btn:active { transform:scale(.97); }
+
+    .hint { margin-top:.4rem; font-size:.76rem; color:var(--muted); min-height:1.1em; }
+
+    /* ── Result ── */
+    .result { margin-top:1.3rem; border-radius:10px; padding:1rem 1.1rem; display:none; border:1px solid transparent; }
+    .result.ok  { background:var(--ok-lo);  border-color:var(--ok);  }
+    .result.err { background:var(--err-lo); border-color:var(--err); }
+    .result-head { display:flex; align-items:center; gap:.45rem; font-weight:700; font-size:.95rem; }
+    .result-head .icon { font-size:1.1rem; }
+    .result.ok  .result-head { color:var(--ok); }
+    .result.err .result-head { color:var(--err); }
+    .result-body { margin-top:.55rem; font-size:.84rem; line-height:1.6; color:var(--text); }
+
+    .details { margin-top:.9rem; display:grid; grid-template-columns:auto 1fr; gap:.28rem .75rem; font-size:.8rem; }
+    .details dt { color:var(--muted); white-space:nowrap; }
+    .details dd { font-family:var(--mono); word-break:break-all; }
+
+    .doc-fmt {
+      margin-top:.8rem; font-family:var(--mono); font-size:1rem;
+      letter-spacing:.12em; display:flex; flex-wrap:wrap; gap:.28rem;
+    }
+    .doc-fmt .grp     { padding:.13rem .32rem; border-radius:4px; background:var(--border); }
+    .doc-fmt .grp.hi  { background:var(--accent-lo); color:var(--accent); }
+    .doc-fmt .grp.chk { background:var(--warn-lo);   color:var(--warn); }
+    .doc-fmt .grp.ok  { background:var(--ok-lo);     color:var(--ok); }
+
+    /* ── Examples ── */
+    .examples { margin-top:1.3rem; border-top:1px solid var(--border); padding-top:.9rem; }
+    .examples-label { font-size:.7rem; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); margin-bottom:.45rem; }
+    .chips { display:flex; flex-wrap:wrap; gap:.35rem; }
+    .chip {
+      padding:.28rem .65rem; font-family:var(--mono); font-size:.75rem; letter-spacing:.04em;
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+      cursor:pointer; color:var(--muted); transition:border-color .15s,color .15s;
+    }
+    .chip:hover { border-color:var(--accent); color:var(--text); }
+
+    /* ── Info box ── */
+    .infobox {
+      margin-top:1.2rem; border-top:1px solid var(--border); padding-top:.9rem;
+      font-size:.76rem; color:var(--muted); line-height:1.65;
+    }
+    .infobox strong { color:var(--text); }
+
+    footer { margin-top:2rem; font-size:.73rem; color:var(--muted); text-align:center; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="eyebrow">Format & Prüfziffer</div>
+  <h1>Dokument-Prüfer</h1>
+  <p>8 Prüfverfahren — alles clientseitig, kein Server</p>
+</header>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('iban')"><span class="emoji">🏦</span>IBAN</button>
+  <button class="tab" onclick="switchTab('ausweis')"><span class="emoji">🪪</span>Personalausweis</button>
+  <button class="tab" onclick="switchTab('pass')"><span class="emoji">📗</span>Reisepass</button>
+  <button class="tab" onclick="switchTab('karte')"><span class="emoji">💳</span>Kredit-/Bankkarte</button>
+  <button class="tab" onclick="switchTab('steuerid')"><span class="emoji">🧾</span>Steuer-ID</button>
+  <button class="tab" onclick="switchTab('ustid')"><span class="emoji">🏢</span>USt-IdNr.</button>
+  <button class="tab" onclick="switchTab('svnr')"><span class="emoji">🏥</span>Sozialversicherung</button>
+  <button class="tab" onclick="switchTab('isbn')"><span class="emoji">📚</span>ISBN / EAN</button>
+</div>
+
+<div class="card">
+
+<!-- ══════════════ IBAN ══════════════ -->
+<div class="panel active" id="panel-iban">
+  <label for="ibanInput">IBAN eingeben</label>
+  <div class="input-row">
+    <input type="text" id="ibanInput" placeholder="DE89 3704 0044 0532 0130 00" autocomplete="off" spellcheck="false" maxlength="42"/>
+    <button class="check-btn" onclick="checkIBAN()">Prüfen</button>
+  </div>
+  <div class="hint" id="ibanHint"></div>
+  <div class="result" id="ibanResult">
+    <div class="result-head"><span class="icon" id="ibanIcon"></span><span id="ibanTitle"></span></div>
+    <div class="result-body" id="ibanBody"></div>
+    <div class="doc-fmt" id="ibanFmt"></div>
+    <dl class="details" id="ibanDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="ibanChips"></div></div>
+</div>
+
+<!-- ══════════════ AUSWEIS ══════════════ -->
+<div class="panel" id="panel-ausweis">
+  <label for="ausweisInput">Seriennummer (9 Zeichen)</label>
+  <div class="input-row">
+    <input type="text" id="ausweisInput" placeholder="T22000129" autocomplete="off" spellcheck="false" maxlength="10"/>
+    <button class="check-btn" onclick="checkAusweis()">Prüfen</button>
+  </div>
+  <div class="hint" id="ausweisHint"></div>
+  <div class="result" id="ausweisResult">
+    <div class="result-head"><span class="icon" id="ausweisIcon"></span><span id="ausweisTitle"></span></div>
+    <div class="result-body" id="ausweisBody"></div>
+    <div class="doc-fmt" id="ausweisFmt"></div>
+    <dl class="details" id="ausweisDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="ausweisChips"></div></div>
+  <div class="infobox">
+    <strong>Wo?</strong> Vorderseite oben rechts, 9-stellig.<br>
+    <strong>Prüfung:</strong> Format + Prüfziffer (ICAO 7·3·1). Ob die Nummer vergeben wurde, ist nicht prüfbar.
+  </div>
+</div>
+
+<!-- ══════════════ REISEPASS ══════════════ -->
+<div class="panel" id="panel-pass">
+  <label for="passInput">Passnummer (9 Zeichen)</label>
+  <div class="input-row">
+    <input type="text" id="passInput" placeholder="C01X00T47" autocomplete="off" spellcheck="false" maxlength="10"/>
+    <button class="check-btn" onclick="checkPass()">Prüfen</button>
+  </div>
+  <div class="hint" id="passHint"></div>
+  <div class="result" id="passResult">
+    <div class="result-head"><span class="icon" id="passIcon"></span><span id="passTitle"></span></div>
+    <div class="result-body" id="passBody"></div>
+    <div class="doc-fmt" id="passFmt"></div>
+    <dl class="details" id="passDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="passChips"></div></div>
+  <div class="infobox">
+    <strong>Wo?</strong> Datenseite oben rechts, 9-stellig.<br>
+    <strong>Format:</strong> 2 Buchstaben (Serienkennung) + 6 Ziffern + 1 Prüfziffer (ICAO 9303, 7·3·1).
+  </div>
+</div>
+
+<!-- ══════════════ KREDITKARTE ══════════════ -->
+<div class="panel" id="panel-karte">
+  <label for="karteInput">Kartennummer (13–19 Ziffern)</label>
+  <div class="input-row">
+    <input type="text" id="karteInput" placeholder="4539 1488 0343 6467" autocomplete="off" spellcheck="false" maxlength="24"/>
+    <button class="check-btn" onclick="checkKarte()">Prüfen</button>
+  </div>
+  <div class="hint" id="karteHint"></div>
+  <div class="result" id="karteResult">
+    <div class="result-head"><span class="icon" id="karteIcon"></span><span id="karteTitle"></span></div>
+    <div class="result-body" id="karteBody"></div>
+    <div class="doc-fmt" id="karteFmt"></div>
+    <dl class="details" id="karteDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele (Testnummern)</div><div class="chips" id="karteChips"></div></div>
+  <div class="infobox">
+    <strong>Algorithmus:</strong> Luhn (ISO/IEC 7812). <strong>Netz-Erkennung:</strong> IIN/BIN-Präfix.<br>
+    <strong>Hinweis:</strong> Die Beispiele sind offizielle Testnummern — keine echten Karten.
+  </div>
+</div>
+
+<!-- ══════════════ STEUER-ID ══════════════ -->
+<div class="panel" id="panel-steuerid">
+  <label for="steueridInput">Steueridentifikationsnummer (11 Ziffern)</label>
+  <div class="input-row">
+    <input type="text" id="steueridInput" placeholder="86095742719" autocomplete="off" spellcheck="false" maxlength="13"/>
+    <button class="check-btn" onclick="checkSteuerID()">Prüfen</button>
+  </div>
+  <div class="hint" id="steueridHint"></div>
+  <div class="result" id="steueridResult">
+    <div class="result-head"><span class="icon" id="steueridIcon"></span><span id="steueridTitle"></span></div>
+    <div class="result-body" id="steueridBody"></div>
+    <div class="doc-fmt" id="steueridFmt"></div>
+    <dl class="details" id="steueridDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="steueridChips"></div></div>
+  <div class="infobox">
+    <strong>Algorithmus:</strong> ISO 7064, Mod 11,10 (iterative Modulo-Kette).<br>
+    <strong>Regeln:</strong> Erste Ziffer ≠ 0, keine Ziffer darf mehr als dreimal vorkommen, Ziffern 1–10 dürfen nicht alle gleich sein.
+  </div>
+</div>
+
+<!-- ══════════════ UST-ID ══════════════ -->
+<div class="panel" id="panel-ustid">
+  <label for="ustidInput">Umsatzsteuer-ID (DE + 9 Ziffern)</label>
+  <div class="input-row">
+    <input type="text" id="ustidInput" placeholder="DE129274202" autocomplete="off" spellcheck="false" maxlength="13"/>
+    <button class="check-btn" onclick="checkUstID()">Prüfen</button>
+  </div>
+  <div class="hint" id="ustidHint"></div>
+  <div class="result" id="ustidResult">
+    <div class="result-head"><span class="icon" id="ustidIcon"></span><span id="ustidTitle"></span></div>
+    <div class="result-body" id="ustidBody"></div>
+    <div class="doc-fmt" id="ustidFmt"></div>
+    <dl class="details" id="ustidDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="ustidChips"></div></div>
+  <div class="infobox">
+    <strong>Prüfung:</strong> Nur deutsche USt-IdNr. (DE…). Algorithmus: Mod 11 mit Doppelschritt (§ 27a UStG).<br>
+    <strong>Hinweis:</strong> Ob die Nummer aktiv/vergeben ist, nur per EU-VIES-Abfrage prüfbar.
+  </div>
+</div>
+
+<!-- ══════════════ SVNR ══════════════ -->
+<div class="panel" id="panel-svnr">
+  <label for="svnrInput">Sozialversicherungsnummer (12 Zeichen)</label>
+  <div class="input-row">
+    <input type="text" id="svnrInput" placeholder="65070891M052" autocomplete="off" spellcheck="false" maxlength="13"/>
+    <button class="check-btn" onclick="checkSVNR()">Prüfen</button>
+  </div>
+  <div class="hint" id="svnrHint"></div>
+  <div class="result" id="svnrResult">
+    <div class="result-head"><span class="icon" id="svnrIcon"></span><span id="svnrTitle"></span></div>
+    <div class="result-body" id="svnrBody"></div>
+    <div class="doc-fmt" id="svnrFmt"></div>
+    <dl class="details" id="svnrDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="svnrChips"></div></div>
+  <div class="infobox">
+    <strong>Format:</strong> 2 Ziffern (Bereichsnummer) + 6 Ziffern (Geburtsdatum TTMMJJ) + Buchstabe (Anfangsbuchstabe Geburtsname) + 3 Ziffern (Seriennummer).<br>
+    <strong>Prüfziffer:</strong> Stelle 1 (Quersumme nach Gewichtung 2·1·2·5·7·1·2·1·2·1·2·1).
+  </div>
+</div>
+
+<!-- ══════════════ ISBN / EAN ══════════════ -->
+<div class="panel" id="panel-isbn">
+  <label for="isbnInput">ISBN-10, ISBN-13 oder EAN-13</label>
+  <div class="input-row">
+    <input type="text" id="isbnInput" placeholder="978-3-16-148410-0" autocomplete="off" spellcheck="false" maxlength="22"/>
+    <button class="check-btn" onclick="checkISBN()">Prüfen</button>
+  </div>
+  <div class="hint" id="isbnHint"></div>
+  <div class="result" id="isbnResult">
+    <div class="result-head"><span class="icon" id="isbnIcon"></span><span id="isbnTitle"></span></div>
+    <div class="result-body" id="isbnBody"></div>
+    <div class="doc-fmt" id="isbnFmt"></div>
+    <dl class="details" id="isbnDetails"></dl>
+  </div>
+  <div class="examples"><div class="examples-label">Beispiele</div><div class="chips" id="isbnChips"></div></div>
+  <div class="infobox">
+    <strong>ISBN-10:</strong> Mod 11 (Gewichtung 10–1). Prüfziffer kann X=10 sein.<br>
+    <strong>ISBN-13 / EAN-13:</strong> Abwechselnd Gewichtung 1·3. Bindestriche und Leerzeichen werden ignoriert.
+  </div>
+</div>
+
+</div><!-- .card -->
+<footer>Keine Daten verlassen diesen Browser.</footer>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  UTILS
+// ═══════════════════════════════════════════════════════
+const TABS = ['iban','ausweis','pass','karte','steuerid','ustid','svnr','isbn'];
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', TABS[i]===name));
+  document.querySelectorAll('.panel').forEach(p => p.classList.toggle('active', p.id==='panel-'+name));
+}
+
+function showResult(id, ok, title, body) {
+  const el = document.getElementById(id+'Result');
+  el.style.display = 'block';
+  el.className = 'result ' + (ok ? 'ok' : 'err');
+  document.getElementById(id+'Icon').textContent  = ok ? '✓' : '✗';
+  document.getElementById(id+'Title').textContent = title;
+  document.getElementById(id+'Body').textContent  = body;
+}
+function clearFmt(id) {
+  document.getElementById(id+'Fmt').innerHTML = '';
+  document.getElementById(id+'Details').innerHTML = '';
+}
+function setFmt(id, html)    { document.getElementById(id+'Fmt').innerHTML = html; }
+function setDetails(id, rows) {
+  document.getElementById(id+'Details').innerHTML =
+    rows.map(([k,v])=>`<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+function grp(cls, txt) { return `<span class="grp ${cls}">${txt}</span>`; }
+
+function bindInput(id, checkFn, hintFn) {
+  const el = document.getElementById(id+'Input');
+  el.addEventListener('input', function() {
+    this.className = '';
+    document.getElementById(id+'Result').style.display = 'none';
+    if (hintFn) document.getElementById(id+'Hint').textContent = hintFn(this.value);
+  });
+  el.addEventListener('keydown', e => { if(e.key==='Enter') checkFn(); });
+  el.addEventListener('paste', e => {
+    e.preventDefault();
+    e.target.value = (e.clipboardData||window.clipboardData).getData('text').replace(/\s+-/g,'').trim();
+    e.target.dispatchEvent(new Event('input'));
+  });
+}
+function makeChips(containerId, inputId, examples, checkFn) {
+  const c = document.getElementById(containerId);
+  examples.forEach(({v,l}) => {
+    const b = document.createElement('button');
+    b.className='chip'; b.textContent=l; b.title=v;
+    b.onclick=()=>{ document.getElementById(inputId).value=v; checkFn(); };
+    c.appendChild(b);
+  });
+}
+
+// ICAO 7·3·1 check digit over a string (A=10…Z=35, <<=0)
+function icaoCheckDigit(s) {
+  const W=[7,3,1]; let sum=0;
+  for(let i=0;i<s.length;i++){
+    const c=s[i];
+    let v = c>='0'&&c<='9' ? +c : c>='A'&&c<='Z' ? c.charCodeAt(0)-55 : c==='<' ? 0 : -99;
+    if(v<0) return -1;
+    sum += v * W[i%3];
+  }
+  return sum%10;
+}
+
+// ═══════════════════════════════════════════════════════
+//  1. IBAN
+// ═══════════════════════════════════════════════════════
+const COUNTRIES={AD:22,AE:23,AL:28,AT:20,AZ:28,BA:20,BE:16,BG:22,BH:22,BR:29,BY:28,CH:21,CR:22,CY:28,CZ:24,DE:22,DK:18,DO:28,DZ:26,EE:20,EG:29,ES:24,FI:18,FK:18,FO:18,FR:27,GB:22,GE:22,GI:23,GL:18,GR:27,GT:28,HR:21,HU:28,IE:22,IL:23,IQ:23,IS:26,IT:27,JO:30,KW:30,KZ:20,LB:28,LC:32,LI:21,LT:20,LU:20,LV:21,LY:25,MA:28,MC:27,MD:24,ME:22,MK:19,MR:27,MT:31,MU:30,NI:28,NL:18,NO:15,OM:23,PK:24,PL:28,PS:29,PT:25,QA:29,RO:24,RS:22,SA:24,SC:31,SD:18,SE:24,SI:19,SK:24,SM:27,SO:23,ST:25,SV:28,TL:23,TN:24,TR:26,UA:29,VA:22,VG:24,XK:20};
+const CNAMES={AD:"Andorra",AE:"Ver. Arab. Emirate",AL:"Albanien",AT:"Österreich",AZ:"Aserbaidschan",BA:"Bosnien",BE:"Belgien",BG:"Bulgarien",BH:"Bahrain",BR:"Brasilien",BY:"Belarus",CH:"Schweiz",CR:"Costa Rica",CY:"Zypern",CZ:"Tschechien",DE:"Deutschland",DK:"Dänemark",DO:"Dominikan. Rep.",DZ:"Algerien",EE:"Estland",EG:"Ägypten",ES:"Spanien",FI:"Finnland",FK:"Falklandinseln",FO:"Färöer",FR:"Frankreich",GB:"Großbritannien",GE:"Georgien",GI:"Gibraltar",GL:"Grönland",GR:"Griechenland",GT:"Guatemala",HR:"Kroatien",HU:"Ungarn",IE:"Irland",IL:"Israel",IQ:"Irak",IS:"Island",IT:"Italien",JO:"Jordanien",KW:"Kuwait",KZ:"Kasachstan",LB:"Libanon",LC:"St. Lucia",LI:"Liechtenstein",LT:"Litauen",LU:"Luxemburg",LV:"Lettland",LY:"Libyen",MA:"Marokko",MC:"Monaco",MD:"Moldau",ME:"Montenegro",MK:"Nordmazedonien",MR:"Mauretanien",MT:"Malta",MU:"Mauritius",NI:"Nicaragua",NL:"Niederlande",NO:"Norwegen",OM:"Oman",PK:"Pakistan",PL:"Polen",PS:"Palästin. Gebiete",PT:"Portugal",QA:"Katar",RO:"Rumänien",RS:"Serbien",SA:"Saudi-Arabien",SC:"Seychellen",SD:"Sudan",SE:"Schweden",SI:"Slowenien",SK:"Slowakei",SM:"San Marino",SO:"Somalia",ST:"São Tomé",SV:"El Salvador",TL:"Osttimor",TN:"Tunesien",TR:"Türkei",UA:"Ukraine",VA:"Vatikan",VG:"Brit. Jungferninseln",XK:"Kosovo"};
+
+function mod97(str) {
+  const r = str.slice(4)+str.slice(0,4);
+  const n = r.split('').map(c=>{const x=c.charCodeAt(0);return x>=65?(x-55).toString():c;}).join('');
+  let rem='';
+  for(const ch of n) rem=(BigInt(rem+ch)%97n).toString();
+  return Number(rem);
+}
+function checkIBAN() {
+  const raw=document.getElementById('ibanInput').value;
+  const iban=raw.replace(/\s+/g,'').toUpperCase();
+  const id='iban';
+  if(!iban){showResult(id,false,'Ungültige IBAN','Bitte eine IBAN eingeben.');clearFmt(id);return;}
+  const cc=iban.slice(0,2);
+  if(!/^[A-Z]{2}/.test(iban)){showResult(id,false,'Ungültige IBAN','Muss mit 2 Buchstaben (Ländercode) beginnen.');clearFmt(id);document.getElementById('ibanInput').className='invalid';return;}
+  if(!(cc in COUNTRIES)){showResult(id,false,'Ungültige IBAN',`Unbekannter Ländercode „${cc}".`);clearFmt(id);document.getElementById('ibanInput').className='invalid';return;}
+  const exp=COUNTRIES[cc];
+  if(iban.length!==exp){showResult(id,false,'Ungültige IBAN',`Falsche Länge für ${cc}: erwartet ${exp}, gefunden ${iban.length}.`);clearFmt(id);document.getElementById('ibanInput').className='invalid';return;}
+  if(!/^[A-Z0-9]+$/.test(iban)){showResult(id,false,'Ungültige IBAN','Enthält ungültige Zeichen.');clearFmt(id);document.getElementById('ibanInput').className='invalid';return;}
+  const rem=mod97(iban);
+  if(rem!==1){showResult(id,false,'Ungültige IBAN',`Prüfziffer falsch — MOD-97 ergibt ${rem} (erwartet 1).`);clearFmt(id);document.getElementById('ibanInput').className='invalid';return;}
+  showResult(id,true,'Gültige IBAN','Format und MOD-97-Prüfziffer korrekt.');
+  document.getElementById('ibanInput').className='valid';
+  const chk=iban.slice(2,4), rest=iban.slice(4);
+  setFmt(id, grp('hi',cc)+grp('chk',chk)+(rest.match(/.{1,4}/g)||[]).map(g=>grp('',g)).join(''));
+  setDetails(id,[['Land',`${CNAMES[cc]||cc} (${cc})`],['Prüfziffern',chk],['BBAN',rest],['Länge',`${iban.length} Zeichen`]]);
+}
+bindInput('iban',checkIBAN,v=>{
+  const r=v.replace(/\s+/g,'').toUpperCase(), cc=r.slice(0,2);
+  if(/^[A-Z]{2}$/.test(cc)&&cc in COUNTRIES){const rem=COUNTRIES[cc]-r.length; return rem>0?`${CNAMES[cc]} · noch ${rem} Zeichen`:rem===0?`${CNAMES[cc]} · Länge OK`:`${CNAMES[cc]} · ${Math.abs(rem)} zu viel`;}
+  return r.length>=2?'Ländercode nicht erkannt':'';
+});
+makeChips('ibanChips','ibanInput',[
+  {v:'DE89370400440532013000',l:'DE (gültig)'},{v:'AT611904300234573201',l:'AT (gültig)'},
+  {v:'CH5604835012345678009',l:'CH (gültig)'},{v:'GB29NWBK60161331926819',l:'GB (gültig)'},
+  {v:'DE89370400440532013001',l:'DE (falsch)'}
+],checkIBAN);
+
+// ═══════════════════════════════════════════════════════
+//  2. PERSONALAUSWEIS
+// ═══════════════════════════════════════════════════════
+const PA_OK=/^[A-CE-HJ-NPR-TV-Z0-9]$/;
+function checkAusweis() {
+  const raw=document.getElementById('ausweisInput').value;
+  const nr=raw.replace(/\s+/g,'').toUpperCase(), id='ausweis';
+  const inp=document.getElementById('ausweisInput');
+  if(nr.length!==9){showResult(id,false,'Ungültige Seriennummer',`Muss genau 9 Zeichen haben (gefunden: ${nr.length}).`);clearFmt(id);inp.className='invalid';return;}
+  const bad=[...nr].filter(c=>!PA_OK.test(c));
+  if(bad.length){showResult(id,false,'Ungültige Seriennummer',`Ungültige Zeichen: ${[...new Set(bad)].join(' ')} (D,F,I,O,Q,U nicht erlaubt).`);clearFmt(id);inp.className='invalid';return;}
+  if(!/^[A-Z]/.test(nr)){showResult(id,false,'Ungültige Seriennummer','Erstes Zeichen muss ein Buchstabe sein.');clearFmt(id);inp.className='invalid';return;}
+  const given=parseInt(nr[8],10), comp=icaoCheckDigit(nr.slice(0,8));
+  if(comp<0||given!==comp){showResult(id,false,'Ungültige Seriennummer',`Prüfziffer falsch: Zeichen 9 ist „${nr[8]}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+  showResult(id,true,'Gültige Seriennummer','Format und Prüfziffer (ICAO 7·3·1) korrekt.');
+  inp.className='valid';
+  setFmt(id, grp('hi',nr[0])+grp('',nr.slice(1,8))+grp('chk',nr[8]));
+  setDetails(id,[['Kennung',nr[0]],['Seriennummer',nr.slice(1,8)],['Prüfziffer',given],['Algorithmus','ICAO 9303 (7·3·1)']]);
+}
+bindInput('ausweis',checkAusweis,v=>{const rem=9-v.replace(/\s+/g,'').length;return v?rem>0?`noch ${rem} Zeichen`:rem===0?'Länge OK':`${Math.abs(rem)} zu viel`:'';});
+makeChips('ausweisChips','ausweisInput',[
+  {v:'T22000129',l:'T22000129 (gültig)'},{v:'T22000128',l:'T22000128 (falsch)'},{v:'L01X00T27',l:'L01X00T27 (gültig)'}
+],checkAusweis);
+
+// ═══════════════════════════════════════════════════════
+//  3. REISEPASS
+// ═══════════════════════════════════════════════════════
+function checkPass() {
+  const raw=document.getElementById('passInput').value;
+  const nr=raw.replace(/\s+/g,'').toUpperCase(), id='pass';
+  const inp=document.getElementById('passInput');
+  if(nr.length!==9){showResult(id,false,'Ungültige Passnummer',`Muss genau 9 Zeichen haben (gefunden: ${nr.length}).`);clearFmt(id);inp.className='invalid';return;}
+  if(!/^[A-Z0-9]{9}$/.test(nr)){showResult(id,false,'Ungültige Passnummer','Nur A–Z und 0–9 erlaubt.');clearFmt(id);inp.className='invalid';return;}
+  if(!/^[A-Z]{2}/.test(nr)){showResult(id,false,'Ungültige Passnummer','Erste zwei Zeichen müssen Buchstaben sein (Serienkennung).');clearFmt(id);inp.className='invalid';return;}
+  const given=parseInt(nr[8],10), comp=icaoCheckDigit(nr.slice(0,8));
+  if(given!==comp){showResult(id,false,'Ungültige Passnummer',`Prüfziffer falsch: Zeichen 9 ist „${nr[8]}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+  showResult(id,true,'Gültige Passnummer','Format und Prüfziffer (ICAO 9303, 7·3·1) korrekt.');
+  inp.className='valid';
+  setFmt(id, grp('hi',nr.slice(0,2))+grp('',nr.slice(2,8))+grp('chk',nr[8]));
+  setDetails(id,[['Serienkennung',nr.slice(0,2)],['Nummer',nr.slice(2,8)],['Prüfziffer',given],['Algorithmus','ICAO 9303 (7·3·1)']]);
+}
+bindInput('pass',checkPass,v=>{const rem=9-v.replace(/\s+/g,'').length;return v?rem>0?`noch ${rem} Zeichen`:rem===0?'Länge OK':`${Math.abs(rem)} zu viel`:'';});
+makeChips('passChips','passInput',[
+  {v:'C01X00T47',l:'C01X00T47 (gültig)'},{v:'C01X00T48',l:'C01X00T48 (falsch)'},{v:'CA165836D',l:'CA165836D (gültig)'}
+],checkPass);
+
+// ═══════════════════════════════════════════════════════
+//  4. KREDIT-/BANKKARTE (Luhn + IIN)
+// ═══════════════════════════════════════════════════════
+function luhn(nr) {
+  let sum=0;
+  for(let i=0;i<nr.length;i++){
+    let d=+nr[nr.length-1-i];
+    if(i%2===1){d*=2; if(d>9) d-=9;}
+    sum+=d;
+  }
+  return sum%10===0;
+}
+function detectNetwork(nr) {
+  if(/^4/.test(nr))                                   return 'Visa';
+  if(/^5[1-5]/.test(nr)||/^2[2-7]/.test(nr))         return 'Mastercard';
+  if(/^3[47]/.test(nr))                               return 'American Express';
+  if(/^3(?:0[0-5]|[68])/.test(nr))                   return 'Diners Club';
+  if(/^6(?:011|5)/.test(nr)||/^64[4-9]/.test(nr))    return 'Discover';
+  if(/^35(?:2[89]|[3-8])/.test(nr))                  return 'JCB';
+  if(/^(?:6304|6759|6761|6762|6763)/.test(nr))       return 'Maestro';
+  if(/^6/.test(nr))                                   return 'UnionPay / Girocard';
+  return 'Unbekanntes Netz';
+}
+function checkKarte() {
+  const raw=document.getElementById('karteInput').value;
+  const nr=raw.replace(/[\s-]/g,''), id='karte';
+  const inp=document.getElementById('karteInput');
+  if(!/^\d+$/.test(nr)){showResult(id,false,'Ungültige Kartennummer','Nur Ziffern erlaubt (Leerzeichen/Bindestriche werden ignoriert).');clearFmt(id);inp.className='invalid';return;}
+  if(nr.length<13||nr.length>19){showResult(id,false,'Ungültige Kartennummer',`Länge ungültig: ${nr.length} Ziffern (erwartet 13–19).`);clearFmt(id);inp.className='invalid';return;}
+  if(!luhn(nr)){showResult(id,false,'Ungültige Kartennummer',`Luhn-Prüfung fehlgeschlagen.`);clearFmt(id);inp.className='invalid';return;}
+  const net=detectNetwork(nr);
+  showResult(id,true,'Gültige Kartennummer',`Luhn-Prüfziffer korrekt.`);
+  inp.className='valid';
+  // Format in 4er-Gruppen
+  const groups=nr.match(/.{1,4}/g)||[];
+  setFmt(id, grp('hi',groups[0]||'')+(groups.slice(1,-1)||[]).map(g=>grp('',g)).join('')+grp('chk',groups[groups.length-1]||''));
+  setDetails(id,[['Netz/Typ',net],['Länge',`${nr.length} Ziffern`],['IIN/BIN',nr.slice(0,6)],['Algorithmus','Luhn (ISO/IEC 7812)']]);
+}
+bindInput('karte',checkKarte,v=>{
+  const n=v.replace(/[\s-]/g,'');
+  if(!n) return '';
+  if(!/^\d*$/.test(n)) return 'Nur Ziffern erlaubt';
+  return n.length<13?`noch min. ${13-n.length} Ziffern`:n.length>19?`${n.length-19} zu viel`:'Länge OK';
+});
+makeChips('karteChips','karteInput',[
+  {v:'4539148803436467',l:'Visa (gültig)'},{v:'5425233430109903',l:'MC (gültig)'},
+  {v:'374251018720955',l:'Amex (gültig)'},{v:'4539148803436468',l:'Visa (falsch)'}
+],checkKarte);
+
+// ═══════════════════════════════════════════════════════
+//  5. STEUER-IDENTIFIKATIONSNUMMER
+// ═══════════════════════════════════════════════════════
+function checkSteuerID() {
+  const raw=document.getElementById('steueridInput').value;
+  const nr=raw.replace(/\s+/g,''), id='steuerid';
+  const inp=document.getElementById('steueridInput');
+  if(!/^\d+$/.test(nr)){showResult(id,false,'Ungültige Steuer-ID','Nur Ziffern erlaubt.');clearFmt(id);inp.className='invalid';return;}
+  if(nr.length!==11){showResult(id,false,'Ungültige Steuer-ID',`Muss genau 11 Ziffern haben (gefunden: ${nr.length}).`);clearFmt(id);inp.className='invalid';return;}
+  if(nr[0]==='0'){showResult(id,false,'Ungültige Steuer-ID','Erste Ziffer darf nicht 0 sein.');clearFmt(id);inp.className='invalid';return;}
+  // Kein Digit mehr als 3× (Stellen 1–10), nicht alle gleich
+  const counts={};
+  for(const c of nr.slice(0,10)) counts[c]=(counts[c]||0)+1;
+  if(Object.values(counts).some(x=>x>3)){showResult(id,false,'Ungültige Steuer-ID','Eine Ziffer kommt in den ersten 10 Stellen mehr als dreimal vor.');clearFmt(id);inp.className='invalid';return;}
+  // ISO 7064 Mod 11,10
+  let p=10;
+  for(let i=0;i<10;i++){
+    let s=(parseInt(nr[i])+p)%10; if(s===0) s=10;
+    p=(s*2)%11;
+  }
+  const comp=11-p===10?0:11-p;
+  const given=parseInt(nr[10]);
+  if(given!==comp){showResult(id,false,'Ungültige Steuer-ID',`Prüfziffer falsch: Stelle 11 ist „${given}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+  showResult(id,true,'Gültige Steuer-ID','Format und Prüfziffer (ISO 7064 Mod 11,10) korrekt.');
+  inp.className='valid';
+  setFmt(id, grp('hi',nr.slice(0,1))+grp('',nr.slice(1,10))+grp('chk',nr[10]));
+  setDetails(id,[['Erste Ziffer',nr[0]],['Nummer',nr.slice(1,10)],['Prüfziffer',given],['Algorithmus','ISO 7064 Mod 11,10']]);
+}
+bindInput('steuerid',checkSteuerID,v=>{const n=v.replace(/\s+/g,'');return n?11-n.length>0?`noch ${11-n.length} Ziffern`:n.length===11?'Länge OK':`${n.length-11} zu viel`:'';});
+makeChips('steueridChips','steueridInput',[
+  {v:'86095742719',l:'86095742719 (gültig)'},{v:'02476291358',l:'02476291358 (gültig)'},{v:'86095742710',l:'86095742710 (falsch)'}
+],checkSteuerID);
+
+// ═══════════════════════════════════════════════════════
+//  6. UST-IDNR. (Deutschland)
+// ═══════════════════════════════════════════════════════
+function checkUstID() {
+  const raw=document.getElementById('ustidInput').value;
+  const nr=raw.replace(/\s+/g,'').toUpperCase(), id='ustid';
+  const inp=document.getElementById('ustidInput');
+  if(!nr.startsWith('DE')){showResult(id,false,'Ungültige USt-IdNr.','Muss mit „DE" beginnen (nur deutsche Nummern werden unterstützt).');clearFmt(id);inp.className='invalid';return;}
+  const digits=nr.slice(2);
+  if(!/^\d{9}$/.test(digits)){showResult(id,false,'Ungültige USt-IdNr.',`Nach „DE" müssen genau 9 Ziffern folgen (gefunden: ${digits.length}).`);clearFmt(id);inp.className='invalid';return;}
+  if(digits[0]==='0'){showResult(id,false,'Ungültige USt-IdNr.','Erste Ziffer nach DE darf nicht 0 sein.');clearFmt(id);inp.className='invalid';return;}
+  // Mod 11 Doppelschritt (BMF-Algorithmus)
+  let p=10;
+  for(let i=0;i<8;i++){
+    let s=(parseInt(digits[i])+p)%10; if(s===0) s=10;
+    p=(s*2)%11;
+  }
+  const comp=11-p===10?0:11-p;
+  const given=parseInt(digits[8]);
+  if(given!==comp){showResult(id,false,'Ungültige USt-IdNr.',`Prüfziffer falsch: Stelle 9 ist „${given}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+  showResult(id,true,'Gültige USt-IdNr.','Format und Prüfziffer (Mod 11 Doppelschritt) korrekt.');
+  inp.className='valid';
+  setFmt(id, grp('hi','DE')+grp('',digits.slice(0,8))+grp('chk',digits[8]));
+  setDetails(id,[['Präfix','DE'],['Steuernummer',digits.slice(0,8)],['Prüfziffer',given],['Algorithmus','Mod 11 Doppelschritt (BMF)']]);
+}
+bindInput('ustid',checkUstID,v=>{
+  const n=v.replace(/\s+/g,'').toUpperCase();
+  const digits=n.startsWith('DE')?n.slice(2):n;
+  if(!n) return '';
+  if(n.length<2) return 'Beginnt mit DE…';
+  const rem=9-digits.length; return rem>0?`noch ${rem} Ziffern`:rem===0?'Länge OK':`${Math.abs(rem)} zu viel`;
+});
+makeChips('ustidChips','ustidInput',[
+  {v:'DE129274202',l:'DE129274202 (gültig)'},{v:'DE136695976',l:'DE136695976 (gültig)'},{v:'DE129274203',l:'DE129274203 (falsch)'}
+],checkUstID);
+
+// ═══════════════════════════════════════════════════════
+//  7. SOZIALVERSICHERUNGSNUMMER
+// ═══════════════════════════════════════════════════════
+// Format: TTMMJJ (Geburtsdatum) + Anfangsbuchstabe Geburtsname + Seriennummer (2 Stellen) + Prüfziffer
+// Vollformat: 2 Bereichsziffern + TTMMJJ + Buchstabe + 2 Ziffern + Prüfziffer = 12 Zeichen
+// Prüfziffer: Gewichtung 2,1,2,5,7,1,2,1,2,1,2,1 auf Ziffern (Buchstabe → zweistellig A=01..Z=26), Quersumme mod 10
+const SV_WEIGHTS=[2,1,2,5,7,1,2,1,2,1,2,1];
+function checkSVNR() {
+  const raw=document.getElementById('svnrInput').value;
+  const nr=raw.replace(/\s+/g,'').toUpperCase(), id='svnr';
+  const inp=document.getElementById('svnrInput');
+  if(nr.length!==12){showResult(id,false,'Ungültige SV-Nummer',`Muss genau 12 Zeichen haben (gefunden: ${nr.length}).`);clearFmt(id);inp.className='invalid';return;}
+  // pos 0-1: Bereichsnr (Ziffern), pos 2-7: TTMMJJ (Ziffern), pos 8: Buchstabe, pos 9-10: Seriennr (Ziffern), pos 11: Prüfziffer
+  if(!/^\d{2}\d{6}[A-Z]\d{2}\d$/.test(nr)){showResult(id,false,'Ungültige SV-Nummer','Format: 2 Ziffern + TTMMJJ + Buchstabe + 2 Ziffern + Prüfziffer.');clearFmt(id);inp.className='invalid';return;}
+  // Expand letter at pos 8 to two digits
+  const letterVal = nr.charCodeAt(8)-64; // A=1..Z=26
+  const expanded = nr.slice(0,8) + (letterVal<10?'0':'')+letterVal + nr.slice(9,12);
+  // expanded is now 13 chars; weights apply to first 12, pos 11 is Prüfziffer
+  let sum=0;
+  for(let i=0;i<12;i++){
+    const d=parseInt(expanded[i]);
+    const w=SV_WEIGHTS[i];
+    const p=d*w;
+    sum += p>=10 ? Math.floor(p/10)+p%10 : p; // Quersumme wenn ≥10
+  }
+  const comp=sum%10;
+  const given=parseInt(nr[11]);
+  if(given!==comp){showResult(id,false,'Ungültige SV-Nummer',`Prüfziffer falsch: Stelle 12 ist „${given}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+  // Parse date
+  const tt=nr.slice(2,4), mm=nr.slice(4,6), jj=nr.slice(6,8);
+  const yyyy = parseInt(jj)<25 ? '20'+jj : '19'+jj;
+  showResult(id,true,'Gültige SV-Nummer','Format und Prüfziffer korrekt.');
+  inp.className='valid';
+  setFmt(id, grp('hi',nr.slice(0,2))+grp('',nr.slice(2,8))+grp('ok',nr[8])+grp('',nr.slice(9,11))+grp('chk',nr[11]));
+  setDetails(id,[['Bereichsnr.',nr.slice(0,2)],['Geburtsdatum',`${tt}.${mm}.${yyyy}`],['Anfangsbuchstabe',nr[8]],['Seriennummer',nr.slice(9,11)],['Prüfziffer',given]]);
+}
+bindInput('svnr',checkSVNR,v=>{const rem=12-v.replace(/\s+/g,'').length;return v?rem>0?`noch ${rem} Zeichen`:rem===0?'Länge OK':`${Math.abs(rem)} zu viel`:'';});
+makeChips('svnrChips','svnrInput',[
+  {v:'65070891M052',l:'65070891M052 (gültig)'},{v:'65070891M053',l:'65070891M053 (falsch)'}
+],checkSVNR);
+
+// ═══════════════════════════════════════════════════════
+//  8. ISBN-10 / ISBN-13 / EAN-13
+// ═══════════════════════════════════════════════════════
+function checkISBN() {
+  const raw=document.getElementById('isbnInput').value;
+  const clean=raw.replace(/[\s\-]/g,'').toUpperCase(), id='isbn';
+  const inp=document.getElementById('isbnInput');
+  if(!clean){showResult(id,false,'Ungültige Nummer','Bitte eine ISBN oder EAN eingeben.');clearFmt(id);inp.className='invalid';return;}
+
+  if(clean.length===10) {
+    // ISBN-10: digits + optional X at end
+    if(!/^\d{9}[\dX]$/.test(clean)){showResult(id,false,'Ungültige ISBN-10','Format: 9 Ziffern + Prüfzeichen (0–9 oder X).');clearFmt(id);inp.className='invalid';return;}
+    let sum=0;
+    for(let i=0;i<9;i++) sum+=(10-i)*parseInt(clean[i]);
+    const last=clean[9]==='X'?10:parseInt(clean[9]);
+    sum+=last;
+    if(sum%11!==0){showResult(id,false,'Ungültige ISBN-10',`Prüfziffer falsch (Summe mod 11 = ${sum%11}, erwartet 0).`);clearFmt(id);inp.className='invalid';return;}
+    showResult(id,true,'Gültige ISBN-10','Format und Mod-11-Prüfziffer korrekt.');
+    inp.className='valid';
+    setFmt(id, grp('hi',clean.slice(0,1))+grp('',clean.slice(1,3))+grp('',clean.slice(3,9))+grp('chk',clean[9]));
+    setDetails(id,[['Format','ISBN-10'],['Verlagskennung',clean.slice(0,3)],['Titel',clean.slice(3,9)],['Prüfzeichen',clean[9]],['Algorithmus','Mod 11']]);
+  } else if(clean.length===13) {
+    if(!/^\d{13}$/.test(clean)){showResult(id,false,'Ungültige ISBN-13 / EAN-13','Format: genau 13 Ziffern (Bindestriche werden ignoriert).');clearFmt(id);inp.className='invalid';return;}
+    let sum=0;
+    for(let i=0;i<12;i++) sum+=parseInt(clean[i])*(i%2===0?1:3);
+    const comp=(10-sum%10)%10, given=parseInt(clean[12]);
+    if(given!==comp){showResult(id,false,'Ungültige ISBN-13 / EAN-13',`Prüfziffer falsch: Stelle 13 ist „${given}", erwartet „${comp}".`);clearFmt(id);inp.className='invalid';return;}
+    const isISBN=clean.startsWith('978')||clean.startsWith('979');
+    const fmt=isISBN?'ISBN-13':'EAN-13';
+    showResult(id,true,`Gültige ${fmt}`,`Format und EAN-13-Prüfziffer korrekt.`);
+    inp.className='valid';
+    setFmt(id, grp('hi',clean.slice(0,3))+grp('',clean.slice(3,9))+grp('',clean.slice(9,12))+grp('chk',clean[12]));
+    setDetails(id,[['Format',fmt],['Präfix',clean.slice(0,3)],['Nummer',clean.slice(3,12)],['Prüfziffer',given],['Algorithmus','EAN-13 (1·3)']]);
+  } else {
+    showResult(id,false,'Ungültige Nummer',`Ungültige Länge: ${clean.length} Zeichen. Erwartet 10 (ISBN-10) oder 13 (ISBN-13/EAN).`);
+    clearFmt(id); inp.className='invalid';
+  }
+}
+bindInput('isbn',checkISBN,v=>{
+  const n=v.replace(/[\s\-]/g,'');
+  if(!n) return '';
+  if(n.length<10) return `noch min. ${10-n.length} Zeichen`;
+  if(n.length===10||n.length===13) return 'Länge OK';
+  if(n.length<13) return `${n.length} — noch ${13-n.length} für ISBN-13`;
+  return `${n.length-13} zu viel`;
+});
+makeChips('isbnChips','isbnInput',[
+  {v:'978-3-16-148410-0',l:'ISBN-13 (gültig)'},{v:'3-16-148410-X',l:'ISBN-10 (gültig)'},
+  {v:'4006381333931',l:'EAN-13 (gültig)'},{v:'978-3-16-148410-1',l:'ISBN-13 (falsch)'}
+],checkISBN);
+</script>
+</body>
+</html>
