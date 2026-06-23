@@ -13,7 +13,7 @@
 // KN10 / KG DN100 Rohr
 rohr_aussen_d    = 100;   // Außendurchmesser KN10-Rohr [mm]
 muffe_spiel      = 0.1;   // Spiel für den Stecksitz [mm]
-muffe_laenge     = 50;    // Tiefe der Muffe [mm]
+muffe_laenge     = 60;    // Tiefe der Muffe [mm]
 muffe_wandstaerke = 3;    // Wandstärke der Muffe [mm]
 
 // Übergang
@@ -29,6 +29,9 @@ lue_rahmen_dicke  = 4;    // Dicke des Lüfterrahmens [mm]
 
 // Luftöffnung im Lüfterrahmen
 lue_oeffnung_d   = 116;   // Freier Durchmesser der Luftöffnung [mm]
+
+//nur muffe
+muffe_only = false;
 
 // Allgemein
 $fn = 128;                 // Auflösung (Segmente für Kreise)
@@ -49,13 +52,15 @@ union() {
     // 1) Muffe (Steckende für das KN10-Rohr)
     muffe();
 
-    // 2) Übergang: Zylinder → quadratischer Rahmen
-    translate([0, 0, muffe_laenge])
-        uebergang();
+    if ( false == muffe_only ) {
+        // 2) Übergang: Zylinder → quadratischer Rahmen
+        translate([0, 0, muffe_laenge])
+            uebergang();
 
-    // 3) Lüfterrahmen
-    translate([0, 0, muffe_laenge + uebergang_laenge])
-        lueifterrahmen();
+        // 3) Lüfterrahmen
+        translate([0, 0, muffe_laenge + uebergang_laenge])
+            lueifterrahmen();
+    }
 }
 
 
