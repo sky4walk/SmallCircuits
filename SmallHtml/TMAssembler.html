@@ -1766,10 +1766,26 @@ function crossCompileTM(src){
 
     let m;
     if((m = rest.match(/^INC\s*\(([^)]+)\)/i))){
-      instrs.push({type:'INC', reg: m[1].trim(), origIdx});
+      // Parameter kann "label:var" Notation haben → Parameter-Zelle bekommt das Label
+      let param = m[1].trim();
+      let paramLabel = null;
+      const colonM = param.match(/^(\w+)\s*:\s*(\w+)$/);
+      if(colonM){
+        paramLabel = colonM[1];
+        param = colonM[2];
+      }
+      instrs.push({type:'INC', reg: param, paramLabel, origIdx});
       instrIdx++;
     } else if((m = rest.match(/^BNZ\s*\(([^,)]+),([^)]+)\)/i))){
-      instrs.push({type:'BNZ', reg: m[1].trim(), lbl: m[2].trim(), origIdx});
+      // Erstes Argument kann ebenfalls "label:var" Notation haben
+      let param = m[1].trim();
+      let paramLabel = null;
+      const colonM = param.match(/^(\w+)\s*:\s*(\w+)$/);
+      if(colonM){
+        paramLabel = colonM[1];
+        param = colonM[2];
+      }
+      instrs.push({type:'BNZ', reg: param, paramLabel, lbl: m[2].trim(), origIdx});
       instrIdx++;
     } else if((m = rest.match(/^CLR\s*\(([^)]+)\)/i))){
       return {error: `CLR auf Hardware-Ebene nicht erlaubt. CLR ist ein STDLIB-Makro – wird automatisch ersetzt. (Zeile mit "${rest}")`};
@@ -1801,6 +1817,18 @@ function crossCompileTM(src){
   }
   const totalCells = cellPos;
 
+  // Parameter-Labels (R1:A-Notation): zeigen auf die Parameter-Zelle (addr+1)
+  // Diese Labels haben Vorrang vor normalen Labels (überschreiben sie)
+  // Damit kann ein BNZ(x, R1) auf die Parameter-Zelle springen.
+  // Hinweis: das ist eine Speicheradresse, kein Programm-Index!
+  // Daher tragen wir sie als spezielle Labels ein, die direkt Zell-Adressen referenzieren.
+  const cellLabels = {};  // labelName -> direkte Zell-Adresse
+  for(let i = 0; i < instrs.length; i++){
+    if(instrs[i].paramLabel){
+      cellLabels[instrs[i].paramLabel] = instrCellAddr[i] + 1;
+    }
+  }
+
   // 5. Wortbreite N berechnen
   // Brauche genug Bits für: höchste Adresse + alle Werte
   // Werte sind: 0 (BNZ), 1 (INC), Variablenadressen, Sprungziele, Variablen-Initialwerte
@@ -1814,12 +1842,24 @@ function crossCompileTM(src){
   while((1 << N) < totalCells) N++;
 
   // 6. Resolve Labels zu Zell-Adressen
+  // Helper: löst Variablen-/Label-Namen zu Zell-Adresse auf
+  // Erst normale Variablen, dann Parameter-Labels (R1:A-Notation)
+  function resolveAddress(name){
+    if(varAddr[name] !== undefined) return varAddr[name];
+    if(cellLabels[name] !== undefined) return cellLabels[name];
+    return undefined;
+  }
+
   for(const instr of instrs){
     if(instr.type === 'BNZ'){
-      if(labels[instr.lbl] === undefined){
+      // Sprungziel: kann Label im Programm sein, oder Parameter-Label (Zell-Adresse direkt)
+      if(labels[instr.lbl] !== undefined){
+        instr.targetCell = instrCellAddr[labels[instr.lbl]];
+      } else if(cellLabels[instr.lbl] !== undefined){
+        instr.targetCell = cellLabels[instr.lbl];
+      } else {
         return {error: `Label '${instr.lbl}' nicht gefunden`};
       }
-      instr.targetCell = instrCellAddr[labels[instr.lbl]];
     }
   }
 
@@ -1831,16 +1871,18 @@ function crossCompileTM(src){
     const addr = instrCellAddr[i];
     if(instr.type === 'INC'){
       cells[addr]   = 1;  // INC-Opcode
-      if(varAddr[instr.reg] === undefined){
+      const a = resolveAddress(instr.reg);
+      if(a === undefined){
         return {error: `Variable '${instr.reg}' nicht deklariert (INC)`};
       }
-      cells[addr+1] = varAddr[instr.reg];
+      cells[addr+1] = a;
     } else if(instr.type === 'BNZ'){
       cells[addr]   = 0;  // BNZ-Opcode
-      if(varAddr[instr.reg] === undefined){
+      const a = resolveAddress(instr.reg);
+      if(a === undefined){
         return {error: `Variable '${instr.reg}' nicht deklariert (BNZ)`};
       }
-      cells[addr+1] = varAddr[instr.reg];
+      cells[addr+1] = a;
       cells[addr+2] = instr.targetCell;
     }
   }
@@ -1861,12 +1903,15 @@ function crossCompileTM(src){
   for(let i = 0; i < instrs.length; i++){
     const instr = instrs[i];
     const addr = instrCellAddr[i];
+    const labelHint = instr.paramLabel ? ` [Label: ${instr.paramLabel}]` : '';
     if(instr.type === 'INC'){
       mapping.push({addr, val: '001', comment: `INC – Opcode`});
-      mapping.push({addr: addr+1, val: toBinN(varAddr[instr.reg], N), comment: `→ ${instr.reg} (Adresse ${varAddr[instr.reg]})`});
+      const a = resolveAddress(instr.reg);
+      mapping.push({addr: addr+1, val: toBinN(a, N), comment: `→ ${instr.reg} (Zelle ${a})${labelHint}`});
     } else if(instr.type === 'BNZ'){
       mapping.push({addr, val: '000', comment: `BNZ – Opcode`});
-      mapping.push({addr: addr+1, val: toBinN(varAddr[instr.reg], N), comment: `→ ${instr.reg} (Adresse ${varAddr[instr.reg]})`});
+      const a = resolveAddress(instr.reg);
+      mapping.push({addr: addr+1, val: toBinN(a, N), comment: `→ ${instr.reg} (Zelle ${a})${labelHint}`});
       mapping.push({addr: addr+2, val: toBinN(instr.targetCell, N), comment: `→ Sprung zu Zelle ${instr.targetCell}`});
     }
   }
@@ -1895,12 +1940,15 @@ function showTMExport(){
   const mapOut = document.getElementById('addr-mapping');
 
   if(result.error){
-    stats.innerHTML = `<div class="k">Fehler:</div><div class="v" style="color:var(--red)">${esc(result.error)}</div>`;
+    stats.innerHTML = `<div class="k">Fehler:</div><div class="v" style="color:var(--red);white-space:pre-wrap;line-height:1.5">${esc(result.error)}</div>`;
     bandOut.textContent = '';
     mapOut.innerHTML = '';
+    document.getElementById('btn-download-tm').disabled = true;
+    window._tmResult = null;
     bg.classList.add('visible');
     return;
   }
+  document.getElementById('btn-download-tm').disabled = false;
 
   stats.innerHTML = `
     <div class="k">Wortbreite N:</div><div class="v">${result.N} Bit (max ${(1<<result.N)-1})</div>
