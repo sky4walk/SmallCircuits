@@ -1,0 +1,2119 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>RAM Simulator v4</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --panel:   #161b22;
+    --border:  #30363d;
+    --accent:  #58a6ff;
+    --green:   #3fb950;
+    --yellow:  #d29922;
+    --red:     #f85149;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --mono:    'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    --syn-keyword:    #ff7b72;
+    --syn-macro-kw:   #d2a8ff;
+    --syn-macro-call: #79c0ff;
+    --syn-label:      #e3b341;
+    --syn-label-ref:  #ffa657;
+    --syn-number:     #79c0ff;
+    --syn-reg:        #e6edf3;
+    --syn-paren:      #8b949e;
+    --syn-comment:    #484f58;
+    --syn-varval:     #79c0ff;
+    --syn-active-bg:  #1c2b3a;
+    --syn-active-border: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background:var(--bg); color:var(--text); font-family:var(--mono);
+         font-size:13px; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+  #toolbar { display:flex; align-items:center; gap:8px; padding:8px 12px;
+             background:var(--panel); border-bottom:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; }
+  #toolbar h1 { font-size:14px; font-weight:700; color:var(--accent); letter-spacing:.05em; margin-right:4px; }
+  .btn { padding:4px 12px; border:1px solid var(--border); border-radius:6px;
+         background:#21262d; color:var(--text); font-family:var(--mono); font-size:12px;
+         cursor:pointer; transition:background .15s,border-color .15s; }
+  .btn:hover { background:#30363d; border-color:var(--accent); }
+  .btn.primary { background:#1f6feb; border-color:#388bfd; }
+  .btn.primary:hover { background:#388bfd; }
+  .btn:disabled { opacity:.4; cursor:default; }
+  select.btn { padding:4px 8px; }
+  #speed { width:70px; accent-color:var(--accent); }
+  #speed-label { color:var(--muted); font-size:11px; }
+  #status-badge { margin-left:auto; padding:3px 10px; border-radius:12px; font-size:11px;
+                  font-weight:600; letter-spacing:.06em; background:#21262d; border:1px solid var(--border); }
+  #status-badge.running { color:var(--green);  border-color:var(--green); }
+  #status-badge.halted  { color:var(--red);    border-color:var(--red); }
+  #status-badge.ready   { color:var(--accent); border-color:var(--accent); }
+  #status-badge.error   { color:var(--yellow); border-color:var(--yellow); }
+  #step-count { color:var(--muted); font-size:11px; }
+
+  #main { display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr auto;
+          gap:0; flex:1; overflow:hidden; }
+
+  #editor-pane { grid-row:1/3; border-right:1px solid var(--border);
+                 display:flex; flex-direction:column; overflow:hidden; }
+  .pane-header { padding:6px 12px; font-size:11px; color:var(--muted); background:var(--panel);
+                 border-bottom:1px solid var(--border); display:flex; align-items:center; gap:8px; flex-shrink:0; }
+  .pane-header span { color:var(--text); font-weight:600; }
+  #file-input { display:none; }
+  .load-btn { margin-left:auto; padding:2px 8px; border:1px solid var(--border); border-radius:4px;
+              background:transparent; color:var(--muted); font-family:var(--mono); font-size:11px; cursor:pointer; }
+  .load-btn:hover { color:var(--accent); border-color:var(--accent); }
+
+  #editor-wrap { display:flex; flex:1; overflow:hidden; position:relative; }
+  #line-numbers { width:46px; padding:8px 0; text-align:right; color:var(--muted);
+                  font-family:var(--mono); font-size:12px; line-height:1.6em; overflow:hidden;
+                  background:var(--panel); user-select:none; flex-shrink:0;
+                  border-right:1px solid var(--border); z-index:3; }
+  #line-numbers div { padding-right:8px; height:1.6em; }
+  #line-numbers div.active { color:var(--accent); font-weight:700; }
+
+  #hl-layer { position:absolute; left:46px; right:0; top:0; bottom:0;
+              overflow:hidden; pointer-events:none; z-index:1; }
+  #hl-content { padding:8px; font-family:var(--mono); font-size:12px; line-height:1.6em;
+                white-space:pre; word-break:normal; color:transparent; min-width:100%; }
+  .hl-line { display:block; height:1.6em; }
+  .hl-line-active { display:block; background:var(--syn-active-bg);
+                    border-left:2px solid var(--syn-active-border); margin-left:-2px; }
+
+  #editor { position:absolute; left:46px; right:0; top:0; bottom:0; padding:8px;
+            background:transparent; color:transparent; caret-color:var(--text);
+            font-family:var(--mono); font-size:12px; line-height:1.6em; border:none;
+            resize:none; outline:none; overflow:auto; tab-size:6; white-space:pre; z-index:2; }
+  #editor::selection { background:rgba(56,139,253,.35); color:transparent; }
+
+  #debug-pane { display:flex; flex-direction:column; overflow:hidden; border-bottom:1px solid var(--border); }
+  #registers-wrap { flex:1; overflow-y:auto; padding:6px 8px; display:flex;
+                    flex-wrap:wrap; align-content:flex-start; gap:4px; }
+  .reg-cell { display:flex; flex-direction:column; min-width:90px; padding:4px 8px;
+              background:#21262d; border:1px solid var(--border); border-radius:6px;
+              transition:border-color .2s,background .2s; }
+  .reg-cell.changed { border-color:var(--yellow); background:#2d2208; }
+  .reg-name { font-size:10px; color:var(--muted); }
+  .reg-val  { font-size:14px; font-weight:700; color:var(--text); }
+
+  #log-pane { height:160px; border-top:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
+  #log { flex:1; overflow-y:auto; padding:6px 10px; font-size:11px; line-height:1.7; color:var(--muted); }
+  #log .log-info  { color:var(--muted); }
+  #log .log-warn  { color:var(--yellow); }
+  #log .log-error { color:var(--red); }
+  #log .log-ok    { color:var(--green); }
+
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+  /* ── TM-Band Export Modal ── */
+  #modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.7); display:none;
+              align-items:center; justify-content:center; z-index:100; }
+  #modal-bg.visible { display:flex; }
+  #modal { background:var(--panel); border:1px solid var(--border); border-radius:8px;
+           width:80%; max-width:900px; max-height:85vh; display:flex; flex-direction:column;
+           overflow:hidden; }
+  #modal-header { padding:12px 16px; border-bottom:1px solid var(--border);
+                  display:flex; align-items:center; gap:12px; }
+  #modal-header h2 { font-size:14px; color:var(--accent); margin:0; flex:1; }
+  #modal-close { background:transparent; border:none; color:var(--muted); font-size:20px;
+                 cursor:pointer; padding:0 6px; }
+  #modal-close:hover { color:var(--text); }
+  #modal-body { padding:12px 16px; overflow-y:auto; flex:1; }
+  .modal-section { margin-bottom:16px; }
+  .modal-section h3 { font-size:11px; color:var(--muted); margin-bottom:6px;
+                      font-weight:600; letter-spacing:.05em; text-transform:uppercase; }
+  .modal-section .stat-grid { display:grid; grid-template-columns:auto 1fr; gap:4px 12px;
+                              font-size:12px; }
+  .modal-section .stat-grid .k { color:var(--muted); }
+  .modal-section .stat-grid .v { color:var(--text); font-weight:600; }
+  #band-output { background:var(--bg); border:1px solid var(--border); border-radius:4px;
+                 padding:10px; font-family:var(--mono); font-size:11px; line-height:1.6;
+                 color:var(--text); white-space:pre-wrap; word-break:break-all;
+                 max-height:200px; overflow-y:auto; }
+  #addr-mapping { background:var(--bg); border:1px solid var(--border); border-radius:4px;
+                  padding:10px; font-family:var(--mono); font-size:11px; line-height:1.6;
+                  color:var(--text); max-height:220px; overflow-y:auto; }
+  #addr-mapping .row { display:grid; grid-template-columns:60px 80px 1fr; gap:8px; }
+  #addr-mapping .row.hdr { color:var(--muted); border-bottom:1px solid var(--border);
+                           padding-bottom:4px; margin-bottom:4px; }
+  #addr-mapping .a { color:var(--syn-number); }
+  #addr-mapping .v { color:var(--syn-keyword); }
+  #addr-mapping .c { color:var(--muted); font-style:italic; }
+  #modal-footer { padding:12px 16px; border-top:1px solid var(--border);
+                  display:flex; gap:8px; justify-content:flex-end; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>▶ RAM Simulator</h1>
+  <button class="btn" id="btn-load-file">📂 Laden</button>
+  <input type="file" id="file-input" accept=".asm">
+  <select class="btn" id="example-select">
+    <option value="">── Beispiele ──</option>
+    <option value="fak">Fakultät n!</option>
+    <option value="fib">Fibonacci</option>
+    <option value="gcd">GGT (Euklid)</option>
+    <option value="mul">Multiplikation</option>
+    <option value="div">Division + Modulo</option>
+    <option value="hello">Zähler / Hello</option>
+    <option value="tmcompile">↳ TM-Compile Demo</option>
+    <option value="wordsize">3-Bit Wortbreite</option>
+    <option value="utm">TMonRAM – UTM</option>
+  </select>
+  <button class="btn primary" id="btn-run"  disabled>▶ Run</button>
+  <button class="btn"         id="btn-step" disabled title="Step Over – überspringt Makro-Aufrufe (F10)">⏭ Step Over</button>
+  <button class="btn"         id="btn-step-in" disabled title="Step Into – geht in Makros rein (F11)">⏬ Step Into</button>
+  <button class="btn"         id="btn-step-out" disabled title="Step Out – aus Makro rauszoomen (Shift+F11)">⏫ Step Out</button>
+  <button class="btn"         id="btn-stop" disabled>⏹ Stop</button>
+  <button class="btn"         id="btn-reset">↺ Reset</button>
+  <button class="btn"         id="btn-tm-export" title="Als TM-Band exportieren (RAMonTM.tm Format)">📤 Als TM-Band</button>
+  <span id="speed-label">Speed</span>
+  <input type="range" id="speed" min="1" max="100" value="50">
+  <span id="step-count">Schritte: 0</span>
+  <div id="status-badge" class="ready">BEREIT</div>
+</div>
+
+<div id="main">
+  <div id="editor-pane">
+    <div class="pane-header">
+      <span>Quellcode</span>
+      <span id="source-name" style="color:var(--accent);font-size:11px"></span>
+      <small style="color:var(--muted);font-size:10px;margin-left:auto">SubRoutine.asm wird beim Laden automatisch vorangestellt</small>
+    </div>
+    <div id="editor-wrap">
+      <div id="line-numbers"></div>
+      <div id="hl-layer"><div id="hl-content"></div></div>
+      <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+    </div>
+  </div>
+
+  <div id="debug-pane">
+    <div class="pane-header"><span>Register / Speicher</span></div>
+    <div id="registers-wrap"><span style="color:var(--muted);padding:8px">Noch kein Programm geladen.</span></div>
+  </div>
+
+  <div id="log-pane">
+    <div class="pane-header"><span>Ausführungslog</span></div>
+    <div id="log"><div class="log-info">Bereit.</div></div>
+  </div>
+</div>
+
+<!-- ── Cross-Compile-Dialog ── -->
+<div id="modal-bg">
+  <div id="modal">
+    <div id="modal-header">
+      <h2>📤 TM-Band Export (RAMonTM Format)</h2>
+      <button id="modal-close" title="Schließen">×</button>
+    </div>
+    <div id="modal-body">
+      <div class="modal-section">
+        <h3>Statistik</h3>
+        <div class="stat-grid" id="tm-stats"></div>
+      </div>
+      <div class="modal-section">
+        <h3>Initialisierung</h3>
+        <div id="band-output"></div>
+      </div>
+      <div class="modal-section">
+        <h3>Adress-Mapping</h3>
+        <div id="addr-mapping"></div>
+      </div>
+    </div>
+    <div id="modal-footer">
+      <button class="btn" id="btn-download-tm">💾 Als .tm speichern</button>
+      <button class="btn primary" id="btn-modal-close2">Schließen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════
+// STDLIB – SubRoutine.asm, vollständig eingebettet
+// Wird automatisch vor jedem Benutzerprogramm eingefügt.
+// ══════════════════════════════════════════════════════════════════
+const STDLIB = `
+MAKRO:JMP(A)
+   BNZ(t1,A)
+t1: 1
+END
+
+MAKRO:CLR(A)
+Start:BNZ(A,t1)
+      JMP(End)
+t1:   DEC(A)
+      JMP(Start)
+END
+
+MAKRO:BZ(A,B)
+      BNZ(A,End)
+      JMP(B)
+END
+
+MAKRO:CPY(A,B)
+      JMP(Start)
+t1:   0
+Start:CLR(B)
+      BZ(A,End)
+S1:   DEC(A)
+      INC(t1)
+      INC(B)
+      BNZ(A,S1)
+S2:   DEC(t1)
+      INC(A)
+      BNZ(t1,S2)
+END
+
+MAKRO:ADD(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:CPY(A,C)
+      CPY(B,t2)
+      BZ(t2,End)
+S1:   INC(C)
+      DEC(t2)
+      BNZ(t2,S1)
+END
+
+MAKRO:SUB(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:CPY(A,C)
+      CPY(B,t2)
+      BZ(t2,End)
+S1:   DEC(C)
+      DEC(t2)
+      BNZ(t2,S1)
+END
+
+MAKRO:EQU(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:SUB(A,B,t1)
+      SUB(B,A,t2)
+      ADD(t1,t2,t3)
+      BZ(t3,C)
+END
+
+MAKRO:NEQ(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:SUB(A,B,t1)
+      SUB(B,A,t2)
+      ADD(t1,t2,t3)
+      BNZ(t3,C)
+END
+
+MAKRO:GT(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:EQU(A,B,End)
+      CPY(A,t1)
+      CPY(B,t2)
+S1:   BZ(t1,End)
+      BZ(t2,C)
+      DEC(t1)
+      DEC(t2)
+      JMP(S1)
+END
+
+MAKRO:GTE(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:EQU(A,B,C)
+      CPY(A,t1)
+      CPY(B,t2)
+S1:   BZ(t1,End)
+      BZ(t2,C)
+      DEC(t1)
+      DEC(t2)
+      JMP(S1)
+END
+
+MAKRO:MUL(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:CLR(C)
+      CLR(t2)
+      BZ(A,End)
+      BZ(B,End)
+      CPY(B,t1)
+S1:   ADD(A,t2,t3)
+      CPY(t3,t2)
+      DEC(t1)
+      BNZ(t1,S1)
+      CPY(t2,C)
+END
+
+MAKRO:DIV(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:CLR(C)
+      CLR(t3)
+      BZ(A,End)
+      BZ(B,End)
+      GT(B,A,End)
+      CPY(A,t1)
+S1:   SUB(t1,B,t2)
+      CPY(t2,t1)
+      INC(C)
+      GT(B,t1,End)
+      JMP(S1)
+END
+
+MAKRO:NAND(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   1
+Start:CLR(C)
+      ADD(A,B,t1)
+      GT(t1,t2,End)
+      INC(C)
+END
+
+MAKRO:MODULO(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:DIV(A,B,t1)
+      MUL(B,t1,t2)
+      SUB(A,t2,C)
+END
+`;
+
+// ══════════════════════════════════════════════════════════════════
+// BEISPIELE (nur Hauptprogramm, Stdlib automatisch davor)
+// ══════════════════════════════════════════════════════════════════
+const EXAMPLES = {
+fak: `# Fakultät: result = n!
+# Ergebnis in: result
+n:      5
+result: 1
+tmp:    0
+
+Loop:   BZ(n,End)
+        MUL(result,n,tmp)
+        CPY(tmp,result)
+        DEC(n)
+        JMP(Loop)
+End:`,
+
+fib: `# Fibonacci: fib(n)
+# F(0)=0, F(1)=1, F(2)=1, F(3)=2, F(4)=3, F(5)=5 ...
+# Ergebnis in: b
+n:   7
+a:   0
+b:   1
+tmp: 0
+
+Loop:   BZ(n,End)
+        ADD(a,b,tmp)
+        CPY(b,a)
+        CPY(tmp,b)
+        DEC(n)
+        JMP(Loop)
+End:`,
+
+gcd: `# GGT nach Euklid: ggT(a,b)
+# Ergebnis in: a
+a:   48
+b:   18
+tmp: 0
+
+Loop:   BZ(b,End)
+        MODULO(a,b,tmp)
+        CPY(b,a)
+        CPY(tmp,b)
+        JMP(Loop)
+End:`,
+
+mul: `# Multiplikation: c = a * b
+a:   7
+b:   6
+c:   0
+
+MUL(a,b,c)`,
+
+div: `# Division und Modulo: a / b
+# Quotient in q, Rest in r
+a:  17
+b:   5
+q:   0
+r:   0
+tmp: 0
+
+DIV(a,b,q)
+MODULO(a,b,r)`,
+
+hello: `# Einfacher Zähler: zählt von 0 bis n
+# Aktueller Wert in: i
+n:    10
+i:    0
+one:  1
+tmp:  0
+
+Loop:   EQU(i,n,End)
+        ADD(i,one,tmp)
+        CPY(tmp,i)
+        JMP(Loop)
+End:`,
+
+tmcompile: `# TM-Compile Demo: Einfaches Programm für RAMonTM.tm
+# ===================================================
+# Dieses Programm laesst sich gut zur RAMonTM-Turingmaschine
+# uebersetzen (Knopf "Als TM-Band").
+#
+# Aufgabe: Erhoehe x zweimal, dann teste ob nicht-null und
+# springe zurueck. Endlos-Loop mit waxendem x.
+#
+# Nutzt nur INC, BNZ und DEC (keine grossen Makros) →
+# kompakte TM-Band-Ausgabe.
+
+x:   0
+
+Start: INC(x)
+       INC(x)
+       BNZ(x, Start)
+`,
+
+wordsize: `# Wortbreiten-Demo: DEC durch INC simuliert
+# ===========================================
+# Direktive: WORDSIZE: N setzt die Wortbreite auf N Bit.
+# Wirkt auf INC, DEC und Variablen-Initialwerte.
+#
+# Bei N-Bit-Worten gilt:  (x + 1) mod 2^N == x - 1 (modulare Arithmetik)
+# Also kann DEC durch wiederholtes INC simuliert werden:
+#   2^N - 1 mal INC == 1 mal DEC
+# Bei 3 Bit:  7 INCs = 1 DEC
+#
+# HINWEIS: Die anderen Beispiele (Fakultät, Fibonacci, GGT, MUL, DIV)
+# nutzen WORDSIZE NICHT. Grund: Die Makros in der STDLIB (SUB, EQU, GT,
+# MODULO) verlassen sich darauf dass SUB(A,B,C) bei B>A zu 0 klemmt
+# (Semantik natürlicher Zahlen). Bei endlicher Wortbreite wrapt das
+# stattdessen um und die Vergleichs-Makros funktionieren nicht mehr.
+#
+# WORDSIZE ist also primär nützlich für:
+#   1. Hardware-nahe Simulation (wie Andres TM mit 3-Bit-Worten)
+#   2. DEC durch INC ersetzen wenn man minimalistisch bleiben will
+#   3. Eigene Programme die bewusst mit Modulo-Arithmetik arbeiten
+
+WORDSIZE: 3
+
+# DEC nur mit INC: 7 mal INC = DEC (bei 3 Bit)
+MAKRO:DEC_VIA_INC(A)
+   INC(A)
+   INC(A)
+   INC(A)
+   INC(A)
+   INC(A)
+   INC(A)
+   INC(A)
+END
+
+x:       3
+counter: 0
+
+# Stelle x auf 0 herunter, zaehle Schritte
+Loop:   BNZ(x,Body)
+        JMP(End)
+Body:   DEC_VIA_INC(x)
+        INC(counter)
+        JMP(Loop)
+End:
+# Erwartet: x=0, counter=3 (drei DECs ueber 7-INC-Trick)`,
+
+utm: `# TMonRAM – Universelle Turingmaschine auf dem RAM-Simulator
+# (C) 2003 by www.andrebetz.de
+# ─────────────────────────────────────────────────────────
+# Dieses Programm simuliert eine Turingmaschine auf dem RAM.
+# Die TM ist als flaches Array kodiert:
+#   TMDef[]: State, ReadSymbol, NewState, WriteSymbol, Direction, ...
+#   Direction: 0 = rechts, 1 = links
+#
+# Enthaltene Beispiel-TM: erhöht eine Binärzahl um 1
+#   Band (TMBand): initial alle 0
+#   TM-Definition (TMDef): 0,0,1,0,0, 0,1,1,1,0, 1,0,1,0,1, 1,1,0,1,1
+#   Bedeutung: State0+Read0 → State1,Write0,R
+#              State0+Read1 → State1,Write1,R
+#              State1+Read0 → State1,Write0,L  (Halt nicht explizit nötig)
+#              State1+Read1 → State0,Write1,L
+# ─────────────────────────────────────────────────────────
+# ACHTUNG: Dieses Programm enthält alle Makros selbst –
+# die SubRoutine-Bibliothek ist hier direkt eingebettet.
+# ─────────────────────────────────────────────────────────
+
+MAKRO:JMP(A)
+   BNZ(t1,A)
+t1: 1
+END
+
+MAKRO:CLR(A)
+Start:BNZ(A,t1)
+      JMP(End)
+t1:   DEC(A)
+      JMP(Start)
+END
+
+MAKRO:BZ(A,B)
+      BNZ(A,End)
+      JMP(B)
+END
+
+MAKRO:CPY(A,B)
+      JMP(Start)
+t1:   0
+Start:CLR(B)
+      BZ(A,End)
+S1:   DEC(A)
+      INC(t1)
+      INC(B)
+      BNZ(A,S1)
+S2:   DEC(t1)
+      INC(A)
+      BNZ(t1,S2)
+END
+
+MAKRO:ADD(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:CPY(A,C)
+      CPY(B,t2)
+      BZ(t2,End)
+S1:   INC(C)
+      DEC(t2)
+      BNZ(t2,S1)
+END
+
+MAKRO:SUB(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:CPY(A,C)
+      CPY(B,t2)
+      BZ(t2,End)
+S1:   DEC(C)
+      DEC(t2)
+      BNZ(t2,S1)
+END
+
+MAKRO:EQU(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:SUB(A,B,t1)
+      SUB(B,A,t2)
+      ADD(t1,t2,t3)
+      BZ(t3,C)
+END
+
+MAKRO:NEQ(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:SUB(A,B,t1)
+      SUB(B,A,t2)
+      ADD(t1,t2,t3)
+      BNZ(t3,C)
+END
+
+MAKRO:GT(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:EQU(A,B,End)
+      CPY(A,t1)
+      CPY(B,t2)
+S1:   BZ(t1,End)
+      BZ(t2,C)
+      DEC(t1)
+      DEC(t2)
+      JMP(S1)
+END
+
+MAKRO:GTE(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+Start:EQU(A,B,C)
+      CPY(A,t1)
+      CPY(B,t2)
+S1:   BZ(t1,End)
+      BZ(t2,C)
+      DEC(t1)
+      DEC(t2)
+      JMP(S1)
+END
+
+MAKRO:MUL(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:CLR(C)
+      CLR(t2)
+      BZ(A,End)
+      BZ(B,End)
+      CPY(B,t1)
+S1:   ADD(A,t2,t3)
+      CPY(t3,t2)
+      DEC(t1)
+      BNZ(t1,S1)
+      CPY(t2,C)
+END
+
+MAKRO:DIV(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   0
+t3:   0
+Start:CLR(C)
+      CLR(t3)
+      BZ(A,End)
+      BZ(B,End)
+      GT(B,A,End)
+      CPY(A,t1)
+S1:   SUB(t1,B,t2)
+      CPY(t2,t1)
+      INC(C)
+      GT(B,t1,End)
+      JMP(S1)
+END
+
+MAKRO:NAND(A,B,C)
+      JMP(Start)
+t1:   0
+t2:   1
+Start:CLR(C)
+      ADD(A,B,t1)
+      GT(t1,t2,End)
+      INC(C)
+END
+
+MAKRO:Var2Adr(A,B)
+      INC(R1:A)
+      DEC(A)
+      CPY(B,R1)
+END
+
+MAKRO:Adr2Var(A,B)
+      INC(R1:A)
+      DEC(A)
+      CPY(R1,B)
+END
+
+MAKRO:LD(A,B,C)
+      JMP(Start)
+t1:   0
+r0:   0
+Start:Adr2Var(A,r0)
+      ADD(r0,B,t1)
+      Var2Adr(A,t1)
+      CPY(A,C)
+      Var2Adr(A,r0)
+END
+
+MAKRO:ST(A,B,C)
+      JMP(Start)
+t1:   0
+r0:   0
+Start:Adr2Var(A,r0)
+      ADD(r0,B,t1)
+      Var2Adr(A,t1)
+      CPY(C,A)
+      Var2Adr(A,r0)
+END
+
+# ══════════════════════════════════════════════════════
+# UTM – Universelle Turingmaschinen-Simulation
+# ══════════════════════════════════════════════════════
+
+MAKRO:UTM()
+               JMP(Start)
+TMBand[40]:    0,0,0,0,0,0,0,0,0,0
+TMDef[20]:     0,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,0,1,1
+Length:        20
+BandPos:       0
+State:         0
+Read:          0
+Write:         0
+Direct:        0
+looptmp1:      0
+gettag:        0
+Start:         CLR(looptmp1)
+               LD(TMBand,BandPos,Read)
+S1:            LD(TMDef,looptmp1,gettag)
+               INC(looptmp1)
+               EQU(gettag,State,S2)
+               INC(looptmp1)
+               INC(looptmp1)
+               INC(looptmp1)
+               INC(looptmp1)
+               GT(Length,looptmp1,S1)
+               JMP(End)
+S2:            LD(TMDef,looptmp1,gettag)
+               INC(looptmp1)
+               EQU(gettag,Read,S3)
+               INC(looptmp1)
+               INC(looptmp1)
+               INC(looptmp1)
+               GT(Length,looptmp1,S1)
+               JMP(End)
+S3:            LD(TMDef,looptmp1,State)
+               INC(looptmp1)
+               LD(TMDef,looptmp1,Write)
+               ST(TMBand,BandPos,Write)
+               INC(looptmp1)
+               LD(TMDef,looptmp1,Direct)
+               INC(looptmp1)
+               BNZ(Direct,BL)
+               INC(BandPos)
+               JMP(Start)
+BL:            DEC(BandPos)
+               JMP(Start)
+END
+
+# ══════════════════════════════════════════════════════
+# Hauptprogramm: UTM starten
+# ══════════════════════════════════════════════════════
+UTM()`,
+};
+
+// ══════════════════════════════════════════════════════════════════
+// SYNTAX HIGHLIGHTER
+// ══════════════════════════════════════════════════════════════════
+let knownMacroNames = new Set([
+  'JMP','CLR','BZ','CPY','ADD','SUB','MUL','DIV',
+  'EQU','NEQ','GT','GTE','NAND','MODULO','SIZEOF','B_NAND',
+  'VAR2ADR','ADR2VAR','LD','ST','NOT','POP','PSH','JSR','RTS','OUT',
+]);
+const BUILTINS = /^(INC|CLR|BNZ|DEC)$/i;
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function sp(color,text){ return `<span style="color:${color}">${esc(text)}</span>`; }
+
+function highlightLine(raw, activeIdx, lineIdx){
+  const isActive = lineIdx === activeIdx;
+  const cls = isActive ? 'hl-line hl-line-active' : 'hl-line';
+  if (!raw.trim()) return `<span class="${cls}"> </span>`;
+
+  let out='', i=0, n=raw.length;
+
+  while(i<n){
+    const ch=raw[i];
+
+    // Comment
+    if(ch==='#'){ out+=sp('var(--syn-comment)',raw.slice(i)); break; }
+
+    // MAKRO:
+    if(raw.slice(i).match(/^MAKRO\s*:/i)){
+      const m=raw.slice(i).match(/^(MAKRO\s*:)\s*(\w+)?(\s*\([^)]*\))?/i);
+      if(m){
+        out+=sp('var(--syn-macro-kw)',m[1]);
+        if(m[2]){ knownMacroNames.add(m[2].toUpperCase()); out+=sp('var(--syn-macro-call)',m[2]); }
+        if(m[3]) out+=sp('var(--syn-paren)',m[3]);
+        i+=m[0].length; continue;
+      }
+    }
+
+    // END
+    if(raw.slice(i).match(/^END\b/)){ out+=sp('var(--syn-macro-kw)','END'); i+=3; continue; }
+
+    // WORDSIZE-Direktive
+    { const ws=raw.slice(i).match(/^(\s*)(WORDSIZE)(\s*)(:)(\s*)(\d+)/i);
+      if(ws && i===0){
+        out+=esc(ws[1])+sp('var(--syn-macro-kw)',ws[2])+esc(ws[3])+sp('var(--syn-paren)',ws[4])+esc(ws[5])+sp('var(--syn-number)',ws[6]);
+        i+=ws[0].length;
+        continue;
+      }
+    }
+
+    // Label definition at line start
+    { const ld=raw.slice(i).match(/^(\s*)([A-Za-z_]\w*(?:\[\d+\])?)\s*(:)/);
+      if(ld && i===0){
+        out+=esc(ld[1]);
+        out+=sp('var(--syn-label)',ld[2]);
+        out+=sp('var(--syn-paren)',ld[3]);
+        i+=ld[0].length;
+        const spc=raw.slice(i).match(/^\s*/)[0]; out+=esc(spc); i+=spc.length;
+        const rest=raw.slice(i).trimStart();
+        if(rest===''||/^-?\d/.test(rest)){ out+=sp('var(--syn-varval)',raw.slice(i)); i=n; }
+        continue;
+      }
+    }
+
+    // Whitespace
+    if(ch===' '||ch==='\t'){
+      let j=i; while(j<n&&(raw[j]===' '||raw[j]==='\t'))j++;
+      out+=esc(raw.slice(i,j)); i=j; continue;
+    }
+
+    // Word → instruction or macro call
+    { const word=raw.slice(i).match(/^([A-Za-z_]\w*)/);
+      if(word){
+        const name=word[1], nu=name.toUpperCase();
+        const color=BUILTINS.test(name)?'var(--syn-keyword)':
+                    knownMacroNames.has(nu)?'var(--syn-macro-call)':'var(--syn-reg)';
+        out+=sp(color,name); i+=name.length;
+        if(i<n&&raw[i]==='('){
+          out+=sp('var(--syn-paren)','('); i++;
+          let buf='', ac=0;
+          while(i<n&&raw[i]!==')'){
+            if(raw[i]===','){
+              if(buf.trim()){
+                const isR=(nu==='BNZ'||nu==='INC'||nu==='CLR'||nu==='DEC')&&ac===0;
+                out+=sp(isR?'var(--syn-reg)':'var(--syn-label-ref)',buf); buf='';
+              }
+              out+=sp('var(--syn-paren)',','); ac++; i++;
+            } else { buf+=raw[i++]; }
+          }
+          if(buf.trim()){
+            const isR=(nu==='INC'||nu==='CLR'||nu==='DEC')||(nu==='BNZ'&&ac===0);
+            out+=sp(isR?'var(--syn-reg)':'var(--syn-label-ref)',buf);
+          }
+          if(i<n&&raw[i]===')'){ out+=sp('var(--syn-paren)',')'); i++; }
+        }
+        continue;
+      }
+    }
+
+    // Number
+    { const num=raw.slice(i).match(/^-?\d+/);
+      if(num){ out+=sp('var(--syn-number)',num[0]); i+=num[0].length; continue; }
+    }
+
+    out+=esc(ch); i++;
+  }
+  return `<span class="${cls}">${out}</span>`;
+}
+
+function renderHighlight(src, activeIdx){
+  return src.split('\n').map((l,i)=>highlightLine(l,activeIdx,i)).join('');
+}
+
+// ══════════════════════════════════════════════════════════════════
+// DOM
+// ══════════════════════════════════════════════════════════════════
+const editorEl   = document.getElementById('editor');
+const lineNums   = document.getElementById('line-numbers');
+const hlContent  = document.getElementById('hl-content');
+const hlLayer    = document.getElementById('hl-layer');
+const logEl      = document.getElementById('log');
+const regsWrap   = document.getElementById('registers-wrap');
+const badge      = document.getElementById('status-badge');
+const stepCountEl= document.getElementById('step-count');
+const speedSlider= document.getElementById('speed');
+const btnRun     = document.getElementById('btn-run');
+const btnStep    = document.getElementById('btn-step');
+const btnStepIn  = document.getElementById('btn-step-in');
+const btnStepOut = document.getElementById('btn-step-out');
+const btnStop    = document.getElementById('btn-stop');
+const btnReset   = document.getElementById('btn-reset');
+const fileInput  = document.getElementById('file-input');
+const exSel      = document.getElementById('example-select');
+const sourceName = document.getElementById('source-name');
+
+// ══════════════════════════════════════════════════════════════════
+// SIM STATE
+// ══════════════════════════════════════════════════════════════════
+let program=[], memory={}, pc=0, steps=0;
+let running=false, runTimer=null, prevMem={};
+let activeHL=-1, instToLine=[], instToTop=[], instToStack=[], macros={};
+let viewLevel = 0;  // aktuelle Tiefe im Aufruf-Stack die der User betrachtet
+let wordMask  = 0;  // 0 = unbegrenzt. Sonst 2^N - 1 für N-Bit-Worte
+
+// ══════════════════════════════════════════════════════════════════
+// LOGGING
+// ══════════════════════════════════════════════════════════════════
+function log(msg,cls='log-info'){
+  const d=document.createElement('div'); d.className=cls; d.textContent=msg;
+  logEl.appendChild(d); logEl.scrollTop=logEl.scrollHeight;
+}
+function clearLog(){ logEl.innerHTML=''; }
+function setStatus(s){
+  const map={BEREIT:'ready',LÄUFT:'running',HALT:'halted',FEHLER:'error'};
+  badge.textContent=s; badge.className=map[s]||'ready';
+}
+
+// ══════════════════════════════════════════════════════════════════
+// UI UPDATE
+// ══════════════════════════════════════════════════════════════════
+function updateUI(newActive){
+  if(newActive!==undefined) activeHL=newActive;
+  const lines=editorEl.value.split('\n');
+  lineNums.innerHTML=lines.map((_,i)=>
+    `<div id="ln${i}" class="${i===activeHL?'active':''}">${i+1}</div>`).join('');
+  hlContent.innerHTML=renderHighlight(editorEl.value, activeHL);
+
+  // Aktive Zeile in den sichtbaren Bereich scrollen (Editor steuert den Scroll)
+  if(activeHL >= 0){
+    const lineHeight = 1.6 * 12;  // 1.6em bei 12px font
+    const targetY    = activeHL * lineHeight;
+    const visibleTop = editorEl.scrollTop;
+    const visibleBot = visibleTop + editorEl.clientHeight;
+    const margin     = lineHeight * 3;  // 3 Zeilen Puffer am Rand
+    if(targetY < visibleTop + margin){
+      editorEl.scrollTop = Math.max(0, targetY - margin);
+    } else if(targetY > visibleBot - margin){
+      editorEl.scrollTop = targetY - editorEl.clientHeight + margin + lineHeight;
+    }
+  }
+
+  // Scroll-Sync (Zeilennummern + Highlight-Layer folgen dem Editor)
+  hlLayer.scrollTop  = editorEl.scrollTop;
+  hlLayer.scrollLeft = editorEl.scrollLeft;
+  lineNums.scrollTop = editorEl.scrollTop;
+}
+function updateStepCount(){ stepCountEl.textContent=`Schritte: ${steps}`; }
+function updateRegisters(){
+  regsWrap.innerHTML='';
+  const entries=Object.entries(memory);
+  if(!entries.length){ regsWrap.innerHTML='<span style="color:var(--muted);padding:8px">Keine Variablen.</span>'; return; }
+  for(const [k,v] of entries){
+    const cell=document.createElement('div');
+    cell.className='reg-cell'+(prevMem[k]!==v?' changed':'');
+    cell.innerHTML=`<div class="reg-name">${esc(k)}</div><div class="reg-val">${v}</div>`;
+    regsWrap.appendChild(cell);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PARSER
+// ══════════════════════════════════════════════════════════════════
+function stripComments(src){ return src.split('\n').map(l=>l.replace(/#.*/,'').trimEnd()); }
+
+function extractMacros(lines){
+  const macs={}, code=[];
+  let i=0;
+  while(i<lines.length){
+    const t=lines[i].trim();
+    const m=t.match(/^MAKRO\s*:\s*(\w+)\s*\(([^)]*)\)/i);
+    if(m){
+      const name=m[1], params=m[2].split(',').map(p=>p.trim()).filter(Boolean);
+      const body=[];  // jetzt Array von {text, lineIdx}
+      i++;
+      while(i<lines.length&&lines[i].trim().toUpperCase()!=='END'){
+        body.push({text: lines[i], lineIdx: i});
+        i++;
+      }
+      i++;
+      macs[name.toUpperCase()]={params,body};
+      knownMacroNames.add(name.toUpperCase());
+    } else { code.push({text:lines[i],origIdx:i}); i++; }
+  }
+  return {macs,code};
+}
+
+let globalMacroId = 0;
+
+function expandMacros(lines, macs){
+  const out = [];
+  for(const item of lines){
+    const {text, origIdx} = item;
+    // callStack = Aufrufpfad: [outerCall, ..., directCall, currentBodyLine]
+    // Erster Eintrag ist die Hauptprogramm-Zeile, letzter ist die aktuelle Body-Zeile.
+    const incomingStack = item.callStack || [origIdx];
+    const tr = text.trim();
+    if(!tr){ out.push({text:'', origIdx, callStack: incomingStack}); continue; }
+
+    const lbM = tr.match(/^(\w+)\s*:\s*(.*)/);
+    let lp = '', rest = tr;
+    if(lbM){
+      const ac = lbM[2].trim();
+      if(ac === '' || /^-?\d/.test(ac)){ out.push({text, origIdx, callStack: incomingStack}); continue; }
+      lp = lbM[1]; rest = ac;
+    }
+
+    const cM = rest.match(/^(\w+)\s*\(([^)]*)\)\s*$/);
+    if(cM && macs[cM[1].toUpperCase()]){
+      const mn  = cM[1].toUpperCase();
+      const mac = macs[mn];
+      const uid = `_m${globalMacroId++}_`;
+
+      const args = cM[2].split(',').map(a=>a.trim()).filter((a,i,arr)=>arr.length>1||a!='');
+      const subst = {};
+      mac.params.forEach((p,i) => { subst[p] = args[i] ?? p; });
+
+      const localLabels = new Set(['End']);
+      for(const {text: bl} of mac.body){
+        const lm = bl.trim().match(/^([A-Za-z_]\w*)\s*:/);
+        if(lm) localLabels.add(lm[1]);
+      }
+      for(const p of Object.keys(subst)) localLabels.delete(p);
+
+      const processed = mac.body.map(({text: bl, lineIdx}) => {
+        let t = bl;
+        const placeholders = [];
+        for(const [p,a] of Object.entries(subst)){
+          const ph = `\x01PH${placeholders.length}\x01`;
+          placeholders.push(a);
+          t = t.replace(new RegExp(`\\b${p}\\b`, 'g'), () => ph);
+        }
+        for(const lb of localLabels){
+          t = t.replace(new RegExp(`^([ \\t]*)(${lb})([ \\t]*:)`), (_,s1,l,s2) => s1+uid+l+s2);
+          t = t.replace(new RegExp(`\\b(${lb})\\b`, 'g'), () => uid+lb);
+        }
+        placeholders.forEach((a, i) => { t = t.split(`\x01PH${i}\x01`).join(a); });
+        // Call-Stack erweitern: bisheriger Pfad + diese Body-Zeile
+        return {text: t, origIdx: lineIdx, callStack: [...incomingStack, lineIdx]};
+      });
+
+      const expanded = expandMacros(processed, macs);
+
+      if(lp) out.push({text: `${lp}:`, origIdx, callStack: incomingStack});
+      out.push(...expanded);
+      out.push({text: `${uid}End:`, origIdx, callStack: incomingStack});
+      continue;
+    }
+
+    out.push({text, origIdx, callStack: incomingStack});
+  }
+  return out;
+}
+
+function assemble(expLines){
+  const labelMap={}, vars={}, stripped=[];
+  for(const {text,origIdx,callStack} of expLines){
+    const t=text.trim(); if(!t){ stripped.push({label:null,rest:'',origIdx,callStack}); continue; }
+    const lm=t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/); let label=null,rest=t;
+    if(lm){label=lm[1];rest=lm[2].trim();}
+    if(label && /^-?\d/.test(rest)){
+      const arrM=label.match(/(\w+)\[(\d+)\]/);
+      if(arrM){ const base=arrM[1],size=parseInt(arrM[2]),vals=rest.split(',').map(v=>parseInt(v.trim())||0); for(let i=0;i<size;i++) vars[`${base}__${i}`]=vals[i]||0; vars[base]=vals[0]||0; }
+      else vars[label]=parseInt(rest)||0;
+      stripped.push({label:null,rest:'',origIdx,callStack,varDecl:true}); continue;
+    }
+    stripped.push({label,rest,origIdx,callStack});
+  }
+  let pos=0; const tmp=[];
+  for(const {label,rest,origIdx,callStack,varDecl} of stripped){
+    if(varDecl||(!rest&&!label)) continue;
+    if(label&&!rest){ labelMap[label]=pos; continue; }
+    if(label) labelMap[label]=pos;
+    tmp.push({rest,origIdx,callStack}); pos++;
+  }
+  const prog=[], i2l=[], i2t=[], i2s=[];
+  for(const {rest,origIdx,callStack} of tmp){
+    prog.push(parseInstr(rest));
+    i2l.push(origIdx);
+    const cs = callStack || [origIdx];
+    i2t.push(cs[0]);  // erste Ebene = Hauptprogramm
+    i2s.push(cs);     // ganzer Stack
+  }
+  return {program:prog,memory:{...vars},labelMap,instrToLine:i2l,instrToTop:i2t,instrToStack:i2s};
+}
+
+function parseInstr(rest){
+  let m;
+  m=rest.match(/^INC\s*\(([^)]+)\)/i); if(m) return{type:'INC',reg:m[1].trim()};
+  m=rest.match(/^CLR\s*\(([^)]+)\)/i); if(m) return{type:'CLR',reg:m[1].trim()};
+  m=rest.match(/^BNZ\s*\(([^,)]+),([^)]+)\)/i); if(m) return{type:'BNZ',reg:m[1].trim(),lbl:m[2].trim()};
+  m=rest.match(/^DEC\s*\(([^)]+)\)/i); if(m) return{type:'DEC',reg:m[1].trim()};
+  return{type:'UNKNOWN',raw:rest};
+}
+
+// ══════════════════════════════════════════════════════════════════
+// COMPILE  –  Editor-Inhalt ist der komplette Source (Stdlib sichtbar)
+// ══════════════════════════════════════════════════════════════════
+function compile(src){
+  globalMacroId = 0;
+  clearLog(); log('Kompiliere...','log-info');
+
+  // WORDSIZE-Direktive erkennen: "WORDSIZE: N" auf eigener Zeile setzt N-Bit-Worte
+  // Wirkt auf INC (mod 2^N), DEC (mod 2^N), Variablen-Initialwerte
+  wordMask = 0;
+  const wsMatch = src.match(/^[ \t]*WORDSIZE\s*:\s*(\d+)\s*(?:#.*)?$/im);
+  if(wsMatch){
+    const bits = parseInt(wsMatch[1]);
+    if(bits >= 1 && bits <= 30){
+      wordMask = (1 << bits) - 1;
+      log(`Wortbreite: ${bits} Bit (mod ${wordMask+1})`,'log-info');
+    } else {
+      log(`WORDSIZE muss 1-30 sein (war ${bits}) – ignoriert`,'log-warn');
+    }
+  }
+
+  // WORDSIZE-Zeile entfernen damit sie nicht als Variablendeklaration interpretiert wird
+  const cleanSrc = src.replace(/^[ \t]*WORDSIZE\s*:\s*\d+\s*(?:#.*)?$/im, '');
+  const allLines = stripComments(cleanSrc);
+  const {macs, code} = extractMacros(allLines);
+  macros = macs;
+  log(`Makros: ${Object.keys(macs).join(', ')||'(keine)'}`, 'log-info');
+
+  let expanded;
+  try { expanded = expandMacros(code, macs); }
+  catch(e){ log('Makro-Fehler: '+e.message,'log-error'); setStatus('FEHLER'); return false; }
+
+  let assembled;
+  try { assembled = assemble(expanded); }
+  catch(e){ log('Assembler-Fehler: '+e.message,'log-error'); setStatus('FEHLER'); return false; }
+
+  program    = assembled.program;
+  memory     = assembled.memory;
+  // Initialwerte auf Wortbreite maskieren
+  if(wordMask > 0){
+    for(const k in memory) memory[k] = memory[k] & wordMask;
+  }
+  instToLine = assembled.instrToLine;
+  instToTop  = assembled.instrToTop;
+  instToStack= assembled.instrToStack;
+  viewLevel  = 0;
+  pc=0; steps=0; prevMem={};
+
+  const lm=assembled.labelMap;
+  for(const instr of program){
+    if(instr.type==='BNZ'){
+      instr.target=lm[instr.lbl]!==undefined?lm[instr.lbl]:program.length;
+      if(lm[instr.lbl]===undefined) log(`Warnung: Label '${instr.lbl}' nicht gefunden`,'log-warn');
+    }
+  }
+
+  log(`OK: ${program.length} Instruktionen, ${Object.keys(memory).length} Variablen`,'log-ok');
+  if(!program.length) log('Keine Instruktionen.','log-warn');
+  updateRegisters(); updateUI(-1); updateStepCount();
+  return true;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════
+function getReg(n){ if(memory[n]===undefined) memory[n]=0; return memory[n]; }
+function setReg(n,v){
+  if(wordMask>0) memory[n] = v & wordMask;
+  else memory[n] = Math.max(0,v);
+}
+
+// Einen einzelnen Grundbefehl ausführen, gibt true zurück wenn Programm noch läuft
+function execOneInstruction(){
+  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
+  const instr=program[pc]; prevMem={...memory};
+  let nextPc=pc+1;
+  switch(instr.type){
+    case 'INC':
+      if(wordMask>0) setReg(instr.reg,(getReg(instr.reg)+1) & wordMask);
+      else setReg(instr.reg,getReg(instr.reg)+1);
+      break;
+    case 'CLR': setReg(instr.reg,0); break;
+    case 'DEC':
+      if(wordMask>0) setReg(instr.reg,(getReg(instr.reg)-1) & wordMask);
+      else setReg(instr.reg,Math.max(0,getReg(instr.reg)-1));
+      break;
+    case 'BNZ':
+      if(getReg(instr.reg)!==0){
+        if(instr.target===undefined){ log(`Label '${instr.lbl}' fehlt`,'log-error'); halt('FEHLER'); return false; }
+        nextPc=instr.target;
+      }
+      break;
+    case 'UNKNOWN': log(`Unbekannt: ${instr.raw}`,'log-warn'); break;
+  }
+  steps++; pc=nextPc;
+  if(steps>2_000_000){ halt('STOP (2M Schritte)'); log('Mögliche Endlosschleife.','log-warn'); return false; }
+  return true;
+}
+
+// Aktive Zeile abhängig vom viewLevel ermitteln
+// callStack[viewLevel] = die Zeile auf der Ebene die User aktuell betrachtet
+function lineAtViewLevel(pcIdx){
+  const stack = instToStack[pcIdx] || [];
+  if(stack.length === 0) return -1;
+  // Wenn viewLevel tiefer als der Stack ist, zeige die tiefste verfügbare Zeile
+  return stack[Math.min(viewLevel, stack.length - 1)];
+}
+
+// Step Over: führe Instruktionen aus bis sich die Zeile auf viewLevel ändert
+function execStep(){
+  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
+  const startStack = instToStack[pc] || [];
+  const startLine  = startStack[Math.min(viewLevel, startStack.length - 1)];
+  const startLevel = viewLevel;
+  const maxSteps   = 500000;
+  let count = 0;
+  while(pc < program.length && count < maxSteps){
+    if(!execOneInstruction()){
+      updateRegisters(); updateUI(lineAtViewLevel(pc-1)); updateStepCount();
+      return false;
+    }
+    count++;
+    if(pc >= program.length) break;
+    const currentStack = instToStack[pc] || [];
+    // Wenn aktuelle Stack-Tiefe kleiner als startLevel ist, wurde Makro verlassen
+    if(currentStack.length <= startLevel){
+      // viewLevel auf gültige Tiefe absenken
+      viewLevel = Math.min(viewLevel, currentStack.length - 1);
+      break;
+    }
+    // Wenn die Zeile auf startLevel sich geändert hat: Step Over fertig
+    const currentLine = currentStack[Math.min(startLevel, currentStack.length - 1)];
+    if(currentLine !== startLine) break;
+  }
+  if(count >= maxSteps) log(`Step Over: ${maxSteps} Sub-Schritte`,'log-warn');
+  updateRegisters(); updateUI(lineAtViewLevel(pc)); updateStepCount();
+  return pc < program.length;
+}
+
+// Step Into: erhöhe viewLevel um 1 wenn aktuell ein Makro-Aufruf vorliegt
+function execStepIn(){
+  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
+  const stack = instToStack[pc] || [];
+  // Wenn der Stack tiefer geht als unser aktueller View, einfach Level erhöhen
+  // (keine Instruktion ausführen — nur in das bereits expandierte Makro reinzoomen)
+  if(stack.length > viewLevel + 1){
+    viewLevel++;
+    updateUI(lineAtViewLevel(pc));
+    return true;
+  }
+  // Sonst: einfach einen Schritt auf der aktuellen Ebene
+  return execStep();
+}
+
+// Step Out: viewLevel um 1 reduzieren (aus Makro rausspringen)
+function execStepOut(){
+  if(viewLevel > 0){
+    viewLevel--;
+    updateUI(lineAtViewLevel(pc));
+    return true;
+  }
+  return execStep();
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// CROSS-COMPILE zu RAMonTM Band-Format
+// ══════════════════════════════════════════════════════════════════
+
+// RAMonTM-Transitionen, eingebettet aus RAMonTM.tm
+// Wortlängenunabhängig: gleicher Code läuft mit beliebiger Wortbreite N.
+const RAMONTM_TRANSITIONS = `# Transitionen
+#    0               1               *             H
+# Suchen der angegebenen Speicherzelle: sucheFeld(PC)
+(S00,0,S01,H,R) (S00,1,S04,H,R) (S00,*,S00,*,R) (S00,H,---,H,R)
+#0
+(S01,0,S01,0,R) (S01,1,S01,1,R) (S01,*,S02,*,R) (S01,H,---,H,R)
+(S02,0,S02,0,R) (S02,1,S02,1,R) (S02,*,S03,*,R) (S02,H,---,H,R)
+(S03,0,S07,H,L) (S02,1,S23,1,R) (S03,*,---,*,R) (S03,H,---,H,R)
+#1
+(S04,0,S04,0,R) (S04,1,S04,1,R) (S04,*,S05,*,R) (S04,H,---,H,R)
+(S05,0,S05,0,R) (S05,1,S05,1,R) (S05,*,S06,*,R) (S05,H,---,H,R)
+(S06,0,S26,0,R) (S06,1,S09,H,L) (S06,*,---,*,R) (S06,H,---,H,R)
+# 00 rueck
+(S07,0,S07,0,L) (S07,1,S07,1,L) (S07,*,S07,*,L) (S07,H,S08,0,R)
+(S08,0,S15,H,R) (S08,1,S17,H,R) (S08,*,S15,H,R) (S07,H,---,H,R)
+# 01 rueck
+(S09,0,S09,0,L) (S09,1,S09,1,L) (S09,*,S09,*,L) (S09,H,S10,1,R)
+(S10,0,S19,H,R) (S10,1,S21,H,R) (S10,*,S21,H,R) (S10,H,---,H,R)
+# 10 rueck
+(S11,0,S11,0,L) (S11,1,S11,1,L) (S11,*,S11,*,L) (S11,H,S12,0,R)
+(S12,0,---,H,R) (S12,1,---,H,R) (S12,*,---,H,R) (S11,H,---,H,R)
+# 11 rueck
+(S13,0,S13,0,L) (S13,1,S13,1,L) (S13,*,S13,*,L) (S13,H,S14,1,R)
+(S14,0,S19,H,R) (S14,1,S21,H,R) (S14,*,S21,H,R) (S13,H,---,H,R)
+# 00 vor
+(S15,0,S15,0,R) (S15,1,S15,1,R) (S15,*,S15,*,R) (S15,H,S16,0,R)
+(S16,0,S07,H,L) (S16,1,S23,1,R) (S16,*,C00,H,R) (S15,H,---,H,R)
+# 01 vor
+(S17,0,S17,0,R) (S17,1,S17,1,R) (S17,*,S17,*,R) (S17,H,S18,0,R)
+(S18,0,S26,0,R) (S18,1,S13,H,L) (S18,*,C00,*,R) (S17,H,---,H,R)
+# 10 vor
+(S19,0,S19,0,R) (S19,1,S19,1,R) (S19,*,S19,*,R) (S19,H,S20,1,R)
+(S20,0,S07,H,L) (S20,1,S23,1,R) (S20,*,C00,*,R) (S19,H,---,H,R)
+# 11 vor
+(S21,0,S21,0,R) (S21,1,S21,1,R) (S21,*,S21,*,R) (S21,H,S22,1,R)
+(S22,0,S26,0,R) (S22,1,S13,H,L) (S22,*,C00,H,R) (S21,H,---,H,R)
+# nicht gefunden 0
+(S23,0,S23,0,R) (S23,1,S23,1,R) (S23,*,S24,*,R) (S24,H,---,H,R)
+(S24,0,S24,0,R) (S24,1,S24,1,R) (S24,*,S25,H,L) (S24,H,HLT,H,L)
+(S25,0,S25,0,L) (S25,1,S25,1,L) (S25,*,S25,*,L) (S25,H,S29,0,L)
+# nicht gefunden 1
+(S26,0,S26,0,R) (S26,1,S26,1,R) (S26,*,S27,*,R) (S26,H,---,H,R)
+(S27,0,S27,0,R) (S27,1,S27,1,R) (S27,*,S28,H,L) (S27,H,HLT,H,L)
+(S28,0,S28,0,L) (S28,1,S28,1,L) (S28,*,S28,*,L) (S28,H,S29,1,L)
+# zurück
+(S29,0,S29,0,L) (S29,1,S29,1,L) (S29,*,S30,*,R) (S29,H,---,H,R)
+#von vorne
+(S30,0,S31,H,R) (S30,1,S33,H,R) (S30,*,S30,*,R) (S30,H,---,H,R)
+#0
+(S31,0,S31,0,R) (S31,1,S31,1,R) (S31,*,S31,*,R) (S31,H,S32,*,R)
+(S32,0,S07,H,L) (S32,1,S23,1,R) (S32,*,---,*,R) (S32,H,---,H,R)
+#1
+(S33,0,S33,0,R) (S33,1,S33,1,R) (S33,*,S33,*,R) (S33,H,S34,*,R)
+(S34,0,S26,0,R) (S34,1,S09,H,L) (S34,*,---,*,R) (S34,H,---,H,R)
+
+#Kopiere Adresse in das Adress-Feld: kopiere([PC+1],AD)
+#gehe zum naechsten Feld
+(C00,0,C00,0,R) (C00,1,C00,1,R) (C00,*,C01,*,R) (C00,H,---,H,R)
+(C01,0,C01,0,R) (C01,1,C01,1,R) (C01,*,C02,*,R) (C01,H,---,H,R)
+#nimm erstes Zeichen
+(C02,0,C03,H,L) (C02,1,C08,H,L) (C02,*,END,*,R) (C02,H,---,H,R)
+#merke 0 und gehe nach links zum H
+(C03,0,C03,0,L) (C03,1,C03,1,L) (C03,*,C03,*,L) (C03,H,C04,H,L)
+(C04,0,C04,0,L) (C04,1,C04,1,L) (C04,*,C04,*,L) (C04,H,C05,*,R)
+(C05,0,C06,0,R) (C05,1,C06,0,R) (C05,*,---,*,R) (C05,H,---,H,R)
+(C06,0,C07,H,R) (C06,1,C07,H,R) (C06,*,C20,H,R) (C06,H,---,H,R)
+(C07,0,C07,0,R) (C07,1,C07,1,R) (C07,*,C07,*,R) (C07,H,C08,H,R)
+(C08,0,C08,0,R) (C08,1,C08,1,R) (C08,*,C08,*,R) (C08,H,C15,0,R)
+#merke 1 und gehe nach links zum H
+(C09,0,C09,0,L) (C09,1,C09,1,L) (C09,*,C09,*,L) (C09,H,C10,H,L)
+(C10,0,C10,0,L) (C10,1,C10,1,L) (C10,*,C10,*,L) (C10,H,C11,*,R)
+(C11,0,C12,1,R) (C11,1,C12,1,R) (C11,*,---,*,R) (C11,H,---,H,R)
+(C12,0,C13,H,R) (C12,1,C13,H,R) (C12,*,C22,H,R) (C12,H,---,H,R)
+(C13,0,C13,0,R) (C13,1,C13,1,R) (C13,*,C13,*,R) (C13,H,C14,H,R)
+(C14,0,C14,0,R) (C14,1,C14,1,R) (C14,*,C14,*,R) (C14,H,C15,1,R)
+# Auswahl 0 oder 1
+(C15,0,C16,H,L) (C15,1,C18,H,L) (C15,*,---,*,R) (C15,H,---,H,R)
+#merke 0
+(C16,0,C16,0,L) (C16,1,C16,1,L) (C16,*,C16,*,L) (C16,H,C17,H,L)
+(C17,0,C17,0,L) (C17,1,C17,1,L) (C17,*,C17,*,L) (C17,H,C06,0,R)
+#merke 1
+(C18,0,C18,0,L) (C18,1,C18,1,L) (C18,*,C18,*,L) (C18,H,C19,H,L)
+(C19,0,C19,0,L) (C19,1,C19,1,L) (C19,*,C19,*,L) (C19,H,C12,1,R)
+# aufräumen 0
+(C20,0,C20,0,R) (C20,1,C20,1,R) (C20,*,C20,*,R) (C20,H,C21,H,R)
+(C21,0,C21,0,R) (C21,1,C21,1,R) (C21,*,C21,*,R) (C21,H,C24,0,R)
+# aufräumen 1
+(C22,0,C22,0,R) (C22,1,C22,1,R) (C22,*,C22,*,R) (C22,H,C23,H,R)
+(C23,0,C23,0,R) (C23,1,C23,1,R) (C23,*,C23,*,R) (C23,H,C24,1,R)
+#zurück zur Befehlsbestimmung
+(C24,0,C24,0,L) (C24,1,C24,1,L) (C24,*,C24,*,L) (C24,H,B00,*,R)
+
+#Befehl aussuchen: if befehl(PC+1) == 0 then
+(B00,0,B00,0,R) (B00,1,B03,1,L) (B00,*,B01,*,L) (B00,H,---,H,R)
+(B01,0,B01,0,L) (B01,1,B01,1,L) (B01,*,B01,*,L) (B01,H,B02,H,L)
+(B02,0,B02,0,L) (B02,1,B02,1,L) (B02,*,IS00,*,R) (B02,H,---,H,R)
+(B03,0,B03,0,L) (B03,1,B03,1,L) (B03,*,B03,*,L) (B03,H,B04,H,L)
+(B04,0,B04,0,L) (B04,1,B04,1,L) (B04,*,AS00,*,R) (B04,H,---,H,R)
+
+#BNZ-Befehl
+#Finde Feld mit dieser Adresse in AD: sucheFeld(AD)
+(IS00,0,IS01,H,R) (IS00,1,IS03,H,R) (IS00,*,---,*,R) (IS00,H,---,*,L)
+
+#0 gemerkt
+(IS01,0,IS01,0,R) (IS01,1,IS01,1,R) (IS01,*,IS01,*,R) (IS01,H,IS02,*,R)
+(IS02,0,IS05,H,L) (IS02,1,IS24,1,R) (IS02,*,---,*,R) (IS02,H,---,H,R)
+
+#1 gemerkt
+(IS03,0,IS03,0,R) (IS03,1,IS03,1,R) (IS03,*,IS03,*,R) (IS03,H,IS04,*,R)
+(IS04,0,IS27,0,L) (IS04,1,IS07,H,L) (IS04,*,---,*,R) (IS04,H,---,H,R)
+
+#00 gemerkt rueck
+(IS05,0,IS05,0,L) (IS05,1,IS05,1,L) (IS05,*,IS05,*,L) (IS05,H,IS06,0,R)
+(IS06,0,IS13,H,R) (IS06,1,IS17,H,R) (IS06,*,IS21,H,R) (IS06,H,----,0,R)
+
+#01 gemerkt rueck
+(IS07,0,IS07,0,L) (IS07,1,IS07,1,L) (IS07,*,IS07,*,L) (IS07,H,IS08,1,R)
+(IS08,0,IS15,H,R) (IS08,1,IS19,H,R) (IS08,*,IS22,H,R) (IS08,H,----,0,R)
+
+#10 gemerkt rueck
+(IS09,0,IS09,0,L) (IS09,1,IS09,1,L) (IS09,*,IS09,*,L) (IS09,H,IS10,0,R)
+(IS10,0,IS24,0,R) (IS10,1,IS24,1,R) (IS10,*,IS21,H,R) (IS10,H,----,0,R)
+
+#11 gemerkt rueck
+(IS11,0,IS11,0,L) (IS11,1,IS11,1,L) (IS11,*,IS11,*,L) (IS11,H,IS12,1,R)
+(IS12,0,IS15,H,R) (IS12,1,IS19,H,R) (IS12,*,IS22,H,R) (IS12,H,----,H,R)
+
+#00 gemerkt vor
+(IS13,0,IS13,0,R) (IS13,1,IS13,1,R) (IS13,*,IS13,*,R) (IS13,H,IS14,0,R)
+(IS14,0,IS05,H,L) (IS14,1,IS24,1,R) (IS14,*,----,*,R) (IS14,H,----,0,R)
+
+#01 gemerkt vor
+(IS15,0,IS15,0,R) (IS15,1,IS15,1,R) (IS15,*,IS15,*,R) (IS15,H,IS16,1,R)
+(IS16,0,IS05,H,L) (IS16,1,IS24,1,L) (IS16,*,----,*,R) (IS16,H,----,0,R)
+
+#10 gemerkt vor
+(IS17,0,IS17,0,R) (IS17,1,IS17,1,R) (IS17,*,IS17,*,R) (IS17,H,IS18,0,R)
+(IS18,0,IS28,0,L) (IS18,1,IS11,H,L) (IS18,*,----,*,R) (IS18,H,----,H,R)
+
+#11 gemerkt vor
+(IS19,0,IS19,0,R) (IS19,1,IS19,1,R) (IS19,*,IS19,*,R) (IS19,H,IS20,1,R)
+(IS20,0,IS28,0,L) (IS20,1,IS11,H,L) (IS20,*,----,*,R) (IS20,H,----,0,R)
+
+#0 gemerkt Ende
+(IS21,0,IS21,0,R) (IS21,1,IS21,1,R) (IS21,*,IS21,*,R) (IS21,H,IT00,0,R)
+#1 gemerkt Ende
+(IS22,0,IS22,0,R) (IS22,1,IS22,1,R) (IS22,*,IS22,*,R) (IS22,H,IT00,1,R)
+#Teste Feld auf Null: if [AD] == 0 then
+(IT00,0,IT00,0,R) (IT00,1,IT00,1,R) (IT00,*,IT01,*,R) (IT00,H,---,H,R)
+(IT01,0,IT01,0,R) (IT01,1,IC00,1,L) (IT01,*,IN00,*,L) (IT01,H,---,H,R)
+
+#0 gemerkt falsch
+(IS24,0,IS24,0,R) (IS24,1,IS24,1,R) (IS24,*,IS25,*,R) (IT24,H,---,H,R)
+(IS25,0,IS25,0,R) (IS25,1,IS25,1,R) (IS25,*,IS26,H,L) (IT25,H,---,H,R)
+(IS26,0,IS26,0,L) (IS26,1,IS26,1,L) (IS26,*,IS26,*,L) (IS26,H,IS27,0,L)
+(IS27,0,IS27,0,L) (IS27,1,IS27,1,L) (IS27,*,IS00,*,R) (IT27,H,---,H,R)
+
+#1 gemerkt falsch
+(IS28,0,IS28,0,R) (IS28,1,IS28,1,R) (IS28,*,IS29,*,R) (IT28,H,---,H,R)
+(IS29,0,IS29,0,R) (IS29,1,IS29,1,R) (IS29,*,IS30,H,L) (IT29,H,---,H,R)
+(IS30,0,IS30,0,L) (IS30,1,IS30,1,L) (IS30,*,IS30,*,L) (IS30,H,IS31,1,L)
+(IS31,0,IS31,0,L) (IS31,1,IS31,1,L) (IS31,*,IS00,*,R) (IT31,H,---,H,R)
+
+#Adresse im ersten Feld (PC) um 3 erhöhen: PC = (PC + 3) mod N
+(IN00,0,IN00,0,L) (IN00,1,IN00,1,L) (IN00,*,IN00,*,L) (IN00,H,IN01,*,L) 
+(IN01,0,IN01,0,L) (IN01,1,IN01,1,L) (IN01,*,IN02,*,L) (IN01,H,---,H,R)
+#um 3 erhöhen
+(IN02,0,IN04,1,L) (IN02,1,IN03,0,L) (IN02,*,---,H,R)  (IN02,H,---,H,R)
+(IN03,0,IN04,1,L) (IN03,1,IN03,1,L) (IN03,*,IN05,*,R) (IN03,H,---,H,R)
+(IN04,0,IN04,0,L) (IN04,1,IN04,1,L) (IN04,*,IN05,*,R) (IN04,H,---,H,R)
+#und nochmal um eins erhöhen
+(IN05,0,IN05,0,R) (IN05,1,IN05,1,R) (IN05,*,IN06,*,L) (IN05,H,---,H,R)
+(IN06,0,IN08,1,L) (IN06,1,IN07,0,L) (IN06,*,---,*,R)  (IN06,H,---,H,R)
+(IN07,0,IN08,1,L) (IN07,1,IN07,1,L) (IN07,*,IN09,*,R) (IN07,H,---,H,R)
+(IN08,0,IN08,0,L) (IN08,1,IN08,1,L) (IN08,*,IN09,*,R) (IN07,H,---,H,R)
+# und das letzte Mal, dann haben wir 3
+(IN09,0,IN09,0,R) (IN09,1,IN09,1,R) (IN09,*,IN10,*,L) (IN09,H,---,H,R)
+(IN10,0,IN12,1,L) (IN10,1,IN11,0,L) (IN10,*,---,*,R)  (IN10,H,---,H,R)
+(IN11,0,IN12,1,L) (IN11,1,IN11,1,L) (IN11,*,S00,*,R)  (IN11,H,---,H,R)
+(IN12,0,IN12,0,L) (IN12,1,IN12,1,L) (IN12,*,S00,*,R)  (IN12,H,---,H,R)
+
+#an die Adresse springen auf die BNZ:
+# sucheFeld(PC)
+(IC00,0,IC00,0,L) (IC00,1,IC00,1,L) (IC00,*,IC00,*,L) (IC00,H,IC01,H,L) 
+(IC01,0,IC01,0,L) (IC01,1,IC01,1,L) (IC01,*,IC02,*,L) (IC01,H,---,H,R)
+(IC02,0,IC02,0,L) (IC02,1,IC02,1,L) (IC02,*,IP00,*,R) (IC02,H,---,H,R)
+
+#Finde Feld mit dieser Adresse in PC: sucheFeld(PC)
+(IP00,0,IP01,H,R) (IP00,1,IP03,H,R) (IP00,*,---,*,R) (IP00,H,---,*,L)
+
+#0 gemerkt
+(IP01,0,IP01,0,R) (IP01,1,IP01,1,R) (IP01,*,IP01,*,R) (IP01,H,IP02,*,R)
+(IP02,0,IP05,H,L) (IP02,1,IP24,1,R) (IP02,*,---,*,R)  (IP02,H,---,H,R)
+
+#1 gemerkt
+(IP03,0,IP03,0,R) (IP03,1,IP03,1,R) (IP03,*,IP03,*,R) (IP03,H,IP04,*,R)
+(IP04,0,IP27,0,L) (IP04,1,IP07,H,L) (IP04,*,---,*,R)  (IP04,H,---,H,R)
+
+#00 gemerkt rueck
+(IP05,0,IP05,0,L) (IP05,1,IP05,1,L) (IP05,*,IP05,*,L) (IP05,H,IP06,0,R)
+(IP06,0,IP13,H,R) (IP06,1,IP17,H,R) (IP06,*,IP21,H,R) (IP06,H,----,0,R)
+
+#01 gemerkt rueck
+(IP07,0,IP07,0,L) (IP07,1,IP07,1,L) (IP07,*,IP07,*,L) (IP07,H,IP08,1,R)
+(IP08,0,IP15,H,R) (IP08,1,IP19,H,R) (IP08,*,IP22,H,R) (IP08,H,----,0,R)
+
+#10 gemerkt rueck
+(IP09,0,IP09,0,L) (IP09,1,IP09,1,L) (IP09,*,IP09,*,L) (IP09,H,IP10,0,R)
+(IP10,0,IP24,0,R) (IP10,1,IP24,1,R) (IP10,*,IP21,H,R) (IP10,H,----,0,R)
+
+#11 gemerkt rueck
+(IP11,0,IP11,0,L) (IP11,1,IP11,1,L) (IP11,*,IP11,*,L) (IP11,H,IP12,1,R)
+(IP12,0,IP15,H,R) (IP12,1,IP19,H,R) (IP12,*,IP22,H,R) (IP12,H,----,H,R)
+
+#00 gemerkt vor
+(IP13,0,IP13,0,R) (IP13,1,IP13,1,R) (IP13,*,IP13,*,R) (IP13,H,IP14,0,R)
+(IP14,0,IP05,H,L) (IP14,1,IP24,1,R) (IP14,*,----,*,R) (IP14,H,----,0,R)
+
+#01 gemerkt vor
+(IP15,0,IP15,0,R) (IP15,1,IP15,1,R) (IP15,*,IP15,*,R) (IP15,H,IP16,1,R)
+(IP16,0,IP05,H,L) (IP16,1,IP24,1,L) (IP16,*,----,*,R) (IP16,H,----,0,R)
+
+#10 gemerkt vor
+(IP17,0,IP17,0,R) (IP17,1,IP17,1,R) (IP17,*,IP17,*,R) (IP17,H,IP18,0,R)
+(IP18,0,IP28,0,L) (IP18,1,IP11,H,L) (IP18,*,----,*,R) (IP18,H,----,H,R)
+
+#11 gemerkt vor
+(IP19,0,IP19,0,R) (IP19,1,IP19,1,R) (IP19,*,IP19,*,R) (IP19,H,IP20,1,R)
+(IP20,0,IP28,0,L) (IP20,1,IP11,H,L) (IP20,*,----,*,R) (IP20,H,----,0,R)
+
+#0 gemerkt Ende
+(IP21,0,IP21,0,R) (IP21,1,IP21,1,R) (IP21,*,IP21,*,R) (IP21,H,IV0,0,R)
+#1 gemerkt Ende
+(IP22,0,IP22,0,R) (IP22,1,IP22,1,R) (IP22,*,IP22,*,R) (IP22,H,IV0,1,R)
+
+#0 gemerkt falsch
+(IP24,0,IP24,0,R) (IP24,1,IP24,1,R) (IP24,*,IP25,*,R) (IP24,H,---,H,R)
+(IP25,0,IP25,0,R) (IP25,1,IP25,1,R) (IP25,*,IP26,H,L) (IP25,H,---,H,R)
+(IP26,0,IP26,0,L) (IP26,1,IP26,1,L) (IP26,*,IP26,*,L) (IP26,H,IP27,0,L)
+(IP27,0,IP27,0,L) (IP27,1,IP27,1,L) (IP27,*,IP00,*,R) (IP27,H,---,H,R)
+
+#1 gemerkt falsch
+(IP28,0,IP28,0,R) (IP28,1,IP28,1,R) (IP28,*,IP29,*,R) (IP28,H,---,H,R)
+(IP29,0,IP29,0,R) (IP29,1,IP29,1,R) (IP29,*,IP30,H,L) (IP29,H,---,H,R)
+(IP30,0,IP30,0,L) (IP30,1,IP30,1,L) (IP30,*,IP30,*,L) (IP30,H,IP31,1,L)
+(IP31,0,IP31,0,L) (IP31,1,IP31,1,L) (IP31,*,IP00,*,R) (IP31,H,---,H,R)
+
+# vier Felder vor zur 3.Speicherstelle, dort ist die SPrungadresse
+(IV0,0,IV0,0,R) (IV0,1,IV0,1,R) (IV0,*,IV1,*,R)  (IV0,H,---,H,R)
+(IV1,0,IV1,0,R) (IV1,1,IV1,1,R) (IV1,*,IV2,*,R)  (IV1,H,---,H,R)
+(IV2,0,IV2,0,R) (IV2,1,IV2,1,R) (IV2,*,IV3,*,R)  (IV2,H,---,H,R)
+(IV3,0,IV3,0,R) (IV3,1,IV3,1,R) (IV3,*,IV4,*,R)  (IV3,H,---,H,R)
+(IV4,0,IV4,0,R) (IV4,1,IV4,1,R) (IV4,*,IK00,*,R) (IV4,H,---,H,R)
+
+# kopiere dises feld nach PC: kopiere([PC+2],PC)
+(IK00,0,IK01,H,L) (IK00,1,IK04,H,L) (IK00,*,----,*,L) (IK00,H,---,H,R)
+# 0 gemerkt first
+(IK01,0,IK01,0,L) (IK01,1,IK01,1,L) (IK01,*,IK01,*,L) (IK01,H,IK02,*,L)
+(IK02,0,IK03,0,L) (IK02,1,IK03,0,L) (IK02,*,----,*,R) (IK02,H,---,H,R)
+(IK03,0,IK07,H,R) (IK03,1,IK07,H,R) (IK03,*,IK14,H,R) (IK03,H,---,H,R)
+# 1 gemerkt first
+(IK04,0,IK04,0,L) (IK04,1,IK04,1,L) (IK04,*,IK04,*,L) (IK04,H,IK05,*,L)
+(IK05,0,IK05,0,L) (IK05,1,IK06,0,L) (IK05,*,----,*,R) (IK05,H,---,H,R)
+(IK06,0,IK08,H,R) (IK06,1,IK08,H,R) (IK06,*,IK15,H,R) (IK06,H,---,H,R)
+#0 zurück
+(IK07,0,IK07,0,R) (IK07,1,IK07,1,R) (IK07,*,IK07,*,R) (IK07,H,IK09,0,R)
+#1 zurück
+(IK08,0,IK08,0,R) (IK08,1,IK08,1,R) (IK08,*,IK08,*,R) (IK08,H,IK09,1,R)
+
+(IK09,0,IK10,H,L) (IK09,1,IK12,H,L) (IK09,*,----,*,L) (IK09,H,---,H,R)
+# 0 gemerkt
+(IK10,0,IK10,0,L) (IK10,1,IK10,1,L) (IK10,*,IK10,*,L) (IK10,H,IK11,0,L)
+(IK11,0,IK07,H,R) (IK11,1,IK07,H,R) (IK11,*,IK14,H,R) (IK11,H,---,H,R)
+# 1 gemerkt
+(IK12,0,IK12,0,L) (IK12,1,IK12,1,L) (IK12,*,IK12,*,L) (IK12,H,IK13,1,L)
+(IK13,0,IK07,H,R) (IK13,1,IK07,H,R) (IK13,*,IK15,H,R) (IK13,H,---,H,R)
+# aufräumen 0
+(IK14,0,IK14,0,R) (IK14,1,IK14,1,R) (IK14,*,IK14,*,R) (IK14,H,IK16,0,R)
+# aufräumen 1
+(IK15,0,IK15,0,R) (IK15,1,IK15,1,R) (IK15,*,IK15,*,R) (IK15,H,IK16,1,R)
+# und zurück
+(IK16,0,IK16,0,L) (IK16,1,IK16,1,L) (IK16,*,IK16,*,L) (IK16,H,S00,*,R)
+
+# INC Befehl
+# Finde Feld mit dieser Adresse in AD: sucheFeld(AD)
+(AS00,0,AS01,H,R) (AS00,1,AS03,H,R) (AS00,*,---,*,R) (AS00,H,---,*,L)
+#0 gemerkt
+(AS01,0,AS01,0,R) (AS01,1,AS01,1,R) (AS01,*,AS01,*,R) (AS01,H,AS02,*,R)
+(AS02,0,AS05,H,L) (AS02,1,AS24,1,R) (AS02,*,---,*,R)  (AS02,H,---,H,R)
+
+#1 gemerkt
+(AS03,0,AS03,0,R) (AS03,1,AS03,1,R) (AS03,*,AS03,*,R) (AS03,H,AS04,*,R)
+(AS04,0,AS27,0,L) (AS04,1,AS07,H,L) (AS04,*,---,*,R)  (AS04,H,---,H,R)
+
+#00 gemerkt rueck
+(AS05,0,AS05,0,L) (AS05,1,AS05,1,L) (AS05,*,AS05,*,L) (AS05,H,AS06,0,R)
+(AS06,0,AS13,H,R) (AS06,1,AS17,H,R) (AS06,*,AS21,H,R) (AS06,H,----,0,R)
+
+#01 gemerkt rueck
+(AS07,0,AS07,0,L) (AS07,1,AS07,1,L) (AS07,*,AS07,*,L) (AS07,H,AS08,1,R)
+(AS08,0,AS15,H,R) (AS08,1,AS19,H,R) (AS08,*,AS22,H,R) (AS08,H,----,0,R)
+
+#10 gemerkt rueck
+(AS09,0,AS09,0,L) (AS09,1,AS09,1,L) (AS09,*,AS09,*,L) (AS09,H,AS10,0,R)
+(AS10,0,AS24,0,R) (AS10,1,AS24,1,R) (AS10,*,AS21,H,R) (AS10,H,----,0,R)
+
+#11 gemerkt rueck
+(AS11,0,AS11,0,L) (AS11,1,AS11,1,L) (AS11,*,AS11,*,L) (AS11,H,AS12,1,R)
+(AS12,0,AS15,H,R) (AS12,1,AS19,H,R) (AS12,*,AS22,H,R) (AS12,H,----,H,R)
+
+#00 gemerkt vor
+(AS13,0,AS13,0,R) (AS13,1,AS13,1,R) (AS13,*,AS13,*,R) (AS13,H,AS14,0,R)
+(AS14,0,AS05,H,L) (AS14,1,AS24,1,R) (AS14,*,----,*,R) (AS14,H,----,0,R)
+
+#01 gemerkt vor
+(AS15,0,AS15,0,R) (AS15,1,AS15,1,R) (AS15,*,AS15,*,R) (AS15,H,AS16,1,R)
+(AS16,0,AS05,H,L) (AS16,1,AS24,1,L) (AS16,*,----,*,R) (AS16,H,----,0,R)
+
+#10 gemerkt vor
+(AS17,0,AS17,0,R) (AS17,1,AS17,1,R) (AS17,*,AS17,*,R) (AS17,H,AS18,0,R)
+(AS18,0,AS28,0,L) (AS18,1,AS11,H,L) (AS18,*,----,*,R) (AS18,H,----,H,R)
+
+#11 gemerkt vor
+(AS19,0,AS19,0,R) (AS19,1,AS19,1,R) (AS19,*,AS19,*,R) (AS19,H,AS20,1,R)
+(AS20,0,AS28,0,L) (AS20,1,AS11,H,L) (AS20,*,----,*,R) (AS20,H,----,0,R)
+
+#0 gemerkt Ende
+(AS21,0,AS21,0,R) (AS21,1,AS21,1,R) (AS21,*,AS21,*,R) (AS21,H,AI00,0,R)
+#1 gemerkt Ende
+(AS22,0,AS22,0,R) (AS22,1,AS22,1,R) (AS22,*,AS22,*,R) (AS22,H,AI00,1,R)
+
+#0 gemerkt falsch
+(AS24,0,AS24,0,R) (AS24,1,AS24,1,R) (AS24,*,AS25,*,R) (AS24,H,---,H,R)
+(AS25,0,AS25,0,R) (AS25,1,AS25,1,R) (AS25,*,AS26,H,L) (AS25,H,---,H,R)
+(AS26,0,AS26,0,L) (AS26,1,AS26,1,L) (AS26,*,AS26,*,L) (AS26,H,AS27,0,L)
+(AS27,0,AS27,0,L) (AS27,1,AS27,1,L) (AS27,*,AS00,*,R) (AS27,H,---,H,R)
+
+#1 gemerkt falsch
+(AS28,0,AS28,0,R) (AS28,1,AS28,1,R) (AS28,*,AS29,*,R) (AS28,H,---,H,R)
+(AS29,0,AS29,0,R) (AS29,1,AS29,1,R) (AS29,*,AS30,H,L) (AS29,H,---,H,R)
+(AS30,0,AS30,0,L) (AS30,1,AS30,1,L) (AS30,*,AS30,*,L) (AS30,H,AS31,1,L)
+(AS31,0,AS31,0,L) (AS31,1,AS31,1,L) (AS31,*,AS00,*,R) (AS31,H,---,H,R)
+
+# [AD] = ([AD] + 1) mode N
+#Adresse im ersten Feld (PC) um 3 erhöhen: PC = (PC + 3) mod N
+(AI00,0,AI00,0,R) (AI00,1,AI00,1,R) (AI00,*,AI01,*,R) (AI00,H,---,H,R)
+(AI01,0,AI01,0,R) (AI01,1,AI01,1,R) (AI01,*,AI02,*,L) (AI01,H,---,H,R)
+#um 1 erhöhen
+(AI02,0,AI04,1,L) (AI02,1,AI03,0,L) (AI02,*,---,*,R)  (AI02,H,---,H,R)
+(AI03,0,AI04,1,L) (AI03,1,AI03,1,L) (AI03,*,AI05,*,R) (AI03,H,---,H,R)
+(AI04,0,AI04,0,L) (AI04,1,AI04,1,L) (AI04,*,AN00,*,R) (AI04,H,---,H,R)
+
+#Adresse im ersten Feld (PC) um 3 erhöhen: PC = (PC + 2) mod N
+(AN00,0,AN00,0,L) (AN00,1,AN00,1,L) (AN00,*,AN00,*,L) (AN00,H,AN01,*,L) 
+(AN01,0,AN01,0,L) (AN01,1,AN01,1,L) (AN01,*,AN02,*,L) (AN01,H,---,H,R)
+#um 3 erhöhen
+(AN02,0,AN04,1,L) (AN02,1,AN03,0,L) (AN02,*,---,*,R)  (AN02,H,---,H,R)
+(AN03,0,AN04,1,L) (AN03,1,AN03,1,L) (AN03,*,AN05,*,R) (AN03,H,---,H,R)
+(AN04,0,AN04,0,L) (AN04,1,AN04,1,L) (AN04,*,AN05,*,R) (AN04,H,---,H,R)
+#und nochmal um eANs erhöhen
+(AN05,0,AN05,0,R) (AN05,1,AN05,1,R) (AN05,*,AN06,*,L) (AN05,H,---,H,R)
+(AN06,0,AN08,1,L) (AN06,1,AN07,0,L) (AN06,*,---,*,R)  (AN06,H,---,H,R)
+(AN07,0,AN08,1,L) (AN07,1,AN07,1,L) (AN07,*,S00,*,R)  (AN07,H,---,H,R)
+(AN08,0,AN08,0,L) (AN08,1,AN08,1,L) (AN08,*,S00,*,R)  (AN07,H,---,H,R)
+`;
+
+// Andres DEC-Makro: nutzt RLen als modularen Counter.
+// Funktioniert ohne nativen DEC weil RLen via INC wrapt.
+// Schleife ist klein (konstant), egal wie groß N ist.
+//
+// Zusätzlich: CLR wird mit INC implementiert (statt mit DEC),
+// sonst gibt es eine Rekursion DEC→CLR→DEC. Andres ursprünglicher
+// Trick aus SubRoutine.asm. CLR-mit-INC funktioniert nur bei endlicher
+// Wortbreite, aber auf der TM ist die ja gegeben.
+const TM_DEC_MACRO = `
+MAKRO:CLR(A)
+Start:BNZ(A,t1)
+      JMP(End)
+t1:   INC(A)
+      JMP(Start)
+END
+
+MAKRO:DEC(A)
+      JMP(Start)
+RLen: 0
+Start:CLR(RLen)
+      INC(RLen)
+S1:   INC(A)
+      INC(RLen)
+      BNZ(RLen,S1)
+END
+`;
+
+// Binär-String mit N Bit MSB-first
+function toBinN(value, n){
+  let s = '';
+  for(let i = n-1; i >= 0; i--) s += ((value >> i) & 1).toString();
+  return s;
+}
+
+function crossCompileTM(src){
+  // 1. TM-spezifische Makros (DEC, CLR) am ENDE anhängen, damit sie
+  //    die STDLIB-Definitionen überschreiben (letzte Definition gewinnt).
+  //    Grund: STDLIB-CLR nutzt DEC → DEC-Makro nutzt CLR → Rekursion.
+  //    Mit Andres alternativer CLR-Implementierung (mit INC statt DEC)
+  //    ist der Zyklus aufgebrochen — funktioniert wegen modularer Arithmetik.
+  const srcWithDec = src + '\n' + TM_DEC_MACRO;
+
+  // 2. Parse und expandiere
+  globalMacroId = 0;
+  const lines = stripComments(srcWithDec);
+  const {macs, code} = extractMacros(lines);
+  let expanded;
+  try { expanded = expandMacros(code, macs); }
+  catch(e){ return {error: 'Makro-Fehler: ' + e.message}; }
+
+  // 3. Variablen und Programm-Instruktionen sammeln
+  // Aus expanded extrahieren: Variablen mit Initialwerten, und reine Instruktionen
+  const vars = {};       // varName -> initialValue
+  const varOrder = [];   // Reihenfolge der Variablen-Deklarationen
+  const instrs  = [];    // Liste von {type, reg, lbl?, origIdx}
+  const labels  = {};    // labelName -> Instruktions-Index (vor Adresszuweisung)
+
+  // Erst Variablen sammeln (Zeilen "name: zahl")
+  for(const {text} of expanded){
+    const t = text.trim();
+    if(!t) continue;
+    const lm = t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/);
+    if(lm){
+      const label = lm[1], rest = lm[2].trim();
+      if(/^-?\d/.test(rest)){
+        // Array oder skalar
+        const arrM = label.match(/(\w+)\[(\d+)\]/);
+        if(arrM){
+          const base = arrM[1], size = parseInt(arrM[2]);
+          const vs = rest.split(',').map(v=>parseInt(v.trim())||0);
+          for(let i=0;i<size;i++){
+            const n = `${base}__${i}`;
+            if(vars[n] === undefined){ vars[n] = vs[i]||0; varOrder.push(n); }
+          }
+          if(vars[base] === undefined){ vars[base] = vs[0]||0; varOrder.push(base); }
+        } else {
+          if(vars[label] === undefined){ vars[label] = parseInt(rest)||0; varOrder.push(label); }
+        }
+      }
+    }
+  }
+
+  // Zweite Runde: Instruktionen + Labels
+  let instrIdx = 0;
+  for(const {text, origIdx} of expanded){
+    const t = text.trim();
+    if(!t) continue;
+    const lm = t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/);
+    let label = null, rest = t;
+    if(lm){ label = lm[1]; rest = lm[2].trim(); }
+    // Variablen-Deklaration überspringen
+    if(label && /^-?\d/.test(rest)) continue;
+    // Bare Label → markiert nächste Instruktion
+    if(label && !rest){ labels[label] = instrIdx; continue; }
+    if(label) labels[label] = instrIdx;
+    if(!rest) continue;
+
+    let m;
+    if((m = rest.match(/^INC\s*\(([^)]+)\)/i))){
+      instrs.push({type:'INC', reg: m[1].trim(), origIdx});
+      instrIdx++;
+    } else if((m = rest.match(/^BNZ\s*\(([^,)]+),([^)]+)\)/i))){
+      instrs.push({type:'BNZ', reg: m[1].trim(), lbl: m[2].trim(), origIdx});
+      instrIdx++;
+    } else if((m = rest.match(/^CLR\s*\(([^)]+)\)/i))){
+      return {error: `CLR auf Hardware-Ebene nicht erlaubt. CLR ist ein STDLIB-Makro – wird automatisch ersetzt. (Zeile mit "${rest}")`};
+    } else if((m = rest.match(/^DEC\s*\(([^)]+)\)/i))){
+      return {error: `DEC sollte durch Makro ersetzt sein. (Zeile mit "${rest}")`};
+    } else {
+      return {error: `Unbekannte Instruktion: ${rest}`};
+    }
+  }
+
+  // 4. Layout: Programm-Zellen + Daten-Zellen
+  // Pro Instruktion eine Anzahl Zellen:
+  //   INC(p) → 2 Zellen: [Opcode=001, p_addr]
+  //   BNZ(p,j) → 3 Zellen: [Opcode=000, p_addr, j_addr]
+
+  // Erst: Instruktions-Index -> Zell-Adresse berechnen
+  const instrCellAddr = [];
+  let cellPos = 0;
+  for(const instr of instrs){
+    instrCellAddr.push(cellPos);
+    cellPos += (instr.type === 'BNZ') ? 3 : 2;
+  }
+  const programCellCount = cellPos;
+
+  // Variablen: nach dem Programm anhängen
+  const varAddr = {};
+  for(const v of varOrder){
+    varAddr[v] = cellPos++;
+  }
+  const totalCells = cellPos;
+
+  // 5. Wortbreite N berechnen
+  // Brauche genug Bits für: höchste Adresse + alle Werte
+  // Werte sind: 0 (BNZ), 1 (INC), Variablenadressen, Sprungziele, Variablen-Initialwerte
+  let maxValue = totalCells - 1;  // höchste Adresse die irgendwo vorkommt
+  for(const v of varOrder){
+    if(vars[v] > maxValue) maxValue = vars[v];
+  }
+  let N = 1;
+  while((1 << N) <= maxValue) N++;
+  // Mindestens so viele Bits damit alle Zellen adressierbar sind
+  while((1 << N) < totalCells) N++;
+
+  // 6. Resolve Labels zu Zell-Adressen
+  for(const instr of instrs){
+    if(instr.type === 'BNZ'){
+      if(labels[instr.lbl] === undefined){
+        return {error: `Label '${instr.lbl}' nicht gefunden`};
+      }
+      instr.targetCell = instrCellAddr[labels[instr.lbl]];
+    }
+  }
+
+  // 7. Zell-Inhalte berechnen
+  // cells[i] = numerischer Wert der Zelle i
+  const cells = new Array(totalCells).fill(0);
+  for(let i = 0; i < instrs.length; i++){
+    const instr = instrs[i];
+    const addr = instrCellAddr[i];
+    if(instr.type === 'INC'){
+      cells[addr]   = 1;  // INC-Opcode
+      if(varAddr[instr.reg] === undefined){
+        return {error: `Variable '${instr.reg}' nicht deklariert (INC)`};
+      }
+      cells[addr+1] = varAddr[instr.reg];
+    } else if(instr.type === 'BNZ'){
+      cells[addr]   = 0;  // BNZ-Opcode
+      if(varAddr[instr.reg] === undefined){
+        return {error: `Variable '${instr.reg}' nicht deklariert (BNZ)`};
+      }
+      cells[addr+1] = varAddr[instr.reg];
+      cells[addr+2] = instr.targetCell;
+    }
+  }
+  // Variablen-Initialwerte
+  for(const v of varOrder){
+    cells[varAddr[v]] = vars[v] & ((1<<N) - 1);
+  }
+
+  // 8. Bandstring generieren
+  // Format: *PC*AD*adr0*val0*adr1*val1*...*
+  let band = '*' + toBinN(0, N) + '*' + toBinN(0, N) + '*';
+  for(let i = 0; i < totalCells; i++){
+    band += toBinN(i, N) + '*' + toBinN(cells[i], N) + '*';
+  }
+
+  // 9. Mapping für Anzeige
+  const mapping = [];
+  for(let i = 0; i < instrs.length; i++){
+    const instr = instrs[i];
+    const addr = instrCellAddr[i];
+    if(instr.type === 'INC'){
+      mapping.push({addr, val: '001', comment: `INC – Opcode`});
+      mapping.push({addr: addr+1, val: toBinN(varAddr[instr.reg], N), comment: `→ ${instr.reg} (Adresse ${varAddr[instr.reg]})`});
+    } else if(instr.type === 'BNZ'){
+      mapping.push({addr, val: '000', comment: `BNZ – Opcode`});
+      mapping.push({addr: addr+1, val: toBinN(varAddr[instr.reg], N), comment: `→ ${instr.reg} (Adresse ${varAddr[instr.reg]})`});
+      mapping.push({addr: addr+2, val: toBinN(instr.targetCell, N), comment: `→ Sprung zu Zelle ${instr.targetCell}`});
+    }
+  }
+  for(const v of varOrder){
+    mapping.push({addr: varAddr[v], val: toBinN(vars[v] & ((1<<N)-1), N), comment: `Variable ${v} = ${vars[v]}`});
+  }
+
+  return {
+    band,
+    N,
+    totalCells,
+    programCellCount,
+    varCount: varOrder.length,
+    instrCount: instrs.length,
+    mapping,
+    cells
+  };
+}
+
+// ── Modal-Handling ──
+function showTMExport(){
+  const result = crossCompileTM(editorEl.value);
+  const bg = document.getElementById('modal-bg');
+  const stats = document.getElementById('tm-stats');
+  const bandOut = document.getElementById('band-output');
+  const mapOut = document.getElementById('addr-mapping');
+
+  if(result.error){
+    stats.innerHTML = `<div class="k">Fehler:</div><div class="v" style="color:var(--red)">${esc(result.error)}</div>`;
+    bandOut.textContent = '';
+    mapOut.innerHTML = '';
+    bg.classList.add('visible');
+    return;
+  }
+
+  stats.innerHTML = `
+    <div class="k">Wortbreite N:</div><div class="v">${result.N} Bit (max ${(1<<result.N)-1})</div>
+    <div class="k">Zellen gesamt:</div><div class="v">${result.totalCells}</div>
+    <div class="k">– Programm:</div><div class="v">${result.programCellCount}</div>
+    <div class="k">– Daten:</div><div class="v">${result.varCount}</div>
+    <div class="k">Instruktionen:</div><div class="v">${result.instrCount}</div>
+    <div class="k">Bandlänge:</div><div class="v">${result.band.length} Zeichen</div>
+  `;
+
+  bandOut.textContent = result.band;
+
+  let html = '<div class="row hdr"><span>Zelle</span><span>Wert</span><span>Bedeutung</span></div>';
+  for(const m of result.mapping){
+    html += `<div class="row"><span class="a">${m.addr}</span><span class="v">${m.val}</span><span class="c">${esc(m.comment)}</span></div>`;
+  }
+  mapOut.innerHTML = html;
+
+  // Daten speichern für Copy-Buttons
+  window._tmResult = result;
+  bg.classList.add('visible');
+}
+
+function buildTmFileContent(result){
+  return `# RAM-Programm kompiliert für RAMonTM
+# ====================================
+# Wortbreite (N):       ${result.N} Bit  (max Wert: ${(1<<result.N)-1})
+# Zellen gesamt:        ${result.totalCells}
+#   – Programm:         ${result.programCellCount}
+#   – Daten:            ${result.varCount}
+# Instruktionen:        ${result.instrCount}
+#
+# Eigenständige .tm-Datei: enthält Initialisierung + Band + alle
+# RAMonTM-Transitionen. Direkt in einem TM-Simulator ausführbar.
+# Die Transitionen sind wortlängenunabhängig – funktionieren für
+# jede Wortbreite N.
+
+# Initialisierung
+(S00,0)
+
+# Turing Band (PC, AD, danach jeweils Adresse + Wert pro Zelle)
+(${result.band})
+
+${RAMONTM_TRANSITIONS}`;
+}
+
+
+function halt(msg){
+  running=false; if(runTimer){clearInterval(runTimer);runTimer=null;}
+  log(msg,'log-ok'); setStatus('HALT');
+  btnStop.disabled=true; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
+}
+
+function startRun(){
+  if(!program.length||pc===0){ if(!compile(editorEl.value)) return; }
+  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
+  running=true; setStatus('LÄUFT');
+  btnStop.disabled=false; btnRun.disabled=true; btnStep.disabled=true; btnStepIn.disabled=true; btnStepOut.disabled=true;
+  const spt=()=>{ const s=+speedSlider.value; return s<=10?1:s<=50?Math.round(s/2):s*5; };
+  const ims=()=>{ const s=+speedSlider.value; return s<=10?600-s*50:50; };
+  runTimer=setInterval(()=>{ if(!running)return; const n=spt(); for(let i=0;i<n;i++) if(!execStep()) return; }, ims());
+}
+
+function stopRun(){
+  running=false; if(runTimer){clearInterval(runTimer);runTimer=null;}
+  setStatus('BEREIT'); btnStop.disabled=true; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
+}
+
+function resetSim(){
+  stopRun(); program=[]; memory={}; prevMem={}; pc=0; steps=0;
+  updateStepCount(); updateRegisters(); updateUI(-1); setStatus('BEREIT');
+  btnRun.disabled=true; btnStep.disabled=true; btnStepIn.disabled=true; btnStepOut.disabled=true;
+  clearLog(); log('Reset.','log-info');
+}
+
+function loadCode(userSrc){
+  // Stdlib + Trennkommentar + Benutzerprogramm in den Editor schreiben
+  const combined = STDLIB.trimStart()
+    + '\n# ══════════════════════════════════════════════════════\n'
+    + '# Hauptprogramm\n'
+    + '# ══════════════════════════════════════════════════════\n\n'
+    + userSrc;
+  editorEl.value = combined;
+  resetSim();
+  if(compile(combined)){ btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; }
+  updateUI(-1);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// EVENTS
+// ══════════════════════════════════════════════════════════════════
+btnRun.addEventListener('click',()=>{
+  if(!program.length||pc===0){ if(!compile(editorEl.value)) return; }
+  startRun();
+});
+btnStep.addEventListener('click',()=>{
+  if(!program.length){ if(!compile(editorEl.value)) return; }
+  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
+  setStatus('BEREIT'); execStep();
+  btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
+});
+btnStepIn.addEventListener('click',()=>{
+  if(!program.length){ if(!compile(editorEl.value)) return; }
+  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
+  setStatus('BEREIT'); execStepIn();
+  btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
+});
+btnStepOut.addEventListener('click',()=>{
+  if(!program.length){ if(!compile(editorEl.value)) return; }
+  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
+  setStatus('BEREIT'); execStepOut();
+  btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
+});
+btnStop.addEventListener('click', stopRun);
+btnReset.addEventListener('click', resetSim);
+
+// ── TM-Export Button + Modal ──
+document.getElementById('btn-tm-export').addEventListener('click', showTMExport);
+document.getElementById('modal-close').addEventListener('click', ()=>{
+  document.getElementById('modal-bg').classList.remove('visible');
+});
+document.getElementById('btn-modal-close2').addEventListener('click', ()=>{
+  document.getElementById('modal-bg').classList.remove('visible');
+});
+document.getElementById('modal-bg').addEventListener('click', e => {
+  if(e.target.id === 'modal-bg') e.target.classList.remove('visible');
+});
+document.getElementById('btn-download-tm').addEventListener('click', ()=>{
+  if(!window._tmResult) return;
+  const content = buildTmFileContent(window._tmResult);
+  // Dateiname aus Quellprogramm-Namen ableiten
+  let name = 'programm';
+  const nm = sourceName.textContent.replace(/^[▸📄]\s*/, '').trim();
+  if(nm){
+    // Sonderzeichen entfernen
+    name = nm.replace(/[^\w\-]/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'') || 'programm';
+  }
+  const filename = `${name}_N${window._tmResult.N}.tm`;
+  const blob = new Blob([content], {type:'text/plain;charset=utf-8'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  log(`Heruntergeladen: ${filename}`,'log-ok');
+});
+
+document.getElementById('btn-load-file').addEventListener('click',()=>fileInput.click());
+fileInput.addEventListener('change',()=>{
+  const f=fileInput.files[0]; if(!f) return;
+  const r=new FileReader();
+  r.onload=e=>{
+    const userSrc = e.target.result;
+    // Prüfen ob die Datei schon Makro-Definitionen enthält (z.B. SubRoutine.asm selbst)
+    const hasStdlib = /MAKRO\s*:\s*JMP/i.test(userSrc);
+    if(hasStdlib){
+      // Datei enthält eigene Makros → direkt laden ohne nochmal Stdlib dranzuhängen
+      editorEl.value = userSrc;
+      resetSim();
+      if(compile(userSrc)){ btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; }
+      updateUI(-1);
+    } else {
+      loadCode(userSrc);
+    }
+    log(`Geladen: ${f.name}`,'log-ok');
+    sourceName.textContent = `📄 ${f.name}`;
+  };
+  r.readAsText(f); fileInput.value='';
+});
+
+exSel.addEventListener('change',()=>{
+  const key=exSel.value; if(!key) return;
+  const label = exSel.options[exSel.selectedIndex].text;
+  const src = EXAMPLES[key]||'';
+  const hasOwnMacros = /MAKRO\s*:\s*JMP/i.test(src);
+  if(hasOwnMacros){
+    editorEl.value=src; resetSim();
+    if(compile(src)){ btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; }
+    updateUI(-1);
+  } else {
+    loadCode(src);
+  }
+  sourceName.textContent = `▸ ${label}`;
+  exSel.value='';
+});
+
+editorEl.addEventListener('input',()=>{
+  program=[]; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
+  sourceName.textContent=''; updateUI(-1);
+});
+editorEl.addEventListener('scroll',()=>{
+  hlLayer.scrollTop=editorEl.scrollTop;
+  hlLayer.scrollLeft=editorEl.scrollLeft;
+  lineNums.scrollTop=editorEl.scrollTop;
+});
+
+document.addEventListener('keydown',e=>{
+  if(e.key==='F5'||(e.ctrlKey&&e.key==='Enter')){ e.preventDefault(); btnRun.click(); }
+  if(e.key==='F10'){ e.preventDefault(); btnStep.click(); }
+  if(e.key==='F11'){ e.preventDefault(); if(e.shiftKey) btnStepOut.click(); else btnStepIn.click(); }
+  if(e.key==='F8'){ e.preventDefault(); btnStop.click(); }
+});
+
+// ══════════════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════════════
+loadCode(EXAMPLES.fak);
+sourceName.textContent = '▸ Fakultät n!';
+log('SubRoutine.asm ist im Editor sichtbar – vollständig debuggbar.','log-info');
+log('Beispiele im Dropdown. F5=Run  F10=Step Over  F11=Step Into  Shift+F11=Step Out  F8=Stop','log-info');
+</script>
+</body>
+</html>
