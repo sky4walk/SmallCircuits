@@ -1,0 +1,1415 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Logisim Web</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  background:#0d1117; color:#c9d1d9;
+  font:12px/1.4 'Courier New',monospace;
+  display:flex; flex-direction:column; height:100vh; overflow:hidden;
+}
+#toolbar {
+  display:flex; align-items:center; gap:6px; padding:5px 10px;
+  background:#161b22; border-bottom:1px solid #30363d; flex-shrink:0;
+  flex-wrap:wrap;
+}
+.tb { background:#21262d; border:1px solid #30363d; color:#c9d1d9;
+  padding:3px 8px; cursor:pointer; border-radius:4px; font:inherit; }
+.tb:hover { background:#30363d; border-color:#8b949e; }
+.tb.act { background:#1f6feb; border-color:#388bfd; color:#fff; }
+#circSel { background:#21262d; border:1px solid #30363d; color:#c9d1d9;
+  padding:3px 6px; font:inherit; border-radius:4px; max-width:340px; }
+#status { margin-left:auto; color:#484f58; font-size:11px; }
+#tooltip {
+  position:fixed; pointer-events:none; background:#161b22;
+  border:1px solid #388bfd; padding:4px 8px; font-size:11px; color:#79c0ff;
+  border-radius:3px; display:none; z-index:100;
+}
+#canvas { display:block; cursor:crosshair; }
+#overlay {
+  position:fixed; inset:0; background:rgba(0,0,0,.7);
+  display:flex; align-items:center; justify-content:center; z-index:50;
+}
+#overlay.hidden { display:none; }
+#overlay-box {
+  background:#161b22; border:1px solid #30363d; padding:20px; border-radius:8px;
+  max-width:480px; width:90%;
+}
+#overlay-box h3 { color:#58a6ff; margin-bottom:8px; }
+#overlay-box input {
+  width:100%; background:#21262d; border:1px solid #30363d; color:#c9d1d9;
+  padding:6px 8px; font:inherit; border-radius:4px; margin:8px 0;
+}
+#overlay-box .row { display:flex; gap:8px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <span style="color:#58a6ff;font-weight:bold;letter-spacing:.5px">⬡ Logisim Web</span>
+  <span style="color:#6e7681;font-size:11px" title="Build-Kennung">build&nbsp;v14&nbsp;·&nbsp;25.06</span>
+  <span style="color:#30363d">│</span>
+  <button class="tb" onclick="fileInput.click()">📂 .circ laden</button>
+  <input id="fileInput" type="file" accept=".circ" style="display:none">
+  <button class="tb" onclick="showUrlDialog()">🌐 URL</button>
+  <span style="color:#30363d">│</span>
+  <select id="circSel" onchange="switchCircuit(this.value)"><option>– keine Datei –</option></select>
+  <span style="color:#30363d">│</span>
+  <button class="tb" id="btnTakt" onclick="stepClock()" title="Taktsignal umschalten">⏭ Takt</button>
+  <button class="tb" id="btnRun" onclick="toggleRun()" title="Kontinuierlich takten">▶ Run</button>
+  <button class="tb" onclick="resetSim()">↺ Reset</button>
+  <span style="color:#30363d">│</span>
+  <button class="tb" onclick="fitView()">⛶ Fit</button>
+  <button class="tb" onclick="zoom(1.25)">+</button>
+  <button class="tb" onclick="zoom(0.8)">−</button>
+  <div id="status">Keine Datei geladen</div>
+</div>
+<canvas id="canvas"></canvas>
+<div id="tooltip"></div>
+
+<div id="overlay" class="hidden">
+  <div id="overlay-box">
+    <h3>🌐 URL laden</h3>
+    <p style="color:#8b949e;font-size:11px">GitHub raw URL oder direkter Link zu .circ Datei</p>
+    <input id="urlInput" type="text" placeholder="https://raw.githubusercontent.com/..." value="https://raw.githubusercontent.com/sky4walk/documents/master/Logisim-CPU.circ">
+    <div class="row">
+      <button class="tb act" onclick="loadFromUrl()">Laden</button>
+      <button class="tb" onclick="closeOverlay()">Abbrechen</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+// ════════════════════════════ PARSER ════════════════════════════
+function parseCircFile(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) throw new Error('XML-Fehler in der .circ Datei');
+  const proj = { circuits: new Map(), main: null };
+  const mainEl = doc.querySelector('main');
+  proj.main = mainEl?.getAttribute('name') || null;
+  for (const el of doc.querySelectorAll('circuit')) {
+    const c = parseCircuit(el);
+    proj.circuits.set(c.name, c);
+  }
+  return proj;
+}
+function parseCircuit(el) {
+  const c = { name: el.getAttribute('name'), wires: [], comps: [] };
+  let uid = 0;
+  for (const w of el.querySelectorAll(':scope > wire')) {
+    c.wires.push({ from: parseXY(w.getAttribute('from')), to: parseXY(w.getAttribute('to')) });
+  }
+  for (const x of el.querySelectorAll(':scope > comp')) {
+    const comp = {
+      uid: uid++,
+      type: x.getAttribute('name'),
+      lib:  x.hasAttribute('lib') ? parseInt(x.getAttribute('lib')) : null,
+      loc:  parseXY(x.getAttribute('loc')),
+      attrs: {}, val: null,
+    };
+    for (const a of x.querySelectorAll('a')) comp.attrs[a.getAttribute('name')] = a.getAttribute('val');
+    c.comps.push(comp);
+  }
+  return c;
+}
+function parseXY(s) {
+  const m = s.match(/\((-?\d+),(-?\d+)\)/);
+  return { x: +m[1], y: +m[2] };
+}
+
+// ════════════════════════ PORT DEFINITIONS ════════════════════════
+function gateInputPorts(type, n, size, w) {
+  // y offsets verified empirically against Logisim 2.7 .circ files:
+  //   n=2: ±20
+  //   n=3: -20, 0, +20
+  //   n=4: -20, -10, +10, +20      (center skipped)
+  //   n=5: -30, -10, 0, +10, +30   (guess)
+  //   n=8: ±10, ±20, ±30, ±40      (center skipped)
+  let ys;
+  if (n === 1)      ys = [0];
+  else if (n === 2) ys = [-20, 20];
+  else if (n === 3) ys = [-20, 0, 20];
+  else if (n === 4) ys = [-20, -10, 10, 20];
+  else if (n === 5) ys = [-30, -10, 0, 10, 30];
+  else if (n === 6) ys = [-30, -20, -10, 10, 20, 30];
+  else if (n === 7) ys = [-30, -20, -10, 0, 10, 20, 30];
+  else if (n === 8) ys = [-40, -30, -20, -10, 10, 20, 30, 40];
+  else {
+    ys = [];
+    const half = Math.floor(n/2);
+    for (let i = half; i >= 1; i--) ys.push(-i*10);
+    if (n % 2 === 1) ys.push(0);
+    for (let i = 1; i <= half; i++) ys.push(i*10);
+  }
+  // x offset: for AND/NAND with n>=3, ports are pushed out by 10 px
+  // (because the curved right side of the D-shape would put middle inputs inside the body)
+  const isAndType = type === 'AND Gate' || type === 'NAND Gate';
+  const xOff = (isAndType && n >= 3) ? -(size + 10) : -size;
+  return ys.map((dy, i) => ({ name:`in${i}`, io:'in', dx: xOff, dy, w }));
+}
+function getPortsEast(type, attrs) {
+  const n  = parseInt(attrs.inputs   || 2);
+  const w  = parseInt(attrs.width    || 1);
+  const sz = parseInt(attrs.size     || 50);
+  switch (type) {
+    case 'Pin':        return [{ name: (attrs.output==='true')?'in':'out',
+                                  io:  (attrs.output==='true')?'in':'out',
+                                  dx:0, dy:0, w: parseInt(attrs.width||1) }];
+    case 'Constant':   return [{ name:'out', io:'out', dx:0, dy:0, w: parseInt(attrs.width||1) }];
+    case 'Clock':      return [{ name:'out', io:'out', dx:0, dy:0, w:1 }];
+    case 'Probe':      return [{ name:'in',  io:'in',  dx:0, dy:0, w: parseInt(attrs.width||1) }];
+    case 'Tunnel':     return [{ name:'p',   io:'in',  dx:0, dy:0, w: parseInt(attrs.width||1) }];
+    case 'NOT Gate':
+      return [{ name:'out',io:'out',dx:0, dy:0,w },{ name:'in',io:'in',dx:-30,dy:0,w }];
+    case 'AND Gate': case 'NAND Gate':
+    case 'OR Gate':  case 'NOR Gate':
+    case 'XOR Gate': case 'XNOR Gate':
+      return [{ name:'out',io:'out',dx:0,dy:0,w }, ...gateInputPorts(type,n,sz,w)];
+    case 'Splitter': {
+      const fanout  = parseInt(attrs.fanout   || 2);
+      const incom   = parseInt(attrs.incoming || fanout);
+      const spacing = parseInt(attrs.spacing  || 1) * 10;  // Logisim: spacing in 10px units, default 1
+      const facing  = attrs.facing || 'east';
+      const appear  = attrs.appear || 'left';
+      const bitsPerFan = Math.floor(incom / fanout) || 1;
+      const ports = [{ name:'combined', io:'in', dx:0, dy:0, w:incom, isCombined:true }];
+      // For each fan i, compute the perpendicular offset (perp) based on `appear`:
+      //   - "left"   : perp = -(i+1) * spacing  (fans go "left" relative to facing)
+      //   - "right"  : perp = +(i+1) * spacing
+      //   - "center" : perp = (i - fanout/2) * spacing
+      // Then map to (dx, dy) based on facing:
+      //   - east:   dx=+20, dy= perp
+      //   - west:   dx=-20, dy=-perp
+      //   - north:  dx= perp, dy=-20   (left of north = west)
+      //   - south:  dx=-perp, dy=+20   (left of south = east)
+      // Spread offset along the perpendicular axis, then mapped per facing.
+      // left/right get sign-flipped on the "negative" facings (west, south);
+      // center is an absolute signed position and must NOT be flipped.
+      for (let i = 0; i < fanout; i++) {
+        let spread;
+        if      (appear === 'right')  spread =  (i + 1) * spacing;
+        else if (appear === 'center') spread =  (i - fanout/2) * spacing;
+        else                          spread = -(i + 1) * spacing;
+        if (appear !== 'center' && (facing === 'west' || facing === 'south')) spread = -spread;
+        let dx, dy;
+        switch (facing) {
+          case 'east':  dx =  20; dy = spread; break;
+          case 'west':  dx = -20; dy = spread; break;
+          case 'north': dx = spread; dy = -20; break;
+          case 'south': dx = spread; dy =  20; break;
+          default:      dx =  20; dy = spread;
+        }
+        ports.push({ name:`bit${i}`, io:'out', dx, dy, w: bitsPerFan, noFacingRotate:true });
+      }
+      return ports;
+    }
+    case 'Multiplexer': {
+      const selW  = Math.max(1, Math.ceil(Math.log2(Math.max(2, parseInt(attrs.select||1)+1))));
+      const numIn = (parseInt(attrs.select || 1) + 1);
+      const dw    = parseInt(attrs.width || 8);
+      const en    = attrs.enable !== 'false';
+      const ports = [{ name:'out', io:'out', dx:0, dy:0, w:dw }];
+      const selBot = (numIn/2) * 10;        // south control row
+      ports.push({ name:'sel', io:'in', dx:-20, dy:selBot, w:selW });
+      if (en) ports.push({ name:'en', io:'in', dx:-30, dy:selBot, w:1 });
+      for (let i=0; i<numIn; i++) {
+        ports.push({ name:`in${i}`, io:'in', dx:-40, dy:(i - numIn/2)*10, w:dw });
+      }
+      return ports;
+    }
+    case 'Demultiplexer': {
+      const numOut = (parseInt(attrs.select || 1) + 1);
+      const selW   = Math.max(1, Math.ceil(Math.log2(Math.max(2, numOut))));
+      const dw     = parseInt(attrs.width || 1);
+      const en     = attrs.enable !== 'false';
+      // loc sits at the INPUT (west, narrow end); outputs fan out east at dx=+40.
+      const ports  = [{ name:'in', io:'in', dx:0, dy:0, w:dw }];
+      const selBot = (numOut/2) * 10;
+      ports.push({ name:'sel', io:'in', dx:20, dy:selBot, w:selW });
+      if (en) ports.push({ name:'en', io:'in', dx:30, dy:selBot, w:1 });
+      for (let i=0; i<numOut; i++) {
+        ports.push({ name:`out${i}`, io:'out', dx:40, dy:(i - numOut/2)*10, w:dw });
+      }
+      return ports;
+    }
+    case 'Register': {
+      const dw = parseInt(attrs.width || 8);
+      return [
+        { name:'D',  io:'in',  dx:-40, dy:  0, w:dw },
+        { name:'clk',io:'in',  dx:-30, dy: 20, w:1  },
+        { name:'en', io:'in',  dx:-20, dy: 20, w:1  },
+        { name:'clr',io:'in',  dx:-10, dy: 20, w:1  },
+        { name:'Q',  io:'out', dx:  0, dy:  0, w:dw },
+      ];
+    }
+    case 'J-K Flip-Flop':
+      return [
+        { name:'J',  io:'in',  dx:-40, dy:  0, w:1 },
+        { name:'CLK',io:'in',  dx:-40, dy: 10, w:1 },
+        { name:'K',  io:'in',  dx:-40, dy: 20, w:1 },
+        { name:'pre',io:'in',  dx:-30, dy: 30, w:1 },
+        { name:'en', io:'in',  dx:-20, dy: 30, w:1 },
+        { name:'clr',io:'in',  dx:-10, dy: 30, w:1 },
+        { name:'Q',  io:'out', dx:  0, dy:  0, w:1 },
+        { name:'nQ', io:'out', dx:  0, dy: 20, w:1 },
+      ];
+    case 'D Flip-Flop':
+      return [
+        { name:'D',  io:'in',  dx:-40, dy:  0, w:1 },
+        { name:'CLK',io:'in',  dx:-40, dy: 20, w:1 },
+        { name:'pre',io:'in',  dx:-30, dy: 30, w:1 },
+        { name:'en', io:'in',  dx:-20, dy: 30, w:1 },
+        { name:'clr',io:'in',  dx:-10, dy: 30, w:1 },
+        { name:'Q',  io:'out', dx:  0, dy:  0, w:1 },
+        { name:'nQ', io:'out', dx:  0, dy: 20, w:1 },
+      ];
+    case 'Adder': {
+      const dw = parseInt(attrs.width || 8);
+      return [
+        { name:'a',   io:'in',  dx:-40, dy:-10, w:dw },
+        { name:'b',   io:'in',  dx:-40, dy: 10, w:dw },
+        { name:'cin', io:'in',  dx:-20, dy:-20, w:1  },
+        { name:'sum', io:'out', dx:  0, dy:  0, w:dw },
+        { name:'cout',io:'out', dx:-20, dy: 20, w:1  },
+      ];
+    }
+    case 'Subtractor': {
+      const dw = parseInt(attrs.width || 8);
+      return [
+        { name:'a',   io:'in',  dx:-40, dy:-10, w:dw },
+        { name:'b',   io:'in',  dx:-40, dy: 10, w:dw },
+        { name:'bin', io:'in',  dx:-20, dy:-20, w:1  },
+        { name:'out', io:'out', dx:  0, dy:  0, w:dw },
+        { name:'bout',io:'out', dx:-20, dy: 20, w:1  },
+      ];
+    }
+    case 'ROM': case 'RAM': {
+      const aw = parseInt(attrs.addrWidth || 8);
+      const dw = parseInt(attrs.dataWidth || 8);
+      return [
+        { name:'addr', io:'in',  dx:-40, dy:-10, w:aw },
+        { name:'data', io:'out', dx:  0, dy:  0, w:dw },
+        { name:'sel',  io:'in',  dx:-20, dy: 20, w:1  },
+      ];
+    }
+    default: return [];
+  }
+}
+function rotateFacing(dx, dy, facing) {
+  switch (facing || 'east') {
+    case 'west':  return { dx:-dx, dy:-dy };
+    case 'north': return { dx: dy, dy:-dx };
+    case 'south': return { dx:-dy, dy: dx };
+    default:      return { dx, dy };
+  }
+}
+function getAbsPorts(comp, proj) {
+  const facing = comp.attrs.facing || 'east';
+  let defs;
+  if (comp.lib !== null) defs = getPortsEast(comp.type, comp.attrs);
+  else defs = getSubPorts(comp.type, proj);
+  return defs.map(p => {
+    if (p.noFacingRotate) {
+      return { ...p, ax: comp.loc.x + p.dx, ay: comp.loc.y + p.dy };
+    }
+    const r = rotateFacing(p.dx, p.dy, facing);
+    return { ...p, ax: comp.loc.x + r.dx, ay: comp.loc.y + r.dy };
+  });
+}
+function getSubBoxDims(circName, proj) {
+  const empty = { w: 30, h: 0, boxTop: 0, west:[], east:[], north:[], south:[], E:0, W:0, N:0, S:0, maxEW:1, maxNS:0 };
+  if (!proj) return empty;
+  const sub = proj.circuits.get(circName);
+  if (!sub) return empty;
+  const opp = { east:'west', west:'east', north:'south', south:'north' };
+  const sides = { west:[], east:[], north:[], south:[] };
+  for (const c of sub.comps) {
+    if (c.type !== 'Pin') continue;
+    sides[opp[c.attrs.facing || 'east']].push(c);
+  }
+  sides.west.sort((a,b)  => a.loc.y - b.loc.y);
+  sides.east.sort((a,b)  => a.loc.y - b.loc.y);
+  sides.north.sort((a,b) => a.loc.x - b.loc.x);
+  sides.south.sort((a,b) => a.loc.x - b.loc.x);
+  const E = sides.east.length, W = sides.west.length;
+  const N = sides.north.length, S = sides.south.length;
+  const maxEW = Math.max(E, W, 1);
+  const maxNS = Math.max(N, S, 0);
+  // Effective row count for height:
+  //   - top row if N > 0
+  //   - maxEW middle rows for E/W pins
+  //   - bottom row if S > 0
+  const hasN = N > 0, hasS = S > 0;
+  const rows = (hasN ? 1 : 0) + maxEW + (hasS ? 1 : 0);
+  const h = Math.max(0, (rows - 1) * 10);
+  // Box top:
+  //   - E == 1 → centered around loc.y → boxTop = -(maxEW-1)*5 + (hasN ? -10 : 0)
+  //   - Otherwise → loc.y at top edge → boxTop = 0
+  const boxTop = (E === 1) ? -(maxEW - 1) * 5 + (hasN ? -10 : 0) : 0;
+  return {
+    w: Math.max(30, (maxNS + 1) * 10 + 20),
+    h, boxTop,
+    west: sides.west, east: sides.east, north: sides.north, south: sides.south,
+    E, W, N, S, maxEW, maxNS, hasN, hasS,
+  };
+}
+
+function getSubPorts(circName, proj) {
+  const dims = getSubBoxDims(circName, proj);
+  const W = dims.w, boxTop = dims.boxTop;
+  // y position of the EW pin group (between north row and south row):
+  const ewStartY = boxTop + (dims.hasN ? 10 : 0);
+  const ewEndY   = ewStartY + (dims.maxEW - 1) * 10;
+  const southY   = boxTop + dims.h;
+  const ports = [];
+  // West pins
+  dims.west.forEach((p, i) => {
+    const w = parseInt(p.attrs.width || 1);
+    const isOut = p.attrs.output === 'true';
+    const dy = (dims.W === 1) ? (ewStartY + ewEndY) / 2 : ewStartY + i * 10;
+    ports.push({ name: p.attrs.label || `west${i}`, io: isOut ? 'out' : 'in',
+                 dx: -W, dy, w });
+  });
+  // East pins
+  dims.east.forEach((p, i) => {
+    const w = parseInt(p.attrs.width || 1);
+    const isOut = p.attrs.output === 'true';
+    const dy = (dims.E === 1) ? (ewStartY + ewEndY) / 2 : ewStartY + i * 10;
+    ports.push({ name: p.attrs.label || `east${i}`, io: isOut ? 'out' : 'in',
+                 dx: 0, dy, w });
+  });
+  // North pins at top edge of box
+  dims.north.forEach((p, i) => {
+    const w = parseInt(p.attrs.width || 1);
+    const isOut = p.attrs.output === 'true';
+    ports.push({ name: p.attrs.label || `north${i}`, io: isOut ? 'out' : 'in',
+                 dx: -W + (i + 1) * 10, dy: boxTop, w });
+  });
+  // South pins at bottom edge of box
+  dims.south.forEach((p, i) => {
+    const w = parseInt(p.attrs.width || 1);
+    const isOut = p.attrs.output === 'true';
+    ports.push({ name: p.attrs.label || `south${i}`, io: isOut ? 'out' : 'in',
+                 dx: -W + (i + 1) * 10, dy: southY, w });
+  });
+  return ports;
+}
+
+// ════════════════════════ NET BUILDER ════════════════════════
+const TOL = 20;
+function buildNets(circ, proj) {
+  const parent = new Map();
+  function find(k) {
+    if (!parent.has(k)) parent.set(k, k);
+    if (parent.get(k) !== k) parent.set(k, find(parent.get(k)));
+    return parent.get(k);
+  }
+  function union(a, b) { parent.set(find(a), find(b)); }
+  const key = ({x,y}) => `${x},${y}`;
+  for (const w of circ.wires) {
+    const ka = key(w.from), kb = key(w.to);
+    parent.set(ka, ka); parent.set(kb, kb);
+    union(ka, kb);
+  }
+  const roots = new Map();
+  for (const k of parent.keys()) {
+    const r = find(k);
+    if (!roots.has(r)) roots.set(r, roots.size);
+  }
+  const coordToNet = new Map();
+  for (const k of parent.keys()) coordToNet.set(k, roots.get(find(k)));
+  const numNets = roots.size;
+  const netVals = new Array(numNets).fill(null);
+  const netWidth = new Array(numNets).fill(1);
+  const compPorts = [];
+  for (const comp of circ.comps) {
+    if (comp.type === 'Text') continue;
+    const ports = getAbsPorts(comp, proj);
+    const bound = [];
+    for (const p of ports) {
+      let bestNet = -1, bestDist = TOL * TOL;
+      for (const [k, nid] of coordToNet) {
+        const [px, py] = k.split(',').map(Number);
+        const d2 = (px-p.ax)**2 + (py-p.ay)**2;
+        if (d2 < bestDist) { bestDist = d2; bestNet = nid; }
+      }
+      if (bestNet >= 0 && p.w > netWidth[bestNet]) netWidth[bestNet] = p.w;
+      bound.push({ ...p, netId: bestNet });
+    }
+    compPorts.push({ comp, ports: bound });
+  }
+  const tunnelNets = new Map();
+  for (const { comp, ports } of compPorts) {
+    if (comp.type === 'Tunnel') {
+      const lbl = comp.attrs.label || '';
+      const p = ports[0];
+      if (p && p.netId >= 0 && !tunnelNets.has(lbl)) tunnelNets.set(lbl, p.netId);
+    }
+  }
+  return { coordToNet, netVals, netWidth, compPorts, numNets, tunnelNets };
+}
+
+// ════════════════════════ SIMULATION ════════════════════════
+function simulate(circ, nets, proj, regState, clkVal) {
+  const { netVals, compPorts, tunnelNets } = nets;
+  netVals.fill(null);
+  let changed = true, iters = 0;
+  while (changed && iters++ < 200) {
+    changed = false;
+    for (const { comp, ports } of compPorts) {
+      const type = comp.type;
+      const inVal = (name) => {
+        const p = ports.find(x => x.name === name && x.io === 'in');
+        return (p && p.netId >= 0) ? netVals[p.netId] : null;
+      };
+      const setOut = (name, val) => {
+        const p = ports.find(x => x.name === name && x.io === 'out');
+        if (p && p.netId >= 0 && netVals[p.netId] !== val) {
+          netVals[p.netId] = val; changed = true;
+        }
+        comp.val = val;
+      };
+      const inN = (i) => inVal(`in${i}`);
+
+      if (type === 'Constant') {
+        setOut('out', parseInt(comp.attrs.value || '0x0', 16)); continue;
+      }
+      if (type === 'Clock') { setOut('out', clkVal); continue; }
+      if (type === 'Pin') {
+        if (comp.attrs.output !== 'true') {
+          const p = ports.find(x => x.io === 'out');
+          if (p && p.netId >= 0 && comp.val !== null && netVals[p.netId] !== comp.val) {
+            netVals[p.netId] = comp.val; changed = true;
+          }
+        }
+        continue;
+      }
+      if (type === 'Tunnel') {
+        const lbl = comp.attrs.label || '';
+        const srcNet = tunnelNets.get(lbl);
+        if (srcNet !== undefined) {
+          const p = ports[0];
+          if (p && p.netId >= 0 && netVals[p.netId] !== netVals[srcNet]) {
+            netVals[p.netId] = netVals[srcNet]; changed = true;
+          }
+        }
+        continue;
+      }
+
+      const w = parseInt(comp.attrs.width || 1);
+      const mask = (1 << w) - 1;
+      const n = parseInt(comp.attrs.inputs || 2);
+      const ins = Array.from({length:n}, (_,i) => inN(i));
+      const allDefined = ins.every(v => v !== null);
+
+      if (type === 'NOT Gate') { const v=inVal('in'); if(v!==null) setOut('out',(~v)&mask); continue; }
+      if (type === 'AND Gate')  { if(allDefined) setOut('out', ins.reduce((a,b)=>a&b)&mask); continue; }
+      if (type === 'NAND Gate') { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a&b))&mask); continue; }
+      if (type === 'OR Gate')   { if(allDefined) setOut('out', ins.reduce((a,b)=>a|b)&mask); continue; }
+      if (type === 'NOR Gate')  { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a|b))&mask); continue; }
+      if (type === 'XOR Gate')  { if(allDefined) setOut('out', ins.reduce((a,b)=>a^b)&mask); continue; }
+      if (type === 'XNOR Gate') { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a^b))&mask); continue; }
+
+      if (type === 'Adder') {
+        const a=inVal('a'), b=inVal('b'), ci=inVal('cin')??0;
+        if (a!==null && b!==null) {
+          const s = a + b + ci;
+          setOut('sum',  s & mask); setOut('cout', (s >> w) & 1);
+        }
+        continue;
+      }
+      if (type === 'Subtractor') {
+        const a=inVal('a'), b=inVal('b'), bi=inVal('bin')??0;
+        if (a!==null && b!==null) {
+          const s = a - b - bi;
+          setOut('out',  ((s & mask) + mask + 1) & mask);
+          setOut('bout', s < 0 ? 1 : 0);
+        }
+        continue;
+      }
+      if (type === 'Multiplexer') {
+        const sel = inVal('sel');
+        if (sel !== null) {
+          const v = inVal(`in${sel}`);
+          if (v !== null) setOut('out', v & mask);
+        }
+        continue;
+      }
+      if (type === 'Demultiplexer') {
+        const numOut = (parseInt(comp.attrs.select || 1) + 1);
+        const sel = inVal('sel');
+        const inputV = inVal('in');
+        if (sel !== null && inputV !== null) {
+          for (let i = 0; i < numOut; i++) {
+            setOut(`out${i}`, i === sel ? (inputV & mask) : 0);
+          }
+        }
+        continue;
+      }
+      if (type === 'Splitter') {
+        const fanout = parseInt(comp.attrs.fanout || 2);
+        const incom  = parseInt(comp.attrs.incoming || fanout);
+        const cp = ports.find(p=>p.isCombined);
+        const comb = cp && cp.netId>=0 ? netVals[cp.netId] : null;
+        if (comb !== null) {
+          const bpf = Math.floor(incom / fanout) || 1;
+          for (let i=0; i<fanout; i++) {
+            const bits = ((comb >> (i*bpf)) & ((1<<bpf)-1));
+            setOut(`bit${i}`, bits);
+          }
+        }
+        let combined = 0, any = false;
+        for (let i=0; i<fanout; i++) {
+          const v = inVal(`bit${i}`);
+          if (v !== null) { const bpf = Math.floor(incom/fanout)||1; combined |= (v << (i*bpf)); any = true; }
+        }
+        if (any && cp && cp.netId >= 0 && netVals[cp.netId] !== combined) {
+          netVals[cp.netId] = combined; changed = true;
+        }
+        continue;
+      }
+      if (type === 'Register') {
+        const id = `${circ.name}_${comp.uid}`;
+        setOut('Q', regState.get(id) ?? 0);
+        continue;
+      }
+      if (type === 'J-K Flip-Flop') {
+        const id = `${circ.name}_${comp.uid}`;
+        const q = regState.get(id) ?? 0;
+        setOut('Q', q); setOut('nQ', q^1);
+        continue;
+      }
+
+      // Subcircuit
+      if (comp.lib === null && proj) {
+        const sub = proj.circuits.get(comp.type);
+        if (sub && sub._nets) {
+          const subPins = sub.comps.filter(c=>c.type==='Pin');
+          const inPins  = subPins.filter(c=>c.attrs.output!=='true');
+          const outPins = subPins.filter(c=>c.attrs.output==='true');
+          inPins.forEach((pin, i) => {
+            const outerPort = ports.find(p=>p.name===(pin.attrs.label||`in${i}`) && p.io==='in');
+            if (outerPort && outerPort.netId >= 0) pin.val = netVals[outerPort.netId];
+          });
+          simulate(sub, sub._nets, proj, regState, clkVal);
+          outPins.forEach((pin, i) => {
+            const outerPort = ports.find(p=>p.name===(pin.attrs.label||`out${i}`) && p.io==='out');
+            if (outerPort && outerPort.netId >= 0) {
+              const innerPort = sub._nets.compPorts.find(cp=>cp.comp===pin)
+                ?.ports.find(pp=>pp.io==='in');
+              if (innerPort && innerPort.netId >= 0) {
+                const v = sub._nets.netVals[innerPort.netId];
+                if (v !== null && netVals[outerPort.netId] !== v) {
+                  netVals[outerPort.netId] = v; changed = true;
+                }
+              }
+            }
+          });
+        }
+      }
+    }
+  }
+}
+
+// ════════════════════════ RENDERER ════════════════════════
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+const C = {
+  bg:'#0d1117', grid:'#161b22',
+  w0:'#1a4020', w1:'#3fb950', wX:'#1c3a6e',
+  gate:'#1c2a3e', gstr:'#58a6ff',
+  pin0:'#30363d', pin1:'#3fb950',
+  out0:'#2d1b1b', out1:'#f85149',
+  lbl:'#79c0ff', val:'#ffa657',
+  sub:'#1c2438', subst:'#8b5cf6',
+  junc:'#ffa657', text:'#8b949e',
+};
+function wireColor(v, w) {
+  if (v === null) return C.wX;
+  if (w === 1) return v ? C.w1 : C.w0;
+  return C.w1;
+}
+function netAt(x, y, nets) {
+  if (!nets) return null;
+  const nid = nets.coordToNet.get(`${x},${y}`);
+  return nid !== undefined ? nets.netVals[nid] : null;
+}
+function netWidthAt(x, y, nets) {
+  if (!nets) return 1;
+  const nid = nets.coordToNet.get(`${x},${y}`);
+  return nid !== undefined ? nets.netWidth[nid] : 1;
+}
+function drawWire(from, to, nets) {
+  const v = netAt(from.x, from.y, nets);
+  const w = netWidthAt(from.x, from.y, nets);
+  ctx.strokeStyle = wireColor(v, w);
+  ctx.lineWidth = w > 1 ? 2 : 1.5;
+  ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+}
+function findJunctions(circ) {
+  const count = new Map();
+  const inc = ({x,y}) => { const k=`${x},${y}`; count.set(k, (count.get(k)||0)+1); };
+  for (const w of circ.wires) { inc(w.from); inc(w.to); }
+  const pts = [];
+  for (const [k,c] of count) if (c >= 3) {
+    const [x,y]=k.split(',').map(Number); pts.push({x,y});
+  }
+  return pts;
+}
+
+function applyFacing(ctx, facing) {
+  ctx.save();
+  const rot = { east:0, west:Math.PI, north:-Math.PI/2, south:Math.PI/2 };
+  ctx.rotate(rot[facing||'east'] || 0);
+}
+function drawNOT(facing, w) {
+  applyFacing(ctx, facing);
+  ctx.fillStyle = C.gate; ctx.strokeStyle = C.gstr; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(-30, -12); ctx.lineTo(-30, 12); ctx.lineTo(-5, 0); ctx.closePath();
+  ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(-3, 0, 3, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-30, 0); ctx.lineTo(-35, 0); ctx.stroke();
+  if (w > 1) { ctx.fillStyle=C.val; ctx.font='7px monospace'; ctx.textAlign='center'; ctx.fillText(w+'b',-18,-14); }
+  ctx.restore();
+}
+function gateInputYs(n) {
+  if (n === 1)      return [0];
+  if (n === 2)      return [-20, 20];
+  if (n === 3)      return [-20, 0, 20];
+  if (n === 4)      return [-20, -10, 10, 20];
+  if (n === 5)      return [-30, -10, 0, 10, 30];
+  if (n === 6)      return [-30, -20, -10, 10, 20, 30];
+  if (n === 7)      return [-30, -20, -10, 0, 10, 20, 30];
+  if (n === 8)      return [-40, -30, -20, -10, 10, 20, 30, 40];
+  const ys = [], half = Math.floor(n/2);
+  for (let i = half; i >= 1; i--) ys.push(-i*10);
+  if (n % 2 === 1) ys.push(0);
+  for (let i = 1; i <= half; i++) ys.push(i*10);
+  return ys;
+}
+function drawInputStubs(type, n, sz) {
+  const ys = gateInputYs(n);
+  const isAndType = type === 'AND Gate' || type === 'NAND Gate';
+  // Port x: for AND/NAND with n>=3, port pushed out 10 px (matches port computation)
+  const portX = (isAndType && n >= 3) ? -(sz + 10) : -sz;
+  // Stub goes from port back to gate body
+  const bodyX = -sz;
+  ctx.strokeStyle = C.gstr; ctx.lineWidth = 1.5;
+  for (const dy of ys) {
+    ctx.beginPath();
+    ctx.moveTo(portX, dy);
+    // For AND n>=3, draw 10px stub up to body. Otherwise draw 8px stub outward.
+    if (isAndType && n >= 3) ctx.lineTo(bodyX, dy);
+    else                     ctx.lineTo(portX - 8, dy);
+    ctx.stroke();
+  }
+}
+function drawANDlike(type, n, sz, facing, w) {
+  applyFacing(ctx, facing);
+  // Body height based on actual input y range, with padding
+  const ys = gateInputYs(n);
+  const maxAbsY = Math.max(...ys.map(Math.abs));
+  const h = Math.max(40, maxAbsY * 2 + 10);
+  const bbl = type.includes('NAND') || type.includes('NOR') || type.includes('XNOR');
+  ctx.fillStyle = C.gate; ctx.strokeStyle = C.gstr; ctx.lineWidth = 1.5;
+
+  if (type.includes('AND') || type.includes('NAND')) {
+    ctx.beginPath();
+    ctx.moveTo(-sz, -h/2);
+    ctx.lineTo(-sz/2, -h/2);
+    ctx.arc(-sz/2, 0, h/2, -Math.PI/2, Math.PI/2);
+    ctx.lineTo(-sz, h/2);
+    ctx.closePath();
+  } else if (type.includes('XOR') || type.includes('XNOR')) {
+    ctx.beginPath();
+    ctx.moveTo(-sz, -h/2);
+    ctx.quadraticCurveTo(-sz/2, 0, -sz, h/2);
+    ctx.quadraticCurveTo(-sz/4, h/2+5, 0, 0);
+    ctx.quadraticCurveTo(-sz/4, -h/2-5, -sz, -h/2);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-sz-8, -h/2); ctx.quadraticCurveTo(-sz/2-8, 0, -sz-8, h/2);
+    ctx.stroke();
+    if (bbl) { ctx.beginPath(); ctx.arc(3,0,3,0,Math.PI*2); ctx.fill(); ctx.stroke(); }
+    drawInputStubs(type, n, sz);
+    ctx.restore(); return;
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(-sz, -h/2);
+    ctx.quadraticCurveTo(-sz/2, 0, -sz, h/2);
+    ctx.quadraticCurveTo(-sz/4, h/2+5, 0, 0);
+    ctx.quadraticCurveTo(-sz/4, -h/2-5, -sz, -h/2);
+    ctx.closePath();
+  }
+  ctx.fill(); ctx.stroke();
+  if (bbl) { ctx.beginPath(); ctx.arc(3, 0, 3, 0, Math.PI*2); ctx.fill(); ctx.stroke(); }
+  drawInputStubs(type, n, sz);
+  ctx.fillStyle = C.lbl; ctx.font = 'bold 8px monospace'; ctx.textAlign='center';
+  const shortName = {
+    'AND Gate':'&', 'NAND Gate':'↑', 'OR Gate':'≥1', 'NOR Gate':'↓',
+    'XOR Gate':'⊕', 'XNOR Gate':'⊙'
+  }[type] || '';
+  ctx.fillText(shortName, -sz/2, 4);
+  if (w > 1) { ctx.fillStyle=C.val; ctx.font='7px monospace'; ctx.fillText(w+'b',-sz/2,-h/2-4); }
+  ctx.restore();
+}
+function drawPin(comp, nets) {
+  const isOut = comp.attrs.output === 'true';
+  const facing = comp.attrs.facing || 'east';
+  const w  = parseInt(comp.attrs.width || 1);
+  const lbl = comp.attrs.label || '';
+  const p = getAbsPorts(comp, null)[0];
+  const nid = nets ? nets.coordToNet.get(`${p?.ax},${p?.ay}`) : undefined;
+  const val = nid !== undefined ? nets.netVals[nid] : comp.val;
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  // loc is the wire connection point; the body sits offset OPPOSITE to facing
+  // so the connection lands cleanly on the body's edge (not its centre).
+  const bodyOff = { east:[-6,0], west:[6,0], north:[0,6], south:[0,-6] };
+  const [bx, by] = bodyOff[facing] || [-6, 0];
+  if (isOut) {
+    const lit = val !== null && val !== 0;
+    ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI*2);
+    ctx.fillStyle = val===null ? '#1c2438' : val ? C.out1 : C.out0;
+    ctx.fill();
+    ctx.strokeStyle = lit ? C.out1 : '#30363d'; ctx.lineWidth=1.5; ctx.stroke();
+    if (w > 1 && val !== null) {
+      ctx.fillStyle = C.val; ctx.font='8px monospace'; ctx.textAlign='center';
+      ctx.fillText('0x'+val.toString(16).toUpperCase(), bx, by+18);
+    }
+  } else {
+    const r = 6;
+    ctx.fillStyle = val===1 ? C.pin1 : val===0 ? C.pin0 : '#1c2438';
+    ctx.fillRect(bx-r, by-r, r*2, r*2);
+    ctx.strokeStyle = val===null ? '#30363d' : '#8b949e'; ctx.lineWidth=1;
+    ctx.strokeRect(bx-r, by-r, r*2, r*2);
+    if (w > 1 && val !== null) {
+      ctx.fillStyle = C.val; ctx.font='8px monospace'; ctx.textAlign='center';
+      ctx.fillText('0x'+val.toString(16).toUpperCase(), bx, by+18);
+    }
+  }
+  if (lbl) {
+    ctx.fillStyle = C.lbl; ctx.font = '9px monospace';
+    // label placement keyed on labelloc (falls back to facing-based default)
+    const locKey = comp.attrs.labelloc || facing;
+    const offsets = { east:[10,3], west:[-10,3], north:[3,-12], south:[3,14] };
+    const [ox,oy] = offsets[locKey] || offsets[facing] || [10,3];
+    ctx.textAlign = ox > 0 ? 'left' : ox < 0 ? 'right' : 'center';
+    ctx.fillText(lbl, ox + bx, oy + by);
+  }
+  ctx.restore();
+}
+function drawConstant(comp) {
+  const val = parseInt(comp.attrs.value || '0x0', 16);
+  const w   = parseInt(comp.attrs.width || 1);
+  const facing = comp.attrs.facing || 'east';
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  // loc is the output connection; body sits opposite to facing so loc is on the edge.
+  const off = { east:[-7,0], west:[7,0], north:[0,7], south:[0,-7] };
+  const [bx, by] = off[facing] || [-7, 0];
+  ctx.fillStyle = '#1c2438'; ctx.strokeStyle = '#58a6ff'; ctx.lineWidth=1;
+  ctx.fillRect(bx-7, by-7, 14, 14); ctx.strokeRect(bx-7, by-7, 14, 14);
+  ctx.fillStyle = C.val; ctx.font='bold 8px monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(w>1 ? '0x'+val.toString(16).toUpperCase() : ''+val, bx, by);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+function drawSplitter(comp) {
+  const fanout  = parseInt(comp.attrs.fanout || 2);
+  const spacing = parseInt(comp.attrs.spacing || 1) * 10;
+  const facing  = comp.attrs.facing || 'east';
+  const appear  = comp.attrs.appear || 'left';
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#58a6ff';
+  // Compute all fan endpoint positions (in local coords)
+  const fans = [];
+  for (let i = 0; i < fanout; i++) {
+    let spread;
+    if      (appear === 'right')  spread =  (i + 1) * spacing;
+    else if (appear === 'center') spread =  (i - fanout/2) * spacing;
+    else                          spread = -(i + 1) * spacing;
+    if (appear !== 'center' && (facing === 'west' || facing === 'south')) spread = -spread;
+    let fx, fy;
+    switch (facing) {
+      case 'east':  fx =  20; fy = spread; break;
+      case 'west':  fx = -20; fy = spread; break;
+      case 'north': fx = spread; fy = -20; break;
+      case 'south': fx = spread; fy =  20; break;
+      default:      fx =  20; fy = spread;
+    }
+    fans.push({ x: fx, y: fy });
+  }
+  if (fans.length > 0) {
+    const isHoriz = facing === 'east' || facing === 'west';
+    if (isHoriz) {
+      // Vertical body line at fans[0].x, extended to include y=0 so connector hits it
+      const bodyX = fans[0].x;
+      const minY = Math.min(0, ...fans.map(f => f.y));
+      const maxY = Math.max(0, ...fans.map(f => f.y));
+      ctx.beginPath(); ctx.moveTo(bodyX, minY); ctx.lineTo(bodyX, maxY); ctx.stroke();
+      // Connector from combined (0,0) horizontally to body
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(bodyX, 0); ctx.stroke();
+    } else {
+      // Horizontal body line at fans[0].y, extended to include x=0
+      const bodyY = fans[0].y;
+      const minX = Math.min(0, ...fans.map(f => f.x));
+      const maxX = Math.max(0, ...fans.map(f => f.x));
+      ctx.beginPath(); ctx.moveTo(minX, bodyY); ctx.lineTo(maxX, bodyY); ctx.stroke();
+      // Connector from combined (0,0) vertically to body
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, bodyY); ctx.stroke();
+    }
+  }
+  // Fan dots
+  for (const f of fans) {
+    ctx.beginPath(); ctx.arc(f.x, f.y, 1.5, 0, Math.PI*2); ctx.fill();
+  }
+  // Combined dot
+  ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawMemory(comp, label) {
+  // Logisim RAM/ROM (separate bus): loc is the top-RIGHT corner; the box
+  // extends LEFT (to ~x=-140) and DOWN (to ~y=110).
+  const W = 140, H = 110;
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.fillStyle = '#1c1c2a'; ctx.strokeStyle = C.subst; ctx.lineWidth = 1.5;
+  ctx.fillRect(-W, 0, W, H); ctx.strokeRect(-W, 0, W, H);
+  ctx.fillStyle = C.lbl; ctx.font = 'bold 9px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, -W/2, 14);
+  const aw = parseInt(comp.attrs.addrWidth || 8), dw = parseInt(comp.attrs.dataWidth || 8);
+  ctx.fillStyle = C.val; ctx.font = '7px monospace';
+  ctx.fillText(`${1<<aw}×${dw}`, -W/2, 26);
+  ctx.textBaseline = 'alphabetic';
+  ctx.restore();
+}
+function drawGenericBox(comp, label, color) {
+  // Fit the box to the component's actual port extents (Adder/Subtractor/ROM/RAM
+  // all place carry/sel ports on the N/S edges, so a fixed size mismatches them).
+  const ports = getPortsEast(comp.type, comp.attrs);
+  let minX=-40, maxX=0, minY=-15, maxY=15;
+  for (const p of ports) {
+    if (p.dx < minX) minX = p.dx; if (p.dx > maxX) maxX = p.dx;
+    if (p.dy < minY) minY = p.dy; if (p.dy > maxY) maxY = p.dy;
+  }
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.fillStyle = color || C.sub; ctx.strokeStyle = C.subst; ctx.lineWidth=1.5;
+  ctx.fillRect(minX, minY, maxX-minX, maxY-minY);
+  ctx.strokeRect(minX, minY, maxX-minX, maxY-minY);
+  ctx.fillStyle = C.lbl; ctx.font='bold 8px monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  const cx = (minX+maxX)/2, cy = (minY+maxY)/2;
+  const display = label.length>8 ? label.slice(0,7)+'…' : label;
+  ctx.fillText(display, cx, cy);
+  ctx.textBaseline='alphabetic';
+  ctx.restore();
+}
+
+function drawSubcircuit(comp) {
+  const dims = getSubBoxDims(comp.type, project);
+  const W = dims.w, H = dims.h, boxTop = dims.boxTop;
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  // Box extends from (-W, boxTop) to (0, boxTop + H), with small visual padding
+  const pad = 5;
+  ctx.fillStyle = C.sub; ctx.strokeStyle = C.subst; ctx.lineWidth = 1.5;
+  ctx.fillRect(-W, boxTop - pad, W, H + 2*pad);
+  ctx.strokeRect(-W, boxTop - pad, W, H + 2*pad);
+  // Label centered in box
+  ctx.fillStyle = C.lbl; ctx.font = 'bold 8px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const maxChars = Math.max(4, Math.floor(W / 6));
+  const display = comp.type.length > maxChars ? comp.type.slice(0, maxChars-1)+'…' : comp.type;
+  ctx.fillText(display, -W/2, boxTop + H/2);
+  ctx.textBaseline = 'alphabetic';
+  // Custom label below box
+  if (comp.attrs.label) {
+    ctx.fillStyle = '#8b949e'; ctx.font = '7px monospace';
+    ctx.fillText(comp.attrs.label, -W/2, boxTop + H + pad + 8);
+  }
+  ctx.restore();
+}
+function drawRegister(comp) {
+  const w=50, h=40; const dw=parseInt(comp.attrs.width||8);
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.fillStyle='#1c2438'; ctx.strokeStyle='#388bfd'; ctx.lineWidth=1.5;
+  ctx.fillRect(-w,-h/2,w,h); ctx.strokeRect(-w,-h/2,w,h);
+  ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+  ctx.fillText('REG', -w/2, -4);
+  ctx.fillStyle=C.val; ctx.font='7px monospace';
+  ctx.fillText(dw+'b', -w/2, 6);
+  ctx.restore();
+}
+function drawFlipFlop(comp, type) {
+  // Real Logisim bounds: x ∈ [-40,0], y ∈ [-10,30]; clock triangle on west side.
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.fillStyle='#1c2438'; ctx.strokeStyle='#f0883e'; ctx.lineWidth=1.5;
+  ctx.fillRect(-40,-10,40,40); ctx.strokeRect(-40,-10,40,40);
+  ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+  ctx.fillText(type, -20, 13);
+  // Clock triangle: JK has it at west-middle (y=10), DFF at west-lower (y=20)
+  const cy = type === 'DFF' ? 20 : 10;
+  ctx.beginPath(); ctx.moveTo(-40,cy-5); ctx.lineTo(-32,cy); ctx.lineTo(-40,cy+5); ctx.stroke();
+  ctx.restore();
+}
+function drawText(comp) {
+  const txt = comp.attrs.text || '';
+  if (!txt) return;
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  ctx.fillStyle = C.text; ctx.font = '11px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline='middle';
+  ctx.fillText(txt, 0, 0);
+  ctx.restore();
+}
+function drawMux(comp) {
+  const facing = comp.attrs.facing || 'east';
+  const numIn  = (parseInt(comp.attrs.select||1)+1);
+  const h = Math.max(30, numIn*10+20);
+  const w = 40;
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  const rot = { east:0, west:Math.PI, north:-Math.PI/2, south:Math.PI/2 };
+  ctx.rotate(rot[facing]||0);
+  ctx.fillStyle='#1c2438'; ctx.strokeStyle='#58a6ff'; ctx.lineWidth=1.5;
+  ctx.beginPath();
+  ctx.moveTo(-w, -h/2+5); ctx.lineTo(-w, h/2-5);
+  ctx.lineTo(0,  h/2-12); ctx.lineTo(0, -h/2+12);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+  ctx.fillText('MUX', -w/2, 4);
+  ctx.restore();
+}
+function drawDemux(comp) {
+  const facing = comp.attrs.facing || 'east';
+  const numOut = (parseInt(comp.attrs.select||1)+1);
+  const h = Math.max(30, numOut*10+20);
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  const rot = { east:0, west:Math.PI, north:-Math.PI/2, south:Math.PI/2 };
+  ctx.rotate(rot[facing]||0);
+  ctx.fillStyle='#1c2438'; ctx.strokeStyle='#58a6ff'; ctx.lineWidth=1.5;
+  ctx.beginPath();
+  // loc is the INPUT (narrow, west). Body widens eastward to the outputs at x=+40.
+  ctx.moveTo(0,  -h/2+12); ctx.lineTo(0,  h/2-12);   // narrow input edge at x=0
+  ctx.lineTo(40, h/2-5);   ctx.lineTo(40, -h/2+5);   // wide output edge at x=+40
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+  ctx.fillText('DMX', 20, 4);
+  ctx.restore();
+}
+function drawComp(comp) {
+  const type = comp.type;
+  const facing = comp.attrs.facing || 'east';
+  const w = parseInt(comp.attrs.width || 1);
+  const n = parseInt(comp.attrs.inputs || 2);
+  const sz = parseInt(comp.attrs.size || 50);
+  ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+  switch (type) {
+    case 'NOT Gate': drawNOT(facing, w); break;
+    case 'AND Gate': case 'NAND Gate':
+    case 'OR Gate':  case 'NOR Gate':
+    case 'XOR Gate': case 'XNOR Gate':
+      drawANDlike(type, n, sz, facing, w); break;
+    case 'Constant':   ctx.restore(); drawConstant(comp); return;
+    case 'Splitter':   ctx.restore(); drawSplitter(comp); return;
+    case 'Text':       ctx.restore(); drawText(comp); return;
+    case 'Pin':        ctx.restore(); drawPin(comp, currentNets); return;
+    case 'Register':   ctx.restore(); drawRegister(comp); return;
+    case 'J-K Flip-Flop': ctx.restore(); drawFlipFlop(comp, 'JK'); return;
+    case 'D Flip-Flop':   ctx.restore(); drawFlipFlop(comp, 'DFF'); return;
+    case 'Adder':      ctx.restore(); drawGenericBox(comp, 'ADD', '#1c2820'); return;
+    case 'Subtractor': ctx.restore(); drawGenericBox(comp, 'SUB', '#2a1c1c'); return;
+    case 'Multiplexer':ctx.restore(); drawMux(comp); return;
+    case 'Demultiplexer':ctx.restore(); drawDemux(comp); return;
+    case 'ROM':        ctx.restore(); drawMemory(comp, 'ROM'); return;
+    case 'RAM':        ctx.restore(); drawMemory(comp, 'RAM'); return;
+    case 'Probe':
+      ctx.restore();
+      ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+      ctx.fillStyle='#1c2438'; ctx.strokeStyle='#ffa657'; ctx.lineWidth=1;
+      ctx.fillRect(-20,-8,20,16); ctx.strokeRect(-20,-8,20,16);
+      ctx.fillStyle=C.val; ctx.font='8px monospace'; ctx.textAlign='center';
+      ctx.fillText('PROBE', -10, 3); ctx.restore(); return;
+    case 'Tunnel':
+      ctx.restore();
+      ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+      ctx.fillStyle='#1c2438'; ctx.strokeStyle='#a5d6ff'; ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.moveTo(0,0); ctx.lineTo(-10,-6); ctx.lineTo(-25,-6);
+      ctx.lineTo(-25,6); ctx.lineTo(-10,6); ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle=C.lbl; ctx.font='8px monospace'; ctx.textAlign='center';
+      ctx.fillText(comp.attrs.label||'', -17, 3); ctx.restore(); return;
+    default:
+      ctx.restore();
+      if (comp.lib === null) drawSubcircuit(comp);
+      else drawGenericBox(comp, type, '#1c1c1c');
+      return;
+  }
+  ctx.restore();
+}
+
+// ════════════════════════ STATE & RENDER LOOP ════════════════════════
+let panX = 40, panY = 40, viewZoom = 1.5;
+let dragging = false, lastX = 0, lastY = 0;
+let project = null, currentCirc = null, currentNets = null;
+let junctions = null;
+let regState = new Map();
+let clkVal = 0;
+let runTimer = null;
+
+function render() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = C.bg; ctx.fillRect(0,0,W,H);
+
+  if (!currentCirc) {
+    ctx.fillStyle='#484f58'; ctx.font='14px monospace'; ctx.textAlign='center';
+    ctx.fillText('Keine Schaltung geladen', W/2, H/2);
+    return;
+  }
+
+  // Check if circuit is essentially empty
+  const nonText = currentCirc.comps.filter(c=>c.type!=='Text').length;
+  if (currentCirc.wires.length === 0 && nonText === 0) {
+    ctx.fillStyle='#f0883e'; ctx.font='bold 16px monospace'; ctx.textAlign='center';
+    ctx.fillText('⚠  Diese Schaltung ist leer', W/2, H/2 - 20);
+    ctx.fillStyle='#8b949e'; ctx.font='12px monospace';
+    ctx.fillText(`"${currentCirc.name}" enthält keine Bauteile oder Drähte.`, W/2, H/2 + 5);
+    ctx.fillText('Wähle oben im Dropdown eine andere Schaltung aus.', W/2, H/2 + 25);
+    return;
+  }
+
+  ctx.save();
+  ctx.translate(panX, panY);
+  ctx.scale(viewZoom, viewZoom);
+
+  const gs = 10;
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 0.5;
+  const startX = Math.floor(-panX/viewZoom/gs)*gs;
+  const startY = Math.floor(-panY/viewZoom/gs)*gs;
+  const endX = startX + W/viewZoom + gs;
+  const endY = startY + H/viewZoom + gs;
+  for (let x=startX; x<endX; x+=gs) {
+    ctx.beginPath(); ctx.moveTo(x,startY); ctx.lineTo(x,endY); ctx.stroke();
+  }
+  for (let y=startY; y<endY; y+=gs) {
+    ctx.beginPath(); ctx.moveTo(startX,y); ctx.lineTo(endX,y); ctx.stroke();
+  }
+
+  for (const w of currentCirc.wires) drawWire(w.from, w.to, currentNets);
+
+  if (junctions) {
+    for (const {x,y} of junctions) {
+      const v = netAt(x, y, currentNets);
+      ctx.fillStyle = v===1 ? C.w1 : v===0 ? C.w0 : C.junc;
+      ctx.beginPath(); ctx.arc(x, y, 2.5, 0, Math.PI*2); ctx.fill();
+    }
+  }
+
+  for (const comp of currentCirc.comps) drawComp(comp);
+
+  ctx.restore();
+}
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight - canvas.getBoundingClientRect().top;
+  render();
+}
+
+function fitView() {
+  if (!currentCirc) return;
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for (const w of currentCirc.wires) {
+    minX=Math.min(minX,w.from.x,w.to.x); maxX=Math.max(maxX,w.from.x,w.to.x);
+    minY=Math.min(minY,w.from.y,w.to.y); maxY=Math.max(maxY,w.from.y,w.to.y);
+  }
+  for (const c of currentCirc.comps) {
+    if (c.type === 'Text') continue;
+    minX=Math.min(minX,c.loc.x-60); maxX=Math.max(maxX,c.loc.x+60);
+    minY=Math.min(minY,c.loc.y-40); maxY=Math.max(maxY,c.loc.y+40);
+  }
+  if (!isFinite(minX)) {
+    // Empty circuit - just reset view to defaults
+    panX = 40; panY = 40; viewZoom = 1.5;
+    render(); return;
+  }
+  const pw = canvas.width-80, ph = canvas.height-80;
+  const cw = Math.max(maxX-minX, 100), ch = Math.max(maxY-minY, 100);
+  viewZoom = Math.min(pw/cw, ph/ch, 2.5);
+  panX = (canvas.width  - cw*viewZoom)/2 - minX*viewZoom;
+  panY = (canvas.height - ch*viewZoom)/2 - minY*viewZoom;
+  render();
+}
+
+function zoom(factor) {
+  viewZoom = Math.min(6, Math.max(0.2, viewZoom * factor));
+  render();
+}
+
+function switchCircuit(name) {
+  if (!project || !project.circuits.has(name)) return;
+  currentCirc = project.circuits.get(name);
+  currentNets = buildNets(currentCirc, project);
+  currentCirc._nets = currentNets;
+  junctions   = findJunctions(currentCirc);
+  for (const c of currentCirc.comps) {
+    if (c.type==='Pin' && c.attrs.output!=='true') c.val = null;
+  }
+  runSim();
+  fitView();
+  const nonText = currentCirc.comps.filter(c=>c.type!=='Text').length;
+  document.getElementById('status').textContent =
+    `📋 ${currentCirc.name}: ${nonText} Bauteile, ${currentCirc.wires.length} Drähte`;
+}
+
+function populateCircSelect() {
+  const sel = document.getElementById('circSel');
+  sel.innerHTML = '';
+  for (const [name, c] of project.circuits) {
+    const opt = document.createElement('option');
+    const nonText = c.comps.filter(co => co.type !== 'Text').length;
+    const empty   = c.wires.length === 0 && nonText === 0;
+    opt.value = name;
+    opt.textContent = empty
+      ? `${name}  (leer)`
+      : `${name}  — ${nonText} Teile, ${c.wires.length} Drähte`;
+    sel.appendChild(opt);
+  }
+  // Prefer non-empty circuit (the file's "main" is often empty)
+  const isEmpty = (n) => {
+    const c = project.circuits.get(n);
+    return !c || (c.wires.length === 0 &&
+                  c.comps.filter(co=>co.type!=='Text').length === 0);
+  };
+  let start = project.main;
+  if (!start || isEmpty(start)) {
+    for (const n of project.circuits.keys()) {
+      if (!isEmpty(n)) { start = n; break; }
+    }
+  }
+  if (!start) start = project.circuits.keys().next().value;
+  sel.value = start;
+  switchCircuit(start);
+}
+
+function runSim() {
+  if (!currentNets || !currentCirc) return;
+  simulate(currentCirc, currentNets, project, regState, clkVal);
+  render();
+}
+
+function stepClock() {
+  clkVal ^= 1;
+  if (clkVal === 1 && currentNets) {
+    for (const { comp } of currentNets.compPorts) {
+      if (comp.type === 'Register') {
+        const ports = getAbsPorts(comp, project);
+        const dPort = ports.find(p=>p.name==='D');
+        const enPort= ports.find(p=>p.name==='en');
+        if (dPort) {
+          const dNet = currentNets.compPorts.find(cp=>cp.comp===comp)?.ports.find(p=>p.name==='D')?.netId;
+          const enNet= currentNets.compPorts.find(cp=>cp.comp===comp)?.ports.find(p=>p.name==='en')?.netId;
+          const enVal = enNet >= 0 ? (currentNets.netVals[enNet] ?? 1) : 1;
+          if (enVal !== 0 && dNet >= 0) {
+            const d = currentNets.netVals[dNet];
+            if (d !== null) regState.set(`${currentCirc.name}_${comp.uid}`, d);
+          }
+        }
+      }
+      if (comp.type === 'J-K Flip-Flop') {
+        const cp = currentNets.compPorts.find(p=>p.comp===comp);
+        const jNet = cp?.ports.find(p=>p.name==='J')?.netId;
+        const kNet = cp?.ports.find(p=>p.name==='K')?.netId;
+        const id = `${currentCirc.name}_${comp.uid}`;
+        const q = regState.get(id) ?? 0;
+        const j = jNet >= 0 ? (currentNets.netVals[jNet]??0) : 0;
+        const k = kNet >= 0 ? (currentNets.netVals[kNet]??0) : 0;
+        if      (j && !k) regState.set(id, 1);
+        else if (!j && k) regState.set(id, 0);
+        else if (j && k)  regState.set(id, q^1);
+      }
+    }
+  }
+  runSim();
+}
+
+function resetSim() {
+  regState.clear(); clkVal = 0;
+  if (currentCirc) {
+    for (const c of currentCirc.comps)
+      if (c.type==='Pin' && c.attrs.output!=='true') c.val = null;
+  }
+  runSim();
+}
+
+function toggleRun() {
+  const btn = document.getElementById('btnRun');
+  if (runTimer) {
+    clearInterval(runTimer); runTimer = null;
+    btn.textContent = '▶ Run'; btn.classList.remove('act');
+  } else {
+    runTimer = setInterval(stepClock, 300);
+    btn.textContent = '⏸ Stop'; btn.classList.add('act');
+  }
+}
+
+// ════════════════════════ FILE / URL LOADING ════════════════════════
+function loadText(text, name) {
+  try {
+    project = parseCircFile(text);
+    for (const [n, c] of project.circuits) {
+      c._nets = buildNets(c, project);
+    }
+    populateCircSelect();
+    document.getElementById('status').textContent =
+      `✓ ${project.circuits.size} Schaltungen aus "${name}"`;
+  } catch(e) {
+    alert('Fehler: ' + e.message);
+    console.error(e);
+  }
+}
+
+document.getElementById('fileInput').addEventListener('change', e => {
+  const f = e.target.files[0]; if (!f) return;
+  const r = new FileReader();
+  r.onload = ev => loadText(ev.target.result, f.name);
+  r.readAsText(f);
+});
+
+function showUrlDialog() { document.getElementById('overlay').classList.remove('hidden'); }
+function closeOverlay()  { document.getElementById('overlay').classList.add('hidden'); }
+
+async function loadFromUrl() {
+  const url = document.getElementById('urlInput').value.trim();
+  if (!url) return;
+  closeOverlay();
+  document.getElementById('status').textContent = 'Laden...';
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const text = await r.text();
+    loadText(text, url.split('/').pop());
+  } catch(e) {
+    alert('Ladefehler: ' + e.message);
+    document.getElementById('status').textContent = 'Ladefehler';
+  }
+}
+
+// ════════════════════════ MOUSE / INTERACTION ════════════════════════
+function screenToCirc(sx, sy) {
+  return { x: (sx - panX) / viewZoom, y: (sy - panY) / viewZoom };
+}
+function findPinAt(cx, cy) {
+  if (!currentCirc) return null;
+  for (const comp of currentCirc.comps) {
+    if (comp.type !== 'Pin' || comp.attrs.output === 'true') continue;
+    const dx = cx - comp.loc.x, dy = cy - comp.loc.y;
+    if (Math.abs(dx) <= 8 && Math.abs(dy) <= 8) return comp;
+  }
+  return null;
+}
+function findCompAt(cx, cy) {
+  if (!currentCirc) return null;
+  for (const comp of currentCirc.comps) {
+    const dx = cx - comp.loc.x, dy = cy - comp.loc.y;
+    if (Math.abs(dx) <= 30 && Math.abs(dy) <= 30) return comp;
+  }
+  return null;
+}
+
+const tooltip = document.getElementById('tooltip');
+
+canvas.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  const p = screenToCirc(e.clientX, e.clientY);
+  const pin = findPinAt(p.x, p.y);
+  if (pin) {
+    const w = parseInt(pin.attrs.width || 1);
+    if (w === 1) pin.val = pin.val===1 ? 0 : 1;
+    else {
+      const cur = pin.val ?? 0;
+      pin.val = (cur + 1) & ((1<<w)-1);
+    }
+    runSim();
+    return;
+  }
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  canvas.style.cursor = 'grabbing';
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (dragging) {
+    panX += e.clientX - lastX; panY += e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    render(); return;
+  }
+  const p = screenToCirc(e.clientX, e.clientY);
+  const pin = findPinAt(p.x, p.y);
+  if (pin) {
+    canvas.style.cursor = 'pointer';
+    const w = parseInt(pin.attrs.width||1);
+    const v = pin.val;
+    tooltip.style.left = (e.clientX+12)+'px';
+    tooltip.style.top  = (e.clientY-4)+'px';
+    tooltip.textContent = `${pin.attrs.label||'Pin'} [${w}bit] = ${v===null?'?':v}  (klicken zum Toggle)`;
+    tooltip.style.display = 'block';
+    return;
+  }
+  const comp = findCompAt(p.x, p.y);
+  if (comp && comp.type !== 'Text') {
+    canvas.style.cursor = 'default';
+    const cp = currentNets?.compPorts.find(cp=>cp.comp===comp);
+    const outPort = cp?.ports.find(pp=>pp.io==='out');
+    const v = outPort && outPort.netId >= 0 ? currentNets.netVals[outPort.netId] : null;
+    tooltip.style.left = (e.clientX+12)+'px';
+    tooltip.style.top  = (e.clientY-4)+'px';
+    tooltip.textContent = `${comp.type}${comp.attrs.label?(' "'+comp.attrs.label+'"'):''} → ${v===null?'?':('0x'+v.toString(16).toUpperCase())}`;
+    tooltip.style.display = 'block';
+    return;
+  }
+  canvas.style.cursor = 'crosshair';
+  tooltip.style.display = 'none';
+});
+
+canvas.addEventListener('mouseup',   () => { dragging=false; canvas.style.cursor='crosshair'; });
+canvas.addEventListener('mouseleave',() => { dragging=false; tooltip.style.display='none'; });
+
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const f = e.deltaY < 0 ? 1.1 : 0.91;
+  const cx = e.clientX, cy = e.clientY;
+  panX = cx - (cx - panX) * f;
+  panY = cy - (cy - panY) * f;
+  viewZoom = Math.min(8, Math.max(0.15, viewZoom * f));
+  render();
+}, { passive:false });
+
+document.getElementById('urlInput').addEventListener('keydown', e => {
+  if (e.key==='Enter') loadFromUrl();
+});
+document.getElementById('overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('overlay')) closeOverlay();
+});
+
+window.addEventListener('resize', resize);
+resize();
+
+(async () => {
+  const url = 'https://raw.githubusercontent.com/sky4walk/documents/master/Logisim-CPU.circ';
+  document.getElementById('status').textContent = 'Lade Beispiel...';
+  try {
+    const r = await fetch(url + '?t=' + Date.now(), { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP '+r.status);
+    loadText(await r.text(), 'Logisim-CPU.circ');
+  } catch(e) {
+    document.getElementById('status').textContent = 'Auto-load fehlgeschlagen — bitte Datei manuell laden';
+  }
+})();
+</script>
+</body>
+</html>
