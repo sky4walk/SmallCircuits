@@ -330,6 +330,10 @@
     border-radius: 2px; transition: width .2s;
     box-shadow: 0 0 6px var(--glow);
   }
+
+  #tf-editor { display: block; }
+  #tf-color-pick::-webkit-color-swatch-wrapper { padding: 1px; }
+  #tf-color-pick::-webkit-color-swatch { border: none; border-radius: 1px; }
 </style>
 </head>
 <body>
@@ -361,7 +365,7 @@
     <div class="drop-label">
       <strong>DICOM-Datei öffnen</strong>
       Hierher ziehen oder auf „+ Datei(en) laden" klicken<br>
-      <span style="font-size:11px;color:#2a3a2a">Unterstützt: Implicit/Explicit LE · JPEG Lossless · unkomprimiert</span>
+      <span style="font-size:11px;color:#2a3a2a">Unterstützt: DICOM · ZIP-Archive · JPEG Lossless · JPEG Extended</span>
     </div>
   </div>
   <div id="canvas-wrap">
@@ -429,6 +433,9 @@
       „Volumen erstellen" klicken
     </div>
     <button class="btn primary" id="btn-build-vol" onclick="buildVolume()" disabled>Volumen erstellen</button>
+    <div style="color:var(--muted);font-family:var(--mono);font-size:11px;margin:4px 0">— oder —</div>
+    <button class="btn" onclick="document.getElementById('vol-file-input').click()">⤒ Volumen laden (.dvol)</button>
+    <input type="file" id="vol-file-input" accept=".dvol" style="display:none" onchange="loadVolumeFile(this.files)">
     <div class="progress-bar" id="vol-progress" style="display:none;width:200px">
       <div class="fill" id="vol-progress-fill" style="width:0%"></div>
     </div>
@@ -440,7 +447,11 @@
     <button class="tool-btn active" id="tb3-orbit" onclick="set3DTool('orbit')">↺ Orbit</button>
     <button class="tool-btn" id="tb3-wl" onclick="set3DTool('wl')">◐ WL</button>
     <span style="width:1px;background:var(--border);margin:2px 4px"></span>
-    <button class="tool-btn" onclick="resetView3D()">↻ Reset</button>
+    <button class="tool-btn" onclick="resetView3D()">↻ Ansicht</button>
+    <span style="width:1px;background:var(--border);margin:2px 4px"></span>
+    <button class="tool-btn" onclick="resetVolume()" style="color:var(--danger)">✕ Volumen</button>
+    <span style="width:1px;background:var(--border);margin:2px 4px"></span>
+    <button class="tool-btn" onclick="saveVolume()">⤓ Speichern</button>
   </div>
 </div>
 
@@ -452,6 +463,7 @@
       <button class="mode-btn active" id="mode-mip" onclick="setRenderMode('mip')">MIP</button>
       <button class="mode-btn" id="mode-minip" onclick="setRenderMode('minip')">MinIP</button>
       <button class="mode-btn" id="mode-avg" onclick="setRenderMode('avg')">Avg</button>
+      <button class="mode-btn" id="mode-raycast" onclick="setRenderMode('raycast')">Raycast</button>
     </div>
   </div>
   <div class="sidebar-section">
@@ -465,12 +477,104 @@
       <input type="range" id="sl3-wc" min="-2000" max="4000" value="200" oninput="on3DSlider()">
     </div>
   </div>
+  <div class="sidebar-section" id="sec-tf" style="display:none">
+    <h3>Transferfunktion</h3>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn active" id="tf-bone" onclick="setTFPreset('bone')">Knochen</button>
+      <button class="mode-btn" id="tf-soft" onclick="setTFPreset('soft')">Weichteil</button>
+      <button class="mode-btn" id="tf-angio" onclick="setTFPreset('angio')">Angio</button>
+      <button class="mode-btn" id="tf-lung" onclick="setTFPreset('lung')">Lunge</button>
+    </div>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn" id="tf-skin" onclick="setTFPreset('skin')">Haut</button>
+      <button class="mode-btn" id="tf-muscle" onclick="setTFPreset('muscle')">Muskel</button>
+      <button class="mode-btn" id="tf-brain" onclick="setTFPreset('brain')">Gehirn</button>
+      <button class="mode-btn" id="tf-custom" onclick="setTFPreset('custom')">Custom</button>
+    </div>
+    <canvas id="tf-editor" width="268" height="120" style="width:100%;height:120px;border:1px solid var(--border);border-radius:3px;margin-bottom:4px;cursor:crosshair"></canvas>
+    <div style="display:flex;gap:4px;margin-bottom:8px;align-items:center">
+      <span style="font-family:var(--mono);font-size:9px;color:var(--muted);flex:1" id="tf-hint">Klick = Punkt setzen · Rechtsklick = löschen · Ziehen = verschieben</span>
+      <input type="color" id="tf-color-pick" value="#ffffff" style="width:24px;height:20px;padding:0;border:1px solid var(--border);border-radius:2px;cursor:pointer;background:var(--panel)" title="Farbe ändern">
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">Opazität <span id="lbl-opacity">100%</span></div>
+      <input type="range" id="sl-opacity" min="1" max="100" value="100" oninput="onOpacitySlider()">
+    </div>
+    <h3 style="margin-top:4px">Beleuchtung</h3>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn" id="lt-off" onclick="setLightMode(0)">Aus</button>
+      <button class="mode-btn active" id="lt-cam" onclick="setLightMode(1)">Kamera</button>
+      <button class="mode-btn" id="lt-top" onclick="setLightMode(2)">Fest oben</button>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">Ambient <span id="lbl-ambient">0.15</span></div>
+      <input type="range" id="sl-ambient" min="5" max="80" value="15" oninput="onLightParams()">
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">Wrap (Aufhellung) <span id="lbl-wrap">0.0</span></div>
+      <input type="range" id="sl-wrap" min="0" max="80" value="0" oninput="onLightParams()">
+    </div>
+  </div>
   <div class="sidebar-section">
+    <h3>Qualität</h3>
     <h3>Qualität</h3>
     <div class="slider-group">
       <div class="slider-label">Schrittweite <span id="lbl3-steps">256</span></div>
       <input type="range" id="sl3-steps" min="64" max="512" step="16" value="256" oninput="on3DSteps()">
     </div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Schnittebene</h3>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn active" id="clip-off"   onclick="setClipMode('off')">Aus</button>
+      <button class="mode-btn"        id="clip-clip"   onclick="setClipMode('clip')">Clip</button>
+      <button class="mode-btn"        id="clip-slice"  onclick="setClipMode('slice')">Schnitt</button>
+    </div>
+    <div id="clip-controls" style="display:none">
+      <div class="mode-group" style="margin-bottom:10px">
+        <button class="mode-btn active" id="ax-z" onclick="setClipAxis(3)">Axial</button>
+        <button class="mode-btn"        id="ax-y" onclick="setClipAxis(2)">Koronal</button>
+        <button class="mode-btn"        id="ax-x" onclick="setClipAxis(1)">Sagittal</button>
+      </div>
+      <div class="slider-group">
+        <div class="slider-label">Position <span id="lbl-clip">50%</span></div>
+        <input type="range" id="sl-clip" min="0" max="100" value="50" oninput="onClipSlider()">
+      </div>
+      <div class="toggle-row">
+        Richtung umkehren
+        <label class="toggle"><input type="checkbox" id="chk-clip-flip" onchange="onClipSlider()">
+        <div class="toggle-track"></div></label>
+      </div>
+    </div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Beschneiden (Crop)</h3>
+    <div class="slider-group">
+      <div class="slider-label">X (Sagittal) <span id="lbl-cx">0 – 100%</span></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="range" id="sl-cx0" min="0" max="100" value="0" style="flex:1" oninput="onCropSlider()">
+        <input type="range" id="sl-cx1" min="0" max="100" value="100" style="flex:1" oninput="onCropSlider()">
+      </div>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">Y (Koronal) <span id="lbl-cy">0 – 100%</span></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="range" id="sl-cy0" min="0" max="100" value="0" style="flex:1" oninput="onCropSlider()">
+        <input type="range" id="sl-cy1" min="0" max="100" value="100" style="flex:1" oninput="onCropSlider()">
+      </div>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">Z (Axial) <span id="lbl-cz">0 – 100%</span></div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <input type="range" id="sl-cz0" min="0" max="100" value="0" style="flex:1" oninput="onCropSlider()">
+        <input type="range" id="sl-cz1" min="0" max="100" value="100" style="flex:1" oninput="onCropSlider()">
+      </div>
+    </div>
+    <div class="slider-group">
+      <div class="slider-label">HU-Schwelle <span id="lbl-hu-thresh">-1000</span></div>
+      <input type="range" id="sl-hu-thresh" min="-1000" max="1000" value="-1000" oninput="onCropSlider()">
+    </div>
+    <button class="btn" onclick="resetCrop()" style="width:100%;margin-top:4px">Crop zurücksetzen</button>
   </div>
   <div class="sidebar-section">
     <h3>Volumen-Info</h3>
@@ -961,8 +1065,8 @@ function decodeJpegLossless(jpegBytes) {
       let code=0;
       for(let len=1;len<=16;len++){
         code=(code<<1)|this.readBit();
-        const sym=tbl[(code<<5)|len];
-        if(sym!==undefined) return sym;
+        const key=(code<<5)|len;
+        if(tbl.has(key)) return tbl.get(key);
       }
       throw new Error('Huffman-Fehler');
     }
@@ -975,11 +1079,11 @@ function decodeJpegLossless(jpegBytes) {
       const counts=Array.from(u8.slice(pos,pos+16)); pos+=16;
       const total=counts.reduce((a,b)=>a+b,0);
       const syms=Array.from(u8.slice(pos,pos+total)); pos+=total;
-      const tbl=new Array(17<<5).fill(undefined);
+      const tbl=new Map();
       let code=0, symIdx=0;
       for(let bits=1;bits<=16;bits++){
         for(let i=0;i<counts[bits-1];i++){
-          tbl[(code<<5)|bits]=syms[symIdx++];
+          tbl.set((code<<5)|bits, syms[symIdx++]);
           code++;
         }
         code<<=1;
@@ -1034,7 +1138,8 @@ function decodeJpegLossless(jpegBytes) {
   for(let row=0;row<height;row++){
     for(let col=0;col<width;col++){
       const t=stream.decodeHuffman(huff);
-      const diff=extend(t>0?stream.readBits(t):0,t);
+      // JPEG standard: category 16 = fixed diff of 32768, no extra bits
+      const diff=t===16?32768:extend(t>0?stream.readBits(t):0,t);
       let pred;
       const idx=row*width+col;
       if(col===0&&row===0){
@@ -1082,29 +1187,156 @@ const ctx=canvas.getContext('2d');
 // ═══════════════════════════════════════════════════════════════
 // LOAD FILES
 // ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// ZIP EXTRACTOR (pure JS, uses browser DecompressionStream)
+// ═══════════════════════════════════════════════════════════════
+async function extractZip(arrayBuffer) {
+  const u8 = new Uint8Array(arrayBuffer);
+  const dv = new DataView(arrayBuffer);
+  const entries = [];
+
+  // Scan for Local File Headers (signature 0x04034b50 = "PK\x03\x04")
+  let pos = 0;
+  while (pos < u8.length - 30) {
+    if (dv.getUint32(pos, true) !== 0x04034b50) { pos++; continue; }
+
+    const version    = dv.getUint16(pos + 4, true);
+    const flags      = dv.getUint16(pos + 6, true);
+    const method     = dv.getUint16(pos + 8, true);
+    const crc32      = dv.getUint32(pos + 14, true);
+    let   compSize   = dv.getUint32(pos + 18, true);
+    let   uncompSize = dv.getUint32(pos + 22, true);
+    const nameLen    = dv.getUint16(pos + 26, true);
+    const extraLen   = dv.getUint16(pos + 28, true);
+    const name       = new TextDecoder().decode(u8.slice(pos + 30, pos + 30 + nameLen));
+    const dataStart  = pos + 30 + nameLen + extraLen;
+
+    // Skip directories
+    if (name.endsWith('/') || compSize === 0) {
+      pos = dataStart + compSize;
+      continue;
+    }
+
+    // Data descriptor? (bit 3 of flags)
+    if ((flags & 0x08) && compSize === 0) {
+      // Find the next PK header or data descriptor to determine size
+      let nextPK = dataStart + 1;
+      while (nextPK < u8.length - 4) {
+        if (dv.getUint32(nextPK, true) === 0x04034b50 ||
+            dv.getUint32(nextPK, true) === 0x02014b50) break;
+        // Data descriptor signature 0x08074b50
+        if (dv.getUint32(nextPK, true) === 0x08074b50) {
+          compSize = dv.getUint32(nextPK + 8, true);
+          break;
+        }
+        nextPK++;
+      }
+      if (compSize === 0) compSize = nextPK - dataStart;
+    }
+
+    const compData = u8.slice(dataStart, dataStart + compSize);
+    let fileData;
+
+    if (method === 0) {
+      // STORE — no compression
+      fileData = compData;
+    } else if (method === 8) {
+      // DEFLATE — use browser's DecompressionStream
+      try {
+        const ds = new DecompressionStream('deflate-raw');
+        const writer = ds.writable.getWriter();
+        const reader = ds.readable.getReader();
+        const chunks = [];
+        const readAll = (async () => {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+          }
+        })();
+        await writer.write(compData);
+        await writer.close();
+        await readAll;
+        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+        fileData = new Uint8Array(totalLen);
+        let off = 0;
+        for (const c of chunks) { fileData.set(c, off); off += c.length; }
+      } catch(e) {
+        console.warn('ZIP: Deflate-Fehler bei ' + name + ':', e);
+        pos = dataStart + compSize;
+        continue;
+      }
+    } else {
+      console.warn('ZIP: Unbekannte Methode ' + method + ' für ' + name);
+      pos = dataStart + compSize;
+      continue;
+    }
+
+    // Only add files that look like DICOM (check for DICM magic or no extension)
+    const isDicom = (fileData.length > 132 &&
+      fileData[128]===0x44 && fileData[129]===0x49 &&
+      fileData[130]===0x43 && fileData[131]===0x4D);
+    const ext = name.split('.').pop().toLowerCase();
+    const noDotInName = !name.includes('.') || ext === 'dcm' || ext === 'dicom';
+
+    if (isDicom || noDotInName) {
+      entries.push({ name: name.split('/').pop() || name, buffer: fileData.buffer.slice(
+        fileData.byteOffset, fileData.byteOffset + fileData.byteLength) });
+    }
+
+    pos = dataStart + compSize;
+  }
+
+  return entries;
+}
+
+function isZipFile(arrayBuffer) {
+  const u8 = new Uint8Array(arrayBuffer, 0, 4);
+  return u8[0]===0x50 && u8[1]===0x4B && u8[2]===0x03 && u8[3]===0x04;
+}
+
 function loadFiles(fl){
   if(!fl||!fl.length) return;
-  Promise.all(Array.from(fl).map(f=>new Promise(res=>{
-    const r=new FileReader();
-    r.onload=e=>res({name:f.name,buf:e.target.result});
-    r.readAsArrayBuffer(f);
-  }))).then(results=>{
-    let added=0;
-    for(const r of results){
-      try{
-        const dicom=parseDicom(r.buf);
-        files.push({name:r.name,buf:r.buf,dicom}); added++;
-      }catch(e){ showError(`„${r.name}": ${e.message}`); }
+  (async function(){
+    showSpinner('Lade Dateien\u2026');
+    const rawFiles = [];
+    for(const f of Array.from(fl)){
+      const buf = await new Promise(res=>{
+        const r=new FileReader();
+        r.onload=e=>res(e.target.result);
+        r.readAsArrayBuffer(f);
+      });
+      if(isZipFile(buf)){
+        showSpinner('Entpacke ' + f.name + '\u2026');
+        try{
+          const entries = await extractZip(buf);
+          console.log('ZIP ' + f.name + ': ' + entries.length + ' Dateien');
+          for(const e of entries) rawFiles.push(e);
+        }catch(e){ showError('ZIP-Fehler: ' + e.message); }
+      } else {
+        rawFiles.push({name:f.name, buffer:buf});
+      }
     }
+    let added=0;
+    for(let i=0; i<rawFiles.length; i++){
+      const r=rawFiles[i];
+      if(i%20===0) showSpinner('Parse DICOM ' + (i+1) + '/' + rawFiles.length + '\u2026');
+      if(i%50===0) await new Promise(res=>setTimeout(res,5));
+      try{
+        const dicom=parseDicom(r.buffer);
+        files.push({name:r.name, buf:r.buffer, dicom}); added++;
+      }catch(e){
+        if(rawFiles.length < 5) showError(r.name + ': ' + e.message);
+      }
+    }
+    hideSpinner();
     if(added){
       document.getElementById('btn-reset').disabled=false;
       const firstIdx = files.length - added;
-      displayFrame(firstIdx).then(()=>{
-        // Lazily decode thumbnails for all other files in background
-        scheduleThumbnails(firstIdx);
-      });
+      await displayFrame(firstIdx);
+      scheduleThumbnails(firstIdx);
     }
-  });
+  })();
 }
 
 async function displayFrame(idx){
@@ -1151,7 +1383,8 @@ async function displayFrame(idx){
 
     } else if(mode==='explicit_le'||mode==='implicit_le'||mode==='explicit_be'){
       const pt=dicom.pixTag;
-      const raw=new Uint8Array(buf, pt.valueOff, pt.length);
+      const rawLen2=(pt.length===0xFFFFFFFF||pt.length===4294967295)?(buf.byteLength-pt.valueOff):pt.length;
+      const raw=new Uint8Array(buf, pt.valueOff, rawLen2);
       if(bitsAlloc===16){
         const src=new Uint8Array(raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength));
         pixelData=pixelRep===1
@@ -1357,7 +1590,9 @@ async function decodeForThumb(idx) {
   } else {
     const pt = dicom.pixTag;
     if (!pt) return;
-    const raw = new Uint8Array(buf, pt.valueOff, pt.length);
+    const rawLen = (pt.length === 0xFFFFFFFF || pt.length === 4294967295)
+            ? (buf.byteLength - pt.valueOff) : pt.length;
+        const raw = new Uint8Array(buf, pt.valueOff, rawLen);
     if (bitsAlloc === 16) {
       const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset+raw.byteLength));
       pd = pixelRep===1 ? new Int16Array(src.buffer)
@@ -1513,6 +1748,9 @@ viewerEl.addEventListener('dragover',e=>{e.preventDefault();dropZone.classList.a
 viewerEl.addEventListener('dragleave',()=>dropZone.classList.remove('dragover'));
 viewerEl.addEventListener('drop',e=>{e.preventDefault();dropZone.classList.remove('dragover');loadFiles(e.dataTransfer.files);});
 dropZone.addEventListener('click',()=>document.getElementById('file-input').click());
+// Init TF editor  
+initTFEditor();
+
 window.addEventListener('keydown',e=>{
   if(files.length<2) return;
   if(e.key==='ArrowRight'||e.key==='ArrowDown') displayFrame((currentIdx+1)%files.length);
@@ -1530,7 +1768,20 @@ function switchTab(tab) {
   document.getElementById('viewer-3d').classList.toggle('active', !is2d);
   document.getElementById('sidebar').classList.toggle('active', is2d);
   document.getElementById('sidebar-3d').classList.toggle('active', !is2d);
-  if (!is2d && glReady) render3D();
+  // Filmstrip always visible for both tabs
+  if (!is2d && glReady) {
+    // Wait for layout then resize and render
+    requestAnimationFrame(() => {
+      const c = document.getElementById('gl-canvas');
+      const p = document.getElementById('viewer-3d');
+      if (p.clientWidth > 0 && p.clientHeight > 0) {
+        c.width = p.clientWidth;
+        c.height = p.clientHeight;
+        gl.viewport(0, 0, c.width, c.height);
+      }
+      render3D();
+    });
+  }
 }
 
 // Update badge when files change
@@ -1555,6 +1806,7 @@ let glReady = false;
 async function buildVolume() {
   if (files.length < 2) return;
   const statusEl  = document.getElementById('vol-status');
+  try {
   const progBar   = document.getElementById('vol-progress');
   const progFill  = document.getElementById('vol-progress-fill');
   progBar.style.display = 'block';
@@ -1609,7 +1861,9 @@ async function buildVolume() {
       } else {
         const pt = d.pixTag;
         if (!pt) continue;
-        const raw = new Uint8Array(f.buf, pt.valueOff, pt.length);
+        const rawLen3 = (pt.length === 0xFFFFFFFF || pt.length === 4294967295)
+              ? (f.buf.byteLength - pt.valueOff) : pt.length;
+        const raw = new Uint8Array(f.buf, pt.valueOff, rawLen3);
         if (bitsAlloc === 16) {
           const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset+raw.byteLength));
           pd = pixelRep === 1 ? new Int16Array(src.buffer)
@@ -1623,6 +1877,11 @@ async function buildVolume() {
     }
 
     slices.push({ zPos, pd, w, h, sl, ic, spacingXY });
+    // Read SliceThickness once
+    if (i === 0) {
+      console.log('Slice 0: zPos=' + zPos + ' spacing=' + spacingXY +
+        ' SliceThickness=' + d.getStr(0x00180050));
+    }
   }
 
   if (slices.length < 2) {
@@ -1642,7 +1901,31 @@ async function buildVolume() {
   const dimZ = slices.length;
   const spacingX = slices[0].spacingXY[1] || 1;
   const spacingY = slices[0].spacingXY[0] || 1;
-  const spacingZ = dimZ > 1 ? Math.abs(slices[1].zPos - slices[0].zPos) || 1 : 1;
+
+  // Z spacing: prefer SliceThickness tag, then median inter-slice distance
+  let spacingZ = 1;
+  // 1) Try SliceThickness (0018,0050) from first slice
+  const sliceThick = parseFloat(files[0].dicom.getStr(0x00180050) || '0');
+  // 2) Try SpacingBetweenSlices (0018,0088)
+  const sliceBetween = parseFloat(files[0].dicom.getStr(0x00180088) || '0');
+  // 3) Compute median inter-slice distance
+  let medianDist = 0;
+  if (dimZ > 1) {
+    const dists = [];
+    for (let zi = 1; zi < slices.length; zi++) {
+      const d = Math.abs(slices[zi].zPos - slices[zi-1].zPos);
+      if (d > 0.001) dists.push(d);
+    }
+    if (dists.length > 0) {
+      dists.sort((a,b) => a - b);
+      medianDist = dists[Math.floor(dists.length / 2)];
+    }
+  }
+  // Pick best: SliceThickness > SpacingBetween > median > 1
+  spacingZ = sliceThick || sliceBetween || medianDist || 1;
+  console.log('Spacing: X=' + spacingX.toFixed(3) + ' Y=' + spacingY.toFixed(3) +
+    ' Z=' + spacingZ.toFixed(3) + ' (thick=' + sliceThick + ' between=' + sliceBetween +
+    ' median=' + medianDist.toFixed(3) + ')');
   const volData  = new Float32Array(dimX * dimY * dimZ);
 
   let minHU = Infinity, maxHU = -Infinity;
@@ -1660,11 +1943,16 @@ async function buildVolume() {
   }
 
   volume = { data: volData, dimX, dimY, dimZ, spacingX, spacingY, spacingZ, minHU, maxHU };
+  computeHistogram();
+  console.log('Volume created:', dimX, 'x', dimY, 'x', dimZ, 'HU:', minHU, '-', maxHU);
 
   statusEl.textContent = 'Lade GPU-Textur…';
   progFill.style.width = '92%';
   await new Promise(r => setTimeout(r, 10));
 
+  // Switch to 3D tab so canvas gets proper dimensions
+  switchTab('3d');
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   init3D();
   progFill.style.width = '100%';
   statusEl.textContent = '';
@@ -1686,16 +1974,35 @@ async function buildVolume() {
   slWC.min = Math.round(minHU);
   slWC.max = Math.round(maxHU);
   slWC.value = Math.round((maxHU + minHU) / 2);
+  // Update HU threshold slider range
+  const slHU = document.getElementById('sl-hu-thresh');
+  slHU.min = Math.round(volume.minHU);
+  slHU.max = Math.round(volume.maxHU);
+  slHU.value = Math.round(volume.minHU);
+  huThreshold = volume.minHU;
+  document.getElementById('lbl-hu-thresh').textContent = Math.round(volume.minHU) + ' HU';
+
   on3DSlider();
+  } catch(e) {
+    const st = document.getElementById('vol-status');
+    st.textContent = 'Fehler: ' + e.message;
+    document.getElementById('vol-progress').style.display = 'none';
+    console.error('buildVolume:', e);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // WebGL2 MIP RENDERER
 // ═══════════════════════════════════════════════════════════════
 let gl, glProgram, volTexture;
-let rotX = -0.4, rotY = 0.3;
+let rotX = -0.4, rotY = 0.3, zoom3D = 1.0;
 let renderMode = 0; // 0=MIP, 1=MinIP, 2=Avg
 let ww3D = 2000, wc3D = 200, numSteps = 256;
+let clipAxis = 0, clipPos = 0.5, clipMode = 0, clipFlip = 0;
+let tfTexture = null, tfData = new Uint8Array(256 * 4);
+let globalOpacity = 1.0, lightMode = 1, ambientVal = 0.15, wrapVal = 0.0;
+let activeTFPreset = 'bone';
+let cropMin = [0, 0, 0], cropMax = [1, 1, 1], huThreshold = -1000;
 
 const VS_SRC = `#version 300 es
 in vec2 aPos;
@@ -1708,66 +2015,193 @@ void main() {
 const FS_SRC = `#version 300 es
 precision highp float;
 precision highp sampler3D;
+precision highp sampler2D;
 uniform sampler3D uVol;
-uniform vec3 uVolDim;     // normalized aspect: dimX*spX, dimY*spY, dimZ*spZ
+uniform sampler2D uTF;        // 256x1 RGBA transfer function
+uniform vec3 uVolDim;
 uniform mat3 uRotMat;
 uniform float uWC, uWW;
-uniform int uMode;        // 0=MIP, 1=MinIP, 2=Avg
+uniform int uMode;            // 0=MIP, 1=MinIP, 2=Avg, 3=Raycast
 uniform int uSteps;
+uniform int uClipAxis;
+uniform float uClipPos;
+uniform int uClipMode;
+uniform int uClipFlip;
+uniform float uOpacity;       // global opacity multiplier
+uniform int uLightMode;       // 0=off, 1=camera-fixed, 2=world-fixed
+uniform float uWrap;           // wrap lighting factor 0..1
+uniform float uAmbient;       // ambient light factor
+uniform vec3 uVolStep;        // 1/dimX, 1/dimY, 1/dimZ for gradient
+uniform float uCanvasAspect;   // canvas width / height
+uniform float uZoom;           // zoom factor
+uniform vec3 uCropMin;      // spatial crop min (0..1)
+uniform vec3 uCropMax;      // spatial crop max (0..1)
+uniform float uHUThresh;    // HU threshold (skip below)
 in vec2 vUV;
 out vec4 fragColor;
 
+// Compute gradient via central differences
+vec3 gradient(vec3 p) {
+  float dx = texture(uVol, p + vec3(uVolStep.x,0,0)).r
+           - texture(uVol, p - vec3(uVolStep.x,0,0)).r;
+  float dy = texture(uVol, p + vec3(0,uVolStep.y,0)).r
+           - texture(uVol, p - vec3(0,uVolStep.y,0)).r;
+  float dz = texture(uVol, p + vec3(0,0,uVolStep.z)).r
+           - texture(uVol, p - vec3(0,0,uVolStep.z)).r;
+  return vec3(dx, dy, dz);
+}
+
 void main() {
-  // Ray setup in normalized cube [-0.5, 0.5]^3
-  float aspect = uVolDim.x / uVolDim.y;
-  vec2 ndc = (vUV - 0.5) * 2.0;
-  ndc.x *= aspect;
+  float lo = uWC - uWW * 0.5;
+  float hi = uWC + uWW * 0.5;
+
+  // ── Slice mode ──
+  if (uClipAxis > 0 && uClipMode == 1) {
+    vec2 ndc = (vUV - 0.5) * 2.0 / uZoom;
+    ndc.x *= uCanvasAspect;
+    float cp = uClipPos;
+    vec3 center, right, up;
+    if (uClipAxis == 3)      { center=vec3(0,0,cp-0.5); right=vec3(1,0,0); up=vec3(0,1,0); }
+    else if (uClipAxis == 2) { center=vec3(0,cp-0.5,0); right=vec3(1,0,0); up=vec3(0,0,1); }
+    else                     { center=vec3(cp-0.5,0,0); right=vec3(0,1,0); up=vec3(0,0,1); }
+    vec3 pos = uRotMat * (center + right*ndc.x*0.5 + up*ndc.y*0.5) + 0.5;
+    pos.y = 1.0 - pos.y;
+    if (pos.x<0.0||pos.x>1.0||pos.y<0.0||pos.y>1.0||pos.z<0.0||pos.z>1.0)
+      { fragColor=vec4(0,0,0,1); return; }
+    float hu = texture(uVol, pos).r;
+    if (uMode == 3) {
+      float t = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+      vec4 c = texture(uTF, vec2(t, 0.5));
+      fragColor = vec4(c.rgb, 1.0);
+    } else {
+      float v = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+      fragColor = vec4(v,v,v,1);
+    }
+    return;
+  }
+
+  // ── Ray setup with proper volume proportions ──
+  vec2 ndc = (vUV - 0.5) * 2.0 / uZoom;
+  ndc.x *= uCanvasAspect;
   vec3 rayDir = normalize(uRotMat * vec3(ndc, -1.5));
   vec3 rayOrigin = uRotMat * vec3(ndc * 0.5, 1.2);
 
-  // AABB intersection with unit cube [-0.5, 0.5]
+  // AABB scaled to volume proportions
+  vec3 boxMin = -uVolDim * 0.5;
+  vec3 boxMax =  uVolDim * 0.5;
   vec3 invDir = 1.0 / rayDir;
-  vec3 t0 = (-0.5 - rayOrigin) * invDir;
-  vec3 t1 = ( 0.5 - rayOrigin) * invDir;
-  vec3 tmin = min(t0, t1);
-  vec3 tmax = max(t0, t1);
-  float tNear = max(max(tmin.x, tmin.y), tmin.z);
-  float tFar  = min(min(tmax.x, tmax.y), tmax.z);
-
-  if (tNear > tFar || tFar < 0.0) { fragColor = vec4(0,0,0,1); return; }
+  vec3 t0 = (boxMin - rayOrigin) * invDir;
+  vec3 t1 = (boxMax - rayOrigin) * invDir;
+  vec3 tmn = min(t0, t1);
+  vec3 tmx = max(t0, t1);
+  float tNear = max(max(tmn.x, tmn.y), tmn.z);
+  float tFar  = min(min(tmx.x, tmx.y), tmx.z);
+  if (tNear > tFar || tFar < 0.0) { fragColor=vec4(0,0,0,1); return; }
   tNear = max(tNear, 0.0);
 
   float dt = (tFar - tNear) / float(uSteps);
-  float maxVal = -99999.0;
-  float minVal = 99999.0;
-  float sumVal = 0.0;
-  int hitCount = 0;
+  vec3 boxSize = boxMax - boxMin;
 
+  // ── Raycast with compositing ──
+  if (uMode == 3) {
+    vec4 accum = vec4(0.0);
+
+    for (int i = 0; i < 512; i++) {
+      if (i >= uSteps) break;
+      float t = tNear + (float(i) + 0.5) * dt;
+      vec3 pos = (rayOrigin + rayDir * t - boxMin) / boxSize;
+      pos.y = 1.0 - pos.y;
+
+      // Clipping
+      if (uClipAxis > 0 && uClipMode == 0) {
+        float coord = uClipAxis==1 ? pos.x : uClipAxis==2 ? pos.y : pos.z;
+        bool keep = uClipFlip==0 ? (coord >= uClipPos) : (coord <= uClipPos);
+        if (!keep) continue;
+      }
+      // Spatial crop
+      if (pos.x < uCropMin.x || pos.x > uCropMax.x ||
+          pos.y < uCropMin.y || pos.y > uCropMax.y ||
+          pos.z < uCropMin.z || pos.z > uCropMax.z) continue;
+
+      float hu = texture(uVol, pos).r;
+      // HU threshold
+      if (hu < uHUThresh) continue;
+      float tCoord = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+      vec4 c = texture(uTF, vec2(tCoord, 0.5));
+      c.a *= uOpacity * dt * 200.0; // scale opacity by step size
+
+      // Lighting
+      if (uLightMode > 0 && c.a > 0.005) {
+        vec3 grad = gradient(pos);
+        float gradLen = length(grad);
+        if (gradLen > 0.001) {
+          vec3 N = normalize(grad);
+          vec3 L, Ne;
+          if (uLightMode == 1) {
+            // Camera-fixed: light from viewer direction
+            Ne = normalize(uRotMat * N);
+            L = normalize(vec3(0.1, 0.2, 1.0));
+          } else {
+            // World-fixed: light from above, doesn't rotate
+            Ne = N;
+            L = normalize(transpose(uRotMat) * vec3(0.2, 0.8, 0.5));
+          }
+          // Wrap lighting: wraps diffuse around the surface
+          float rawDiff = dot(Ne, L);
+          float diff = max(rawDiff + uWrap, 0.0) / (1.0 + uWrap);
+          float spec = pow(max(dot(reflect(-L, Ne), vec3(0,0,1)), 0.0), 40.0);
+          c.rgb *= uAmbient + (1.0 - uAmbient) * diff + 0.2 * spec;
+        } else {
+          c.rgb *= uAmbient + (1.0 - uAmbient) * 0.5;
+        }
+      }
+
+      // Front-to-back compositing
+      c.rgb *= c.a;
+      accum += c * (1.0 - accum.a);
+      if (accum.a > 0.97) break; // early ray termination
+    }
+
+    // Blend with black background
+    fragColor = vec4(accum.rgb, 1.0);
+    return;
+  }
+
+  // ── MIP / MinIP / Avg ──
+  float maxVal=-99999.0, minVal=99999.0, sumVal=0.0;
+  int hitCount=0;
   for (int i = 0; i < 512; i++) {
     if (i >= uSteps) break;
     float t = tNear + (float(i) + 0.5) * dt;
-    vec3 pos = rayOrigin + rayDir * t + 0.5; // [0,1]^3
-    // Flip Y for correct orientation
+    vec3 pos = (rayOrigin + rayDir * t - boxMin) / boxSize;
     pos.y = 1.0 - pos.y;
+    if (uClipAxis > 0 && uClipMode == 0) {
+      float coord = uClipAxis==1 ? pos.x : uClipAxis==2 ? pos.y : pos.z;
+      bool keep = uClipFlip==0 ? (coord >= uClipPos) : (coord <= uClipPos);
+      if (!keep) continue;
+    }
+    // Spatial crop
+    if (pos.x < uCropMin.x || pos.x > uCropMax.x ||
+        pos.y < uCropMin.y || pos.y > uCropMax.y ||
+        pos.z < uCropMin.z || pos.z > uCropMax.z) continue;
     float val = texture(uVol, pos).r;
-    if (uMode == 0) maxVal = max(maxVal, val);
-    else if (uMode == 1) minVal = min(minVal, val);
-    else { sumVal += val; hitCount++; }
+    // HU threshold
+    if (val < uHUThresh) continue;
+    if (uMode==0) maxVal=max(maxVal,val);
+    else if (uMode==1) minVal=min(minVal,val);
+    else { sumVal+=val; hitCount++; }
   }
-
   float hu;
-  if (uMode == 0) hu = maxVal;
-  else if (uMode == 1) hu = minVal;
-  else hu = hitCount > 0 ? sumVal / float(hitCount) : 0.0;
-
-  // Window/level
-  float lo = uWC - uWW * 0.5;
-  float hi = uWC + uWW * 0.5;
-  float v = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
-  fragColor = vec4(v, v, v, 1.0);
+  if (uMode==0) hu=maxVal; else if (uMode==1) hu=minVal;
+  else hu=hitCount>0 ? sumVal/float(hitCount) : 0.0;
+  if (uMode==0 && maxVal<-99998.0) { fragColor=vec4(0,0,0,1); return; }
+  if (uMode==1 && minVal> 99998.0) { fragColor=vec4(0,0,0,1); return; }
+  float v = clamp((hu-lo)/(hi-lo), 0.0, 1.0);
+  fragColor = vec4(v,v,v,1);
 }`;
 
 function init3D() {
+  try {
   const canvas3d = document.getElementById('gl-canvas');
   const parent = document.getElementById('viewer-3d');
   canvas3d.width  = parent.clientWidth  || 800;
@@ -1781,8 +2215,11 @@ function init3D() {
     const s = gl.createShader(type);
     gl.shaderSource(s, src);
     gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
-      throw new Error('Shader: ' + gl.getShaderInfoLog(s));
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      const err = gl.getShaderInfoLog(s);
+      console.error('GLSL Shader Error:', err);
+      throw new Error('GLSL Shader: ' + err);
+    }
     return s;
   }
   const vs = compileShader(VS_SRC, gl.VERTEX_SHADER);
@@ -1807,8 +2244,11 @@ function init3D() {
   volTexture = gl.createTexture();
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_3D, volTexture);
-  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  // R32F needs OES_texture_float_linear for LINEAR filtering
+  const floatLinear = gl.getExtension('OES_texture_float_linear');
+  const filterMode = floatLinear ? gl.LINEAR : gl.NEAREST;
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, filterMode);
+  gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, filterMode);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
@@ -1817,6 +2257,9 @@ function init3D() {
   gl.texImage3D(gl.TEXTURE_3D, 0, gl.R32F,
     volume.dimX, volume.dimY, volume.dimZ,
     0, gl.RED, gl.FLOAT, volume.data);
+  const glErr = gl.getError();
+  if (glErr) console.error('GL texImage3D error:', glErr);
+  else console.log('3D texture uploaded:', volume.dimX, 'x', volume.dimY, 'x', volume.dimZ);
 
   // Show UI
   document.getElementById('vol-empty').style.display = 'none';
@@ -1824,9 +2267,21 @@ function init3D() {
   document.getElementById('vol-info').style.display = 'block';
   document.getElementById('vol-toolbar').style.display = 'flex';
 
+  // Initialize transfer function texture
+  loadPresetToEditor(activeTFPreset);
+  buildTFData(activeTFPreset);
+  uploadTFTexture();
+  drawTFEditor();
+
+  gl.viewport(0, 0, canvas3d.width, canvas3d.height);
   glReady = true;
   setup3DInteraction(canvas3d);
+  console.log('WebGL2 MIP renderer initialized, canvas:', canvas3d.width, 'x', canvas3d.height);
   render3D();
+  } catch(e) {
+    console.error('init3D error:', e);
+    document.getElementById('vol-status').textContent = 'WebGL Fehler: ' + e.message;
+  }
 }
 
 function render3D() {
@@ -1864,19 +2319,50 @@ function render3D() {
   ];
 
   gl.uniform3fv(gl.getUniformLocation(glProgram, 'uVolDim'), volDim);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uCanvasAspect'),
+    canvas3d.width / canvas3d.height);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uZoom'), zoom3D);
   gl.uniformMatrix3fv(gl.getUniformLocation(glProgram, 'uRotMat'), false, rotMat);
   gl.uniform1f(gl.getUniformLocation(glProgram, 'uWC'), wc3D);
   gl.uniform1f(gl.getUniformLocation(glProgram, 'uWW'), ww3D);
   gl.uniform1i(gl.getUniformLocation(glProgram, 'uMode'), renderMode);
   gl.uniform1i(gl.getUniformLocation(glProgram, 'uSteps'), numSteps);
   gl.uniform1i(gl.getUniformLocation(glProgram, 'uVol'), 0);
+  gl.uniform1i(gl.getUniformLocation(glProgram, 'uClipAxis'), clipAxis);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uClipPos'), clipPos);
+  gl.uniform1i(gl.getUniformLocation(glProgram, 'uClipMode'), clipMode);
+  gl.uniform1i(gl.getUniformLocation(glProgram, 'uClipFlip'), clipFlip);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uOpacity'), globalOpacity);
+  gl.uniform1i(gl.getUniformLocation(glProgram, 'uLightMode'), lightMode);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uWrap'), wrapVal);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uAmbient'), ambientVal);
+  gl.uniform3fv(gl.getUniformLocation(glProgram, 'uVolStep'),
+    [1.0/volume.dimX, 1.0/volume.dimY, 1.0/volume.dimZ]);
+  // Crop bounds + HU threshold
+  gl.uniform3fv(gl.getUniformLocation(glProgram, 'uCropMin'), cropMin);
+  gl.uniform3fv(gl.getUniformLocation(glProgram, 'uCropMax'), cropMax);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uHUThresh'), huThreshold);
+  // Bind TF texture
+  if (tfTexture) {
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, tfTexture);
+    gl.uniform1i(gl.getUniformLocation(glProgram, 'uTF'), 1);
+  }
 
   gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  const err3d = gl.getError();
+  if (err3d) console.error('GL draw error:', err3d);
 
   // Update info overlay
-  const modeNames = ['MIP', 'MinIP', 'Durchschnitt'];
+  const modeNames = ['MIP', 'MinIP', 'Durchschnitt', 'Raycast'];
+  const axisNames = ['', 'Sag', 'Kor', 'Ax'];
+  const clipInfo = clipAxis > 0
+    ? `  ·  ${clipMode===1?'Schnitt':'Clip'} ${axisNames[clipAxis]} ${Math.round(clipPos*100)}%`
+    : '';
+  const zoomPct = Math.round(zoom3D * 100);
+  const zoomStr = zoomPct !== 100 ? '  ·  ' + zoomPct + '%' : '';
   document.getElementById('vol-info').innerHTML =
-    `${volume.dimX}×${volume.dimY}×${volume.dimZ}  ·  ${modeNames[renderMode]}  ·  ${numSteps} Schritte`;
+    `${volume.dimX}×${volume.dimY}×${volume.dimZ}  ·  ${modeNames[renderMode]}  ·  ${numSteps} Schritte${clipInfo}${zoomStr}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1894,8 +2380,181 @@ function set3DTool(t) {
 }
 
 function resetView3D() {
-  rotX = -0.4; rotY = 0.3;
-  render3D();
+  rotX = -0.4; rotY = 0.3; zoom3D = 1.0;
+  if (glReady) render3D();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VOLUME SAVE / LOAD (.dvol format)
+// Header: 'DVol' + version(u32) + dimX,Y,Z(u32) + spacingX,Y,Z(f32) + minHU,maxHU(f32) = 40 bytes
+// Body: Float32Array raw volume data
+// ═══════════════════════════════════════════════════════════════
+
+function saveVolume() {
+  if (!volume) return;
+  const headerSize = 40;
+  const bodySize = volume.data.byteLength;
+  const buf = new ArrayBuffer(headerSize + bodySize);
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+
+  // Magic "DVol"
+  u8[0]=0x44; u8[1]=0x56; u8[2]=0x6F; u8[3]=0x6C;
+  dv.setUint32(4, 1, true);  // version
+  dv.setUint32(8,  volume.dimX, true);
+  dv.setUint32(12, volume.dimY, true);
+  dv.setUint32(16, volume.dimZ, true);
+  dv.setFloat32(20, volume.spacingX, true);
+  dv.setFloat32(24, volume.spacingY, true);
+  dv.setFloat32(28, volume.spacingZ, true);
+  dv.setFloat32(32, volume.minHU, true);
+  dv.setFloat32(36, volume.maxHU, true);
+
+  // Copy volume data
+  new Uint8Array(buf, headerSize).set(new Uint8Array(volume.data.buffer));
+
+  // Download
+  const blob = new Blob([buf], {type: 'application/octet-stream'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'volume_' + volume.dimX + 'x' + volume.dimY + 'x' + volume.dimZ + '.dvol';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function loadVolumeFile(fileList) {
+  if (!fileList || !fileList.length) return;
+  const file = fileList[0];
+  const statusEl = document.getElementById('vol-status');
+  const progBar = document.getElementById('vol-progress');
+  const progFill = document.getElementById('vol-progress-fill');
+  progBar.style.display = 'block';
+  progFill.style.width = '10%';
+  statusEl.textContent = 'Lade Volumendatei…';
+
+  try {
+    const buf = await file.arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    const dv = new DataView(buf);
+
+    // Check magic
+    if (u8[0]!==0x44 || u8[1]!==0x56 || u8[2]!==0x6F || u8[3]!==0x6C) {
+      throw new Error('Keine gültige .dvol-Datei (Magic "DVol" fehlt)');
+    }
+
+    progFill.style.width = '30%';
+    statusEl.textContent = 'Lese Header…';
+    await new Promise(r => setTimeout(r, 10));
+
+    const version = dv.getUint32(4, true);
+    const dimX = dv.getUint32(8, true);
+    const dimY = dv.getUint32(12, true);
+    const dimZ = dv.getUint32(16, true);
+    const spacingX = dv.getFloat32(20, true);
+    const spacingY = dv.getFloat32(24, true);
+    const spacingZ = dv.getFloat32(28, true);
+    const minHU = dv.getFloat32(32, true);
+    const maxHU = dv.getFloat32(36, true);
+
+    const expectedSize = 40 + dimX * dimY * dimZ * 4;
+    if (buf.byteLength < expectedSize) {
+      throw new Error('Datei zu klein: erwartet ' + expectedSize + ' Bytes, hat ' + buf.byteLength);
+    }
+
+    progFill.style.width = '50%';
+    statusEl.textContent = 'Erstelle Volumen (' + dimX + '×' + dimY + '×' + dimZ + ')…';
+    await new Promise(r => setTimeout(r, 10));
+
+    const volData = new Float32Array(buf, 40, dimX * dimY * dimZ);
+
+    volume = { data: volData, dimX, dimY, dimZ, spacingX, spacingY, spacingZ, minHU, maxHU };
+    computeHistogram();
+  console.log('Volume loaded:', dimX, 'x', dimY, 'x', dimZ, 'HU:', minHU, '-', maxHU);
+
+    // Update meta
+    document.getElementById('vol-meta').innerHTML =
+      '<tr><td>Schichten</td><td>' + dimZ + '</td></tr>' +
+      '<tr><td>Matrix</td><td>' + dimX + '×' + dimY + '</td></tr>' +
+      '<tr><td>Spacing</td><td>' + spacingX.toFixed(2) + ' × ' + spacingY.toFixed(2) + ' × ' + spacingZ.toFixed(2) + ' mm</td></tr>' +
+      '<tr><td>HU-Bereich</td><td>' + Math.round(minHU) + ' … ' + Math.round(maxHU) + '</td></tr>' +
+      '<tr><td>Quelle</td><td>' + file.name + '</td></tr>';
+
+    // Set window sliders
+    const slWW = document.getElementById('sl3-ww');
+    const slWC = document.getElementById('sl3-wc');
+    slWW.max = Math.round(maxHU - minHU);
+    slWW.value = Math.round(maxHU - minHU);
+    slWC.min = Math.round(minHU);
+    slWC.max = Math.round(maxHU);
+    slWC.value = Math.round((maxHU + minHU) / 2);
+
+    const slHU = document.getElementById('sl-hu-thresh');
+    slHU.min = Math.round(minHU);
+    slHU.max = Math.round(maxHU);
+    slHU.value = Math.round(minHU);
+    huThreshold = minHU;
+    document.getElementById('lbl-hu-thresh').textContent = Math.round(minHU) + ' HU';
+
+    progFill.style.width = '80%';
+    statusEl.textContent = 'Lade GPU-Textur…';
+    await new Promise(r => setTimeout(r, 10));
+
+    switchTab('3d');
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    init3D();
+
+    progFill.style.width = '100%';
+    statusEl.textContent = '';
+    progBar.style.display = 'none';
+    on3DSlider();
+  } catch(e) {
+    statusEl.textContent = 'Fehler: ' + e.message;
+    progBar.style.display = 'none';
+    console.error('loadVolumeFile:', e);
+  }
+  // Reset file input
+  document.getElementById('vol-file-input').value = '';
+}
+
+function resetVolume() {
+  // Free GPU resources
+  if (gl) {
+    if (volTexture) { gl.deleteTexture(volTexture); volTexture = null; }
+    if (tfTexture) { gl.deleteTexture(tfTexture); tfTexture = null; }
+    if (glProgram) { gl.deleteProgram(glProgram); glProgram = null; }
+  }
+  gl = null;
+  glReady = false;
+  volume = null;
+
+  // Reset state
+  rotX = -0.4; rotY = 0.3; zoom3D = 1.0; renderMode = 0;
+  clipAxis = 0; clipPos = 0.5; clipMode = 0; clipFlip = 0;
+  cropMin = [0,0,0]; cropMax = [1,1,1]; huThreshold = -1000;
+  globalOpacity = 1.0; useLighting = 1; ambientVal = 0.15;
+
+  // Reset UI
+  const canvas3d = document.getElementById('gl-canvas');
+  canvas3d.style.display = 'none';
+  document.getElementById('vol-info').style.display = 'none';
+  document.getElementById('vol-toolbar').style.display = 'none';
+  document.getElementById('vol-empty').style.display = 'flex';
+  document.getElementById('btn-build-vol').disabled = files.length < 2;
+  document.getElementById('vol-status').textContent = '';
+  document.getElementById('vol-progress').style.display = 'none';
+  document.getElementById('vol-meta').innerHTML =
+    '<tr><td colspan="2" style="color:var(--muted);font-family:var(--mono);font-size:11px">— Kein Volumen erstellt —</td></tr>';
+
+  // Reset sidebar controls
+  document.getElementById('sec-tf').style.display = 'none';
+  document.getElementById('clip-controls').style.display = 'none';
+  document.querySelectorAll('#sidebar-3d .mode-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('mode-mip').classList.add('active');
+  document.getElementById('clip-off').classList.add('active');
+  resetCrop();
 }
 
 function setup3DInteraction(canvas3d) {
@@ -1933,7 +2592,8 @@ function setup3DInteraction(canvas3d) {
 
   canvas3d.addEventListener('wheel', e => {
     e.preventDefault();
-    // Zoom not implemented yet — could adjust FOV or ray origin distance
+    zoom3D = Math.max(0.2, Math.min(10, zoom3D * (e.deltaY < 0 ? 1.1 : 0.9)));
+    render3D();
   }, {passive: false});
 }
 
@@ -1952,9 +2612,480 @@ function on3DSteps() {
 }
 
 function setRenderMode(mode) {
-  renderMode = mode === 'mip' ? 0 : mode === 'minip' ? 1 : 2;
-  document.querySelectorAll('.mode-btn').forEach(b=>b.classList.remove('active'));
+  renderMode = mode === 'mip' ? 0 : mode === 'minip' ? 1 : mode === 'avg' ? 2 : 3;
+  document.querySelectorAll('#sidebar-3d .sidebar-section:first-child .mode-btn').forEach(b=>b.classList.remove('active'));
   document.getElementById('mode-' + mode).classList.add('active');
+  // Show/hide TF section for raycast mode
+  document.getElementById('sec-tf').style.display = renderMode === 3 ? 'block' : 'none';
+  if (renderMode === 3 && glReady) {
+    buildTFData(activeTFPreset);
+    drawTFPreview();
+    uploadTFTexture();
+  }
+  if (glReady) render3D();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TRANSFER FUNCTION
+// ═══════════════════════════════════════════════════════════════
+
+// Presets: array of {hu, r, g, b, a} control points (HU values, colors 0-255, alpha 0-1)
+const TF_PRESETS = {
+  bone:   { ww:2500, wc:500, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:-200,r:0,g:0,b:0,a:0},
+    {hu:100,r:180,g:60,b:40,a:0.02},{hu:300,r:230,g:200,b:160,a:0.12},
+    {hu:500,r:245,g:230,b:200,a:0.4},{hu:1500,r:255,g:255,b:245,a:0.8},
+    {hu:3000,r:255,g:255,b:255,a:1.0}]},
+  soft:   { ww:400, wc:50, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:-200,r:0,g:0,b:0,a:0},
+    {hu:-50,r:180,g:80,b:70,a:0.01},{hu:20,r:220,g:130,b:100,a:0.06},
+    {hu:80,r:230,g:170,b:140,a:0.12},{hu:200,r:240,g:200,b:170,a:0.2},
+    {hu:500,r:245,g:230,b:200,a:0.05},{hu:3000,r:255,g:255,b:255,a:0}]},
+  angio:  { ww:600, wc:300, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:50,r:0,g:0,b:0,a:0},
+    {hu:150,r:200,g:30,b:20,a:0.08},{hu:250,r:255,g:60,b:30,a:0.4},
+    {hu:400,r:255,g:120,b:80,a:0.7},{hu:800,r:255,g:200,b:180,a:0.9},
+    {hu:3000,r:255,g:255,b:255,a:1.0}]},
+  lung:   { ww:1500, wc:-500, points:[
+    {hu:-1000,r:40,g:60,b:90,a:0.01},{hu:-800,r:60,g:100,b:150,a:0.02},
+    {hu:-500,r:80,g:140,b:200,a:0.04},{hu:-200,r:0,g:0,b:0,a:0},
+    {hu:-50,r:200,g:130,b:100,a:0.02},{hu:200,r:230,g:200,b:170,a:0.1},
+    {hu:500,r:240,g:230,b:210,a:0.4},{hu:3000,r:255,g:255,b:255,a:0.8}]},
+  skin:   { ww:400, wc:40, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:-500,r:0,g:0,b:0,a:0},
+    {hu:-100,r:200,g:140,b:110,a:0.02},{hu:-20,r:230,g:175,b:145,a:0.25},
+    {hu:50,r:240,g:190,b:160,a:0.05},{hu:200,r:0,g:0,b:0,a:0},
+    {hu:3000,r:0,g:0,b:0,a:0}]},
+  muscle: { ww:400, wc:50, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:-100,r:0,g:0,b:0,a:0},
+    {hu:10,r:160,g:40,b:30,a:0.02},{hu:40,r:190,g:60,b:45,a:0.1},
+    {hu:80,r:210,g:90,b:70,a:0.15},{hu:150,r:220,g:160,b:140,a:0.05},
+    {hu:300,r:0,g:0,b:0,a:0},{hu:3000,r:0,g:0,b:0,a:0}]},
+  brain:  { ww:80, wc:40, points:[
+    {hu:-1000,r:0,g:0,b:0,a:0},{hu:0,r:0,g:0,b:0,a:0},
+    {hu:5,r:10,g:15,b:40,a:0.05},{hu:15,r:30,g:50,b:100,a:0.3},
+    {hu:22,r:160,g:140,b:130,a:0.6},{hu:30,r:210,g:195,b:180,a:0.8},
+    {hu:38,r:180,g:165,b:155,a:0.7},{hu:45,r:150,g:135,b:125,a:0.55},
+    {hu:55,r:200,g:50,b:40,a:0.7},{hu:75,r:240,g:40,b:30,a:0.9},
+    {hu:100,r:220,g:210,b:190,a:0.1},{hu:300,r:0,g:0,b:0,a:0},
+    {hu:3000,r:0,g:0,b:0,a:0}]},
+  custom: { ww:3000, wc:500, points:[
+    {hu:-1000,r:0,g:0,b:50,a:0},{hu:-500,r:0,g:80,b:160,a:0.01},
+    {hu:0,r:0,g:200,b:100,a:0.04},{hu:200,r:200,g:200,b:50,a:0.1},
+    {hu:500,r:255,g:100,b:0,a:0.4},{hu:1000,r:255,g:255,b:200,a:0.7},
+    {hu:3000,r:255,g:255,b:255,a:1.0}]},
+};
+
+function buildTFData(presetName) {
+  // Use editor points if available, otherwise preset
+  let pts;
+  if (tfEditorPoints.length > 1) {
+    pts = tfEditorPoints;
+  } else {
+    const preset = TF_PRESETS[presetName];
+    if (!preset) return;
+    pts = preset.points;
+  }
+  const huMin = volume ? volume.minHU : -1000;
+  const huMax = volume ? volume.maxHU : 3000;
+  const range = huMax - huMin || 1;
+
+  for (let i = 0; i < 256; i++) {
+    const hu = huMin + (i / 255) * range;
+    // Find bracketing control points
+    let lo = pts[0], hi = pts[pts.length - 1];
+    for (let j = 0; j < pts.length - 1; j++) {
+      if (hu >= pts[j].hu && hu <= pts[j+1].hu) {
+        lo = pts[j]; hi = pts[j+1]; break;
+      }
+    }
+    const t = hi.hu === lo.hu ? 0 : (hu - lo.hu) / (hi.hu - lo.hu);
+    const idx = i * 4;
+    tfData[idx]   = Math.round(lo.r + (hi.r - lo.r) * t);
+    tfData[idx+1] = Math.round(lo.g + (hi.g - lo.g) * t);
+    tfData[idx+2] = Math.round(lo.b + (hi.b - lo.b) * t);
+    tfData[idx+3] = Math.round((lo.a + (hi.a - lo.a) * t) * 255);
+  }
+}
+
+function uploadTFTexture() {
+  if (!gl) return;
+  if (!tfTexture) {
+    tfTexture = gl.createTexture();
+  }
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, tfTexture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, tfData);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TRANSFER FUNCTION EDITOR
+// ═══════════════════════════════════════════════════════════════
+let tfEditorPoints = [];    // [{hu,r,g,b,a}] — the editable points
+let huHistogram = null;     // Float32Array[256] normalized
+let tfDragIdx = -1;         // index of point being dragged
+let tfSelectedIdx = -1;     // selected point for color editing
+let tfEditorActive = false;
+
+function computeHistogram() {
+  if (!volume) return;
+  huHistogram = new Float32Array(256);
+  const range = volume.maxHU - volume.minHU || 1;
+  for (let i = 0; i < volume.data.length; i++) {
+    const bin = Math.floor((volume.data[i] - volume.minHU) / range * 255);
+    if (bin >= 0 && bin < 256) huHistogram[bin]++;
+  }
+  // Normalize with log scale for better visibility
+  let maxH = 0;
+  for (let i = 0; i < 256; i++) {
+    huHistogram[i] = Math.log1p(huHistogram[i]);
+    if (huHistogram[i] > maxH) maxH = huHistogram[i];
+  }
+  if (maxH > 0) for (let i = 0; i < 256; i++) huHistogram[i] /= maxH;
+}
+
+function loadPresetToEditor(name) {
+  const preset = TF_PRESETS[name];
+  if (!preset) return;
+  tfEditorPoints = preset.points.map(p => ({...p}));
+  tfSelectedIdx = -1;
+}
+
+function huToCanvasX(hu, w) {
+  if (!volume) return 0;
+  return ((hu - volume.minHU) / (volume.maxHU - volume.minHU)) * w;
+}
+function canvasXToHU(x, w) {
+  if (!volume) return 0;
+  return volume.minHU + (x / w) * (volume.maxHU - volume.minHU);
+}
+function alphaToCanvasY(a, h) { return h - a * (h - 4); }
+function canvasYToAlpha(y, h) { return Math.max(0, Math.min(1, (h - y) / (h - 4))); }
+
+function drawTFEditor() {
+  const c = document.getElementById('tf-editor');
+  if (!c) return;
+  const ctx2 = c.getContext('2d');
+  const w = c.width, h = c.height;
+  ctx2.clearRect(0, 0, w, h);
+
+  // Background
+  ctx2.fillStyle = '#0a0d0f';
+  ctx2.fillRect(0, 0, w, h);
+
+  // Histogram bars
+  if (huHistogram) {
+    for (let i = 0; i < 256; i++) {
+      const barH = huHistogram[i] * (h - 8);
+      const x = (i / 255) * w;
+      ctx2.fillStyle = 'rgba(30,50,40,0.7)';
+      ctx2.fillRect(x, h - barH, w/256 + 1, barH);
+    }
+  }
+
+  // Draw TF color band at bottom (8px)
+  for (let i = 0; i < 256; i++) {
+    const idx = i * 4;
+    ctx2.fillStyle = `rgb(${tfData[idx]},${tfData[idx+1]},${tfData[idx+2]})`;
+    ctx2.fillRect((i/255)*w, h-6, w/256+1, 6);
+  }
+
+  // Draw opacity curve
+  if (tfEditorPoints.length > 1) {
+    ctx2.beginPath();
+    ctx2.strokeStyle = 'rgba(0,255,136,0.6)';
+    ctx2.lineWidth = 1.5;
+    for (let i = 0; i < tfEditorPoints.length; i++) {
+      const p = tfEditorPoints[i];
+      const px = huToCanvasX(p.hu, w);
+      const py = alphaToCanvasY(p.a, h);
+      if (i === 0) ctx2.moveTo(px, py); else ctx2.lineTo(px, py);
+    }
+    ctx2.stroke();
+
+    // Fill under curve with gradient
+    ctx2.lineTo(huToCanvasX(tfEditorPoints[tfEditorPoints.length-1].hu, w), h-6);
+    ctx2.lineTo(huToCanvasX(tfEditorPoints[0].hu, w), h-6);
+    ctx2.closePath();
+    ctx2.fillStyle = 'rgba(0,255,136,0.06)';
+    ctx2.fill();
+  }
+
+  // Draw control points
+  for (let i = 0; i < tfEditorPoints.length; i++) {
+    const p = tfEditorPoints[i];
+    const px = huToCanvasX(p.hu, w);
+    const py = alphaToCanvasY(p.a, h);
+    const r = i === tfSelectedIdx ? 7 : 5;
+
+    // Point circle
+    ctx2.beginPath();
+    ctx2.arc(px, py, r, 0, Math.PI*2);
+    ctx2.fillStyle = `rgb(${p.r},${p.g},${p.b})`;
+    ctx2.fill();
+    ctx2.strokeStyle = i === tfSelectedIdx ? '#00ff88' : 'rgba(255,255,255,0.8)';
+    ctx2.lineWidth = i === tfSelectedIdx ? 2 : 1;
+    ctx2.stroke();
+  }
+
+  // HU label for selected point
+  if (tfSelectedIdx >= 0 && tfSelectedIdx < tfEditorPoints.length) {
+    const p = tfEditorPoints[tfSelectedIdx];
+    ctx2.fillStyle = '#00ff88';
+    ctx2.font = '9px "Share Tech Mono", monospace';
+    ctx2.fillText(`HU:${Math.round(p.hu)} α:${p.a.toFixed(2)}`, 4, 10);
+  }
+}
+
+// Alias for compatibility
+function drawTFPreview() { drawTFEditor(); }
+
+function rebuildTFFromEditor() {
+  if (tfEditorPoints.length < 2) return;
+  // Sort points by HU
+  tfEditorPoints.sort((a, b) => a.hu - b.hu);
+  // Rebuild tfData from editor points
+  if (!volume) return;
+  const huMin = volume.minHU, huMax = volume.maxHU;
+  const range = huMax - huMin || 1;
+  const pts = tfEditorPoints;
+  for (let i = 0; i < 256; i++) {
+    const hu = huMin + (i / 255) * range;
+    let lo = pts[0], hi = pts[pts.length - 1];
+    for (let j = 0; j < pts.length - 1; j++) {
+      if (hu >= pts[j].hu && hu <= pts[j+1].hu) { lo = pts[j]; hi = pts[j+1]; break; }
+    }
+    const t = hi.hu === lo.hu ? 0 : (hu - lo.hu) / (hi.hu - lo.hu);
+    const idx = i * 4;
+    tfData[idx]   = Math.round(lo.r + (hi.r - lo.r) * t);
+    tfData[idx+1] = Math.round(lo.g + (hi.g - lo.g) * t);
+    tfData[idx+2] = Math.round(lo.b + (hi.b - lo.b) * t);
+    tfData[idx+3] = Math.round((lo.a + (hi.a - lo.a) * t) * 255);
+  }
+  if (gl) { uploadTFTexture(); render3D(); }
+  drawTFEditor();
+}
+
+function findClosestPoint(mx, my, w, h) {
+  let bestDist = 15; // max grab distance in pixels
+  let bestIdx = -1;
+  for (let i = 0; i < tfEditorPoints.length; i++) {
+    const p = tfEditorPoints[i];
+    const px = huToCanvasX(p.hu, w);
+    const py = alphaToCanvasY(p.a, h);
+    const d = Math.sqrt((mx-px)**2 + (my-py)**2);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  return bestIdx;
+}
+
+// Setup editor interaction (called after DOM ready)
+function initTFEditor() {
+  const c = document.getElementById('tf-editor');
+  if (!c) return;
+  const colorPick = document.getElementById('tf-color-pick');
+
+  c.addEventListener('mousedown', e => {
+    const rect = c.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width * c.width;
+    const my = (e.clientY - rect.top) / rect.height * c.height;
+
+    if (e.button === 2) {
+      // Right click: delete point (if > 2 points)
+      e.preventDefault();
+      const idx = findClosestPoint(mx, my, c.width, c.height);
+      if (idx >= 0 && tfEditorPoints.length > 2) {
+        tfEditorPoints.splice(idx, 1);
+        if (tfSelectedIdx >= tfEditorPoints.length) tfSelectedIdx = -1;
+        rebuildTFFromEditor();
+      }
+      return;
+    }
+
+    // Left click: find or create point
+    const idx = findClosestPoint(mx, my, c.width, c.height);
+    if (idx >= 0) {
+      // Grab existing point
+      tfDragIdx = idx;
+      tfSelectedIdx = idx;
+      // Update color picker
+      const p = tfEditorPoints[idx];
+      colorPick.value = '#' + [p.r,p.g,p.b].map(v=>v.toString(16).padStart(2,'0')).join('');
+    } else {
+      // Create new point
+      const hu = canvasXToHU(mx, c.width);
+      const a = canvasYToAlpha(my, c.height);
+      // Interpolate color from existing TF
+      const tIdx = Math.floor(((hu - (volume?.minHU||0)) / ((volume?.maxHU||1) - (volume?.minHU||0))) * 255);
+      const ci = Math.max(0, Math.min(255, tIdx)) * 4;
+      tfEditorPoints.push({hu, r:tfData[ci], g:tfData[ci+1], b:tfData[ci+2], a});
+      tfEditorPoints.sort((a,b) => a.hu - b.hu);
+      // Find the new point's index
+      tfSelectedIdx = tfEditorPoints.findIndex(p => p.hu === hu);
+      tfDragIdx = tfSelectedIdx;
+      const p = tfEditorPoints[tfSelectedIdx];
+      colorPick.value = '#' + [p.r,p.g,p.b].map(v=>v.toString(16).padStart(2,'0')).join('');
+      rebuildTFFromEditor();
+    }
+    drawTFEditor();
+    tfEditorActive = true;
+  });
+
+  // Use window-level mousemove for smooth dragging outside canvas
+  window.addEventListener('mousemove', e => {
+    if (tfDragIdx < 0) return;
+    e.preventDefault();
+    const rect = c.getBoundingClientRect();
+    const mx = Math.max(0, Math.min(c.width,
+      (e.clientX - rect.left) / rect.width * c.width));
+    const my = Math.max(0, Math.min(c.height,
+      (e.clientY - rect.top) / rect.height * c.height));
+    const p = tfEditorPoints[tfDragIdx];
+    p.hu = canvasXToHU(mx, c.width);
+    p.a = canvasYToAlpha(my, c.height);
+    rebuildTFFromEditor();
+  });
+
+  window.addEventListener('mouseup', () => {
+    if (tfDragIdx >= 0) { tfDragIdx = -1; }
+  });
+
+  c.addEventListener('contextmenu', e => e.preventDefault());
+
+  // Color picker
+  colorPick.addEventListener('input', e => {
+    if (tfSelectedIdx < 0 || tfSelectedIdx >= tfEditorPoints.length) return;
+    const hex = e.target.value;
+    const p = tfEditorPoints[tfSelectedIdx];
+    p.r = parseInt(hex.slice(1,3), 16);
+    p.g = parseInt(hex.slice(3,5), 16);
+    p.b = parseInt(hex.slice(5,7), 16);
+    rebuildTFFromEditor();
+  });
+}
+
+// Initialize editor when DOM is ready
+document.addEventListener('DOMContentLoaded', initTFEditor);
+// Also try immediately in case DOMContentLoaded already fired
+if (document.readyState !== 'loading') initTFEditor();
+
+
+
+function setTFPreset(name) {
+  activeTFPreset = name;
+  document.querySelectorAll('#sec-tf .mode-btn').forEach(b => b.classList.remove('active'));
+  const el = document.getElementById('tf-' + name);
+  if (el) el.classList.add('active');
+  // Auto-set WW/WC from preset
+  const pr = TF_PRESETS[name];
+  if (pr && pr.ww) {
+    document.getElementById('sl3-ww').value = pr.ww;
+    document.getElementById('sl3-wc').value = pr.wc;
+    ww3D = pr.ww; wc3D = pr.wc;
+    document.getElementById('lbl3-ww').textContent = pr.ww;
+    document.getElementById('lbl3-wc').textContent = pr.wc;
+  }
+  loadPresetToEditor(name);
+  buildTFData(name);
+  drawTFEditor();
+  if (gl) { uploadTFTexture(); render3D(); }
+}
+
+function onOpacitySlider() {
+  globalOpacity = parseInt(document.getElementById('sl-opacity').value) / 100;
+  document.getElementById('lbl-opacity').textContent = Math.round(globalOpacity * 100) + '%';
+  if (glReady) render3D();
+}
+
+function setLightMode(mode) {
+  lightMode = mode;
+  document.querySelectorAll('#lt-off,#lt-cam,#lt-top').forEach(b=>b.classList.remove('active'));
+  document.getElementById(mode===0?'lt-off':mode===1?'lt-cam':'lt-top').classList.add('active');
+  if (glReady) render3D();
+}
+
+function onLightParams() {
+  ambientVal = parseInt(document.getElementById('sl-ambient').value) / 100;
+  wrapVal = parseInt(document.getElementById('sl-wrap').value) / 100;
+  document.getElementById('lbl-ambient').textContent = ambientVal.toFixed(2);
+  document.getElementById('lbl-wrap').textContent = wrapVal.toFixed(1);
+  if (glReady) render3D();
+}
+
+
+// ═══════════════════════════════════════════════════════════════
+// CROP CONTROLS
+// ═══════════════════════════════════════════════════════════════
+function onCropSlider() {
+  cropMin[0] = parseInt(document.getElementById('sl-cx0').value) / 100;
+  cropMax[0] = parseInt(document.getElementById('sl-cx1').value) / 100;
+  cropMin[1] = parseInt(document.getElementById('sl-cy0').value) / 100;
+  cropMax[1] = parseInt(document.getElementById('sl-cy1').value) / 100;
+  cropMin[2] = parseInt(document.getElementById('sl-cz0').value) / 100;
+  cropMax[2] = parseInt(document.getElementById('sl-cz1').value) / 100;
+  huThreshold = parseInt(document.getElementById('sl-hu-thresh').value);
+  // Update labels
+  document.getElementById('lbl-cx').textContent =
+    Math.round(cropMin[0]*100) + ' – ' + Math.round(cropMax[0]*100) + '%';
+  document.getElementById('lbl-cy').textContent =
+    Math.round(cropMin[1]*100) + ' – ' + Math.round(cropMax[1]*100) + '%';
+  document.getElementById('lbl-cz').textContent =
+    Math.round(cropMin[2]*100) + ' – ' + Math.round(cropMax[2]*100) + '%';
+  document.getElementById('lbl-hu-thresh').textContent = huThreshold + ' HU';
+  if (glReady) render3D();
+}
+
+function resetCrop() {
+  cropMin = [0, 0, 0]; cropMax = [1, 1, 1]; huThreshold = -1000;
+  document.getElementById('sl-cx0').value = 0;
+  document.getElementById('sl-cx1').value = 100;
+  document.getElementById('sl-cy0').value = 0;
+  document.getElementById('sl-cy1').value = 100;
+  document.getElementById('sl-cz0').value = 0;
+  document.getElementById('sl-cz1').value = 100;
+  document.getElementById('sl-hu-thresh').value = -1000;
+  onCropSlider();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CLIPPING CONTROLS
+// ═══════════════════════════════════════════════════════════════
+function setClipMode(mode) {
+  document.querySelectorAll('#clip-off,#clip-clip,#clip-slice').forEach(b => b.classList.remove('active'));
+  document.getElementById('clip-' + mode).classList.add('active');
+  const controls = document.getElementById('clip-controls');
+  if (mode === 'off') {
+    clipAxis = 0; clipMode = 0;
+    controls.style.display = 'none';
+  } else {
+    clipMode = mode === 'slice' ? 1 : 0;
+    if (clipAxis === 0) clipAxis = 3; // default to axial
+    controls.style.display = 'block';
+    updateClipAxisBtns();
+  }
+  if (glReady) render3D();
+}
+
+function setClipAxis(axis) {
+  clipAxis = axis;
+  updateClipAxisBtns();
+  if (glReady) render3D();
+}
+
+function updateClipAxisBtns() {
+  document.querySelectorAll('#ax-x,#ax-y,#ax-z').forEach(b => b.classList.remove('active'));
+  const id = clipAxis === 1 ? 'ax-x' : clipAxis === 2 ? 'ax-y' : 'ax-z';
+  document.getElementById(id).classList.add('active');
+}
+
+function onClipSlider() {
+  clipPos = parseInt(document.getElementById('sl-clip').value) / 100;
+  clipFlip = document.getElementById('chk-clip-flip').checked ? 1 : 0;
+  document.getElementById('lbl-clip').textContent = Math.round(clipPos * 100) + '%';
   if (glReady) render3D();
 }
 
