@@ -135,6 +135,12 @@ module blech_takt(posX=0,posY=0,posZ=0) {
             }
 }
 
+module blech_verbinder(lenX=0,lenY=0,posX=0,posY=0,posZ=0) {
+    translate([posX*quad, posY*quad,posZ*dicke])
+        color(col_gelb)
+            platte(lenX,lenY);
+}
+
 module blech_eingabe(posX=0,posY=0,posZ=0) {
     oLen = 2;
     translate([(posX-1)*quad, posY*quad,posZ*dicke])
@@ -256,7 +262,8 @@ module Z1_XOR(print=false,A=false,B=false,t=false, gehause=false) {
     if ( print == false ) {
         if ( gehause ) {
             gehaeuse_boden(2);
-//            gehaeuse_deckel_and();
+            translate([0,0,dicke])
+                gehaeuse_deckel_and();
         }
         
         inA = (A) ? 1 : 0;
@@ -319,4 +326,20 @@ module Z1_Switch(print=false,A=false,t=false, gehause=false) {
     }
 }
 
-Z1_AND(false,false,false,true,true);
+module halbaddierer(inA=false,inB=false, takt=false) {
+    
+    
+    Z1_AND(false,inA,inB,takt,true);
+
+    translate([25,0,0])
+        Z1_XOR(false,inA,inB,takt,true);
+    
+    gehaeuse_deckel_and();
+    if ( true == takt ) {
+        blech_verbinder(22,3,-1,13,3);
+    } else {
+        blech_verbinder(22,3,-1,14,3);
+    }
+}
+
+halbaddierer(true,true,false);
