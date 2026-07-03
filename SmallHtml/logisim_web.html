@@ -48,7 +48,7 @@ body {
 <body>
 <div id="toolbar">
   <span style="color:#58a6ff;font-weight:bold;letter-spacing:.5px">⬡ Logisim Web</span>
-  <span style="color:#6e7681;font-size:11px" title="Build-Kennung">build&nbsp;v14&nbsp;·&nbsp;25.06</span>
+  <span style="color:#6e7681;font-size:11px" title="Build-Kennung">build&nbsp;v31&nbsp;·&nbsp;25.06</span>
   <span style="color:#30363d">│</span>
   <button class="tb" onclick="fileInput.click()">📂 .circ laden</button>
   <input id="fileInput" type="file" accept=".circ" style="display:none">
@@ -64,6 +64,17 @@ body {
   <button class="tb" onclick="zoom(1.25)">+</button>
   <button class="tb" onclick="zoom(0.8)">−</button>
   <div id="status">Keine Datei geladen</div>
+</div>
+<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;align-items:center;justify-content:center">
+  <div style="background:#161b22;border:1px solid #388bfd;border-radius:8px;padding:16px;min-width:340px;max-width:80vw">
+    <div id="modalTitle" style="color:#c9d1d9;font:12px monospace;white-space:pre-line;margin-bottom:10px"></div>
+    <input id="modalInput" type="text" spellcheck="false"
+      style="width:100%;box-sizing:border-box;background:#0d1117;color:#79c0ff;border:1px solid #30363d;border-radius:4px;padding:6px 8px;font:12px monospace">
+    <div style="margin-top:10px;text-align:right">
+      <button class="tb" id="modalCancel">Abbrechen</button>
+      <button class="tb" id="modalOk" style="margin-left:8px">OK</button>
+    </div>
+  </div>
 </div>
 <canvas id="canvas"></canvas>
 <div id="tooltip"></div>
@@ -110,7 +121,8 @@ function parseCircuit(el) {
       loc:  parseXY(x.getAttribute('loc')),
       attrs: {}, val: null,
     };
-    for (const a of x.querySelectorAll('a')) comp.attrs[a.getAttribute('name')] = a.getAttribute('val');
+    for (const a of x.querySelectorAll('a'))
+      comp.attrs[a.getAttribute('name')] = a.getAttribute('val') ?? a.textContent;
     c.comps.push(comp);
   }
   return c;
@@ -144,10 +156,15 @@ function gateInputPorts(type, n, size, w) {
     if (n % 2 === 1) ys.push(0);
     for (let i = 1; i <= half; i++) ys.push(i*10);
   }
-  // x offset: for AND/NAND with n>=3, ports are pushed out by 10 px
-  // (because the curved right side of the D-shape would put middle inputs inside the body)
-  const isAndType = type === 'AND Gate' || type === 'NAND Gate';
-  const xOff = (isAndType && n >= 3) ? -(size + 10) : -size;
+  // x offset — empirisch verifiziert (globaler Gate-Verifier über cpu.circ):
+  //   AND/OR:    Eingänge bei -size            (AND n3/s50 → -50 ✓)
+  //   NAND/NOR:  Eingänge bei -(size+10)       (Bubble; NAND n2/s50 → -60 ✓)
+  //   XOR:       -(size+10)  (Extra-Bogen, Logisim-Konvention)
+  //   XNOR:      -(size+20)  (Bogen + Bubble)
+  let extra = 0;
+  if (type === 'NAND Gate' || type === 'NOR Gate' || type === 'XOR Gate') extra = 10;
+  else if (type === 'XNOR Gate') extra = 20;
+  const xOff = -(size + extra);
   return ys.map((dy, i) => ({ name:`in${i}`, io:'in', dx: xOff, dy, w }));
 }
 function getPortsEast(type, attrs) {
@@ -188,6 +205,22 @@ function getPortsEast(type, attrs) {
       // Spread offset along the perpendicular axis, then mapped per facing.
       // left/right get sign-flipped on the "negative" facings (west, south);
       // center is an absolute signed position and must NOT be flipped.
+      // Logisim nummeriert die Splitter-Beine nach BILDSCHIRM-Position:
+      //   E/W-facing (vertikale Fächer):  Leg 0 = oberster Fan (min y)
+      //   N/S-facing (horizontale Fächer): Leg 0 = rechtester Fan (max x)
+      // Belege: ZyklusCounter (east, Bits 0/1 oben), CommandDecoder (south,
+      // Opcode-Bits rechts), Register 8Bit (logisim) (west, E1=Bit0 oben —
+      // nur so ist die Identitäts-Verdrahtung E_n→A_n konsistent).
+      // Attrs bitN=L routen Bit N explizit auf Leg L.
+      const legOfBit = [];
+      for (let b = 0; b < incom; b++) {
+        const a = attrs['bit' + b];
+        legOfBit[b] = (a !== undefined && a !== 'none') ? parseInt(a) : Math.floor(b / bitsPerFan);
+      }
+      const bitOfLeg = {};
+      for (let b = incom - 1; b >= 0; b--) bitOfLeg[legOfBit[b]] = b;
+      // Fan-Positionen berechnen
+      const fanPos = [];
       for (let i = 0; i < fanout; i++) {
         let spread;
         if      (appear === 'right')  spread =  (i + 1) * spacing;
@@ -202,45 +235,65 @@ function getPortsEast(type, attrs) {
           case 'south': dx = spread; dy =  20; break;
           default:      dx =  20; dy = spread;
         }
-        ports.push({ name:`bit${i}`, io:'out', dx, dy, w: bitsPerFan, noFacingRotate:true });
+        fanPos.push({ i, dx, dy });
+      }
+      // Leg-Rang per Position: E/W nach y aufsteigend, N/S nach x absteigend
+      const isVert = facing === 'east' || facing === 'west' || facing === undefined;
+      const order = fanPos.slice().sort((a, b) => isVert ? a.dy - b.dy : b.dx - a.dx);
+      const legAt = new Array(fanout);
+      order.forEach((f, rank) => { legAt[f.i] = rank; });
+      for (const f of fanPos) {
+        const leg = legAt[f.i];
+        const bitIdx = (bitsPerFan === 1) ? (bitOfLeg[leg] ?? leg) : f.i;
+        ports.push({ name:`bit${bitIdx}`, io:'out', dx: f.dx, dy: f.dy, w: bitsPerFan, noFacingRotate:true });
       }
       return ports;
     }
     case 'Multiplexer': {
-      const selW  = Math.max(1, Math.ceil(Math.log2(Math.max(2, parseInt(attrs.select||1)+1))));
-      const numIn = (parseInt(attrs.select || 1) + 1);
-      const dw    = parseInt(attrs.width || 8);
-      const en    = attrs.enable !== 'false';
-      const ports = [{ name:'out', io:'out', dx:0, dy:0, w:dw }];
-      const selBot = (numIn/2) * 10;        // south control row
-      ports.push({ name:'sel', io:'in', dx:-20, dy:selBot, w:selW });
-      if (en) ports.push({ name:'en', io:'in', dx:-30, dy:selBot, w:1 });
+      const selBits = parseInt(attrs.select || 1);
+      const numIn   = 1 << selBits;                 // 2^select Eingänge!
+      const dw      = parseInt(attrs.width || 1);
+      const en      = attrs.enable !== 'false';
+      const ports   = [{ name:'out', io:'out', dx:0, dy:0, w:dw }];
+      // Empirisch (ProgramCounter/ZyklusCounter): 2-Eingang-MUX ist 30 tief,
+      // Eingänge bei ±10; ab 4 Eingängen 40 tief, Eingänge (i-n/2)*10.
+      // selloc='tr' legt den Select nach OBEN, Default unten.
+      const deep = numIn === 2 ? 30 : 40;
+      const ctrlY = numIn === 2 ? (attrs.selloc === 'tr' ? -20 : 20)
+                                : (attrs.selloc === 'tr' ? -(numIn/2)*10 : (numIn/2)*10);
+      ports.push({ name:'sel', io:'in', dx:-20, dy: ctrlY, w:selBits });
+      if (en) ports.push({ name:'en', io:'in', dx:-30, dy: ctrlY, w:1 });
       for (let i=0; i<numIn; i++) {
-        ports.push({ name:`in${i}`, io:'in', dx:-40, dy:(i - numIn/2)*10, w:dw });
+        const dy = numIn === 2 ? (i === 0 ? -10 : 10) : (i - numIn/2) * 10;
+        ports.push({ name:`in${i}`, io:'in', dx:-deep, dy, w:dw });
       }
       return ports;
     }
     case 'Demultiplexer': {
-      const numOut = (parseInt(attrs.select || 1) + 1);
-      const selW   = Math.max(1, Math.ceil(Math.log2(Math.max(2, numOut))));
-      const dw     = parseInt(attrs.width || 1);
-      const en     = attrs.enable !== 'false';
-      // loc sits at the INPUT (west, narrow end); outputs fan out east at dx=+40.
-      const ports  = [{ name:'in', io:'in', dx:0, dy:0, w:dw }];
-      const selBot = (numOut/2) * 10;
-      ports.push({ name:'sel', io:'in', dx:20, dy:selBot, w:selW });
-      if (en) ports.push({ name:'en', io:'in', dx:30, dy:selBot, w:1 });
+      const selBits = parseInt(attrs.select || 1);
+      const numOut  = 1 << selBits;
+      const dw      = parseInt(attrs.width || 1);
+      const en      = attrs.enable !== 'false';
+      const ports   = [{ name:'in', io:'in', dx:0, dy:0, w:dw }];
+      const deep = numOut === 2 ? 30 : 40;
+      const ctrlY = numOut === 2 ? (attrs.selloc === 'tr' ? -20 : 20)
+                                 : (attrs.selloc === 'tr' ? -(numOut/2)*10 : (numOut/2)*10);
+      ports.push({ name:'sel', io:'in', dx:20, dy: ctrlY, w:selBits });
+      if (en) ports.push({ name:'en', io:'in', dx:30, dy: ctrlY, w:1 });
       for (let i=0; i<numOut; i++) {
-        ports.push({ name:`out${i}`, io:'out', dx:40, dy:(i - numOut/2)*10, w:dw });
+        const dy = numOut === 2 ? (i === 0 ? -10 : 10) : (i - numOut/2) * 10;
+        ports.push({ name:`out${i}`, io:'out', dx:deep, dy, w:dw });
       }
       return ports;
     }
     case 'Register': {
+      // Empirisch aus 'Register 8Bit (logisim)': D(-30,0)←Bus, en(-30,10)←Enable,
+      // clk(-20,20)←CLK (Südkante), Q(0,0). Box x∈[-30,0], y∈[-20,20].
       const dw = parseInt(attrs.width || 8);
       return [
-        { name:'D',  io:'in',  dx:-40, dy:  0, w:dw },
-        { name:'clk',io:'in',  dx:-30, dy: 20, w:1  },
-        { name:'en', io:'in',  dx:-20, dy: 20, w:1  },
+        { name:'D',  io:'in',  dx:-30, dy:  0, w:dw },
+        { name:'en', io:'in',  dx:-30, dy: 10, w:1  },
+        { name:'clk',io:'in',  dx:-20, dy: 20, w:1  },
         { name:'clr',io:'in',  dx:-10, dy: 20, w:1  },
         { name:'Q',  io:'out', dx:  0, dy:  0, w:dw },
       ];
@@ -257,9 +310,12 @@ function getPortsEast(type, attrs) {
         { name:'nQ', io:'out', dx:  0, dy: 20, w:1 },
       ];
     case 'D Flip-Flop':
+      // Logisim-Eigenheit: bei Ein-Dateneingang-FFs (D, T) liegt der TAKT oben
+      // (-40,0) und der Dateneingang darunter (-40,20) — anders als bei JK/SR
+      // (Takt in der Mitte). Empirisch via Pin-Labels in 'D-FlipFlop (Logisim)'.
       return [
-        { name:'D',  io:'in',  dx:-40, dy:  0, w:1 },
-        { name:'CLK',io:'in',  dx:-40, dy: 20, w:1 },
+        { name:'CLK',io:'in',  dx:-40, dy:  0, w:1 },
+        { name:'D',  io:'in',  dx:-40, dy: 20, w:1 },
         { name:'pre',io:'in',  dx:-30, dy: 30, w:1 },
         { name:'en', io:'in',  dx:-20, dy: 30, w:1 },
         { name:'clr',io:'in',  dx:-10, dy: 30, w:1 },
@@ -286,13 +342,28 @@ function getPortsEast(type, attrs) {
         { name:'bout',io:'out', dx:-20, dy: 20, w:1  },
       ];
     }
-    case 'ROM': case 'RAM': {
+    case 'RAM': {
+      // Empirisch aus RAM-AdressBus verifiziert (separate bus):
+      //   addr(-140,0)←AdressBus  din(-140,20)←DataInBus
+      //   we(-110,40)←Write  clk(-70,40)←Takt  dout(0,0)→DataOutBus
+      const aw = parseInt(attrs.addrWidth || 8);
+      const dw = parseInt(attrs.dataWidth || 8);
+      const ports = [
+        { name:'addr', io:'in',  dx:-140, dy:  0, w:aw },
+        { name:'dout', io:'out', dx:   0, dy:  0, w:dw },
+        { name:'we',   io:'in',  dx:-110, dy: 40, w:1  },
+        { name:'clk',  io:'in',  dx: -70, dy: 40, w:1  },
+      ];
+      if ((attrs.bus || 'combined') === 'separate')
+        ports.push({ name:'din', io:'in', dx:-140, dy:20, w:dw });
+      return ports;
+    }
+    case 'ROM': {
       const aw = parseInt(attrs.addrWidth || 8);
       const dw = parseInt(attrs.dataWidth || 8);
       return [
-        { name:'addr', io:'in',  dx:-40, dy:-10, w:aw },
-        { name:'data', io:'out', dx:  0, dy:  0, w:dw },
-        { name:'sel',  io:'in',  dx:-20, dy: 20, w:1  },
+        { name:'addr', io:'in',  dx:-140, dy:0, w:aw },
+        { name:'dout', io:'out', dx:   0, dy:0, w:dw },
       ];
     }
     default: return [];
@@ -343,15 +414,32 @@ function getSubBoxDims(circName, proj) {
   //   - maxEW middle rows for E/W pins
   //   - bottom row if S > 0
   const hasN = N > 0, hasS = S > 0;
-  const rows = (hasN ? 1 : 0) + maxEW + (hasS ? 1 : 0);
+  // v17 rules — verified against ALL 68 subcircuit instances in cpu.circ:
+  //   1. E/W pin block has a minimum of 2 rows (maxEWeff)
+  //   2. width = (maxNS+1)*10, min 30 (no extra padding)
+  //   3. the side with fewer E/W pins is grid-centred: floor((maxEWeff-count)/2)*10
+  //   4. N/S pins are grid-centred horizontally: floor((units-(count-1))/2)*10
+  //   5. loc anchors at first EAST pin; if E==0, leftmost N (else S) pin at loc.x
+  const maxEWeff = Math.max(maxEW, 2);
+  const rows = (hasN ? 1 : 0) + maxEWeff + (hasS ? 1 : 0);
   const h = Math.max(0, (rows - 1) * 10);
-  // Box top:
-  //   - E == 1 → centered around loc.y → boxTop = -(maxEW-1)*5 + (hasN ? -10 : 0)
-  //   - Otherwise → loc.y at top edge → boxTop = 0
-  const boxTop = (E === 1) ? -(maxEW - 1) * 5 + (hasN ? -10 : 0) : 0;
+  const eastOff = E > 0 ? Math.floor((maxEWeff - E) / 2) * 10 : 0;
+  const westOff = W > 0 ? Math.floor((maxEWeff - W) / 2) * 10 : 0;
+  const boxTop = (E > 0) ? -eastOff - (hasN ? 10 : 0) : 0;
+  const w = Math.max(30, (maxNS + 1) * 10);
+  const units = w / 10;
+  const northOff = N > 0 ? Math.floor((units - (N - 1)) / 2) * 10 : 0;
+  const southOff = S > 0 ? Math.floor((units - (S - 1)) / 2) * 10 : 0;
+  let boxLeft, boxRight;
+  if (E === 0 && (hasN || hasS)) {
+    boxLeft = -(N > 0 ? northOff : southOff);
+    boxRight = boxLeft + w;
+  } else {
+    boxLeft = -w; boxRight = 0;
+  }
+  const cx = (boxLeft + boxRight) / 2;
   return {
-    w: Math.max(30, (maxNS + 1) * 10 + 20),
-    h, boxTop,
+    w, h, boxTop, boxLeft, boxRight, cx, eastOff, westOff, northOff, southOff,
     west: sides.west, east: sides.east, north: sides.north, south: sides.south,
     E, W, N, S, maxEW, maxNS, hasN, hasS,
   };
@@ -359,41 +447,37 @@ function getSubBoxDims(circName, proj) {
 
 function getSubPorts(circName, proj) {
   const dims = getSubBoxDims(circName, proj);
-  const W = dims.w, boxTop = dims.boxTop;
-  // y position of the EW pin group (between north row and south row):
-  const ewStartY = boxTop + (dims.hasN ? 10 : 0);
-  const ewEndY   = ewStartY + (dims.maxEW - 1) * 10;
-  const southY   = boxTop + dims.h;
+  const { boxLeft, boxRight, cx } = dims;
+  const ewStartY = dims.boxTop + (dims.hasN ? 10 : 0);
+  const southY   = dims.boxTop + dims.h;
   const ports = [];
-  // West pins
+  // West pins (left edge), grid-centred by westOff
   dims.west.forEach((p, i) => {
     const w = parseInt(p.attrs.width || 1);
     const isOut = p.attrs.output === 'true';
-    const dy = (dims.W === 1) ? (ewStartY + ewEndY) / 2 : ewStartY + i * 10;
     ports.push({ name: p.attrs.label || `west${i}`, io: isOut ? 'out' : 'in',
-                 dx: -W, dy, w });
+                 dx: boxLeft, dy: ewStartY + dims.westOff + i * 10, w });
   });
-  // East pins
+  // East pins (right edge), grid-centred by eastOff
   dims.east.forEach((p, i) => {
     const w = parseInt(p.attrs.width || 1);
     const isOut = p.attrs.output === 'true';
-    const dy = (dims.E === 1) ? (ewStartY + ewEndY) / 2 : ewStartY + i * 10;
     ports.push({ name: p.attrs.label || `east${i}`, io: isOut ? 'out' : 'in',
-                 dx: 0, dy, w });
+                 dx: boxRight, dy: ewStartY + dims.eastOff + i * 10, w });
   });
-  // North pins at top edge of box
+  // North pins (top edge), grid-centred by northOff
   dims.north.forEach((p, i) => {
     const w = parseInt(p.attrs.width || 1);
     const isOut = p.attrs.output === 'true';
     ports.push({ name: p.attrs.label || `north${i}`, io: isOut ? 'out' : 'in',
-                 dx: -W + (i + 1) * 10, dy: boxTop, w });
+                 dx: boxLeft + dims.northOff + i * 10, dy: dims.boxTop, w });
   });
-  // South pins at bottom edge of box
+  // South pins (bottom edge), grid-centred by southOff
   dims.south.forEach((p, i) => {
     const w = parseInt(p.attrs.width || 1);
     const isOut = p.attrs.output === 'true';
     ports.push({ name: p.attrs.label || `south${i}`, io: isOut ? 'out' : 'in',
-                 dx: -W + (i + 1) * 10, dy: southY, w });
+                 dx: boxLeft + dims.southOff + i * 10, dy: southY, w });
   });
   return ports;
 }
@@ -411,7 +495,9 @@ function buildNets(circ, proj) {
   const key = ({x,y}) => `${x},${y}`;
   for (const w of circ.wires) {
     const ka = key(w.from), kb = key(w.to);
-    parent.set(ka, ka); parent.set(kb, kb);
+    // WICHTIG: keine Re-Initialisierung! parent.set(ka,ka) würde bereits
+    // verkettete Knoten aus ihrem Netz reißen (Netz-Fragmentierung je nach
+    // Wire-Reihenfolge). find() legt fehlende Knoten selbst an.
     union(ka, kb);
   }
   const roots = new Map();
@@ -429,17 +515,63 @@ function buildNets(circ, proj) {
     if (comp.type === 'Text') continue;
     const ports = getAbsPorts(comp, proj);
     const bound = [];
+    // Optionale Steuer-Ports (in Logisim oft unbeschaltet, mit aktivem Default):
+    // dürfen NICHT per Toleranz an Nachbar-Netze binden — nur exakter Treffer.
+    // (Gefunden am ZyklusCounter: unbeschaltetes Register-en klaute das D-Bus-Netz
+    //  und fror den Zähler beim Reset ein.)
+    const exactOnly = new Set(['en', 'clr', 'pre']);
     for (const p of ports) {
       let bestNet = -1, bestDist = TOL * TOL;
-      for (const [k, nid] of coordToNet) {
-        const [px, py] = k.split(',').map(Number);
-        const d2 = (px-p.ax)**2 + (py-p.ay)**2;
-        if (d2 < bestDist) { bestDist = d2; bestNet = nid; }
+      if (exactOnly.has(p.name)) {
+        const nid = coordToNet.get(`${p.ax},${p.ay}`);
+        bestNet = nid !== undefined ? nid : -1;
+      } else {
+        for (const [k, nid] of coordToNet) {
+          const [px, py] = k.split(',').map(Number);
+          const d2 = (px-p.ax)**2 + (py-p.ay)**2;
+          if (d2 < bestDist) { bestDist = d2; bestNet = nid; }
+        }
       }
       if (bestNet >= 0 && p.w > netWidth[bestNet]) netWidth[bestNet] = p.w;
       bound.push({ ...p, netId: bestNet });
     }
     compPorts.push({ comp, ports: bound });
+  }
+  // Port-Kontakt-Pass: In Logisim verbinden sich Ports, die auf exakt derselben
+  // Koordinate liegen, auch OHNE Draht (z.B. Pin direkt auf Splitter-Combined in
+  // 'AND 8Bit'). Ungebundene Ports an belegten Koordinaten bekommen das dortige
+  // Netz; teilen sich 2+ ungebundene Ports eine Koordinate, entsteht ein neues Netz.
+  {
+    const coordPorts = new Map();   // "x,y" → Liste gebundener Port-Objekte
+    for (const cp of compPorts)
+      for (const p of cp.ports) {
+        const k = `${p.ax},${p.ay}`;
+        if (!coordPorts.has(k)) coordPorts.set(k, []);
+        coordPorts.get(k).push(p);
+      }
+    for (const [k, plist] of coordPorts) {
+      if (plist.length < 2 && !coordToNet.has(k)) continue;
+      let nid = coordToNet.get(k);
+      if (nid === undefined) nid = plist.find(p => p.netId >= 0)?.netId;
+      if (nid === undefined) {
+        if (plist.length < 2) continue;
+        nid = netVals.length;
+        netVals.push(null); netWidth.push(1);
+        coordToNet.set(k, nid);
+      }
+      for (const p of plist) {
+        if (p.netId < 0) p.netId = nid;
+        if (p.w > netWidth[nid]) netWidth[nid] = p.w;
+      }
+    }
+  }
+  // Treiber-Analyse: Netze mit echtem (Nicht-Splitter-)Treiber. Splitter nutzen
+  // das, um pro Bit nur in die ungetriebene Richtung zu propagieren.
+  const netDriven = new Array(netVals.length).fill(false);   // inkl. Kontakt-Netze
+  for (const cp of compPorts) {
+    if (cp.comp.type === 'Splitter') continue;
+    for (const p of cp.ports)
+      if (p.io === 'out' && p.netId >= 0) netDriven[p.netId] = true;
   }
   const tunnelNets = new Map();
   for (const { comp, ports } of compPorts) {
@@ -449,13 +581,15 @@ function buildNets(circ, proj) {
       if (p && p.netId >= 0 && !tunnelNets.has(lbl)) tunnelNets.set(lbl, p.netId);
     }
   }
-  return { coordToNet, netVals, netWidth, compPorts, numNets, tunnelNets };
+  return { coordToNet, netVals, netWidth, compPorts, numNets, tunnelNets, netDriven };
 }
 
 // ════════════════════════ SIMULATION ════════════════════════
-function simulate(circ, nets, proj, regState, clkVal) {
-  const { netVals, compPorts, tunnelNets } = nets;
-  netVals.fill(null);
+function simulate(circ, nets, proj, regState, clkVal, path = '') {
+  const { compPorts, tunnelNets } = nets;
+  let netVals = nets.netVals;
+  // KEIN fill(null): Netzwerte bleiben zwischen Läufen erhalten — nur so
+  // können gate-basierte Latches (Rückkopplung) ihren Zustand halten.
   let changed = true, iters = 0;
   while (changed && iters++ < 200) {
     changed = false;
@@ -475,7 +609,7 @@ function simulate(circ, nets, proj, regState, clkVal) {
       const inN = (i) => inVal(`in${i}`);
 
       if (type === 'Constant') {
-        setOut('out', parseInt(comp.attrs.value || '0x0', 16)); continue;
+        setOut('out', parseInt(comp.attrs.value || '0x1', 16)); continue;   // Logisim-Default: 1
       }
       if (type === 'Clock') { setOut('out', clkVal); continue; }
       if (type === 'Pin') {
@@ -506,26 +640,34 @@ function simulate(circ, nets, proj, regState, clkVal) {
       const allDefined = ins.every(v => v !== null);
 
       if (type === 'NOT Gate') { const v=inVal('in'); if(v!==null) setOut('out',(~v)&mask); continue; }
-      if (type === 'AND Gate')  { if(allDefined) setOut('out', ins.reduce((a,b)=>a&b)&mask); continue; }
-      if (type === 'NAND Gate') { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a&b))&mask); continue; }
-      if (type === 'OR Gate')   { if(allDefined) setOut('out', ins.reduce((a,b)=>a|b)&mask); continue; }
-      if (type === 'NOR Gate')  { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a|b))&mask); continue; }
+      // Kurzschluss-Auswertung wie Logisim: eine dominierende 0 (AND/NAND) bzw.
+      // 1 (OR/NOR) bestimmt den Ausgang auch wenn andere Eingänge noch null sind.
+      // Ohne das können sich kreuzgekoppelte Latches (NAND-Latch im
+      // "D-FlipFlop mit Enable") nie aus dem Undefined-Zustand lösen.
+      if (type === 'AND Gate')  { if(allDefined) setOut('out', ins.reduce((a,b)=>a&b)&mask);    else if (w===1 && ins.some(v=>v===0)) setOut('out',0); continue; }
+      if (type === 'NAND Gate') { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a&b))&mask);  else if (w===1 && ins.some(v=>v===0)) setOut('out',1); continue; }
+      if (type === 'OR Gate')   { if(allDefined) setOut('out', ins.reduce((a,b)=>a|b)&mask);    else if (w===1 && ins.some(v=>v===1)) setOut('out',1); continue; }
+      if (type === 'NOR Gate')  { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a|b))&mask);  else if (w===1 && ins.some(v=>v===1)) setOut('out',0); continue; }
       if (type === 'XOR Gate')  { if(allDefined) setOut('out', ins.reduce((a,b)=>a^b)&mask); continue; }
       if (type === 'XNOR Gate') { if(allDefined) setOut('out',(~ins.reduce((a,b)=>a^b))&mask); continue; }
 
       if (type === 'Adder') {
+        const aw = parseInt(comp.attrs.width || 8);   // Logisim-Default: 8 Bit
+        const amask = (1 << aw) - 1;
         const a=inVal('a'), b=inVal('b'), ci=inVal('cin')??0;
         if (a!==null && b!==null) {
           const s = a + b + ci;
-          setOut('sum',  s & mask); setOut('cout', (s >> w) & 1);
+          setOut('sum',  s & amask); setOut('cout', (s >> aw) & 1);
         }
         continue;
       }
       if (type === 'Subtractor') {
+        const aw = parseInt(comp.attrs.width || 8);   // Logisim-Default: 8 Bit
+        const amask = (1 << aw) - 1;
         const a=inVal('a'), b=inVal('b'), bi=inVal('bin')??0;
         if (a!==null && b!==null) {
           const s = a - b - bi;
-          setOut('out',  ((s & mask) + mask + 1) & mask);
+          setOut('out',  s & amask);
           setOut('bout', s < 0 ? 1 : 0);
         }
         continue;
@@ -552,32 +694,66 @@ function simulate(circ, nets, proj, regState, clkVal) {
       if (type === 'Splitter') {
         const fanout = parseInt(comp.attrs.fanout || 2);
         const incom  = parseInt(comp.attrs.incoming || fanout);
+        const bpf    = Math.floor(incom / fanout) || 1;
+        const fmask  = (1 << bpf) - 1;
         const cp = ports.find(p=>p.isCombined);
-        const comb = cp && cp.netId>=0 ? netVals[cp.netId] : null;
-        if (comb !== null) {
-          const bpf = Math.floor(incom / fanout) || 1;
-          for (let i=0; i<fanout; i++) {
-            const bits = ((comb >> (i*bpf)) & ((1<<bpf)-1));
-            setOut(`bit${i}`, bits);
+        const combId = cp ? cp.netId : -1;
+        const combDriven = combId >= 0 && nets.netDriven[combId];
+        const comb = combId >= 0 ? netVals[combId] : null;
+        // Pro Bit richtungsbewusst: getriebene Fan-Netze liefern ihr Bit ans
+        // Combined; ungetriebene Fans bekommen ihr Bit AUS dem Combined.
+        // So überschreibt die Split-Richtung nie einen echten Treiber (Race weg).
+        let newComb = 0, known = false;
+        for (const p of ports) {
+          if (p.isCombined || p.netId < 0) continue;
+          const b = parseInt(p.name.slice(3));
+          const fanDriven = nets.netDriven[p.netId];
+          let bits = null;
+          if (fanDriven) {
+            bits = netVals[p.netId];
+          } else if (comb !== null) {
+            bits = (comb >> (b * bpf)) & fmask;
+            if (netVals[p.netId] !== bits) { netVals[p.netId] = bits; changed = true; }
+          } else if (netVals[p.netId] !== null) {
+            bits = netVals[p.netId];   // persistierter Wert (z.B. Latch-Feedback)
           }
+          if (bits !== null) { newComb |= (bits & fmask) << (b * bpf); known = true; }
         }
-        let combined = 0, any = false;
-        for (let i=0; i<fanout; i++) {
-          const v = inVal(`bit${i}`);
-          if (v !== null) { const bpf = Math.floor(incom/fanout)||1; combined |= (v << (i*bpf)); any = true; }
-        }
-        if (any && cp && cp.netId >= 0 && netVals[cp.netId] !== combined) {
-          netVals[cp.netId] = combined; changed = true;
+        if (!combDriven && known && combId >= 0 && netVals[combId] !== newComb) {
+          netVals[combId] = newComb; changed = true;
         }
         continue;
       }
       if (type === 'Register') {
-        const id = `${circ.name}_${comp.uid}`;
+        const id = `${path}/${comp.uid}`;
         setOut('Q', regState.get(id) ?? 0);
         continue;
       }
+      if (type === 'RAM') {
+        const id = `${path}/${comp.uid}`;
+        const addr = inVal('addr');
+        if (addr !== null) {
+          const mem = memState.get(id);
+          setOut('dout', (mem && mem.has(addr)) ? mem.get(addr) : 0);
+        }
+        continue;
+      }
+      if (type === 'ROM') {
+        const addr = inVal('addr');
+        if (addr !== null) {
+          if (!comp._romData) comp._romData = parseMemContents(comp.attrs.contents || '');
+          setOut('dout', comp._romData.get(addr) ?? 0);
+        }
+        continue;
+      }
       if (type === 'J-K Flip-Flop') {
-        const id = `${circ.name}_${comp.uid}`;
+        const id = `${path}/${comp.uid}`;
+        const q = regState.get(id) ?? 0;
+        setOut('Q', q); setOut('nQ', q^1);
+        continue;
+      }
+      if (type === 'D Flip-Flop') {
+        const id = `${path}/${comp.uid}`;
         const q = regState.get(id) ?? 0;
         setOut('Q', q); setOut('nQ', q^1);
         continue;
@@ -587,6 +763,14 @@ function simulate(circ, nets, proj, regState, clkVal) {
       if (comp.lib === null && proj) {
         const sub = proj.circuits.get(comp.type);
         if (sub && sub._nets) {
+          // Instanz-eigenes netVals-Array einwechseln: sub._nets ist zwischen
+          // Instanzen geteilt; persistente Werte (Latch-Zustand!) dürfen aber
+          // nicht zwischen Instanzen leaken.
+          const instId = `${path}/${comp.uid}`;
+          if (!sub._instVals) sub._instVals = new Map();
+          let iv = sub._instVals.get(instId);
+          if (!iv) { iv = new Array(sub._nets.netVals.length).fill(null); sub._instVals.set(instId, iv); }
+          sub._nets.netVals = iv;
           const subPins = sub.comps.filter(c=>c.type==='Pin');
           const inPins  = subPins.filter(c=>c.attrs.output!=='true');
           const outPins = subPins.filter(c=>c.attrs.output==='true');
@@ -594,7 +778,7 @@ function simulate(circ, nets, proj, regState, clkVal) {
             const outerPort = ports.find(p=>p.name===(pin.attrs.label||`in${i}`) && p.io==='in');
             if (outerPort && outerPort.netId >= 0) pin.val = netVals[outerPort.netId];
           });
-          simulate(sub, sub._nets, proj, regState, clkVal);
+          simulate(sub, sub._nets, proj, regState, clkVal, `${path}/${comp.uid}`);
           outPins.forEach((pin, i) => {
             const outerPort = ports.find(p=>p.name===(pin.attrs.label||`out${i}`) && p.io==='out');
             if (outerPort && outerPort.netId >= 0) {
@@ -693,18 +877,19 @@ function gateInputYs(n) {
 }
 function drawInputStubs(type, n, sz) {
   const ys = gateInputYs(n);
-  const isAndType = type === 'AND Gate' || type === 'NAND Gate';
-  // Port x: for AND/NAND with n>=3, port pushed out 10 px (matches port computation)
-  const portX = (isAndType && n >= 3) ? -(sz + 10) : -sz;
-  // Stub goes from port back to gate body
+  // Port-x wie in gateInputPorts (bubble-basiert)
+  let extra = 0;
+  if (type === 'NAND Gate' || type === 'NOR Gate' || type === 'XOR Gate') extra = 10;
+  else if (type === 'XNOR Gate') extra = 20;
+  const portX = -(sz + extra);
   const bodyX = -sz;
   ctx.strokeStyle = C.gstr; ctx.lineWidth = 1.5;
   for (const dy of ys) {
     ctx.beginPath();
     ctx.moveTo(portX, dy);
-    // For AND n>=3, draw 10px stub up to body. Otherwise draw 8px stub outward.
-    if (isAndType && n >= 3) ctx.lineTo(bodyX, dy);
-    else                     ctx.lineTo(portX - 8, dy);
+    // Stub vom Port bis zum Körper (bei extra>0), sonst kleiner Außen-Stub
+    if (extra > 0) ctx.lineTo(bodyX, dy);
+    else           ctx.lineTo(portX - 8, dy);
     ctx.stroke();
   }
 }
@@ -804,7 +989,7 @@ function drawPin(comp, nets) {
   ctx.restore();
 }
 function drawConstant(comp) {
-  const val = parseInt(comp.attrs.value || '0x0', 16);
+  const val = parseInt(comp.attrs.value || '0x1', 16);   // Logisim-Default: 1
   const w   = parseInt(comp.attrs.width || 1);
   const facing = comp.attrs.facing || 'east';
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
@@ -847,45 +1032,64 @@ function drawSplitter(comp) {
   }
   if (fans.length > 0) {
     const isHoriz = facing === 'east' || facing === 'west';
+    // Farbe des Combined-Netzes (Bus) für Connector + Body
+    const combV = netAt(comp.loc.x, comp.loc.y, currentNets);
+    const combW = netWidthAt(comp.loc.x, comp.loc.y, currentNets);
+    const busCol = wireColor(combV, combW);
     if (isHoriz) {
-      // Vertical body line at fans[0].x, extended to include y=0 so connector hits it
       const bodyX = fans[0].x;
       const minY = Math.min(0, ...fans.map(f => f.y));
       const maxY = Math.max(0, ...fans.map(f => f.y));
+      ctx.strokeStyle = busCol;
       ctx.beginPath(); ctx.moveTo(bodyX, minY); ctx.lineTo(bodyX, maxY); ctx.stroke();
-      // Connector from combined (0,0) horizontally to body
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(bodyX, 0); ctx.stroke();
     } else {
-      // Horizontal body line at fans[0].y, extended to include x=0
       const bodyY = fans[0].y;
       const minX = Math.min(0, ...fans.map(f => f.x));
       const maxX = Math.max(0, ...fans.map(f => f.x));
+      ctx.strokeStyle = busCol;
       ctx.beginPath(); ctx.moveTo(minX, bodyY); ctx.lineTo(maxX, bodyY); ctx.stroke();
-      // Connector from combined (0,0) vertically to body
       ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, bodyY); ctx.stroke();
     }
   }
-  // Fan dots
+  // Fan-Punkte in der Farbe ihres jeweiligen Bit-Netzes
   for (const f of fans) {
+    const v = netAt(comp.loc.x + f.x, comp.loc.y + f.y, currentNets);
+    ctx.fillStyle = wireColor(v, 1);
     ctx.beginPath(); ctx.arc(f.x, f.y, 1.5, 0, Math.PI*2); ctx.fill();
   }
-  // Combined dot
-  ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI*2); ctx.fill();
+  // Combined-Punkt
+  {
+    const v = netAt(comp.loc.x, comp.loc.y, currentNets);
+    const w = netWidthAt(comp.loc.x, comp.loc.y, currentNets);
+    ctx.fillStyle = wireColor(v, w);
+    ctx.beginPath(); ctx.arc(0, 0, 2, 0, Math.PI*2); ctx.fill();
+  }
   ctx.restore();
 }
 function drawMemory(comp, label) {
-  // Logisim RAM/ROM (separate bus): loc is the top-RIGHT corner; the box
-  // extends LEFT (to ~x=-140) and DOWN (to ~y=110).
-  const W = 140, H = 110;
+  // Bounds passend zu den empirisch verifizierten Ports:
+  // addr(-140,0), din(-140,20), we(-110,40), clk(-70,40), dout(0,0)
+  // → Box x∈[-140,0], y∈[-40,40] (Logisim 2.7 Mem-Bounds)
+  const L = -140, T = -40, W = 140, H = 80;
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
   ctx.fillStyle = '#1c1c2a'; ctx.strokeStyle = C.subst; ctx.lineWidth = 1.5;
-  ctx.fillRect(-W, 0, W, H); ctx.strokeRect(-W, 0, W, H);
+  ctx.fillRect(L, T, W, H); ctx.strokeRect(L, T, W, H);
   ctx.fillStyle = C.lbl; ctx.font = 'bold 9px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(label, -W/2, 14);
+  ctx.fillText(label, L + W/2, T + 12);
   const aw = parseInt(comp.attrs.addrWidth || 8), dw = parseInt(comp.attrs.dataWidth || 8);
   ctx.fillStyle = C.val; ctx.font = '7px monospace';
-  ctx.fillText(`${1<<aw}×${dw}`, -W/2, 26);
+  ctx.fillText(`${1<<aw}×${dw}`, L + W/2, T + 24);
+  // Port-Beschriftungen innen an den Kanten
+  ctx.fillStyle = '#8b949e'; ctx.font = '7px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('A', L + 3, 0);
+  if ((comp.attrs.bus || 'combined') === 'separate') ctx.fillText('Din', L + 3, 20);
+  ctx.textAlign = 'right'; ctx.fillText('D', -3, 0);
+  ctx.textAlign = 'center';
+  ctx.fillText('WE', -110, 34);
+  ctx.fillText('▶',  -70, 34);
   ctx.textBaseline = 'alphabetic';
   ctx.restore();
 }
@@ -913,36 +1117,40 @@ function drawGenericBox(comp, label, color) {
 
 function drawSubcircuit(comp) {
   const dims = getSubBoxDims(comp.type, project);
-  const W = dims.w, H = dims.h, boxTop = dims.boxTop;
+  const { boxLeft, boxRight, h: H, boxTop } = dims;
+  const Wbox = boxRight - boxLeft;
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
-  // Box extends from (-W, boxTop) to (0, boxTop + H), with small visual padding
   const pad = 5;
   ctx.fillStyle = C.sub; ctx.strokeStyle = C.subst; ctx.lineWidth = 1.5;
-  ctx.fillRect(-W, boxTop - pad, W, H + 2*pad);
-  ctx.strokeRect(-W, boxTop - pad, W, H + 2*pad);
-  // Label centered in box
+  ctx.fillRect(boxLeft, boxTop - pad, Wbox, H + 2*pad);
+  ctx.strokeRect(boxLeft, boxTop - pad, Wbox, H + 2*pad);
+  const cx = (boxLeft + boxRight) / 2;
   ctx.fillStyle = C.lbl; ctx.font = 'bold 8px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  const maxChars = Math.max(4, Math.floor(W / 6));
+  const maxChars = Math.max(4, Math.floor(Wbox / 6));
   const display = comp.type.length > maxChars ? comp.type.slice(0, maxChars-1)+'…' : comp.type;
-  ctx.fillText(display, -W/2, boxTop + H/2);
+  ctx.fillText(display, cx, boxTop + H/2);
   ctx.textBaseline = 'alphabetic';
-  // Custom label below box
   if (comp.attrs.label) {
     ctx.fillStyle = '#8b949e'; ctx.font = '7px monospace';
-    ctx.fillText(comp.attrs.label, -W/2, boxTop + H + pad + 8);
+    ctx.fillText(comp.attrs.label, cx, boxTop + H + pad + 8);
   }
   ctx.restore();
 }
 function drawRegister(comp) {
-  const w=50, h=40; const dw=parseInt(comp.attrs.width||8);
+  const dw=parseInt(comp.attrs.width||8);
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
   ctx.fillStyle='#1c2438'; ctx.strokeStyle='#388bfd'; ctx.lineWidth=1.5;
-  ctx.fillRect(-w,-h/2,w,h); ctx.strokeRect(-w,-h/2,w,h);
+  ctx.fillRect(-30,-20,30,40); ctx.strokeRect(-30,-20,30,40);
   ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
-  ctx.fillText('REG', -w/2, -4);
+  ctx.fillText('REG', -15, -8);
+  // aktuellen Registerwert anzeigen (Pfad-ID auf oberster Ebene)
+  const v = regState.get(`/${comp.uid}`);
   ctx.fillStyle=C.val; ctx.font='7px monospace';
-  ctx.fillText(dw+'b', -w/2, 6);
+  ctx.fillText(v !== undefined ? '0x'+v.toString(16).toUpperCase() : dw+'b', -15, 4);
+  // Takt-Dreieck an der Südkante bei x=-20
+  ctx.strokeStyle='#388bfd'; ctx.beginPath();
+  ctx.moveTo(-25,20); ctx.lineTo(-20,14); ctx.lineTo(-15,20); ctx.stroke();
   ctx.restore();
 }
 function drawFlipFlop(comp, type) {
@@ -953,7 +1161,7 @@ function drawFlipFlop(comp, type) {
   ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
   ctx.fillText(type, -20, 13);
   // Clock triangle: JK has it at west-middle (y=10), DFF at west-lower (y=20)
-  const cy = type === 'DFF' ? 20 : 10;
+  const cy = type === 'DFF' ? 0 : 10;
   ctx.beginPath(); ctx.moveTo(-40,cy-5); ctx.lineTo(-32,cy); ctx.lineTo(-40,cy+5); ctx.stroke();
   ctx.restore();
 }
@@ -968,9 +1176,9 @@ function drawText(comp) {
 }
 function drawMux(comp) {
   const facing = comp.attrs.facing || 'east';
-  const numIn  = (parseInt(comp.attrs.select||1)+1);
+  const numIn  = 1 << parseInt(comp.attrs.select||1);
   const h = Math.max(30, numIn*10+20);
-  const w = 40;
+  const w = numIn === 2 ? 30 : 40;
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
   const rot = { east:0, west:Math.PI, north:-Math.PI/2, south:Math.PI/2 };
   ctx.rotate(rot[facing]||0);
@@ -985,8 +1193,9 @@ function drawMux(comp) {
 }
 function drawDemux(comp) {
   const facing = comp.attrs.facing || 'east';
-  const numOut = (parseInt(comp.attrs.select||1)+1);
+  const numOut = 1 << parseInt(comp.attrs.select||1);
   const h = Math.max(30, numOut*10+20);
+  const w = numOut === 2 ? 30 : 40;
   ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
   const rot = { east:0, west:Math.PI, north:-Math.PI/2, south:Math.PI/2 };
   ctx.rotate(rot[facing]||0);
@@ -994,10 +1203,10 @@ function drawDemux(comp) {
   ctx.beginPath();
   // loc is the INPUT (narrow, west). Body widens eastward to the outputs at x=+40.
   ctx.moveTo(0,  -h/2+12); ctx.lineTo(0,  h/2-12);   // narrow input edge at x=0
-  ctx.lineTo(40, h/2-5);   ctx.lineTo(40, -h/2+5);   // wide output edge at x=+40
+  ctx.lineTo(w, h/2-5);    ctx.lineTo(w, -h/2+5);    // wide output edge
   ctx.closePath(); ctx.fill(); ctx.stroke();
   ctx.fillStyle=C.lbl; ctx.font='bold 8px monospace'; ctx.textAlign='center';
-  ctx.fillText('DMX', 20, 4);
+  ctx.fillText('DMX', w/2, 4);
   ctx.restore();
 }
 function drawComp(comp) {
@@ -1058,6 +1267,27 @@ let dragging = false, lastX = 0, lastY = 0;
 let project = null, currentCirc = null, currentNets = null;
 let junctions = null;
 let regState = new Map();
+let memState = new Map();   // RAM: id → Map(addr → value)
+
+// Logisim memory contents: "addr/data: A D\n" then values, run-length "N*V" allowed
+function parseMemContents(s) {
+  const mem = new Map();
+  const body = s.replace(/^addr\/data:\s*\d+\s+\d+/,'');
+  let addr = 0;
+  for (const tok of body.trim().split(/\s+/)) {
+    if (!tok) continue;
+    const star = tok.indexOf('*');
+    if (star > 0) {
+      const n = parseInt(tok.slice(0, star), 10);
+      const v = parseInt(tok.slice(star + 1), 16);
+      for (let i = 0; i < n; i++) { if (v) mem.set(addr, v); addr++; }
+    } else {
+      const v = parseInt(tok, 16);
+      if (!isNaN(v)) { if (v) mem.set(addr, v); addr++; }
+    }
+  }
+  return mem;
+}
 let clkVal = 0;
 let runTimer = null;
 
@@ -1158,7 +1388,9 @@ function switchCircuit(name) {
   currentCirc._nets = currentNets;
   junctions   = findJunctions(currentCirc);
   for (const c of currentCirc.comps) {
-    if (c.type==='Pin' && c.attrs.output!=='true') c.val = null;
+    // Logisim-Verhalten: Eingangs-Pins starten mit 0, nicht undefined —
+    // NOT-Gatter usw. liefern damit sofort ihr Ergebnis, ohne ersten Klick.
+    if (c.type==='Pin' && c.attrs.output!=='true') c.val = 0;
   }
   runSim();
   fitView();
@@ -1199,50 +1431,104 @@ function populateCircSelect() {
 
 function runSim() {
   if (!currentNets || !currentCirc) return;
-  simulate(currentCirc, currentNets, project, regState, clkVal);
+  simulate(currentCirc, currentNets, project, regState, clkVal, '');
+  let guard = 0;
+  while (latchWalk(currentCirc, currentNets, '') && guard++ < 8) {
+    simulate(currentCirc, currentNets, project, regState, clkVal, '');
+  }
   render();
+}
+
+let clkPrev = new Map();   // Pfad-ID → letzter Taktpegel (für Flankenerkennung)
+
+function latchWalk(circ, nets, path) {
+  // Läuft NACH der kombinatorischen Stabilisierung: erkennt steigende Flanken
+  // am jeweils EIGENEN Takt-Netz jeder Komponente (Pin- oder Clock-getrieben)
+  // und übernimmt Zustände. Instanz-pfad-qualifizierte IDs — jede Instanz
+  // eines Subcircuits hat eigenen Zustand.
+  if (!nets) return false;
+  let latched = false;
+  for (const cp of nets.compPorts) {
+    const comp = cp.comp;
+    const netVal = (name, dflt = null) => {
+      const port = cp.ports.find(p => p.name === name);
+      const v = (port && port.netId >= 0) ? nets.netVals[port.netId] : null;
+      return v === null ? dflt : v;
+    };
+    const id = `${path}/${comp.uid}`;
+    const rising = (clkName) => {
+      const now = netVal(clkName, 0) === 1 ? 1 : 0;
+      const was = clkPrev.get(id) ?? 0;
+      clkPrev.set(id, now);
+      return was === 0 && now === 1;
+    };
+    if (comp.type === 'Register') {
+      if (rising('clk')) {
+        const en = netVal('en', 1), d = netVal('D');
+        if (en !== 0 && d !== null && (regState.get(id) ?? 0) !== d) { regState.set(id, d); latched = true; }
+      }
+    } else if (comp.type === 'D Flip-Flop') {
+      if (rising('CLK')) {
+        const en = netVal('en', 1), d = netVal('D');
+        if (en !== 0 && d !== null && (regState.get(id) ?? 0) !== d) { regState.set(id, d); latched = true; }
+      }
+    } else if (comp.type === 'J-K Flip-Flop') {
+      if (rising('CLK')) {
+        const q = regState.get(id) ?? 0;
+        const j = netVal('J', 0), k = netVal('K', 0);
+        let nq = q;
+        if (j && !k) nq = 1; else if (!j && k) nq = 0; else if (j && k) nq = q ^ 1;
+        if (nq !== q) { regState.set(id, nq); latched = true; }
+      }
+    } else if (comp.type === 'RAM') {
+      if (rising('clk')) {
+        if (netVal('we', 0) === 1) {
+          const addr = netVal('addr'), din = netVal('din');
+          if (addr !== null && din !== null) {
+            if (!memState.has(id)) memState.set(id, new Map());
+            if (memState.get(id).get(addr) !== din) { memState.get(id).set(addr, din); latched = true; }
+          }
+        }
+      }
+    } else if (comp.lib === null && project) {
+      const sub = project.circuits.get(comp.type);
+      if (sub && sub._nets) {
+        // Eingänge DIESER Instanz setzen und Sub frisch stabilisieren, damit
+        // die Flankenerkennung auf instanz-eigenen Netzwerten läuft (sub._nets
+        // ist zwischen Instanzen geteilt).
+        if (!sub._instVals) sub._instVals = new Map();
+        let iv = sub._instVals.get(id);
+        if (!iv) { iv = new Array(sub._nets.netVals.length).fill(null); sub._instVals.set(id, iv); }
+        sub._nets.netVals = iv;
+        const subPins = sub.comps.filter(c => c.type === 'Pin');
+        const inPins = subPins.filter(c => c.attrs.output !== 'true');
+        inPins.forEach((pin, i) => {
+          const outerPort = cp.ports.find(p => p.name === (pin.attrs.label || `in${i}`) && p.io === 'in');
+          if (outerPort && outerPort.netId >= 0) pin.val = nets.netVals[outerPort.netId];
+        });
+        simulate(sub, sub._nets, project, regState, clkVal, id);
+        if (latchWalk(sub, sub._nets, id)) latched = true;
+      }
+    }
+  }
+  return latched;
 }
 
 function stepClock() {
   clkVal ^= 1;
-  if (clkVal === 1 && currentNets) {
-    for (const { comp } of currentNets.compPorts) {
-      if (comp.type === 'Register') {
-        const ports = getAbsPorts(comp, project);
-        const dPort = ports.find(p=>p.name==='D');
-        const enPort= ports.find(p=>p.name==='en');
-        if (dPort) {
-          const dNet = currentNets.compPorts.find(cp=>cp.comp===comp)?.ports.find(p=>p.name==='D')?.netId;
-          const enNet= currentNets.compPorts.find(cp=>cp.comp===comp)?.ports.find(p=>p.name==='en')?.netId;
-          const enVal = enNet >= 0 ? (currentNets.netVals[enNet] ?? 1) : 1;
-          if (enVal !== 0 && dNet >= 0) {
-            const d = currentNets.netVals[dNet];
-            if (d !== null) regState.set(`${currentCirc.name}_${comp.uid}`, d);
-          }
-        }
-      }
-      if (comp.type === 'J-K Flip-Flop') {
-        const cp = currentNets.compPorts.find(p=>p.comp===comp);
-        const jNet = cp?.ports.find(p=>p.name==='J')?.netId;
-        const kNet = cp?.ports.find(p=>p.name==='K')?.netId;
-        const id = `${currentCirc.name}_${comp.uid}`;
-        const q = regState.get(id) ?? 0;
-        const j = jNet >= 0 ? (currentNets.netVals[jNet]??0) : 0;
-        const k = kNet >= 0 ? (currentNets.netVals[kNet]??0) : 0;
-        if      (j && !k) regState.set(id, 1);
-        else if (!j && k) regState.set(id, 0);
-        else if (j && k)  regState.set(id, q^1);
-      }
-    }
-  }
-  runSim();
+  runSim();   // Flankenerkennung in runSim übernimmt das Latchen
 }
 
 function resetSim() {
-  regState.clear(); clkVal = 0;
+  regState.clear(); memState.clear(); clkPrev.clear(); clkVal = 0;
+  if (project) for (const [, cc] of project.circuits) {
+    if (cc._nets) cc._nets.netVals.fill(null);
+    if (cc._instVals) cc._instVals.clear();
+  }
+  if (currentNets) currentNets.netVals.fill(null);
   if (currentCirc) {
     for (const c of currentCirc.comps)
-      if (c.type==='Pin' && c.attrs.output!=='true') c.val = null;
+      if (c.type==='Pin' && c.attrs.output!=='true') c.val = 0;   // Logisim: Pins starten bei 0
   }
   runSim();
 }
@@ -1301,17 +1587,52 @@ async function loadFromUrl() {
 }
 
 // ════════════════════════ MOUSE / INTERACTION ════════════════════════
+// Eigener Eingabe-Dialog: window.prompt() ist in Sandbox-iframes (z.B.
+// eingebettete Vorschau) blockiert und liefert sofort null — daher DOM-Modal.
+function showPrompt(title, def) {
+  return new Promise(resolve => {
+    const modal = document.getElementById('modal');
+    const input = document.getElementById('modalInput');
+    document.getElementById('modalTitle').textContent = title;
+    input.value = def ?? '';
+    modal.style.display = 'flex';
+    input.focus(); input.select();
+    const done = (val) => {
+      modal.style.display = 'none';
+      okB.removeEventListener('click', onOk);
+      caB.removeEventListener('click', onCancel);
+      input.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    const okB = document.getElementById('modalOk');
+    const caB = document.getElementById('modalCancel');
+    const onOk = () => done(input.value);
+    const onCancel = () => done(null);
+    const onKey = (e) => { if (e.key==='Enter') onOk(); if (e.key==='Escape') onCancel(); };
+    okB.addEventListener('click', onOk);
+    caB.addEventListener('click', onCancel);
+    input.addEventListener('keydown', onKey);
+  });
+}
+
 function screenToCirc(sx, sy) {
-  return { x: (sx - panX) / viewZoom, y: (sy - panY) / viewZoom };
+  const r = canvas.getBoundingClientRect();
+  return { x: (sx - r.left - panX) / viewZoom, y: (sy - r.top - panY) / viewZoom };
 }
 function findPinAt(cx, cy) {
   if (!currentCirc) return null;
+  // Treffer um den GEZEICHNETEN Pin-Körper (um 6px entgegen facing versetzt),
+  // nächstgelegener Pin gewinnt.
+  const bodyOff = { east:[-6,0], west:[6,0], north:[0,6], south:[0,-6] };
+  let best = null, bestD = Infinity;
   for (const comp of currentCirc.comps) {
     if (comp.type !== 'Pin' || comp.attrs.output === 'true') continue;
-    const dx = cx - comp.loc.x, dy = cy - comp.loc.y;
-    if (Math.abs(dx) <= 8 && Math.abs(dy) <= 8) return comp;
+    const [bx, by] = bodyOff[comp.attrs.facing || 'east'] || [-6, 0];
+    const dx = cx - (comp.loc.x + bx), dy = cy - (comp.loc.y + by);
+    const d = Math.abs(dx) + Math.abs(dy);
+    if (Math.abs(dx) <= 10 && Math.abs(dy) <= 10 && d < bestD) { best = comp; bestD = d; }
   }
-  return null;
+  return best;
 }
 function findCompAt(cx, cy) {
   if (!currentCirc) return null;
@@ -1324,7 +1645,7 @@ function findCompAt(cx, cy) {
 
 const tooltip = document.getElementById('tooltip');
 
-canvas.addEventListener('mousedown', e => {
+canvas.addEventListener('mousedown', async e => {
   if (e.button !== 0) return;
   const p = screenToCirc(e.clientX, e.clientY);
   const pin = findPinAt(p.x, p.y);
@@ -1333,8 +1654,46 @@ canvas.addEventListener('mousedown', e => {
     if (w === 1) pin.val = pin.val===1 ? 0 : 1;
     else {
       const cur = pin.val ?? 0;
-      pin.val = (cur + 1) & ((1<<w)-1);
+      const mask = (1 << w) - 1;
+      const inp = await showPrompt(
+        `${pin.attrs.label || 'Pin'} [${w} Bit] — Wert eingeben\n` +
+        `(dezimal, 0x… hex oder 0b… binär, Bereich 0…${mask})`,
+        '0x' + cur.toString(16).toUpperCase());
+      if (inp === null) return;          // abgebrochen
+      let v = NaN;
+      const s = inp.trim().toLowerCase();
+      if (s.startsWith('0x'))      v = parseInt(s.slice(2), 16);
+      else if (s.startsWith('0b')) v = parseInt(s.slice(2), 2);
+      else                         v = parseInt(s, 10);
+      if (isNaN(v)) return;
+      pin.val = v & mask;
     }
+    runSim();
+    return;
+  }
+  // ROM/RAM anklicken → Inhalt bearbeiten (Box liegt bei x∈[-140,0], y∈[-40,40])
+  let mem = null;
+  for (const c of currentCirc.comps) {
+    if (c.type !== 'ROM' && c.type !== 'RAM') continue;
+    if (p.x >= c.loc.x - 140 && p.x <= c.loc.x && Math.abs(p.y - c.loc.y) <= 40) { mem = c; break; }
+  }
+  if (mem) {
+    // WICHTIG: Pfad-ID wie in simulate/latchWalk (Top-Level: "/uid")
+    const id = `/${mem.uid}`;
+    const cur = mem.type === 'ROM'
+      ? (mem._romData ?? (mem._romData = parseMemContents(mem.attrs.contents || '')))
+      : (memState.get(id) ?? new Map());
+    const maxA = cur.size ? Math.max(...cur.keys()) : -1;
+    const parts = [];
+    for (let a = 0; a <= maxA; a++) parts.push((cur.get(a) ?? 0).toString(16));
+    const inp = await showPrompt(
+      `${mem.type}-Inhalt ab Adresse 0\n` +
+      `Hex-Werte, Leerzeichen-getrennt; "N*V" = N-mal Wert V (z.B. 15 22 ff 4*aa)`,
+      parts.join(' '));
+    if (inp === null) return;
+    const parsed = parseMemContents(inp);
+    if (mem.type === 'ROM') mem._romData = parsed;
+    else memState.set(id, parsed);
     runSim();
     return;
   }
