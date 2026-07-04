@@ -1,0 +1,790 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sternhalma</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+  user-select: none;
+}
+h1 {
+  margin: 12px 0 4px;
+  font-size: 1.6em;
+  color: #f0d060;
+  letter-spacing: 2px;
+}
+#controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin: 6px 0 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+#controls label { font-size: 0.9em; color: #aaa; }
+#controls select, #controls button {
+  padding: 5px 12px;
+  border-radius: 6px;
+  border: 1px solid #444;
+  background: #2a2a4a;
+  color: #e0e0e0;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+#controls button {
+  background: #3a5a3a;
+  border-color: #5a8a5a;
+  font-weight: bold;
+}
+#controls button:hover { background: #4a7a4a; }
+#status {
+  font-size: 1.05em;
+  margin: 4px 0 6px;
+  min-height: 1.4em;
+  text-align: center;
+}
+canvas {
+  border-radius: 12px;
+  cursor: pointer;
+  touch-action: none;
+}
+#legend {
+  display: flex;
+  gap: 16px;
+  margin: 8px 0 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  font-size: 0.85em;
+}
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.legend-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid #666;
+}
+#info {
+  font-size: 0.75em;
+  color: #666;
+  margin-bottom: 10px;
+  text-align: center;
+}
+</style>
+</head>
+<body>
+
+<h1>&#x2726; Sternhalma &#x2726;</h1>
+
+<div id="controls">
+  <label>Gegner: <select id="numAI">
+    <option value="1">1 (2 Spieler)</option>
+    <option value="2">2 (3 Spieler)</option>
+    <option value="3">3 (4 Spieler)</option>
+    <option value="5" selected>5 (6 Spieler)</option>
+  </select></label>
+  <button id="btnNew">Neues Spiel</button>
+</div>
+
+<div id="status">Klicke "Neues Spiel" zum Starten.</div>
+<canvas id="board"></canvas>
+<div id="legend"></div>
+<div id="info">Stein anklicken → Zielfeld anklicken · Sprungketten möglich</div>
+
+<script>
+"use strict";
+
+// ─── Board Definition ───────────────────────────────────────
+// Rows 0-16, columns use doubled-coordinate scheme:
+// Two cells are adjacent if: same row & |dc|=2, OR |dr|=1 & |dc|=1
+
+const ROW_COLS = [
+  [12],                                                 // row 0
+  [11, 13],                                             // row 1
+  [10, 12, 14],                                         // row 2
+  [9, 11, 13, 15],                                      // row 3
+  [0,2,4,6,8,10,12,14,16,18,20,22,24],                  // row 4
+  [1,3,5,7,9,11,13,15,17,19,21,23],                     // row 5
+  [2,4,6,8,10,12,14,16,18,20,22],                       // row 6
+  [3,5,7,9,11,13,15,17,19,21],                          // row 7
+  [4,6,8,10,12,14,16,18,20],                            // row 8
+  [3,5,7,9,11,13,15,17,19,21],                          // row 9
+  [2,4,6,8,10,12,14,16,18,20,22],                       // row 10
+  [1,3,5,7,9,11,13,15,17,19,21,23],                     // row 11
+  [0,2,4,6,8,10,12,14,16,18,20,22,24],                  // row 12
+  [9, 11, 13, 15],                                      // row 13
+  [10, 12, 14],                                         // row 14
+  [11, 13],                                             // row 15
+  [12],                                                 // row 16
+];
+
+// Triangle zones (home areas) — each has 10 cells
+// zone[i] = { home: [...cells], target: i_opposite }
+const TRIANGLE_CELLS = {
+  0: [[0,12],[1,11],[1,13],[2,10],[2,12],[2,14],[3,9],[3,11],[3,13],[3,15]],
+  1: [[4,18],[4,20],[4,22],[4,24],[5,19],[5,21],[5,23],[6,20],[6,22],[7,21]],
+  2: [[9,21],[10,20],[10,22],[11,19],[11,21],[11,23],[12,18],[12,20],[12,22],[12,24]],
+  3: [[13,9],[13,11],[13,13],[13,15],[14,10],[14,12],[14,14],[15,11],[15,13],[16,12]],
+  4: [[9,3],[10,2],[10,4],[11,1],[11,3],[11,5],[12,0],[12,2],[12,4],[12,6]],
+  5: [[4,0],[4,2],[4,4],[4,6],[5,1],[5,3],[5,5],[6,2],[6,4],[7,3]],
+};
+const OPPOSITE = {0:3, 1:4, 2:5, 3:0, 4:1, 5:2};
+
+// Player configurations by number of total players
+const PLAYER_CONFIGS = {
+  2: [0, 3],
+  3: [0, 2, 4],
+  4: [0, 1, 3, 4],
+  6: [0, 1, 2, 3, 4, 5],
+};
+
+const PLAYER_COLORS = ['#e84040','#4488ee','#44bb44','#eecc22','#bb55dd','#ee8833'];
+const PLAYER_NAMES = ['Rot','Blau','Grün','Gelb','Lila','Orange'];
+
+// ─── Game State ─────────────────────────────────────────────
+let cells = [];        // [{r, c, key, zone, px, py}]
+let cellMap = {};      // key -> cell
+let neighbors = {};    // key -> [keys]
+let board = {};        // key -> playerIndex or null
+let players = [];      // [{ index, color, name, isHuman, home:[], target:[] }]
+let currentPlayerIdx = 0;
+let selectedKey = null;
+let validMoves = new Set();
+let jumpPath = [];
+let gameOver = false;
+let animating = false;
+
+// ─── Canvas Setup ───────────────────────────────────────────
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+let cellRadius = 18;
+let offsetX = 0, offsetY = 0;
+
+function resizeCanvas() {
+  const maxW = Math.min(window.innerWidth - 20, 600);
+  cellRadius = Math.max(12, Math.min(20, Math.floor(maxW / 30)));
+  const W = cellRadius * 28;
+  const H = cellRadius * 19 * Math.sqrt(3) * 0.5 + cellRadius * 2;
+  canvas.width = W;
+  canvas.height = H;
+  offsetX = W / 2;
+  offsetY = cellRadius * 1.5;
+}
+
+function cellToPixel(r, c) {
+  const px = offsetX + (c - 12) * cellRadius * 0.55;
+  const py = offsetY + r * cellRadius * Math.sqrt(3) * 0.52;
+  return {px, py};
+}
+
+// ─── Board Init ─────────────────────────────────────────────
+function initBoard() {
+  cells = [];
+  cellMap = {};
+  neighbors = {};
+  for (let r = 0; r < ROW_COLS.length; r++) {
+    for (const c of ROW_COLS[r]) {
+      const key = r + ',' + c;
+      const {px, py} = cellToPixel(r, c);
+      const cell = {r, c, key, px, py, zone: -1};
+      cells.push(cell);
+      cellMap[key] = cell;
+    }
+  }
+  // Assign zones
+  for (let z = 0; z < 6; z++) {
+    for (const [r,c] of TRIANGLE_CELLS[z]) {
+      const key = r+','+c;
+      if (cellMap[key]) cellMap[key].zone = z;
+    }
+  }
+  // Compute neighbors
+  const dirs = [[0,-2],[0,2],[-1,-1],[-1,1],[1,-1],[1,1]];
+  for (const cell of cells) {
+    neighbors[cell.key] = [];
+    for (const [dr, dc] of dirs) {
+      const nk = (cell.r+dr)+','+(cell.c+dc);
+      if (cellMap[nk]) neighbors[cell.key].push(nk);
+    }
+  }
+}
+
+// ─── Game Logic ─────────────────────────────────────────────
+function startGame() {
+  const numAI = parseInt(document.getElementById('numAI').value);
+  const totalPlayers = numAI + 1;
+  const config = PLAYER_CONFIGS[totalPlayers];
+  if (!config) return;
+
+  board = {};
+  for (const cell of cells) board[cell.key] = null;
+
+  players = [];
+  for (let i = 0; i < config.length; i++) {
+    const pi = config[i];
+    const targetZone = OPPOSITE[pi];
+    const p = {
+      index: pi,
+      color: PLAYER_COLORS[pi],
+      name: PLAYER_NAMES[pi],
+      isHuman: i === 0,
+      home: TRIANGLE_CELLS[pi].map(([r,c]) => r+','+c),
+      target: TRIANGLE_CELLS[targetZone].map(([r,c]) => r+','+c),
+    };
+    players.push(p);
+    for (const k of p.home) board[k] = pi;
+  }
+
+  currentPlayerIdx = 0;
+  selectedKey = null;
+  validMoves = new Set();
+  jumpPath = [];
+  gameOver = false;
+  animating = false;
+  updateLegend();
+  updateStatus();
+  draw();
+}
+
+function getCurrentPlayer() { return players[currentPlayerIdx]; }
+
+function getPlayerPieces(playerIndex) {
+  const pieces = [];
+  for (const key in board) {
+    if (board[key] === playerIndex) pieces.push(key);
+  }
+  return pieces;
+}
+
+// ─── Move Calculation ───────────────────────────────────────
+function getValidMoves(key) {
+  const moves = new Set();
+  // Single steps to empty adjacent cells
+  for (const nk of neighbors[key]) {
+    if (board[nk] === null) moves.add(nk);
+  }
+  // Jump chains (BFS)
+  const visited = new Set([key]);
+  const queue = [key];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    for (const nk of neighbors[cur]) {
+      if (board[nk] !== null) {
+        // There's a piece at nk — can we jump over it?
+        const cr = cellMap[cur].r, cc = cellMap[cur].c;
+        const nr = cellMap[nk].r, nc = cellMap[nk].c;
+        const lr = nr + (nr - cr);
+        const lc = nc + (nc - cc);
+        const lk = lr + ',' + lc;
+        if (cellMap[lk] && board[lk] === null && !visited.has(lk)) {
+          visited.add(lk);
+          moves.add(lk);
+          queue.push(lk);
+        }
+      }
+    }
+  }
+  return moves;
+}
+
+function isLegalMove(playerIndex, fromKey, toKey) {
+  // Prevent moving out of target zone once inside
+  const player = players.find(p => p.index === playerIndex);
+  const targetSet = new Set(player.target);
+  if (targetSet.has(fromKey) && !targetSet.has(toKey)) return false;
+  return true;
+}
+
+function getFilteredMoves(playerIndex, key) {
+  const raw = getValidMoves(key);
+  const filtered = new Set();
+  for (const m of raw) {
+    if (isLegalMove(playerIndex, key, m)) filtered.add(m);
+  }
+  return filtered;
+}
+
+// ─── Win Check ──────────────────────────────────────────────
+function checkWin(playerIndex) {
+  const player = players.find(p => p.index === playerIndex);
+  return player.target.every(k => board[k] === playerIndex);
+}
+
+// ─── AI ─────────────────────────────────────────────────────
+// Progress direction vectors (a, b): progress = a*r + b*c
+// Computed from home→target center vectors in the doubled-column system.
+// Higher value = closer to target zone.
+const PROGRESS_DIRS = {
+  0: [1, 0],      // Top → Bottom
+  1: [4, -3],     // Upper-right → Lower-left
+  2: [-4, -3],    // Lower-right → Upper-left
+  3: [-1, 0],     // Bottom → Top
+  4: [-4, 3],     // Lower-left → Upper-right
+  5: [4, 3],      // Upper-left → Lower-right
+};
+
+function hexDist(key1, key2) {
+  const c1 = cellMap[key1], c2 = cellMap[key2];
+  const dr = Math.abs(c2.r - c1.r);
+  const dc = Math.abs(c2.c - c1.c);
+  return dr + Math.max(0, (dc - dr) / 2);
+}
+
+function evaluateBoard(playerIndex) {
+  const player = players.find(p => p.index === playerIndex);
+  const pieces = getPlayerPieces(playerIndex);
+  const targetSet = new Set(player.target);
+  const dir = PROGRESS_DIRS[playerIndex];
+  let score = 0;
+
+  // ── 1. Directional forward progress ──
+  // Main driver: reward pieces that are far along the home→target axis.
+  for (const pk of pieces) {
+    const c = cellMap[pk];
+    score += (dir[0] * c.r + dir[1] * c.c) * 1.0;
+  }
+
+  // ── 2. Greedy target-slot assignment ──
+  // Prevents all pieces converging on the same target cell.
+  // Pieces already inside the target zone stay put (strong bonus);
+  // remaining pieces are greedily matched to the nearest free slot.
+  const freeTargets = new Set(player.target);
+
+  for (const pk of pieces) {
+    if (targetSet.has(pk)) {
+      freeTargets.delete(pk);
+      score += 15;
+    }
+  }
+
+  const unmatched = pieces.filter(pk => !targetSet.has(pk));
+  // Sort by min-distance so the closest piece picks first
+  unmatched.sort((a, b) => {
+    let da = Infinity, db = Infinity;
+    for (const tk of freeTargets) {
+      da = Math.min(da, hexDist(a, tk));
+      db = Math.min(db, hexDist(b, tk));
+    }
+    return da - db;
+  });
+
+  for (const pk of unmatched) {
+    let bestDist = Infinity, bestTarget = null;
+    for (const tk of freeTargets) {
+      const d = hexDist(pk, tk);
+      if (d < bestDist) { bestDist = d; bestTarget = tk; }
+    }
+    if (bestTarget) {
+      freeTargets.delete(bestTarget);
+      score -= bestDist * 2.0;
+    }
+  }
+
+  // ── 3. Cohesion bonus ──
+  // Adjacent own pieces enable jump chains → small reward
+  for (let i = 0; i < pieces.length; i++) {
+    for (let j = i + 1; j < pieces.length; j++) {
+      if (hexDist(pieces[i], pieces[j]) === 1) score += 0.3;
+    }
+  }
+
+  // ── 4. Anti-straggler penalty ──
+  // Pieces still deep in their own home zone late in the game are penalised
+  // to prevent one piece sitting idle while the rest advance.
+  const piecesInTarget = pieces.filter(pk => targetSet.has(pk)).length;
+  if (piecesInTarget >= 5) {
+    // Late game: heavily penalise stragglers far from target
+    for (const pk of unmatched) {
+      let minD = Infinity;
+      for (const tk of player.target) minD = Math.min(minD, hexDist(pk, tk));
+      if (minD > 6) score -= minD * 1.5;
+    }
+  }
+
+  return score;
+}
+
+function aiMove(playerIndex) {
+  const pieces = getPlayerPieces(playerIndex);
+  let bestScore = -Infinity;
+  let bestFrom = null, bestTo = null;
+
+  for (const pk of pieces) {
+    const moves = getFilteredMoves(playerIndex, pk);
+    for (const mk of moves) {
+      // Simulate
+      board[pk] = null;
+      board[mk] = playerIndex;
+
+      let score = evaluateBoard(playerIndex);
+
+      // Bonus for long jumps — encourages building & using bridges
+      const jumpDist = hexDist(pk, mk);
+      if (jumpDist > 1) score += jumpDist * 0.8;
+
+      // Undo
+      board[mk] = null;
+      board[pk] = playerIndex;
+
+      // Minimal randomness for variety without sacrificing quality
+      const rnd = Math.random() * 0.15;
+      if (score + rnd > bestScore) {
+        bestScore = score + rnd;
+        bestFrom = pk;
+        bestTo = mk;
+      }
+    }
+  }
+  return bestFrom && bestTo ? { from: bestFrom, to: bestTo } : null;
+}
+
+// ─── Animation ──────────────────────────────────────────────
+function animateMove(from, to, playerIndex, callback) {
+  animating = true;
+  const fc = cellMap[from], tc = cellMap[to];
+  const duration = 250;
+  const start = performance.now();
+  const color = PLAYER_COLORS[playerIndex];
+
+  board[from] = null;
+
+  function frame(now) {
+    const t = Math.min(1, (now - start) / duration);
+    const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    const x = fc.px + (tc.px - fc.px) * ease;
+    const y = fc.py + (tc.py - fc.py) * ease;
+    draw();
+    // Draw moving piece on top
+    ctx.beginPath();
+    ctx.arc(x, y, cellRadius * 0.42, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    // Highlight
+    ctx.beginPath();
+    ctx.arc(x - cellRadius*0.12, y - cellRadius*0.12, cellRadius * 0.14, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.fill();
+
+    if (t < 1) {
+      requestAnimationFrame(frame);
+    } else {
+      board[to] = playerIndex;
+      animating = false;
+      callback();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+// ─── Turn Management ────────────────────────────────────────
+function nextTurn() {
+  // Check win
+  const cp = getCurrentPlayer();
+  if (checkWin(cp.index)) {
+    gameOver = true;
+    if (cp.isHuman) {
+      setStatus('🎉 Du hast gewonnen! Glückwunsch!');
+    } else {
+      setStatus(`${cp.name} (KI) hat gewonnen!`);
+    }
+    draw();
+    return;
+  }
+
+  currentPlayerIdx = (currentPlayerIdx + 1) % players.length;
+  selectedKey = null;
+  validMoves = new Set();
+  updateStatus();
+  draw();
+
+  const np = getCurrentPlayer();
+  if (!np.isHuman) {
+    setTimeout(doAiTurn, 400);
+  }
+}
+
+function doAiTurn() {
+  if (gameOver) return;
+  const cp = getCurrentPlayer();
+  const move = aiMove(cp.index);
+  if (!move) {
+    // No moves available, skip
+    nextTurn();
+    return;
+  }
+  animateMove(move.from, move.to, cp.index, () => {
+    nextTurn();
+  });
+}
+
+function executeHumanMove(toKey) {
+  if (!selectedKey || gameOver || animating) return;
+  const cp = getCurrentPlayer();
+  animateMove(selectedKey, toKey, cp.index, () => {
+    selectedKey = null;
+    validMoves = new Set();
+    nextTurn();
+  });
+}
+
+// ─── Input Handling ─────────────────────────────────────────
+function getClickedCell(mx, my) {
+  let best = null, bestDist = Infinity;
+  // Larger hit area on mobile (1.6x radius vs 1x)
+  const isMobile = 'ontouchstart' in window;
+  const hitR = cellRadius * (isMobile ? 1.6 : 1.0);
+  for (const cell of cells) {
+    const dx = mx - cell.px, dy = my - cell.py;
+    const d = dx*dx + dy*dy;
+    if (d < hitR * hitR && d < bestDist) {
+      bestDist = d;
+      best = cell;
+    }
+  }
+  return best;
+}
+
+function handleInput(clientX, clientY) {
+  if (gameOver || animating) return;
+  const cp = getCurrentPlayer();
+  if (!cp.isHuman) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const mx = (clientX - rect.left) * (canvas.width / rect.width);
+  const my = (clientY - rect.top) * (canvas.height / rect.height);
+  const cell = getClickedCell(mx, my);
+  if (!cell) return;
+
+  if (validMoves.has(cell.key)) {
+    executeHumanMove(cell.key);
+  } else if (board[cell.key] === cp.index) {
+    selectedKey = cell.key;
+    validMoves = getFilteredMoves(cp.index, cell.key);
+    draw();
+  } else {
+    selectedKey = null;
+    validMoves = new Set();
+    draw();
+  }
+}
+
+canvas.addEventListener('click', (e) => {
+  handleInput(e.clientX, e.clientY);
+});
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (e.changedTouches.length > 0) {
+    const t = e.changedTouches[0];
+    handleInput(t.clientX, t.clientY);
+  }
+}, {passive: false});
+
+// ─── Rendering ──────────────────────────────────────────────
+function draw() {
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.6);
+  bg.addColorStop(0, '#252545');
+  bg.addColorStop(1, '#1a1a2e');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Draw zone tints
+  for (let z = 0; z < 6; z++) {
+    const isActive = players.some(p => p.index === z);
+    if (!isActive) continue;
+    for (const [r,c] of TRIANGLE_CELLS[z]) {
+      const k = r+','+c;
+      const cell = cellMap[k];
+      if (!cell) continue;
+      ctx.beginPath();
+      ctx.arc(cell.px, cell.py, cellRadius * 0.52, 0, Math.PI * 2);
+      ctx.fillStyle = PLAYER_COLORS[z] + '18';
+      ctx.fill();
+    }
+  }
+
+  // Draw connections (subtle lines between adjacent cells)
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 1;
+  const drawn = new Set();
+  for (const cell of cells) {
+    for (const nk of neighbors[cell.key]) {
+      const pair = [cell.key, nk].sort().join('|');
+      if (drawn.has(pair)) continue;
+      drawn.add(pair);
+      const nc = cellMap[nk];
+      ctx.beginPath();
+      ctx.moveTo(cell.px, cell.py);
+      ctx.lineTo(nc.px, nc.py);
+      ctx.stroke();
+    }
+  }
+
+  // Draw cells
+  for (const cell of cells) {
+    const isSelected = cell.key === selectedKey;
+    const isValid = validMoves.has(cell.key);
+    const piece = board[cell.key];
+
+    // Cell background
+    ctx.beginPath();
+    ctx.arc(cell.px, cell.py, cellRadius * 0.44, 0, Math.PI * 2);
+    if (isValid) {
+      ctx.fillStyle = 'rgba(100, 255, 100, 0.25)';
+      ctx.fill();
+      ctx.strokeStyle = '#6f6';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.07)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+
+    // Piece
+    if (piece !== null && piece !== undefined) {
+      const r = cellRadius * 0.42;
+      ctx.beginPath();
+      ctx.arc(cell.px, cell.py, r, 0, Math.PI * 2);
+
+      // Gradient for 3D effect
+      const g = ctx.createRadialGradient(
+        cell.px - r*0.3, cell.py - r*0.3, r*0.1,
+        cell.px, cell.py, r
+      );
+      const col = PLAYER_COLORS[piece];
+      g.addColorStop(0, lighten(col, 40));
+      g.addColorStop(0.7, col);
+      g.addColorStop(1, darken(col, 30));
+      ctx.fillStyle = g;
+      ctx.fill();
+
+      ctx.strokeStyle = isSelected ? '#fff' : 'rgba(0,0,0,0.3)';
+      ctx.lineWidth = isSelected ? 2.5 : 1;
+      ctx.stroke();
+
+      // Highlight
+      ctx.beginPath();
+      ctx.arc(cell.px - r*0.25, cell.py - r*0.25, r*0.2, 0, Math.PI*2);
+      ctx.fillStyle = 'rgba(255,255,255,0.3)';
+      ctx.fill();
+
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.arc(cell.px, cell.py, r + 3, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([3, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+
+  // Highlight target zone for current player
+  if (!gameOver && players.length > 0) {
+    const cp = getCurrentPlayer();
+    if (cp.isHuman) {
+      for (const tk of cp.target) {
+        const tc = cellMap[tk];
+        if (!tc) continue;
+        ctx.beginPath();
+        ctx.arc(tc.px, tc.py, cellRadius * 0.52, 0, Math.PI * 2);
+        ctx.strokeStyle = cp.color + '40';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([2, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
+}
+
+function lighten(hex, amt) {
+  let r = parseInt(hex.slice(1,3),16), g = parseInt(hex.slice(3,5),16), b = parseInt(hex.slice(5,7),16);
+  r = Math.min(255, r + amt); g = Math.min(255, g + amt); b = Math.min(255, b + amt);
+  return '#'+[r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('');
+}
+function darken(hex, amt) { return lighten(hex, -amt); }
+
+// ─── UI Updates ─────────────────────────────────────────────
+function setStatus(text) {
+  document.getElementById('status').textContent = text;
+}
+
+function updateStatus() {
+  if (gameOver) return;
+  const cp = getCurrentPlayer();
+  if (cp.isHuman) {
+    setStatus(`Dein Zug (${cp.name}) — wähle einen Stein`);
+  } else {
+    setStatus(`${cp.name} (KI) denkt nach…`);
+  }
+}
+
+function updateLegend() {
+  const div = document.getElementById('legend');
+  div.innerHTML = '';
+  for (const p of players) {
+    const item = document.createElement('span');
+    item.className = 'legend-item';
+    item.innerHTML = `<span class="legend-dot" style="background:${p.color}"></span>${p.name}${p.isHuman ? ' (Du)' : ' (KI)'}`;
+    div.appendChild(item);
+  }
+}
+
+// ─── Init ───────────────────────────────────────────────────
+document.getElementById('btnNew').addEventListener('click', () => {
+  initBoard();
+  resizeCanvas();
+  // Recompute pixel positions after resize
+  for (const cell of cells) {
+    const {px, py} = cellToPixel(cell.r, cell.c);
+    cell.px = px; cell.py = py;
+  }
+  startGame();
+});
+
+window.addEventListener('resize', () => {
+  if (cells.length === 0) return;
+  resizeCanvas();
+  for (const cell of cells) {
+    const {px, py} = cellToPixel(cell.r, cell.c);
+    cell.px = px; cell.py = py;
+  }
+  draw();
+});
+
+// Auto-start
+initBoard();
+resizeCanvas();
+for (const cell of cells) {
+  const {px, py} = cellToPixel(cell.r, cell.c);
+  cell.px = px; cell.py = py;
+}
+startGame();
+
+</script>
+</body>
+</html>
