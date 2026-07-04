@@ -82,6 +82,77 @@ canvas {
   margin-bottom: 10px;
   text-align: center;
 }
+
+/* ─── Network Mode Panel ─────────────────────────────────── */
+#netPanel {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 14px 20px;
+  background: #22223a;
+  border: 1px solid #444;
+  border-radius: 10px;
+  max-width: 500px;
+  width: 90vw;
+}
+#netPanel.visible { display: flex; }
+#netPanel h3 {
+  font-size: 1em;
+  color: #8ad;
+  margin: 0;
+}
+#netPanel .step {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#netPanel .step-label {
+  font-size: 0.82em;
+  color: #aaa;
+}
+#netPanel textarea {
+  width: 100%;
+  height: 70px;
+  background: #181830;
+  color: #ccc;
+  border: 1px solid #555;
+  border-radius: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.72em;
+  padding: 6px;
+  resize: vertical;
+}
+#netPanel .btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+#netPanel button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid #555;
+  background: #2a3a5a;
+  color: #cde;
+  font-size: 0.85em;
+  cursor: pointer;
+  font-weight: bold;
+}
+#netPanel button:hover { background: #3a5a7a; }
+#netPanel button:disabled { opacity: 0.4; cursor: default; }
+#netPanel button.primary { background: #3a5a3a; border-color: #5a8a5a; color: #efe; }
+#netPanel button.primary:hover { background: #4a7a4a; }
+#netPanel button.danger { background: #5a2a2a; border-color: #8a4a4a; color: #fcc; }
+#netPanel button.danger:hover { background: #7a3a3a; }
+#netStatus {
+  font-size: 0.82em;
+  color: #8ad;
+  text-align: center;
+  min-height: 1.2em;
+}
+.hidden { display: none !important; }
 </style>
 </head>
 <body>
@@ -89,13 +160,69 @@ canvas {
 <h1>&#x2726; Sternhalma &#x2726;</h1>
 
 <div id="controls">
-  <label>Gegner: <select id="numAI">
-    <option value="1">1 (2 Spieler)</option>
-    <option value="2">2 (3 Spieler)</option>
-    <option value="3">3 (4 Spieler)</option>
-    <option value="5" selected>5 (6 Spieler)</option>
+  <label>Modus: <select id="gameMode">
+    <option value="local">Lokal (KI-Gegner)</option>
+    <option value="network">Netzwerk (2 Spieler)</option>
   </select></label>
+  <span id="localControls">
+    <label>Gegner: <select id="numAI">
+      <option value="1">1 (2 Spieler)</option>
+      <option value="2">2 (3 Spieler)</option>
+      <option value="3">3 (4 Spieler)</option>
+      <option value="5" selected>5 (6 Spieler)</option>
+    </select></label>
+  </span>
   <button id="btnNew">Neues Spiel</button>
+</div>
+
+<!-- Network Panel -->
+<div id="netPanel">
+  <h3 id="netTitle">Netzwerk-Spiel</h3>
+  <div id="netStatus"></div>
+
+  <!-- Step 1: Role selection -->
+  <div id="netStep1" class="step">
+    <div class="btn-row" style="justify-content:center;">
+      <button id="btnHost" class="primary">Spiel erstellen (Host)</button>
+      <button id="btnJoin">Spiel beitreten (Gast)</button>
+    </div>
+  </div>
+
+  <!-- Step 2a: Host flow -->
+  <div id="netStepHost" class="step hidden">
+    <div class="step-label">① Diesen Code an deinen Mitspieler senden:</div>
+    <textarea id="offerText" readonly></textarea>
+    <div class="btn-row">
+      <button id="btnCopyOffer">Kopieren</button>
+    </div>
+    <div class="step-label" style="margin-top:8px;">② Antwort-Code des Mitspielers hier einfügen:</div>
+    <textarea id="answerInput" placeholder="Antwort-Code hier einfügen…"></textarea>
+    <div class="btn-row">
+      <button id="btnAcceptAnswer" class="primary">Verbinden</button>
+    </div>
+  </div>
+
+  <!-- Step 2b: Guest flow -->
+  <div id="netStepGuest" class="step hidden">
+    <div class="step-label">① Einladungs-Code des Hosts hier einfügen:</div>
+    <textarea id="offerInput" placeholder="Einladungs-Code hier einfügen…"></textarea>
+    <div class="btn-row">
+      <button id="btnProcessOffer" class="primary">Annehmen</button>
+    </div>
+    <div id="guestStep2" class="hidden">
+      <div class="step-label" style="margin-top:8px;">② Diesen Antwort-Code an den Host senden:</div>
+      <textarea id="answerText" readonly></textarea>
+      <div class="btn-row">
+        <button id="btnCopyAnswer">Kopieren</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Connected state -->
+  <div id="netConnected" class="step hidden" style="align-items:center;">
+    <div style="color:#6c6; font-weight:bold;">✔ Verbunden!</div>
+    <button id="btnDisconnect" class="danger">Trennen</button>
+  </div>
 </div>
 
 <div id="status">Klicke "Neues Spiel" zum Starten.</div>
@@ -107,31 +234,26 @@ canvas {
 "use strict";
 
 // ─── Board Definition ───────────────────────────────────────
-// Rows 0-16, columns use doubled-coordinate scheme:
-// Two cells are adjacent if: same row & |dc|=2, OR |dr|=1 & |dc|=1
-
 const ROW_COLS = [
-  [12],                                                 // row 0
-  [11, 13],                                             // row 1
-  [10, 12, 14],                                         // row 2
-  [9, 11, 13, 15],                                      // row 3
-  [0,2,4,6,8,10,12,14,16,18,20,22,24],                  // row 4
-  [1,3,5,7,9,11,13,15,17,19,21,23],                     // row 5
-  [2,4,6,8,10,12,14,16,18,20,22],                       // row 6
-  [3,5,7,9,11,13,15,17,19,21],                          // row 7
-  [4,6,8,10,12,14,16,18,20],                            // row 8
-  [3,5,7,9,11,13,15,17,19,21],                          // row 9
-  [2,4,6,8,10,12,14,16,18,20,22],                       // row 10
-  [1,3,5,7,9,11,13,15,17,19,21,23],                     // row 11
-  [0,2,4,6,8,10,12,14,16,18,20,22,24],                  // row 12
-  [9, 11, 13, 15],                                      // row 13
-  [10, 12, 14],                                         // row 14
-  [11, 13],                                             // row 15
-  [12],                                                 // row 16
+  [12],
+  [11, 13],
+  [10, 12, 14],
+  [9, 11, 13, 15],
+  [0,2,4,6,8,10,12,14,16,18,20,22,24],
+  [1,3,5,7,9,11,13,15,17,19,21,23],
+  [2,4,6,8,10,12,14,16,18,20,22],
+  [3,5,7,9,11,13,15,17,19,21],
+  [4,6,8,10,12,14,16,18,20],
+  [3,5,7,9,11,13,15,17,19,21],
+  [2,4,6,8,10,12,14,16,18,20,22],
+  [1,3,5,7,9,11,13,15,17,19,21,23],
+  [0,2,4,6,8,10,12,14,16,18,20,22,24],
+  [9, 11, 13, 15],
+  [10, 12, 14],
+  [11, 13],
+  [12],
 ];
 
-// Triangle zones (home areas) — each has 10 cells
-// zone[i] = { home: [...cells], target: i_opposite }
 const TRIANGLE_CELLS = {
   0: [[0,12],[1,11],[1,13],[2,10],[2,12],[2,14],[3,9],[3,11],[3,13],[3,15]],
   1: [[4,18],[4,20],[4,22],[4,24],[5,19],[5,21],[5,23],[6,20],[6,22],[7,21]],
@@ -142,7 +264,6 @@ const TRIANGLE_CELLS = {
 };
 const OPPOSITE = {0:3, 1:4, 2:5, 3:0, 4:1, 5:2};
 
-// Player configurations by number of total players
 const PLAYER_CONFIGS = {
   2: [0, 3],
   3: [0, 2, 4],
@@ -154,17 +275,33 @@ const PLAYER_COLORS = ['#e84040','#4488ee','#44bb44','#eecc22','#bb55dd','#ee883
 const PLAYER_NAMES = ['Rot','Blau','Grün','Gelb','Lila','Orange'];
 
 // ─── Game State ─────────────────────────────────────────────
-let cells = [];        // [{r, c, key, zone, px, py}]
-let cellMap = {};      // key -> cell
-let neighbors = {};    // key -> [keys]
-let board = {};        // key -> playerIndex or null
-let players = [];      // [{ index, color, name, isHuman, home:[], target:[] }]
+let cells = [];
+let cellMap = {};
+let neighbors = {};
+let board = {};
+let players = [];
 let currentPlayerIdx = 0;
 let selectedKey = null;
 let validMoves = new Set();
 let jumpPath = [];
 let gameOver = false;
 let animating = false;
+
+// ─── Network State ──────────────────────────────────────────
+let netMode = false;       // true when playing over network
+let netRole = null;        // 'host' or 'guest'
+let localPlayerIdx = 0;    // which players[] index is local
+let peerConn = null;       // RTCPeerConnection
+let dataChannel = null;    // RTCDataChannel
+let netConnected = false;
+
+const STUN_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+  ]
+};
 
 // ─── Canvas Setup ───────────────────────────────────────────
 const canvas = document.getElementById('board');
@@ -203,14 +340,12 @@ function initBoard() {
       cellMap[key] = cell;
     }
   }
-  // Assign zones
   for (let z = 0; z < 6; z++) {
     for (const [r,c] of TRIANGLE_CELLS[z]) {
       const key = r+','+c;
       if (cellMap[key]) cellMap[key].zone = z;
     }
   }
-  // Compute neighbors
   const dirs = [[0,-2],[0,2],[-1,-1],[-1,1],[1,-1],[1,1]];
   for (const cell of cells) {
     neighbors[cell.key] = [];
@@ -223,6 +358,11 @@ function initBoard() {
 
 // ─── Game Logic ─────────────────────────────────────────────
 function startGame() {
+  if (netMode) {
+    startNetworkGame();
+    return;
+  }
+
   const numAI = parseInt(document.getElementById('numAI').value);
   const totalPlayers = numAI + 1;
   const config = PLAYER_CONFIGS[totalPlayers];
@@ -240,11 +380,48 @@ function startGame() {
       color: PLAYER_COLORS[pi],
       name: PLAYER_NAMES[pi],
       isHuman: i === 0,
+      isLocal: true,
       home: TRIANGLE_CELLS[pi].map(([r,c]) => r+','+c),
       target: TRIANGLE_CELLS[targetZone].map(([r,c]) => r+','+c),
     };
     players.push(p);
     for (const k of p.home) board[k] = pi;
+  }
+
+  currentPlayerIdx = 0;
+  selectedKey = null;
+  validMoves = new Set();
+  jumpPath = [];
+  gameOver = false;
+  animating = false;
+  updateLegend();
+  updateStatus();
+  draw();
+}
+
+function startNetworkGame() {
+  const config = PLAYER_CONFIGS[2]; // always [0, 3]
+  board = {};
+  for (const cell of cells) board[cell.key] = null;
+
+  players = [];
+  for (let i = 0; i < config.length; i++) {
+    const pi = config[i];
+    const targetZone = OPPOSITE[pi];
+    const isLocalPlayer = (netRole === 'host' && i === 0) || (netRole === 'guest' && i === 1);
+    const p = {
+      index: pi,
+      color: PLAYER_COLORS[pi],
+      name: PLAYER_NAMES[pi],
+      isHuman: true,
+      isLocal: isLocalPlayer,
+      isRemote: !isLocalPlayer,
+      home: TRIANGLE_CELLS[pi].map(([r,c]) => r+','+c),
+      target: TRIANGLE_CELLS[targetZone].map(([r,c]) => r+','+c),
+    };
+    players.push(p);
+    for (const k of p.home) board[k] = pi;
+    if (isLocalPlayer) localPlayerIdx = i;
   }
 
   currentPlayerIdx = 0;
@@ -271,18 +448,15 @@ function getPlayerPieces(playerIndex) {
 // ─── Move Calculation ───────────────────────────────────────
 function getValidMoves(key) {
   const moves = new Set();
-  // Single steps to empty adjacent cells
   for (const nk of neighbors[key]) {
     if (board[nk] === null) moves.add(nk);
   }
-  // Jump chains (BFS)
   const visited = new Set([key]);
   const queue = [key];
   while (queue.length > 0) {
     const cur = queue.shift();
     for (const nk of neighbors[cur]) {
       if (board[nk] !== null) {
-        // There's a piece at nk — can we jump over it?
         const cr = cellMap[cur].r, cc = cellMap[cur].c;
         const nr = cellMap[nk].r, nc = cellMap[nk].c;
         const lr = nr + (nr - cr);
@@ -300,7 +474,6 @@ function getValidMoves(key) {
 }
 
 function isLegalMove(playerIndex, fromKey, toKey) {
-  // Prevent moving out of target zone once inside
   const player = players.find(p => p.index === playerIndex);
   const targetSet = new Set(player.target);
   if (targetSet.has(fromKey) && !targetSet.has(toKey)) return false;
@@ -323,16 +496,13 @@ function checkWin(playerIndex) {
 }
 
 // ─── AI ─────────────────────────────────────────────────────
-// Progress direction vectors (a, b): progress = a*r + b*c
-// Computed from home→target center vectors in the doubled-column system.
-// Higher value = closer to target zone.
 const PROGRESS_DIRS = {
-  0: [1, 0],      // Top → Bottom
-  1: [4, -3],     // Upper-right → Lower-left
-  2: [-4, -3],    // Lower-right → Upper-left
-  3: [-1, 0],     // Bottom → Top
-  4: [-4, 3],     // Lower-left → Upper-right
-  5: [4, 3],      // Upper-left → Lower-right
+  0: [1, 0],
+  1: [4, -3],
+  2: [-4, -3],
+  3: [-1, 0],
+  4: [-4, 3],
+  5: [4, 3],
 };
 
 function hexDist(key1, key2) {
@@ -349,19 +519,12 @@ function evaluateBoard(playerIndex) {
   const dir = PROGRESS_DIRS[playerIndex];
   let score = 0;
 
-  // ── 1. Directional forward progress ──
-  // Main driver: reward pieces that are far along the home→target axis.
   for (const pk of pieces) {
     const c = cellMap[pk];
     score += (dir[0] * c.r + dir[1] * c.c) * 1.0;
   }
 
-  // ── 2. Greedy target-slot assignment ──
-  // Prevents all pieces converging on the same target cell.
-  // Pieces already inside the target zone stay put (strong bonus);
-  // remaining pieces are greedily matched to the nearest free slot.
   const freeTargets = new Set(player.target);
-
   for (const pk of pieces) {
     if (targetSet.has(pk)) {
       freeTargets.delete(pk);
@@ -370,7 +533,6 @@ function evaluateBoard(playerIndex) {
   }
 
   const unmatched = pieces.filter(pk => !targetSet.has(pk));
-  // Sort by min-distance so the closest piece picks first
   unmatched.sort((a, b) => {
     let da = Infinity, db = Infinity;
     for (const tk of freeTargets) {
@@ -392,20 +554,14 @@ function evaluateBoard(playerIndex) {
     }
   }
 
-  // ── 3. Cohesion bonus ──
-  // Adjacent own pieces enable jump chains → small reward
   for (let i = 0; i < pieces.length; i++) {
     for (let j = i + 1; j < pieces.length; j++) {
       if (hexDist(pieces[i], pieces[j]) === 1) score += 0.3;
     }
   }
 
-  // ── 4. Anti-straggler penalty ──
-  // Pieces still deep in their own home zone late in the game are penalised
-  // to prevent one piece sitting idle while the rest advance.
   const piecesInTarget = pieces.filter(pk => targetSet.has(pk)).length;
   if (piecesInTarget >= 5) {
-    // Late game: heavily penalise stragglers far from target
     for (const pk of unmatched) {
       let minD = Infinity;
       for (const tk of player.target) minD = Math.min(minD, hexDist(pk, tk));
@@ -424,21 +580,13 @@ function aiMove(playerIndex) {
   for (const pk of pieces) {
     const moves = getFilteredMoves(playerIndex, pk);
     for (const mk of moves) {
-      // Simulate
       board[pk] = null;
       board[mk] = playerIndex;
-
       let score = evaluateBoard(playerIndex);
-
-      // Bonus for long jumps — encourages building & using bridges
       const jumpDist = hexDist(pk, mk);
       if (jumpDist > 1) score += jumpDist * 0.8;
-
-      // Undo
       board[mk] = null;
       board[pk] = playerIndex;
-
-      // Minimal randomness for variety without sacrificing quality
       const rnd = Math.random() * 0.15;
       if (score + rnd > bestScore) {
         bestScore = score + rnd;
@@ -466,7 +614,6 @@ function animateMove(from, to, playerIndex, callback) {
     const x = fc.px + (tc.px - fc.px) * ease;
     const y = fc.py + (tc.py - fc.py) * ease;
     draw();
-    // Draw moving piece on top
     ctx.beginPath();
     ctx.arc(x, y, cellRadius * 0.42, 0, Math.PI * 2);
     ctx.fillStyle = color;
@@ -474,7 +621,6 @@ function animateMove(from, to, playerIndex, callback) {
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 1.5;
     ctx.stroke();
-    // Highlight
     ctx.beginPath();
     ctx.arc(x - cellRadius*0.12, y - cellRadius*0.12, cellRadius * 0.14, 0, Math.PI*2);
     ctx.fillStyle = 'rgba(255,255,255,0.35)';
@@ -493,14 +639,21 @@ function animateMove(from, to, playerIndex, callback) {
 
 // ─── Turn Management ────────────────────────────────────────
 function nextTurn() {
-  // Check win
   const cp = getCurrentPlayer();
   if (checkWin(cp.index)) {
     gameOver = true;
-    if (cp.isHuman) {
-      setStatus('🎉 Du hast gewonnen! Glückwunsch!');
+    if (netMode) {
+      if (cp.isLocal) {
+        setStatus('🎉 Du hast gewonnen! Glückwunsch!');
+      } else {
+        setStatus(`${cp.name} (Gegner) hat gewonnen!`);
+      }
     } else {
-      setStatus(`${cp.name} (KI) hat gewonnen!`);
+      if (cp.isHuman) {
+        setStatus('🎉 Du hast gewonnen! Glückwunsch!');
+      } else {
+        setStatus(`${cp.name} (KI) hat gewonnen!`);
+      }
     }
     draw();
     return;
@@ -513,9 +666,10 @@ function nextTurn() {
   draw();
 
   const np = getCurrentPlayer();
-  if (!np.isHuman) {
+  if (!netMode && !np.isHuman) {
     setTimeout(doAiTurn, 400);
   }
+  // In network mode, remote player's turn is just waiting — moves arrive via DataChannel
 }
 
 function doAiTurn() {
@@ -523,7 +677,6 @@ function doAiTurn() {
   const cp = getCurrentPlayer();
   const move = aiMove(cp.index);
   if (!move) {
-    // No moves available, skip
     nextTurn();
     return;
   }
@@ -535,7 +688,18 @@ function doAiTurn() {
 function executeHumanMove(toKey) {
   if (!selectedKey || gameOver || animating) return;
   const cp = getCurrentPlayer();
-  animateMove(selectedKey, toKey, cp.index, () => {
+
+  // In network mode, only local player can move
+  if (netMode && !cp.isLocal) return;
+
+  const fromKey = selectedKey;
+
+  // Send move to peer before animating
+  if (netMode && netConnected) {
+    netSend({ type: 'move', from: fromKey, to: toKey });
+  }
+
+  animateMove(fromKey, toKey, cp.index, () => {
     selectedKey = null;
     validMoves = new Set();
     nextTurn();
@@ -545,7 +709,6 @@ function executeHumanMove(toKey) {
 // ─── Input Handling ─────────────────────────────────────────
 function getClickedCell(mx, my) {
   let best = null, bestDist = Infinity;
-  // Larger hit area on mobile (1.6x radius vs 1x)
   const isMobile = 'ontouchstart' in window;
   const hitR = cellRadius * (isMobile ? 1.6 : 1.0);
   for (const cell of cells) {
@@ -559,10 +722,20 @@ function getClickedCell(mx, my) {
   return best;
 }
 
+function isLocalTurn() {
+  if (!netMode) return true;
+  const cp = getCurrentPlayer();
+  return cp.isLocal;
+}
+
 function handleInput(clientX, clientY) {
   if (gameOver || animating) return;
   const cp = getCurrentPlayer();
-  if (!cp.isHuman) return;
+
+  // In local mode, must be human's turn
+  if (!netMode && !cp.isHuman) return;
+  // In net mode, must be local player's turn
+  if (netMode && !cp.isLocal) return;
 
   const rect = canvas.getBoundingClientRect();
   const mx = (clientX - rect.left) * (canvas.width / rect.width);
@@ -583,10 +756,7 @@ function handleInput(clientX, clientY) {
   }
 }
 
-canvas.addEventListener('click', (e) => {
-  handleInput(e.clientX, e.clientY);
-});
-
+canvas.addEventListener('click', (e) => handleInput(e.clientX, e.clientY));
 canvas.addEventListener('touchend', (e) => {
   e.preventDefault();
   if (e.changedTouches.length > 0) {
@@ -600,14 +770,12 @@ function draw() {
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
 
-  // Background
   const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.6);
   bg.addColorStop(0, '#252545');
   bg.addColorStop(1, '#1a1a2e');
   ctx.fillStyle = bg;
   ctx.fillRect(0, 0, W, H);
 
-  // Draw zone tints
   for (let z = 0; z < 6; z++) {
     const isActive = players.some(p => p.index === z);
     if (!isActive) continue;
@@ -622,7 +790,6 @@ function draw() {
     }
   }
 
-  // Draw connections (subtle lines between adjacent cells)
   ctx.strokeStyle = 'rgba(255,255,255,0.06)';
   ctx.lineWidth = 1;
   const drawn = new Set();
@@ -639,13 +806,11 @@ function draw() {
     }
   }
 
-  // Draw cells
   for (const cell of cells) {
     const isSelected = cell.key === selectedKey;
     const isValid = validMoves.has(cell.key);
     const piece = board[cell.key];
 
-    // Cell background
     ctx.beginPath();
     ctx.arc(cell.px, cell.py, cellRadius * 0.44, 0, Math.PI * 2);
     if (isValid) {
@@ -662,13 +827,10 @@ function draw() {
       ctx.stroke();
     }
 
-    // Piece
     if (piece !== null && piece !== undefined) {
       const r = cellRadius * 0.42;
       ctx.beginPath();
       ctx.arc(cell.px, cell.py, r, 0, Math.PI * 2);
-
-      // Gradient for 3D effect
       const g = ctx.createRadialGradient(
         cell.px - r*0.3, cell.py - r*0.3, r*0.1,
         cell.px, cell.py, r
@@ -679,12 +841,10 @@ function draw() {
       g.addColorStop(1, darken(col, 30));
       ctx.fillStyle = g;
       ctx.fill();
-
       ctx.strokeStyle = isSelected ? '#fff' : 'rgba(0,0,0,0.3)';
       ctx.lineWidth = isSelected ? 2.5 : 1;
       ctx.stroke();
 
-      // Highlight
       ctx.beginPath();
       ctx.arc(cell.px - r*0.25, cell.py - r*0.25, r*0.2, 0, Math.PI*2);
       ctx.fillStyle = 'rgba(255,255,255,0.3)';
@@ -702,10 +862,10 @@ function draw() {
     }
   }
 
-  // Highlight target zone for current player
   if (!gameOver && players.length > 0) {
     const cp = getCurrentPlayer();
-    if (cp.isHuman) {
+    const showTarget = netMode ? cp.isLocal : cp.isHuman;
+    if (showTarget) {
       for (const tk of cp.target) {
         const tc = cellMap[tk];
         if (!tc) continue;
@@ -736,10 +896,18 @@ function setStatus(text) {
 function updateStatus() {
   if (gameOver) return;
   const cp = getCurrentPlayer();
-  if (cp.isHuman) {
-    setStatus(`Dein Zug (${cp.name}) — wähle einen Stein`);
+  if (netMode) {
+    if (cp.isLocal) {
+      setStatus(`Dein Zug (${cp.name}) — wähle einen Stein`);
+    } else {
+      setStatus(`${cp.name} (Gegner) ist am Zug…`);
+    }
   } else {
-    setStatus(`${cp.name} (KI) denkt nach…`);
+    if (cp.isHuman) {
+      setStatus(`Dein Zug (${cp.name}) — wähle einen Stein`);
+    } else {
+      setStatus(`${cp.name} (KI) denkt nach…`);
+    }
   }
 }
 
@@ -749,16 +917,262 @@ function updateLegend() {
   for (const p of players) {
     const item = document.createElement('span');
     item.className = 'legend-item';
-    item.innerHTML = `<span class="legend-dot" style="background:${p.color}"></span>${p.name}${p.isHuman ? ' (Du)' : ' (KI)'}`;
+    let label;
+    if (netMode) {
+      label = p.isLocal ? ' (Du)' : ' (Gegner)';
+    } else {
+      label = p.isHuman ? ' (Du)' : ' (KI)';
+    }
+    item.innerHTML = `<span class="legend-dot" style="background:${p.color}"></span>${p.name}${label}`;
     div.appendChild(item);
   }
 }
 
+// ─── Network: WebRTC ────────────────────────────────────────
+function setNetStatus(text) {
+  document.getElementById('netStatus').textContent = text;
+}
+
+function showNetStep(stepId) {
+  for (const el of document.querySelectorAll('#netPanel .step')) {
+    el.classList.add('hidden');
+  }
+  if (stepId) document.getElementById(stepId).classList.remove('hidden');
+}
+
+function cleanupPeer() {
+  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
+  if (peerConn) { try { peerConn.close(); } catch(e){} peerConn = null; }
+  netConnected = false;
+}
+
+function createPeerConnection() {
+  cleanupPeer();
+  peerConn = new RTCPeerConnection(STUN_SERVERS);
+
+  // Collect ICE candidates into the SDP
+  peerConn.onicecandidate = (e) => {
+    if (!e.candidate) {
+      // ICE gathering complete — update the displayed SDP
+      if (netRole === 'host') {
+        document.getElementById('offerText').value = btoa(JSON.stringify(peerConn.localDescription));
+      } else {
+        document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
+      }
+    }
+  };
+
+  peerConn.onconnectionstatechange = () => {
+    if (peerConn.connectionState === 'disconnected' || peerConn.connectionState === 'failed') {
+      setNetStatus('Verbindung verloren.');
+      netConnected = false;
+      showNetStep('netStep1');
+      if (netMode && !gameOver) {
+        setStatus('Verbindung zum Gegner verloren.');
+      }
+    }
+  };
+
+  return peerConn;
+}
+
+function setupDataChannel(channel) {
+  dataChannel = channel;
+  dataChannel.onopen = () => {
+    netConnected = true;
+    setNetStatus('');
+    showNetStep('netConnected');
+    // Start game
+    initBoard();
+    resizeCanvas();
+    for (const cell of cells) {
+      const {px, py} = cellToPixel(cell.r, cell.c);
+      cell.px = px; cell.py = py;
+    }
+    startGame();
+  };
+
+  dataChannel.onclose = () => {
+    netConnected = false;
+    setNetStatus('Verbindung geschlossen.');
+    showNetStep('netStep1');
+  };
+
+  dataChannel.onmessage = (e) => {
+    handleNetMessage(e.data);
+  };
+}
+
+function netSend(obj) {
+  if (dataChannel && dataChannel.readyState === 'open') {
+    dataChannel.send(JSON.stringify(obj));
+  }
+}
+
+function handleNetMessage(raw) {
+  let msg;
+  try { msg = JSON.parse(raw); } catch(e) { return; }
+
+  if (msg.type === 'move') {
+    // Remote player made a move
+    const cp = getCurrentPlayer();
+    if (cp.isRemote) {
+      // Validate move exists
+      const validSet = getFilteredMoves(cp.index, msg.from);
+      if (board[msg.from] === cp.index && validSet.has(msg.to)) {
+        animateMove(msg.from, msg.to, cp.index, () => {
+          nextTurn();
+        });
+      }
+    }
+  }
+}
+
+// ─── Network UI wiring ──────────────────────────────────────
+const gameModeSelect = document.getElementById('gameMode');
+const localControls = document.getElementById('localControls');
+const netPanel = document.getElementById('netPanel');
+const btnNew = document.getElementById('btnNew');
+
+gameModeSelect.addEventListener('change', () => {
+  const isNet = gameModeSelect.value === 'network';
+  netMode = isNet;
+  localControls.classList.toggle('hidden', isNet);
+  netPanel.classList.toggle('visible', isNet);
+  if (isNet) {
+    btnNew.classList.add('hidden');
+    showNetStep('netStep1');
+    setNetStatus('Wähle eine Rolle.');
+  } else {
+    btnNew.classList.remove('hidden');
+    netPanel.classList.remove('visible');
+    cleanupPeer();
+    netMode = false;
+  }
+});
+
+// Host flow
+document.getElementById('btnHost').addEventListener('click', async () => {
+  netRole = 'host';
+  setNetStatus('Erstelle Einladung…');
+  showNetStep('netStepHost');
+
+  createPeerConnection();
+  const channel = peerConn.createDataChannel('sternhalma');
+  setupDataChannel(channel);
+
+  try {
+    const offer = await peerConn.createOffer();
+    await peerConn.setLocalDescription(offer);
+    // Initial SDP shown immediately; updated when ICE completes via onicecandidate
+    document.getElementById('offerText').value = btoa(JSON.stringify(peerConn.localDescription));
+    setNetStatus('Warte auf ICE-Kandidaten… (Code wird automatisch aktualisiert)');
+
+    // Wait for ICE gathering to finish for a clean SDP
+    if (peerConn.iceGatheringState === 'complete') {
+      setNetStatus('Code bereit — an Mitspieler senden!');
+    } else {
+      peerConn.onicegatheringstatechange = () => {
+        if (peerConn.iceGatheringState === 'complete') {
+          setNetStatus('Code bereit — an Mitspieler senden!');
+        }
+      };
+    }
+  } catch(e) {
+    setNetStatus('Fehler: ' + e.message);
+  }
+});
+
+document.getElementById('btnCopyOffer').addEventListener('click', () => {
+  const ta = document.getElementById('offerText');
+  ta.select();
+  navigator.clipboard.writeText(ta.value).then(() => {
+    document.getElementById('btnCopyOffer').textContent = '✓ Kopiert!';
+    setTimeout(() => document.getElementById('btnCopyOffer').textContent = 'Kopieren', 2000);
+  });
+});
+
+document.getElementById('btnAcceptAnswer').addEventListener('click', async () => {
+  const raw = document.getElementById('answerInput').value.trim();
+  if (!raw) { setNetStatus('Bitte den Antwort-Code einfügen.'); return; }
+  try {
+    const answer = JSON.parse(atob(raw));
+    await peerConn.setRemoteDescription(new RTCSessionDescription(answer));
+    setNetStatus('Verbinde…');
+  } catch(e) {
+    setNetStatus('Ungültiger Code: ' + e.message);
+  }
+});
+
+// Guest flow
+document.getElementById('btnJoin').addEventListener('click', () => {
+  netRole = 'guest';
+  setNetStatus('Einladungs-Code des Hosts einfügen.');
+  showNetStep('netStepGuest');
+});
+
+document.getElementById('btnProcessOffer').addEventListener('click', async () => {
+  const raw = document.getElementById('offerInput').value.trim();
+  if (!raw) { setNetStatus('Bitte den Einladungs-Code einfügen.'); return; }
+  try {
+    const offer = JSON.parse(atob(raw));
+    createPeerConnection();
+
+    peerConn.ondatachannel = (e) => {
+      setupDataChannel(e.channel);
+    };
+
+    await peerConn.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await peerConn.createAnswer();
+    await peerConn.setLocalDescription(answer);
+
+    // Wait for ICE gathering
+    if (peerConn.iceGatheringState === 'complete') {
+      document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
+      setNetStatus('Antwort-Code bereit — an Host senden!');
+    } else {
+      document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
+      setNetStatus('Warte auf ICE-Kandidaten…');
+      peerConn.onicegatheringstatechange = () => {
+        if (peerConn.iceGatheringState === 'complete') {
+          document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
+          setNetStatus('Antwort-Code bereit — an Host senden!');
+        }
+      };
+    }
+
+    document.getElementById('guestStep2').classList.remove('hidden');
+  } catch(e) {
+    setNetStatus('Ungültiger Code: ' + e.message);
+  }
+});
+
+document.getElementById('btnCopyAnswer').addEventListener('click', () => {
+  const ta = document.getElementById('answerText');
+  ta.select();
+  navigator.clipboard.writeText(ta.value).then(() => {
+    document.getElementById('btnCopyAnswer').textContent = '✓ Kopiert!';
+    setTimeout(() => document.getElementById('btnCopyAnswer').textContent = 'Kopieren', 2000);
+  });
+});
+
+document.getElementById('btnDisconnect').addEventListener('click', () => {
+  cleanupPeer();
+  showNetStep('netStep1');
+  setNetStatus('Getrennt.');
+  setStatus('Klicke "Neues Spiel" zum Starten.');
+  gameModeSelect.value = 'local';
+  netMode = false;
+  localControls.classList.remove('hidden');
+  netPanel.classList.remove('visible');
+  btnNew.classList.remove('hidden');
+});
+
 // ─── Init ───────────────────────────────────────────────────
-document.getElementById('btnNew').addEventListener('click', () => {
+btnNew.addEventListener('click', () => {
+  if (netMode) return; // network games start via connection
   initBoard();
   resizeCanvas();
-  // Recompute pixel positions after resize
   for (const cell of cells) {
     const {px, py} = cellToPixel(cell.r, cell.c);
     cell.px = px; cell.py = py;
@@ -776,7 +1190,7 @@ window.addEventListener('resize', () => {
   draw();
 });
 
-// Auto-start
+// Auto-start local game
 initBoard();
 resizeCanvas();
 for (const cell of cells) {
