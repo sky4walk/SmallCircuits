@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mastermind — mit Knuth-Minimax</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@400;500;600&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #1a1d2e;
+    --board: #252840;
+    --surface: #2e3250;
+    --border: #3d4170;
+    --text: #e0e2f0;
+    --text-dim: #8a8db0;
+    --accent: #6c8aff;
+    --accent-glow: rgba(108,138,255,0.25);
+    --peg-red: #e84545;
+    --peg-blue: #4d8ef7;
+    --peg-green: #3dbd5d;
+    --peg-yellow: #f0c030;
+    --peg-purple: #b44ddb;
+    --peg-orange: #f08030;
+    --fb-black: #1a1a1a;
+    --fb-white: #eee;
+    --fb-empty: #3a3d5a;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px;
+  }
+
+  h1 {
+    font-family: 'Space Mono', monospace;
+    font-size: 1.6rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+    color: var(--accent);
+  }
+
+  .subtitle {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-bottom: 20px;
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* Tabs */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 20px;
+    background: var(--surface);
+    border-radius: 8px;
+    padding: 3px;
+  }
+  .tab {
+    padding: 8px 20px;
+    border: none;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    border-radius: 6px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    transition: all 0.2s;
+  }
+  .tab.active {
+    background: var(--accent);
+    color: #fff;
+  }
+  .tab:hover:not(.active) { color: var(--text); }
+
+  /* Game container */
+  .game-wrap {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .board {
+    background: var(--board);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    min-width: 320px;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    opacity: 0.4;
+    transition: opacity 0.3s;
+  }
+  .row.active { opacity: 1; }
+  .row.done { opacity: 0.8; }
+  .row-num {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--text-dim);
+    width: 18px;
+    text-align: right;
+  }
+
+  .pegs {
+    display: flex;
+    gap: 6px;
+  }
+
+  .peg {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    background: var(--surface);
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+  }
+  .peg:hover { border-color: var(--accent); }
+  .peg.filled { border-color: transparent; }
+  .peg[data-color="0"] { background: var(--peg-red); }
+  .peg[data-color="1"] { background: var(--peg-blue); }
+  .peg[data-color="2"] { background: var(--peg-green); }
+  .peg[data-color="3"] { background: var(--peg-yellow); }
+  .peg[data-color="4"] { background: var(--peg-purple); }
+  .peg[data-color="5"] { background: var(--peg-orange); }
+
+  .feedback {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+    margin-left: 4px;
+  }
+  .fb-peg {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--fb-empty);
+  }
+  .fb-peg.black { background: var(--fb-black); box-shadow: 0 0 0 1px #555; }
+  .fb-peg.white { background: var(--fb-white); }
+
+  /* Color picker */
+  .controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    align-items: center;
+    margin-top: 12px;
+  }
+  .palette {
+    display: flex;
+    gap: 8px;
+  }
+  .color-btn {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .color-btn:hover { transform: scale(1.15); }
+  .color-btn.selected { border-color: #fff; box-shadow: 0 0 10px var(--accent-glow); }
+  .color-btn[data-c="0"] { background: var(--peg-red); }
+  .color-btn[data-c="1"] { background: var(--peg-blue); }
+  .color-btn[data-c="2"] { background: var(--peg-green); }
+  .color-btn[data-c="3"] { background: var(--peg-yellow); }
+  .color-btn[data-c="4"] { background: var(--peg-purple); }
+  .color-btn[data-c="5"] { background: var(--peg-orange); }
+
+  .btn-row { display: flex; gap: 8px; }
+
+  .btn {
+    padding: 8px 18px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn:hover { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .btn:disabled { opacity: 0.3; cursor: default; }
+  .btn:disabled:hover { background: var(--surface); color: var(--text); border-color: var(--border); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { background: #5a7aee; }
+
+  .status {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--accent);
+    min-height: 1.5em;
+    text-align: center;
+  }
+
+  /* Secret code display */
+  .secret-area {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 0;
+    justify-content: center;
+  }
+  .secret-peg {
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 2px dashed var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Space Mono', monospace;
+    font-size: 1rem;
+    color: var(--text-dim);
+  }
+  .secret-peg.revealed {
+    border-style: solid;
+    border-color: transparent;
+  }
+
+  /* AI Panel */
+  .ai-panel {
+    background: var(--board);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    width: 320px;
+    max-height: 620px;
+    overflow-y: auto;
+  }
+  .ai-panel h3 {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.85rem;
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .ai-stat {
+    font-size: 0.78rem;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+  }
+  .ai-stat strong { color: var(--text); }
+  .ai-log {
+    margin-top: 10px;
+    font-size: 0.75rem;
+    font-family: 'Space Mono', monospace;
+    line-height: 1.6;
+    color: var(--text-dim);
+  }
+  .ai-log .step {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .ai-log .step-guess { color: var(--text); }
+  .ai-log .step-elim { color: var(--peg-red); font-size: 0.7rem; }
+  .ai-log .step-remain { color: var(--peg-green); font-size: 0.7rem; }
+
+  .ai-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+  }
+
+  .speed-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  .speed-row input { width: 100px; }
+
+  /* Secret input for AI mode */
+  .secret-input {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin: 8px 0;
+  }
+  .secret-input .peg {
+    width: 34px;
+    height: 34px;
+  }
+
+  .legend {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--surface);
+    border-radius: 8px;
+    border: 1px solid var(--border);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  .legend-item .fb-peg { flex-shrink: 0; }
+
+  .hidden { display: none !important; }
+
+  /* Responsive */
+  @media (max-width: 700px) {
+    .game-wrap { flex-direction: column; align-items: center; }
+    .ai-panel { width: 100%; max-width: 340px; }
+    .board { min-width: 280px; }
+    .peg { width: 32px; height: 32px; }
+    .secret-peg { width: 32px; height: 32px; }
+  }
+</style>
+</head>
+<body>
+
+<h1>Mastermind</h1>
+<p class="subtitle">Klassisch · 4 Positionen · 6 Farben</p>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchMode('play')">Spielen</button>
+  <button class="tab" onclick="switchMode('ai')">KI-Demo (Minimax)</button>
+</div>
+
+<div class="game-wrap">
+  <!-- Board -->
+  <div>
+    <div class="board" id="board"></div>
+    <div class="controls" id="playControls">
+      <div class="secret-area" id="secretArea"></div>
+      <div class="palette" id="palette"></div>
+      <div class="btn-row">
+        <button class="btn" onclick="clearRow()">Leeren</button>
+        <button class="btn primary" id="submitBtn" onclick="submitGuess()" disabled>Prüfen</button>
+      </div>
+      <button class="btn" onclick="newGame()">Neues Spiel</button>
+      <div class="status" id="status"></div>
+      <div class="legend">
+        <span class="legend-item"><span class="fb-peg black"></span> Richtige Farbe, richtige Position</span>
+        <span class="legend-item"><span class="fb-peg white"></span> Richtige Farbe, falsche Position</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Panel -->
+  <div class="ai-panel hidden" id="aiPanel">
+    <h3>Knuth-Minimax Algorithmus</h3>
+    <p class="ai-stat" style="margin-bottom:10px; line-height:1.5;">
+      Wähle den geheimen Code, dann lässt die KI den Algorithmus laufen.
+      Garantiert ≤5 Züge.
+    </p>
+    <div>
+      <span class="ai-stat">Geheimer Code:</span>
+      <div class="secret-input" id="aiSecretInput"></div>
+      <div class="btn-row" style="margin-top: 6px;">
+        <button class="btn" onclick="randomAiSecret()">Zufällig</button>
+        <button class="btn primary" id="aiStartBtn" onclick="startAi()" disabled>KI starten</button>
+        <button class="btn" onclick="resetAi()">Reset</button>
+      </div>
+    </div>
+    <div class="speed-row" style="margin-top:10px;">
+      <span>Tempo:</span>
+      <input type="range" id="aiSpeed" min="100" max="2000" value="800" step="100">
+      <span id="aiSpeedLabel">800ms</span>
+    </div>
+    <div style="margin-top:10px;">
+      <span class="ai-stat">Mögliche Codes: <strong id="aiRemain">1296</strong></span><br>
+      <span class="ai-stat">Schritt: <strong id="aiStep">0</strong> / 10</span>
+    </div>
+    <div class="ai-log" id="aiLog"></div>
+  </div>
+</div>
+
+<script>
+// ─── Constants ───
+const COLORS = 6, SLOTS = 4, MAX_ROWS = 10;
+const COLOR_NAMES = ['Rot','Blau','Grün','Gelb','Lila','Orange'];
+
+// ─── State ───
+let mode = 'play'; // 'play' | 'ai'
+let secret = [];
+let currentRow = 0;
+let currentGuess = [null,null,null,null];
+let selectedColor = 0;
+let gameOver = false;
+let rows = [];
+
+// AI state
+let aiSecret = [null,null,null,null];
+let aiRunning = false;
+let aiTimer = null;
+
+// ─── All possible codes ───
+function allCodes() {
+  const codes = [];
+  for (let a=0; a<COLORS; a++)
+    for (let b=0; b<COLORS; b++)
+      for (let c=0; c<COLORS; c++)
+        for (let d=0; d<COLORS; d++)
+          codes.push([a,b,c,d]);
+  return codes;
+}
+
+// ─── Feedback calculation ───
+function calcFeedback(guess, secret) {
+  let black = 0, white = 0;
+  const gUsed = [false,false,false,false];
+  const sUsed = [false,false,false,false];
+  // blacks
+  for (let i=0; i<SLOTS; i++) {
+    if (guess[i] === secret[i]) { black++; gUsed[i]=true; sUsed[i]=true; }
+  }
+  // whites
+  for (let i=0; i<SLOTS; i++) {
+    if (gUsed[i]) continue;
+    for (let j=0; j<SLOTS; j++) {
+      if (sUsed[j]) continue;
+      if (guess[i] === secret[j]) { white++; sUsed[j]=true; break; }
+    }
+  }
+  return [black, white];
+}
+
+// ─── Board rendering ───
+function buildBoard() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  rows = [];
+  for (let r = MAX_ROWS-1; r >= 0; r--) {
+    const div = document.createElement('div');
+    div.className = 'row' + (r===0 ? ' active' : '');
+    div.dataset.row = r;
+
+    const num = document.createElement('span');
+    num.className = 'row-num';
+    num.textContent = r+1;
+    div.appendChild(num);
+
+    const pegs = document.createElement('div');
+    pegs.className = 'pegs';
+    for (let s=0; s<SLOTS; s++) {
+      const p = document.createElement('div');
+      p.className = 'peg';
+      p.dataset.row = r;
+      p.dataset.slot = s;
+      if (mode === 'play') {
+        p.addEventListener('click', () => placePeg(r, s));
+      }
+      pegs.appendChild(p);
+    }
+    div.appendChild(pegs);
+
+    const fb = document.createElement('div');
+    fb.className = 'feedback';
+    for (let f=0; f<SLOTS; f++) {
+      const fp = document.createElement('div');
+      fp.className = 'fb-peg';
+      fb.appendChild(fp);
+    }
+    div.appendChild(fb);
+
+    board.appendChild(div);
+    rows[r] = div;
+  }
+  buildSecretArea();
+}
+
+function buildSecretArea() {
+  const area = document.getElementById('secretArea');
+  area.innerHTML = '';
+  for (let s=0; s<SLOTS; s++) {
+    const p = document.createElement('div');
+    p.className = 'secret-peg';
+    p.textContent = '?';
+    p.id = 'secret-' + s;
+    area.appendChild(p);
+  }
+}
+
+function buildPalette() {
+  const pal = document.getElementById('palette');
+  pal.innerHTML = '';
+  for (let c=0; c<COLORS; c++) {
+    const btn = document.createElement('button');
+    btn.className = 'color-btn' + (c===selectedColor ? ' selected' : '');
+    btn.dataset.c = c;
+    btn.title = COLOR_NAMES[c];
+    btn.addEventListener('click', () => selectColor(c));
+    pal.appendChild(btn);
+  }
+}
+
+function selectColor(c) {
+  selectedColor = c;
+  document.querySelectorAll('.color-btn').forEach(b => b.classList.toggle('selected', +b.dataset.c === c));
+}
+
+// ─── Play mode ───
+function placePeg(row, slot) {
+  if (gameOver || row !== currentRow || mode !== 'play') return;
+  currentGuess[slot] = selectedColor;
+  const peg = rows[row].querySelectorAll('.peg')[slot];
+  peg.dataset.color = selectedColor;
+  peg.classList.add('filled');
+  updateSubmitBtn();
+}
+
+function updateSubmitBtn() {
+  document.getElementById('submitBtn').disabled = currentGuess.includes(null);
+}
+
+function clearRow() {
+  if (gameOver || mode !== 'play') return;
+  currentGuess = [null,null,null,null];
+  rows[currentRow].querySelectorAll('.peg').forEach(p => {
+    delete p.dataset.color;
+    p.classList.remove('filled');
+  });
+  updateSubmitBtn();
+}
+
+function submitGuess() {
+  if (gameOver || currentGuess.includes(null)) return;
+  const [black, white] = calcFeedback(currentGuess, secret);
+  showFeedback(currentRow, black, white);
+  rows[currentRow].classList.remove('active');
+  rows[currentRow].classList.add('done');
+
+  if (black === SLOTS) {
+    gameOver = true;
+    revealSecret();
+    setStatus('Gewonnen in ' + (currentRow+1) + ' Zügen!');
+    return;
+  }
+
+  currentRow++;
+  if (currentRow >= MAX_ROWS) {
+    gameOver = true;
+    revealSecret();
+    setStatus('Verloren! Der Code war oben.');
+    return;
+  }
+
+  rows[currentRow].classList.add('active');
+  currentGuess = [null,null,null,null];
+  updateSubmitBtn();
+  setStatus('');
+}
+
+function showFeedback(row, black, white) {
+  const fbPegs = rows[row].querySelectorAll('.fb-peg');
+  let i = 0;
+  for (let b=0; b<black; b++) fbPegs[i++].classList.add('black');
+  for (let w=0; w<white; w++) fbPegs[i++].classList.add('white');
+}
+
+function revealSecret() {
+  for (let s=0; s<SLOTS; s++) {
+    const p = document.getElementById('secret-'+s);
+    p.textContent = '';
+    p.className = 'secret-peg revealed';
+    p.dataset.color = secret[s];
+    p.style.background = getComputedStyle(document.documentElement)
+      .getPropertyValue(['--peg-red','--peg-blue','--peg-green','--peg-yellow','--peg-purple','--peg-orange'][secret[s]]);
+  }
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+function generateSecret() {
+  secret = [];
+  for (let i=0; i<SLOTS; i++) secret.push(Math.floor(Math.random()*COLORS));
+}
+
+function newGame() {
+  gameOver = false;
+  currentRow = 0;
+  currentGuess = [null,null,null,null];
+  generateSecret();
+  buildBoard();
+  buildPalette();
+  setStatus('');
+  updateSubmitBtn();
+}
+
+// ─── Mode switching ───
+function switchMode(m) {
+  mode = m;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab')[m==='play'?0:1].classList.add('active');
+
+  document.getElementById('playControls').classList.toggle('hidden', m==='ai');
+  document.getElementById('aiPanel').classList.toggle('hidden', m==='play');
+
+  if (m === 'play') {
+    newGame();
+  } else {
+    resetAi();
+  }
+}
+
+// ─── AI / Knuth Minimax ───
+function buildAiSecretInput() {
+  const wrap = document.getElementById('aiSecretInput');
+  wrap.innerHTML = '';
+  for (let s=0; s<SLOTS; s++) {
+    const p = document.createElement('div');
+    p.className = 'peg';
+    p.dataset.slot = s;
+    if (aiSecret[s] !== null) {
+      p.dataset.color = aiSecret[s];
+      p.classList.add('filled');
+    }
+    p.addEventListener('click', () => {
+      aiSecret[s] = selectedColor;
+      buildAiSecretInput();
+      checkAiReady();
+    });
+    wrap.appendChild(p);
+  }
+}
+
+function checkAiReady() {
+  document.getElementById('aiStartBtn').disabled = aiSecret.includes(null) || aiRunning;
+}
+
+function randomAiSecret() {
+  for (let i=0; i<SLOTS; i++) aiSecret[i] = Math.floor(Math.random()*COLORS);
+  buildAiSecretInput();
+  checkAiReady();
+}
+
+function resetAi() {
+  if (aiTimer) clearTimeout(aiTimer);
+  aiRunning = false;
+  aiSecret = [null,null,null,null];
+  currentRow = 0;
+  gameOver = false;
+  buildBoard();
+  buildPalette();
+  buildAiSecretInput();
+  document.getElementById('aiRemain').textContent = '1296';
+  document.getElementById('aiStep').textContent = '0';
+  document.getElementById('aiLog').innerHTML = '';
+  checkAiReady();
+}
+
+// Knuth's minimax: choose guess that minimizes the maximum partition size
+function knuthMinimaxGuess(possible, allGuesses) {
+  // If only 1 or 2 left, just pick from possible
+  if (possible.length <= 2) return possible[0];
+
+  let bestGuess = null;
+  let bestScore = Infinity;
+
+  // Enumerate all feedback possibilities
+  const fbKeys = [];
+  for (let b=0; b<=SLOTS; b++)
+    for (let w=0; w<=SLOTS-b; w++)
+      if (b+w<=SLOTS && !(b===SLOTS-1 && w===1))
+        fbKeys.push(b*10+w);
+
+  for (const guess of allGuesses) {
+    // Partition possible codes by feedback
+    const partitions = {};
+    for (const code of possible) {
+      const [b,w] = calcFeedback(guess, code);
+      const key = b*10+w;
+      partitions[key] = (partitions[key]||0) + 1;
+    }
+    // Worst case = max partition size
+    let maxPart = 0;
+    for (const k in partitions) {
+      if (partitions[k] > maxPart) maxPart = partitions[k];
+    }
+    // Prefer guesses from possible set (tiebreaker)
+    const inPossible = possible.some(c => c[0]===guess[0]&&c[1]===guess[1]&&c[2]===guess[2]&&c[3]===guess[3]);
+    const score = maxPart * 10000 + (inPossible ? 0 : 1);
+
+    if (score < bestScore) {
+      bestScore = score;
+      bestGuess = guess;
+    }
+  }
+  return bestGuess;
+}
+
+function startAi() {
+  if (aiSecret.includes(null) || aiRunning) return;
+  aiRunning = true;
+  gameOver = false;
+  currentRow = 0;
+  buildBoard();
+  document.getElementById('aiLog').innerHTML = '';
+  document.getElementById('aiStep').textContent = '0';
+  checkAiReady();
+
+  let possible = allCodes();
+  const all = allCodes();
+  document.getElementById('aiRemain').textContent = possible.length;
+
+  // First guess is always [0,0,1,1] per Knuth
+  let guess = [0,0,1,1];
+  let step = 0;
+
+  function doStep() {
+    if (gameOver || currentRow >= MAX_ROWS) { aiRunning = false; checkAiReady(); return; }
+    step++;
+
+    // Place guess on board
+    const rowPegs = rows[currentRow].querySelectorAll('.peg');
+    rows[currentRow].classList.add('active');
+    for (let s=0; s<SLOTS; s++) {
+      rowPegs[s].dataset.color = guess[s];
+      rowPegs[s].classList.add('filled');
+    }
+
+    // Get feedback
+    const [black, white] = calcFeedback(guess, aiSecret);
+    showFeedback(currentRow, black, white);
+    rows[currentRow].classList.remove('active');
+    rows[currentRow].classList.add('done');
+
+    // Filter possible
+    const prevCount = possible.length;
+    possible = possible.filter(code => {
+      const [b,w] = calcFeedback(guess, code);
+      return b===black && w===white;
+    });
+
+    // Log
+    const log = document.getElementById('aiLog');
+    const guessStr = guess.map(c => COLOR_NAMES[c][0]).join('');
+    const div = document.createElement('div');
+    div.className = 'step';
+    div.innerHTML = `<span class="step-guess">Zug ${step}: ${guessStr} → ●${black} ○${white}</span><br>`
+      + `<span class="step-elim">Eliminiert: ${prevCount - possible.length}</span> · `
+      + `<span class="step-remain">Übrig: ${possible.length}</span>`;
+
+    if (step > 1) {
+      // Show minimax reasoning
+      div.innerHTML += `<br><span style="color:var(--text-dim);font-size:0.68rem;">Minimax: worst-case Partition minimiert</span>`;
+    } else {
+      div.innerHTML += `<br><span style="color:var(--text-dim);font-size:0.68rem;">Knuth-Startcode: optimaler erster Zug</span>`;
+    }
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+
+    document.getElementById('aiRemain').textContent = possible.length;
+    document.getElementById('aiStep').textContent = step;
+
+    if (black === SLOTS) {
+      gameOver = true;
+      aiRunning = false;
+      revealSecret_ai();
+      const fin = document.createElement('div');
+      fin.className = 'step';
+      fin.innerHTML = `<span style="color:var(--accent);">✓ Gelöst in ${step} Zügen!</span>`;
+      log.appendChild(fin);
+      checkAiReady();
+      return;
+    }
+
+    currentRow++;
+
+    // Next guess via minimax
+    const speed = +document.getElementById('aiSpeed').value;
+    aiTimer = setTimeout(() => {
+      // Use minimax on full set of codes for best theoretical guarantee
+      guess = knuthMinimaxGuess(possible, possible.length <= 256 ? all : possible);
+      doStep();
+    }, speed);
+  }
+
+  doStep();
+}
+
+function revealSecret_ai() {
+  for (let s=0; s<SLOTS; s++) {
+    const p = document.getElementById('secret-'+s);
+    p.textContent = '';
+    p.className = 'secret-peg revealed';
+    const colors = ['--peg-red','--peg-blue','--peg-green','--peg-yellow','--peg-purple','--peg-orange'];
+    p.style.background = getComputedStyle(document.documentElement).getPropertyValue(colors[aiSecret[s]]);
+  }
+}
+
+// Speed label update
+document.getElementById('aiSpeed').addEventListener('input', function() {
+  document.getElementById('aiSpeedLabel').textContent = this.value + 'ms';
+});
+
+// ─── Init ───
+newGame();
+</script>
+</body>
+</html>
