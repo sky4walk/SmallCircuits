@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CTM → Bi-Tag System</title>
+<style>
+:root {
+  --bg: #1a1a2e;
+  --surface: #16213e;
+  --border: #0f3460;
+  --text: #e0e0e0;
+  --dim: #8899aa;
+  --accent: #e94560;
+  --ok: #4ecca3;
+  --warn: #f0c040;
+  --head: #e94560;
+  --sym-a: #4ecca3;
+  --sym-e: #e9a045;
+  --mono: 'Courier New', monospace;
+  --sans: system-ui, -apple-system, sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  padding: 12px;
+  line-height: 1.5;
+}
+h1 { font-size: 1.3em; margin-bottom: 8px; }
+h2 { font-size: 1.05em; color: var(--accent); margin: 12px 0 6px; }
+button {
+  font-family: var(--sans);
+  font-size: 0.9em;
+  padding: 5px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.green { border-color: var(--ok); color: var(--ok); }
+button.green:hover { background: #1a3a2e; }
+button.red { border-color: var(--accent); color: var(--accent); }
+
+.toolbar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.toolbar label { font-size: 0.85em; color: var(--dim); }
+
+input[type="file"] { display: none; }
+.file-btn {
+  display: inline-block; padding: 5px 14px;
+  border: 1px solid var(--ok); border-radius: 4px;
+  color: var(--ok); cursor: pointer; font-size: 0.9em;
+}
+.file-btn:hover { background: #1a3a2e; }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin: 8px 0;
+}
+.panel-title {
+  font-size: 0.85em;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+/* Dataword display */
+.dataword {
+  font-family: var(--mono);
+  font-size: 1.05em;
+  padding: 8px;
+  background: #0d1525;
+  border-radius: 4px;
+  overflow-x: auto;
+  white-space: nowrap;
+  min-height: 2em;
+  line-height: 1.8;
+}
+.dataword .sym-a { color: var(--sym-a); }
+.dataword .sym-e { color: var(--sym-e); font-weight: bold; }
+.dataword .sym-eh { color: var(--accent); font-weight: bold; }
+
+/* Productions table */
+.prod-list {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #0d1525;
+  border-radius: 4px;
+}
+.prod-list div { padding: 1px 0; }
+.prod-list .prod-a { color: var(--sym-a); }
+.prod-list .prod-ea { color: var(--sym-e); }
+.prod-list .prod-halt { color: var(--accent); }
+
+/* Log */
+.log-area {
+  font-family: var(--mono);
+  font-size: 0.82em;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 6px;
+  background: #0d1525;
+  border-radius: 4px;
+  white-space: pre;
+}
+.log-area .step-num { color: var(--dim); }
+.log-area .log-halt { color: var(--accent); font-weight: bold; }
+.log-area .log-prod { color: var(--warn); }
+
+.status {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  padding: 4px 8px;
+  min-height: 1.5em;
+}
+.status .halted { color: var(--accent); font-weight: bold; }
+.status .running { color: var(--ok); }
+
+.columns { display: flex; gap: 12px; flex-wrap: wrap; }
+.columns > div { flex: 1; min-width: 300px; }
+
+.info-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  font-size: 0.88em;
+}
+.info-grid dt { color: var(--dim); }
+.info-grid dd { font-family: var(--mono); }
+
+select {
+  font-family: var(--sans);
+  font-size: 0.9em;
+  padding: 4px 8px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+</style>
+</head>
+<body>
+
+<h1>CTM → Bi-Tag System</h1>
+
+<div class="toolbar">
+  <label class="file-btn" for="fileInput">📂 .ctm laden</label>
+  <input type="file" id="fileInput" accept=".ctm">
+  <span style="color:var(--dim); font-size:0.85em">—</span>
+  <select id="selExample">
+    <option value="">— Beispiel —</option>
+    <option value="simple">Einfach: 2 Zustände</option>
+    <option value="incr">Binär-Inkrement</option>
+  </select>
+  <button id="btnExport" class="green" disabled>⬇ .bts Export</button>
+</div>
+
+<div id="pnlInfo" class="panel" style="display:none">
+  <div class="panel-title">Konvertierung</div>
+  <div class="columns">
+    <div>
+      <h2>CTM</h2>
+      <dl id="ctmInfo" class="info-grid"></dl>
+    </div>
+    <div>
+      <h2>Bi-Tag System</h2>
+      <dl id="btsInfo" class="info-grid"></dl>
+    </div>
+  </div>
+</div>
+
+<div class="columns">
+  <div>
+    <div class="panel" id="pnlProd" style="display:none">
+      <div class="panel-title">Produktionen P</div>
+      <div id="prodList" class="prod-list"></div>
+    </div>
+  </div>
+  <div>
+    <div class="panel" id="pnlSim" style="display:none">
+      <div class="panel-title">Simulation</div>
+      <div class="toolbar">
+        <button id="btnStep">Schritt ▶</button>
+        <button id="btnRun">Start ▶▶</button>
+        <button id="btnFast">⏩ Schnell</button>
+        <button id="btnReset" class="red">Reset ⟲</button>
+        <label>Tempo:
+          <input type="range" id="sldSpeed" min="1" max="100" value="50" style="width:80px;vertical-align:middle">
+        </label>
+      </div>
+      <div id="simStatus" class="status"></div>
+      <h2>Datenwort</h2>
+      <div id="dataword" class="dataword"></div>
+      <h2>Log</h2>
+      <div id="logArea" class="log-area"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════
+   DATENSTRUKTUREN
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Bi-tag System: (A, E, eh, P)
+ * - A: Set of data symbols
+ * - E: Set of state symbols
+ * - eh: halt symbol ∈ E
+ * - P: productions map
+ *   P(a) → string (for a ∈ A)
+ *   P(e, a) → string (for e ∈ E\{eh}, a ∈ A)
+ */
+class BiTagSystem {
+  constructor() {
+    this.A = [];          // data symbols
+    this.E = [];          // state symbols
+    this.eh = null;       // halt symbol
+    this.prodA = {};      // P(a) → word  (key: a)
+    this.prodEA = {};     // P(e,a) → word (key: "e,a")
+    this.name = '';
+    this.symbolNames = {}; // mapping: internal name → display name
+  }
+
+  /** Get production for a single A symbol */
+  getPA(a) { return this.prodA[a]; }
+
+  /** Get production for (e, a) pair */
+  getPEA(e, a) { return this.prodEA[e + ',' + a]; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CTM PARSER (liest .ctm Dateien)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function parseCTMFile(text) {
+  const lines = text.split('\n');
+  let name = '';
+  let config = null;
+  let tapeStr = null;
+  const transitions = [];
+  const states = new Set();
+  const alphabet = new Set();
+
+  for (let line of lines) {
+    line = line.trim();
+    if (!line) continue;
+    if (line.startsWith('#')) {
+      if (!name) name = line.slice(1).trim();
+      continue;
+    }
+    const regex = /\(([^)]+)\)/g;
+    let match;
+    while ((match = regex.exec(line)) !== null) {
+      const parts = match[1].split(',').map(s => s.trim());
+      if (parts.length === 2 && !config) {
+        config = { startState: parts[0], headPos: parseInt(parts[1], 10) };
+      } else if (parts.length === 1 && tapeStr === null) {
+        tapeStr = parts[0];
+      } else if (parts.length === 5) {
+        const t = {
+          state: parts[0],
+          read: parts[1],
+          writeVal: parts[2],  // 1 or 2 chars
+          nextState: parts[3],
+          stay: parts[4].toUpperCase() === 'S'
+        };
+        transitions.push(t);
+        states.add(t.state);
+        states.add(t.nextState);
+        alphabet.add(t.read);
+        for (const ch of t.writeVal) alphabet.add(ch);
+      }
+    }
+  }
+
+  if (!config) throw new Error('Keine Konfiguration (Startzustand, Kopfposition) gefunden');
+  if (transitions.length === 0) throw new Error('Keine Übergänge gefunden');
+
+  // Build transition map: (state, read) → transition
+  const transMap = {};
+  for (const t of transitions) {
+    transMap[t.state + ',' + t.read] = t;
+  }
+
+  return {
+    name: name || 'Unbenannt',
+    startState: config.startState,
+    headPos: config.headPos,
+    tape: tapeStr || '',
+    transitions,
+    states: [...states].sort(),
+    alphabet: [...alphabet].sort(),
+    transMap
+  };
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CTM → BI-TAG SYSTEM KONVERTIERUNG (Lemma 2.2, Neary/Woods 2009)
+   ═══════════════════════════════════════════════════════════════════════
+
+   Gegeben: CTM C = (Q, Σ, f, q1, q|Q|)
+
+   Konstruktion von BC = (AC, EC, e|Q|, PC):
+     AC = {a_σ | σ ∈ Σ}
+     EC = {e_q | q ∈ Q}
+     e|Q| = Haltsymbol (Zustand ohne Übergänge)
+
+   Produktionen:
+     P(a_σ) = a_σ                    (Identität, rotiert Symbol)
+     P(e_qx, a_σi) = a_σj e_qy      falls (qx, σi, σj, qy) ∈ f
+     P(e_qx, a_σi) = a_σj a_σk e_qy falls (qx, σi, σjσk, qy) ∈ f
+
+   Datenwort: Die Bandsymbole ab Kopfposition im Uhrzeigersinn,
+              mit e_q an der Kopfposition.
+
+   Beispiel: Band [σ2, σ3, σ4], Kopf auf σ2, Zustand q1
+   → Datenwort: e_q1 a_σ2 a_σ3 a_σ4
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function convertCTMtoBTS(ctm) {
+  const bts = new BiTagSystem();
+  bts.name = 'BTS von: ' + ctm.name;
+
+  // Prüfe auf Stay-Transitionen (im Paper nicht vorgesehen)
+  const stayTransitions = ctm.transitions.filter(t => t.stay);
+  const hasStay = stayTransitions.length > 0;
+
+  // Finde Haltzustände: Zustände ohne ausgehende Übergänge
+  const statesWithTransitions = new Set(ctm.transitions.map(t => t.state));
+  const haltStates = ctm.states.filter(s => !statesWithTransitions.has(s));
+
+  // Symbole: A = Bandalphabet, E = Zustände
+  // Namenskonvention: a_<sym> und e_<state>
+  for (const sym of ctm.alphabet) {
+    const aName = 'a_' + sym;
+    bts.A.push(aName);
+    bts.symbolNames[aName] = sym;
+  }
+
+  // Haltsymbol bestimmen
+  let haltSymbol;
+  if (haltStates.length > 0) {
+    // Erster Haltzustand wird eh
+    haltSymbol = 'e_' + haltStates[0];
+    bts.eh = haltSymbol;
+    for (const hs of haltStates) {
+      const eName = 'e_' + hs;
+      if (!bts.E.includes(eName)) bts.E.push(eName);
+      bts.symbolNames[eName] = hs;
+    }
+  } else {
+    // Kein expliziter Haltzustand → synthetischen erzeugen
+    haltSymbol = 'e_HALT';
+    bts.eh = haltSymbol;
+    bts.E.push(haltSymbol);
+    bts.symbolNames[haltSymbol] = 'HALT';
+  }
+
+  // Nicht-Halt-Zustände
+  for (const st of ctm.states) {
+    const eName = 'e_' + st;
+    if (!bts.E.includes(eName)) bts.E.push(eName);
+    bts.symbolNames[eName] = st;
+  }
+
+  // Produktionen P(a) = a (Identität)
+  for (const a of bts.A) {
+    bts.prodA[a] = a;
+  }
+
+  // Produktionen P(e, a) aus CTM-Übergängen
+  for (const st of ctm.states) {
+    if (haltStates.includes(st)) continue;  // Haltzustand: keine Produktionen
+
+    const eName = 'e_' + st;
+    for (const sym of ctm.alphabet) {
+      const aName = 'a_' + sym;
+      const key = eName + ',' + aName;
+      const tKey = st + ',' + sym;
+      const t = ctm.transMap[tKey];
+
+      if (t) {
+        // Übergang vorhanden
+        if (t.writeVal.length === 1) {
+          // (qx, σi, σj, qy) → P(ex, ai) = aj ey
+          bts.prodEA[key] = 'a_' + t.writeVal + ' e_' + t.nextState;
+        } else {
+          // (qx, σi, σjσk, qy) → P(ex, ai) = aj ak ey
+          bts.prodEA[key] = 'a_' + t.writeVal[0] + ' a_' + t.writeVal[1] + ' e_' + t.nextState;
+        }
+      } else {
+        // Kein Übergang → Halt-Produktion
+        // P(ex, ai) = ai eh  (beliebiges A-Symbol + Haltsymbol)
+        bts.prodEA[key] = aName + ' ' + haltSymbol;
+      }
+    }
+  }
+
+  // Datenwort aus dem CTM-Band konstruieren
+  // Band ist zirkulär, Kopf an headPos
+  const tape = [...ctm.tape];  // Array von Einzelzeichen
+  const headPos = ctm.headPos;
+  const n = tape.length;
+
+  // Datenwort: e_startState a_tape[head] a_tape[head+1] ... a_tape[head-1]
+  const dataword = [];
+  dataword.push('e_' + ctm.startState);
+  for (let i = 0; i < n; i++) {
+    const idx = (headPos + i) % n;
+    dataword.push('a_' + tape[idx]);
+  }
+  // Erstes A-Symbol kommt direkt nach E (zusammen gelesen)
+  // → e und das erste a bilden das Paar (e, a)
+
+  return { bts, dataword, haltStates, hasStay, stayCount: stayTransitions.length };
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BI-TAG SYSTEM SIMULATOR
+   ═══════════════════════════════════════════════════════════════════════
+
+   Definition 2.3 (Neary/Woods):
+   (i)  s = a·s'     ⊢  s'·P(a)
+   (ii) s = e·a·s'   ⊢  s'·P(e,a)
+
+   Halt: eh ist linkestes Symbol im Datenwort.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+class BTSSimulator {
+  constructor(bts, initialDataword) {
+    this.bts = bts;
+    this.initialDataword = [...initialDataword];
+    this.reset();
+  }
+
+  reset() {
+    this.dataword = [...this.initialDataword];
+    this.step = 0;
+    this.halted = false;
+    this.haltReason = '';
+    this.lastProduction = '';
+  }
+
+  /** Ist sym ein A-Symbol? */
+  isA(sym) { return this.bts.A.includes(sym); }
+
+  /** Ist sym ein E-Symbol? */
+  isE(sym) { return this.bts.E.includes(sym); }
+
+  /** Ein Berechnungsschritt. Gibt true zurück wenn erfolgreich. */
+  doStep() {
+    if (this.halted) return false;
+    if (this.dataword.length === 0) {
+      this.halted = true;
+      this.haltReason = 'Datenwort leer';
+      return false;
+    }
+
+    const first = this.dataword[0];
+
+    // Halt-Check: eh ist linkestes Symbol
+    if (first === this.bts.eh) {
+      this.halted = true;
+      this.haltReason = 'Haltsymbol ' + this.displaySym(first) + ' erreicht';
+      return false;
+    }
+
+    // Zusätzlich: jedes E-Symbol eines Haltzustands
+    if (this.isE(first) && !this.isA(first)) {
+      // E-Symbol, kein A → prüfe ob es ein Haltzustand ist
+      // (alle E-Symbole in bts.E die Haltzustände sind, stoppen die Berechnung)
+      // Eigentlich reicht der eh-Check oben, da alle Haltzustände auf eh gemappt sind
+      // oder explizit in haltStates waren. Aber sicherheitshalber:
+    }
+
+    if (this.isA(first)) {
+      // Fall (i): s = a·s'  ⊢  s'·P(a)
+      const prod = this.bts.getPA(first);
+      if (prod === undefined) {
+        this.halted = true;
+        this.haltReason = 'Keine Produktion P(' + this.displaySym(first) + ')';
+        return false;
+      }
+      this.lastProduction = 'P(' + this.displaySym(first) + ') = ' + this.displayWord(prod);
+      this.dataword.shift();  // a entfernen
+      const output = prod.split(' ').filter(s => s);
+      this.dataword.push(...output);
+      this.step++;
+      return true;
+
+    } else if (this.isE(first)) {
+      // Fall (ii): s = e·a·s'  ⊢  s'·P(e,a)
+      if (this.dataword.length < 2) {
+        this.halted = true;
+        this.haltReason = 'E-Symbol ohne nachfolgendes A-Symbol';
+        return false;
+      }
+      const e = first;
+      const a = this.dataword[1];
+      if (!this.isA(a)) {
+        this.halted = true;
+        this.haltReason = 'Ungültige Konfiguration: E gefolgt von E (' +
+          this.displaySym(e) + ' ' + this.displaySym(a) + ')';
+        return false;
+      }
+      const prod = this.bts.getPEA(e, a);
+      if (prod === undefined) {
+        this.halted = true;
+        this.haltReason = 'Keine Produktion P(' + this.displaySym(e) + ',' + this.displaySym(a) + ')';
+        return false;
+      }
+      this.lastProduction = 'P(' + this.displaySym(e) + ',' + this.displaySym(a) + ') = ' + this.displayWord(prod);
+      this.dataword.shift();  // e entfernen
+      this.dataword.shift();  // a entfernen
+      const output = prod.split(' ').filter(s => s);
+      this.dataword.push(...output);
+      this.step++;
+      return true;
+    }
+
+    this.halted = true;
+    this.haltReason = 'Unbekanntes Symbol: ' + first;
+    return false;
+  }
+
+  /** Zeigt Symbol in lesbarer Form */
+  displaySym(sym) {
+    const name = this.bts.symbolNames[sym];
+    return name !== undefined ? name : sym;
+  }
+
+  /** Zeigt Wort (space-separierte Symbole) in lesbarer Form */
+  displayWord(word) {
+    return word.split(' ').filter(s => s).map(s => this.displaySym(s)).join(' ');
+  }
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BEISPIELE
+   ═══════════════════════════════════════════════════════════════════════ */
+
+const EXAMPLES = {
+  simple: `# CTM: Einfach 2 Zustände
+# Ändert ▶ zu X▶ und hält
+(q1,0)
+(◀AB▶)
+(q1,A,X,q1,C) (q1,B,Y,q1,C) (q1,◀,◀,q1,C) (q1,▶,X▶,q2,C)
+`,
+  incr: `# CTM: Binär-Inkrement
+# Inkrementiert 011 → 100
+(q1,1)
+(◀011▶)
+(q1,0,0,q1,C) (q1,1,1,q1,C) (q1,◀,◀,q1,C) (q1,▶,▶,q2,C)
+(q2,1,0,q2,C) (q2,0,1,q3,C) (q2,◀,◀,q2,C) (q2,▶,▶,q2,C)
+(q3,0,0,q3,C) (q3,1,1,q3,C) (q3,◀,◀,q3,C) (q3,▶,▶,q4,C)
+`
+};
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   UI
+   ═══════════════════════════════════════════════════════════════════════ */
+
+let currentCTM = null;
+let currentBTS = null;
+let currentSim = null;
+let animInterval = null;
+
+function showPanels(show) {
+  document.getElementById('pnlInfo').style.display = show ? '' : 'none';
+  document.getElementById('pnlProd').style.display = show ? '' : 'none';
+  document.getElementById('pnlSim').style.display = show ? '' : 'none';
+  document.getElementById('btnExport').disabled = !show;
+}
+
+function loadCTM(text) {
+  stopAnim();
+  try {
+    currentCTM = parseCTMFile(text);
+    const result = convertCTMtoBTS(currentCTM);
+    currentBTS = result.bts;
+
+    // Info anzeigen
+    const ci = document.getElementById('ctmInfo');
+    ci.innerHTML = `
+      <dt>Name</dt><dd>${esc(currentCTM.name)}</dd>
+      <dt>Zustände</dt><dd>${currentCTM.states.length}: ${esc(currentCTM.states.join(', '))}</dd>
+      <dt>Alphabet</dt><dd>${currentCTM.alphabet.length}: ${esc(currentCTM.alphabet.join(' '))}</dd>
+      <dt>Übergänge</dt><dd>${currentCTM.transitions.length}</dd>
+      <dt>Band</dt><dd>${esc(currentCTM.tape)}</dd>
+      <dt>Kopf</dt><dd>${currentCTM.headPos}</dd>
+      <dt>Haltzust.</dt><dd>${result.haltStates.length > 0 ? esc(result.haltStates.join(', ')) : '(implizit)'}</dd>
+      ${result.hasStay ? `<dt style="color:var(--warn)">⚠ Stay</dt><dd style="color:var(--warn)">${result.stayCount} Stay-Übergänge (S) gefunden.<br>
+        Das Paper (Neary/Woods, Lemma 2.1) definiert CTMs nur mit Clockwise-Bewegung.<br>
+        Stay-Transitionen werden als Clockwise behandelt — BTS-Simulation weicht ggf. ab.</dd>` : ''}
+    `;
+
+    const bi = document.getElementById('btsInfo');
+    bi.innerHTML = `
+      <dt>A (Daten)</dt><dd>${currentBTS.A.length}: ${currentBTS.A.map(a => esc(currentBTS.symbolNames[a])).join(' ')}</dd>
+      <dt>E (Zust.)</dt><dd>${currentBTS.E.length}: ${currentBTS.E.map(e => esc(currentBTS.symbolNames[e])).join(' ')}</dd>
+      <dt>e<sub>h</sub></dt><dd>${esc(currentBTS.symbolNames[currentBTS.eh] || currentBTS.eh)}</dd>
+      <dt>P(a)</dt><dd>${Object.keys(currentBTS.prodA).length} Identitäten</dd>
+      <dt>P(e,a)</dt><dd>${Object.keys(currentBTS.prodEA).length} Produktionen</dd>
+      <dt>Datenwort</dt><dd>${result.dataword.length} Symbole</dd>
+    `;
+
+    // Produktionen anzeigen
+    const pl = document.getElementById('prodList');
+    let html = '';
+
+    // P(a) Identitäten
+    html += '<div style="color:var(--dim)">── Identitäten P(a) = a ──</div>';
+    for (const a of currentBTS.A) {
+      const name = currentBTS.symbolNames[a];
+      html += `<div class="prod-a">P(${esc(name)}) = ${esc(name)}</div>`;
+    }
+
+    // P(e, a) Produktionen
+    html += '<div style="color:var(--dim);margin-top:6px">── Produktionen P(e, a) ──</div>';
+    for (const key of Object.keys(currentBTS.prodEA).sort()) {
+      const [eName, aName] = key.split(',');
+      const eDisp = currentBTS.symbolNames[eName] || eName;
+      const aDisp = currentBTS.symbolNames[aName] || aName;
+      const prod = currentBTS.prodEA[key];
+      const prodDisp = prod.split(' ').filter(s => s).map(s => currentBTS.symbolNames[s] || s).join(' ');
+
+      const isHalt = prod.includes(currentBTS.eh);
+      const cls = isHalt ? 'prod-halt' : 'prod-ea';
+      html += `<div class="${cls}">P(${esc(eDisp)}, ${esc(aDisp)}) = ${esc(prodDisp)}</div>`;
+    }
+    pl.innerHTML = html;
+
+    // Simulator initialisieren
+    currentSim = new BTSSimulator(currentBTS, result.dataword);
+    showPanels(true);
+    updateSimDisplay();
+    document.getElementById('logArea').textContent = '';
+
+  } catch (e) {
+    alert('Fehler: ' + e.message);
+    console.error(e);
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function updateSimDisplay() {
+  if (!currentSim) return;
+
+  // Datenwort
+  const dw = document.getElementById('dataword');
+  let html = '';
+  for (const sym of currentSim.dataword) {
+    const name = currentBTS.symbolNames[sym] || sym;
+    if (sym === currentBTS.eh) {
+      html += `<span class="sym-eh">${esc(name)}</span> `;
+    } else if (currentBTS.E.includes(sym)) {
+      html += `<span class="sym-e">${esc(name)}</span> `;
+    } else {
+      html += `<span class="sym-a">${esc(name)}</span> `;
+    }
+  }
+  dw.innerHTML = html;
+
+  // Status
+  const st = document.getElementById('simStatus');
+  if (currentSim.halted) {
+    st.innerHTML = `<span class="halted">HALT</span> nach ${currentSim.step} Schritten — ${esc(currentSim.haltReason)}`;
+  } else {
+    st.innerHTML = `<span class="running">Schritt ${currentSim.step}</span> | Datenwort: ${currentSim.dataword.length} Symbole`;
+  }
+}
+
+function appendLog(text, cls) {
+  const log = document.getElementById('logArea');
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = text;
+  log.appendChild(span);
+  log.appendChild(document.createTextNode('\n'));
+  log.scrollTop = log.scrollHeight;
+}
+
+function doStep() {
+  if (!currentSim || currentSim.halted) return false;
+  const ok = currentSim.doStep();
+  if (ok) {
+    appendLog(`${currentSim.step}: ${currentSim.lastProduction}`, 'log-prod');
+  }
+  if (currentSim.halted) {
+    appendLog(`HALT: ${currentSim.haltReason}`, 'log-halt');
+    stopAnim();
+  }
+  updateSimDisplay();
+  return ok;
+}
+
+function stopAnim() {
+  if (animInterval) {
+    clearInterval(animInterval);
+    animInterval = null;
+  }
+}
+
+function startAnim(fast) {
+  stopAnim();
+  const speed = document.getElementById('sldSpeed').value;
+  const delay = fast ? 1 : Math.max(10, 510 - speed * 5);
+  const batchSize = fast ? 100 : 1;
+
+  animInterval = setInterval(() => {
+    for (let i = 0; i < batchSize; i++) {
+      if (!doStep()) { stopAnim(); return; }
+    }
+  }, delay);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BTS EXPORT (.bts Format)
+   ═══════════════════════════════════════════════════════════════════════ */
+
+function exportBTS() {
+  if (!currentBTS || !currentSim) return;
+
+  const lines = [];
+  lines.push('# Bi-Tag System: ' + currentBTS.name);
+  lines.push('# Konvertiert aus CTM nach Neary/Woods (2009), Lemma 2.2');
+  lines.push('#');
+  lines.push('# Format:');
+  lines.push('#   A = {Datensymbole}');
+  lines.push('#   E = {Zustandssymbole}');
+  lines.push('#   eh = Haltsymbol');
+  lines.push('#   P(a) = w           (Typ i: lese ein Symbol)');
+  lines.push('#   P(e, a) = w        (Typ ii: lese zwei Symbole)');
+  lines.push('#   Datenwort: initiale Konfiguration');
+  lines.push('');
+
+  // Symbolmengen
+  lines.push('A = ' + currentBTS.A.map(a => currentBTS.symbolNames[a]).join(' '));
+  lines.push('E = ' + currentBTS.E.map(e => currentBTS.symbolNames[e]).join(' '));
+  lines.push('eh = ' + (currentBTS.symbolNames[currentBTS.eh] || currentBTS.eh));
+  lines.push('');
+
+  // Produktionen
+  lines.push('# Produktionen');
+  for (const a of currentBTS.A) {
+    const name = currentBTS.symbolNames[a];
+    const prod = currentBTS.prodA[a];
+    const prodDisp = prod.split(' ').filter(s => s).map(s => currentBTS.symbolNames[s] || s).join(' ');
+    lines.push('P(' + name + ') = ' + prodDisp);
+  }
+  lines.push('');
+
+  for (const key of Object.keys(currentBTS.prodEA).sort()) {
+    const [eName, aName] = key.split(',');
+    const eDisp = currentBTS.symbolNames[eName] || eName;
+    const aDisp = currentBTS.symbolNames[aName] || aName;
+    const prod = currentBTS.prodEA[key];
+    const prodDisp = prod.split(' ').filter(s => s).map(s => currentBTS.symbolNames[s] || s).join(' ');
+    lines.push('P(' + eDisp + ', ' + aDisp + ') = ' + prodDisp);
+  }
+  lines.push('');
+
+  // Datenwort
+  const dwDisp = currentSim.initialDataword.map(s => currentBTS.symbolNames[s] || s).join(' ');
+  lines.push('Datenwort = ' + dwDisp);
+
+  const text = lines.join('\n') + '\n';
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const baseName = (currentBTS.name || 'bitag')
+    .replace(/[^a-zA-Z0-9äöüÄÖÜß _-]/g, '')
+    .replace(/\s+/g, '_')
+    .substring(0, 40) || 'bitag';
+  a.download = baseName + '.bts';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   EVENT HANDLER
+   ═══════════════════════════════════════════════════════════════════════ */
+
+document.getElementById('fileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => loadCTM(ev.target.result);
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+document.getElementById('selExample').addEventListener('change', e => {
+  const key = e.target.value;
+  if (key && EXAMPLES[key]) loadCTM(EXAMPLES[key]);
+});
+
+document.getElementById('btnStep').addEventListener('click', () => { stopAnim(); doStep(); });
+document.getElementById('btnRun').addEventListener('click', () => startAnim(false));
+document.getElementById('btnFast').addEventListener('click', () => startAnim(true));
+document.getElementById('btnReset').addEventListener('click', () => {
+  stopAnim();
+  if (currentSim) {
+    currentSim.reset();
+    updateSimDisplay();
+    document.getElementById('logArea').textContent = '';
+  }
+});
+document.getElementById('btnExport').addEventListener('click', exportBTS);
+
+// Initial
+showPanels(false);
+</script>
+</body>
+</html>

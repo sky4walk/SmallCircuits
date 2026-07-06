@@ -545,7 +545,6 @@ function convertToClockwise(tm, blank) {
   for (const s of tm.alphabet) {
     if (s !== blank) ctmAlphabet.add(s);
   }
-  // Alle Symbole vom Band hinzufügen
   for (const ch of tm.tape) {
     ctmAlphabet.add(ch);
   }
@@ -553,8 +552,6 @@ function convertToClockwise(tm, blank) {
   ctmAlphabet.add(SYM_RIGHT);
   ctmAlphabet.add(SYM_LEFT);
 
-  // Wenn Blank als Datensymbol verwendet wird (geschrieben mit nicht-Blank-Read),
-  // muss es auch im CTM-Alphabet sein
   const blankAsData = tm.transitions.some(t => t.write === blank && t.read !== blank);
   if (blankAsData) ctmAlphabet.add(blank);
 
@@ -570,101 +567,310 @@ function convertToClockwise(tm, blank) {
     }
   }
 
-  // Jeden Übergang konvertieren
+  // TM-Transitionsmap für Dispatch-Lookup
+  const tmTransMap = new Map();
   for (const t of tm.transitions) {
-    if (t.dir === 'R') {
-      convertRightMove(t);
-    } else {
-      convertLeftMove(t);
+    tmTransMap.set(t.state + '\x00' + t.read, t);
+  }
+  function getTMTrans(state, readSym) {
+    return tmTransMap.get(state + '\x00' + readSym);
+  }
+
+  // Zustände die Carry-Rotation brauchen
+  const needsCarryRotation = new Set();
+
+  // Warnungen für nicht darstellbare Konstrukte
+  const warnings = [];
+
+  // Statische Prüfung: (q,_,·,_,·) — Blank lesen UND Blank schreiben.
+  // Die CTM kollabiert Blank-Regionen auf eine Zelle (◀/▶). Läuft die TM
+  // 2+ Zellen tief in eine Blank-Region und schreibt dort später ein
+  // Symbol, entsteht ein Band mit innerem Blank-Loch, das die CTM nicht
+  // darstellen kann (Paper-Restriktion ii verbietet Blank-Schreiben).
+  for (const t of tm.transitions) {
+    if (t.read === blank && t.write === blank) {
+      warnings.push('(' + t.state + ',' + blank + ',' + t.nextState + ',' + blank +
+        ',' + t.dir + '): Blank-Lesen mit Blank-Schreiben — Blank-Regionen ' +
+        'werden kollabiert. Läuft die TM mehr als eine Zelle in eine ' +
+        'Blank-Region, kann die CTM-Simulation abweichen.');
     }
   }
 
-  /** Konvertiert eine Rechtsbewegung */
+  // Zustände die einen Skip-Zustand (qz_➤) brauchen
+  const needsSkip = new Set();
+
+  // ═══════════════════════════════════════════════════════════
+  // PHASE 1: Rechtsbewegungen konvertieren
+  // ═══════════════════════════════════════════════════════════
+  for (const t of tm.transitions) {
+    if (t.dir === 'R') convertRightMove(t);
+  }
+
   function convertRightMove(t) {
     if (t.read === blank) {
-      // Am RECHTEN Rand (▶): Blank lesen
       if (t.write === blank) {
         addTransition(new CTMTransition(t.state, SYM_RIGHT, SYM_RIGHT, t.nextState));
       } else {
         addTransition(new CTMTransition(t.state, SYM_RIGHT, t.write + SYM_RIGHT, t.nextState));
       }
-      // Am LINKEN Rand (◀): Blank lesen
       if (t.write === blank) {
         addTransition(new CTMTransition(t.state, SYM_LEFT, SYM_LEFT, t.nextState));
       } else {
         addTransition(new CTMTransition(t.state, SYM_LEFT, SYM_LEFT + t.write, t.nextState));
       }
-      // ALS DATENSYMBOL: Blank in einer Zelle gelesen (wurde vorher geschrieben)
       if (blankAsData) {
         addTransition(new CTMTransition(t.state, blank, t.write === blank ? blank : t.write, t.nextState));
       }
     } else {
-      // Normalfall: Symbol ersetzen
       addTransition(new CTMTransition(t.state, t.read, t.write, t.nextState));
     }
   }
 
-  /** Konvertiert eine Linksbewegung durch Band-Rotation */
-  function convertLeftMove(t) {
+  // ═══════════════════════════════════════════════════════════
+  // PHASE 2: Linksbewegungen — nur Marker-Platzierung
+  // ═══════════════════════════════════════════════════════════
+  for (const t of tm.transitions) {
+    if (t.dir === 'L') convertLeftMoveMarker(t);
+  }
+
+  function convertLeftMoveMarker(t) {
     const qx = t.state;
     const qy = t.nextState;
+    needsCarryRotation.add(qy);
 
-    // Schritt 1: Position markieren
     if (t.read === blank) {
-      // --- Boundary-Transitionen: ▶ und ◀ ---
-      const writeSymBoundary = (t.write === blank) ? SYM_RIGHT : t.write;
-
       // Am RECHTEN Rand (▶):
-      const carryR = qy + '_' + SYM_RIGHT;
-      ctmStates.add(carryR);
+      // FIX: ▶ → ◆▶ mit Schreibsymbol im Carry (nicht ◆w mit ▶ im Carry).
+      // Unter der Sim-Semantik "Kopf landet auf zweiter Zelle nach Split"
+      // sorgt das dafür, dass die Rotation zuerst w über ▶ schreibt und
+      // das ▶ korrekt eine Zelle weiter re-insertiert — sonst strandet w
+      // außerhalb der ◀…▶-Region.
       if (t.write === blank) {
+        const carryR = qy + '_' + SYM_RIGHT;
+        ctmStates.add(carryR);
         addTransition(new CTMTransition(qx, SYM_RIGHT, SYM_MARKER, carryR));
       } else {
-        addTransition(new CTMTransition(qx, SYM_RIGHT, SYM_MARKER + writeSymBoundary, carryR));
+        const carryW = qy + '_' + t.write;
+        ctmStates.add(carryW);
+        addTransition(new CTMTransition(qx, SYM_RIGHT, SYM_MARKER + SYM_RIGHT, carryW));
       }
 
-      // Am LINKEN Rand (◀):
-      const carryL = qy + '_' + SYM_LEFT;
-      ctmStates.add(carryL);
+      // Am LINKEN Rand (◀) — PAPER-SCHEMA (Lemma 2.1: "qx,σl → σl σm"):
+      // Das ◀ BLEIBT auf dem Band, ◆ wird dahinter eingefügt. Dadurch endet
+      // die Rotation garantiert mit ◀ im Carry (nicht ▶) — der Dispatch
+      // erkennt die Seite korrekt. Da der Kopf nach dem Split auf ◆ landet,
+      // braucht es einen Hop-Zustand, der über ◆ hinweggeht, bevor die
+      // Rotation (mit dem Schreibsymbol im Carry) beginnt.
       if (t.write === blank) {
-        addTransition(new CTMTransition(qx, SYM_LEFT, SYM_MARKER, carryL));
+        // (qx,_,_,L) am linken Rand: Kopf ginge 2+ tief in die Blank-Region.
+        // Nicht darstellbar (Paper-Restriktion ii verbietet Blank-Schreiben).
+        warnings.push('(' + qx + ',' + blank + ',' + t.nextState + ',' + blank +
+          ',L): Blank-Schreiben bei Blank-Lesen mit Linksbewegung ist am linken ' +
+          'Rand nicht darstellbar — CTM hält dort, TM liefe ggf. weiter.');
+        // Keine Regel für (qx, ◀) → CTM hält an dieser Stelle.
       } else {
-        addTransition(new CTMTransition(qx, SYM_LEFT, SYM_MARKER + writeSymBoundary, carryL));
+        const hop = qy + '_⟳' + t.write;
+        const carryW = qy + '_' + t.write;
+        ctmStates.add(hop);
+        ctmStates.add(carryW);
+        addTransition(new CTMTransition(qx, SYM_LEFT, SYM_LEFT + SYM_MARKER, hop));
+        addTransition(new CTMTransition(hop, SYM_MARKER, SYM_MARKER, carryW));
       }
 
-      // --- Daten-Transition: Blank als reguläres Symbol ---
       if (blankAsData) {
-        const writeSymData = t.write; // Tatsächlicher Schreibwert (auch blank möglich)
+        const writeSymData = t.write;
         const carryData = qy + '_' + writeSymData;
         ctmStates.add(carryData);
         addTransition(new CTMTransition(qx, blank, SYM_MARKER, carryData));
       }
     } else {
-      // Normalfall: Symbol → ◆
       const writeSym = (t.write === blank && !blankAsData) ? SYM_RIGHT : t.write;
       const carryInit = qy + '_' + writeSym;
       ctmStates.add(carryInit);
       addTransition(new CTMTransition(qx, t.read, SYM_MARKER, carryInit));
     }
+  }
 
-    // Schritt 2: Rotations-Regeln für alle möglichen Carry-Symbole
+  // ═══════════════════════════════════════════════════════════
+  // PHASE 3: Dispatch-Regeln (Lemma 2.1, Neary & Woods 2009)
+  //
+  // Wenn Carry-Zustand qy_s den Marker ◆ findet, wird NICHT
+  // s geschrieben + Stay, sondern direkt die NÄCHSTE TM-Transition
+  // für (qy, s_mapped) angestoßen.
+  //
+  // s_mapped = blank falls s ∈ {▶,◀}, sonst s.
+  //
+  // Für Rechts-Dispatch: Schreibwert der nächsten Transition an ◆.
+  // Für Links-Dispatch: ◆ bleibt, neue Carry-Rotation beginnt.
+  // ═══════════════════════════════════════════════════════════
+  generateDispatchRules();
+
+  function generateDispatchRules() {
     const allSymbols = [...ctmAlphabet].filter(s => s !== SYM_MARKER);
 
-    for (const sigma of allSymbols) {
-      const carryState = qy + '_' + sigma;
-      ctmStates.add(carryState);
+    // Iterativ: Dispatch kann neue needsCarryRotation-Einträge erzeugen
+    const processed = new Set();
+    let queue = [...needsCarryRotation];
 
-      for (const sigmaRead of ctmAlphabet) {
-        if (sigmaRead === SYM_MARKER) {
-          // ◆ gefunden → Rotation fertig: schreibe getragenes Symbol, Kopf BLEIBT
-          addTransition(new CTMTransition(carryState, SYM_MARKER, sigma, qy, true));
-        } else {
-          // Weiter rotieren: schreibe sigma, trage sigmaRead
+    while (queue.length > 0) {
+      const batch = queue;
+      queue = [];
+
+      for (const qy of batch) {
+        if (processed.has(qy)) continue;
+        processed.add(qy);
+
+        for (const sigma of allSymbols) {
+          const carryState = qy + '_' + sigma;
+          ctmStates.add(carryState);
+
+          let tmReadSym;
+          if (sigma === SYM_RIGHT || sigma === SYM_LEFT) {
+            tmReadSym = blank;
+          } else {
+            tmReadSym = sigma;
+          }
+
+          const nextT = getTMTrans(qy, tmReadSym);
+          if (!nextT) {
+            // FIX (Halt-Dispatch): TM hält hier. Getragenes Symbol über ◆
+            // zurückschreiben und in einen FRISCHEN TOTEN Zustand qy_✖
+            // wechseln (nicht qy selbst!). qy ist ein lebendiger Zustand —
+            // der Kopf steht nach dem Dispatch eine Zelle weiter, und wenn
+            // dort ein Symbol liegt für das qy eine Regel hat, würde die
+            // CTM fälschlich weiterlaufen.
+            const haltState = qy + '_✖';
+            ctmStates.add(haltState);
+            addTransition(new CTMTransition(carryState, SYM_MARKER, sigma, haltState));
+            continue;
+          }
+
+          if (nextT.dir === 'R') {
+            dispatchRight(carryState, sigma, nextT);
+          } else {
+            const newState = dispatchLeft(carryState, sigma, nextT);
+            if (newState && !processed.has(newState)) {
+              needsCarryRotation.add(newState);
+              queue.push(newState);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  /** Dispatch für Rechtsbewegung: Schreibwert an ◆, clockwise */
+  function dispatchRight(carryState, sigma, nextT) {
+    if (sigma === SYM_RIGHT) {
+      // Mit dem Paper-◀-Schema ist sigma=▶ am Dispatch nicht mehr erreichbar
+      // (Boundary-Flip beseitigt). Defensive Regeln, falls doch:
+      if (nextT.write === blank) {
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_RIGHT, nextT.nextState));
+      } else {
+        addTransition(new CTMTransition(carryState, SYM_MARKER, nextT.write + SYM_RIGHT, nextT.nextState));
+      }
+    } else if (sigma === SYM_LEFT) {
+      // Kopf in der linken Blank-Region, TM liest Blank, Rechtsbewegung.
+      if (nextT.write === blank) {
+        // ◀ zurückschreiben; Kopf landet auf der Zelle danach = content[0]. ✓
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_LEFT, nextT.nextState));
+      } else {
+        // TM schreibt w am linken Rand, Kopf geht rechts auf altes content[0].
+        // ◆ → ◀w (Split): Kopf landet auf w — eine Zelle zu früh.
+        // Skip-Zustand geht unverändert eine Zelle weiter auf content[0].
+        const skip = nextT.nextState + '_➤';
+        ctmStates.add(skip);
+        needsSkip.add(nextT.nextState);
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_LEFT + nextT.write, skip));
+      }
+    } else if (sigma === blank && blankAsData) {
+      addTransition(new CTMTransition(carryState, SYM_MARKER,
+        nextT.write === blank ? blank : nextT.write, nextT.nextState));
+    } else {
+      addTransition(new CTMTransition(carryState, SYM_MARKER, nextT.write, nextT.nextState));
+    }
+  }
+
+  /** Dispatch für Linksbewegung: ◆ bleibt (bzw. wird neu gesetzt),
+   *  neue Carry-Rotation. Gibt den neuen Zielzustand zurück. */
+  function dispatchLeft(carryState, sigma, nextT) {
+    const qz = nextT.nextState;
+
+    if (sigma === SYM_RIGHT) {
+      // Defensiv (sigma=▶ nicht mehr erreichbar, s.o.)
+      if (nextT.write === blank) {
+        const newCarry = qz + '_' + SYM_RIGHT;
+        ctmStates.add(newCarry);
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
+      } else {
+        const newCarry = qz + '_' + nextT.write;
+        ctmStates.add(newCarry);
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER + SYM_RIGHT, newCarry));
+      }
+    } else if (sigma === SYM_LEFT) {
+      // Kopf in der linken Blank-Region, TM liest Blank, Linksbewegung.
+      // PAPER-SCHEMA (wie Marking am ◀): ◆ → ◀◆, Hop über ◆, Rotation mit w.
+      // Das re-deponierte ◀ garantiert, dass die nächste Rotation wieder
+      // mit ◀ im Carry endet.
+      if (nextT.write === blank) {
+        warnings.push('(' + nextT.state + ',' + blank + ',' + qz + ',' + blank +
+          ',L): Blank-Schreiben bei Blank-Lesen mit Linksbewegung ist in der ' +
+          'linken Blank-Region nicht darstellbar — CTM hält dort.');
+        // Keine Regel → CTM hält.
+      } else {
+        const hop = qz + '_⟳' + nextT.write;
+        const carryW = qz + '_' + nextT.write;
+        ctmStates.add(hop);
+        ctmStates.add(carryW);
+        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_LEFT + SYM_MARKER, hop));
+        addTransition(new CTMTransition(hop, SYM_MARKER, SYM_MARKER, carryW));
+      }
+    } else if (sigma === blank && blankAsData) {
+      const newCarry = qz + '_' + nextT.write;
+      ctmStates.add(newCarry);
+      addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
+    } else {
+      const writeSym = (nextT.write === blank && !blankAsData) ? SYM_RIGHT : nextT.write;
+      const newCarry = qz + '_' + writeSym;
+      ctmStates.add(newCarry);
+      addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
+    }
+    return qz;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PHASE 4: Carry-Rotationsregeln (NUR Rotation, kein ◆!)
+  // ═══════════════════════════════════════════════════════════
+  generateCarryRotationRules();
+
+  function generateCarryRotationRules() {
+    const allSymbols = [...ctmAlphabet].filter(s => s !== SYM_MARKER);
+
+    for (const qy of needsCarryRotation) {
+      for (const sigma of allSymbols) {
+        const carryState = qy + '_' + sigma;
+        ctmStates.add(carryState);
+
+        for (const sigmaRead of allSymbols) {
           const nextCarry = qy + '_' + sigmaRead;
           ctmStates.add(nextCarry);
           addTransition(new CTMTransition(carryState, sigmaRead, sigma, nextCarry));
         }
+        // KEIN ◆-Regel! Wird von Dispatch erzeugt.
       }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // PHASE 5: Skip-Zustände: (qz_➤, s, s, qz) — eine Zelle
+  // unverändert weitergehen (nach ◀w-Dispatch am linken Rand).
+  // ═══════════════════════════════════════════════════════════
+  for (const qz of needsSkip) {
+    const skip = qz + '_➤';
+    ctmStates.add(skip);
+    for (const s of ctmAlphabet) {
+      if (s === SYM_MARKER) continue;
+      addTransition(new CTMTransition(skip, s, s, qz));
     }
   }
 
@@ -673,8 +879,8 @@ function convertToClockwise(tm, blank) {
     alphabet: [...ctmAlphabet].sort(),
     transitions: ctmTransitions,
     startState: tm.startState,
-    // Haltzustand: jeder Zustand ohne passenden Übergang
-    transitionMap: buildTransMap(ctmTransitions)
+    transitionMap: buildTransMap(ctmTransitions),
+    warnings: [...new Set(warnings)]
   };
 }
 
@@ -1181,6 +1387,13 @@ function doConvert() {
 
   const info = document.getElementById('convertInfo');
   info.textContent = `${currentCTM.states.length} Zustände, ${currentCTM.transitions.length} Übergänge (${dt}ms)`;
+
+  // Warnungen anzeigen (nicht darstellbare Konstrukte)
+  if (currentCTM.warnings && currentCTM.warnings.length > 0) {
+    info.textContent += ` — ⚠ ${currentCTM.warnings.length} Warnung(en)`;
+    for (const w of currentCTM.warnings) console.warn('CTM-Konvertierung: ' + w);
+    alert('⚠ Konvertierungs-Warnung(en):\n\n' + currentCTM.warnings.join('\n\n'));
+  }
 
   // Export-Button aktivieren
   document.getElementById('btnExportCTM').disabled = false;
