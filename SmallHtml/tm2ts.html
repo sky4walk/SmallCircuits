@@ -631,85 +631,79 @@ function convertTM2TS(tm) {
     productions[sym] = rhs;
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // Cocke-Minsky-Produktionsregeln (korrigiert nach Referenz
+  // arxiv 2504.20771 App. A / Minsky 1967, Kap. 14).
+  //
+  // Konfiguration:  A x (al x)^M  B x (be x)^N
+  //   A/al = linke Bandhälfte (Binärzahl M, unterstes Bit = direkt links)
+  //   B/be = rechte Bandhälfte (Binärzahl N, unterstes Bit = direkt rechts)
+  //
+  // Ein TM-Schritt (schreibt S, bewegt sich):
+  //   RECHTS: M' = 2M+S (verdoppeln),  N' = floor(N/2) (halbieren)
+  //   LINKS:  N' = 2N+S (verdoppeln),  M' = floor(M/2) (halbieren)
+  //
+  // Die VERDOPPELNDE Hälfte durchläuft C→{D1,D0}, die HALBIERENDE S→{T1,T0}.
+  // Das unterste Bit der halbierten Hälfte liefert das nächste gelesene
+  // Symbol (→ stateF0 bei 0, stateF1 bei 1).
+  //
+  // WICHTIG (Paritäts-Fix): Die Regellängen müssen exakt stimmen, sonst
+  // kippt die p=2-Ausrichtung und ein x-Separator landet am Kopf.
+  //   verdoppeln:  HEAD → C x (S=0) | C x c x (S=1);   hc → c x c x
+  //   halbieren:   OTHER → S;   oc → s
+  // ═══════════════════════════════════════════════════════════════
   for (const st of noReadStates) {
     const { name, write, move, stateF0, stateF1 } = st;
+    const S = write;
 
+    // A ist IMMER die linke Hälfte, B die rechte.
+    // RECHTS: A verdoppelt (→C/D), B halbiert (→S/T).
+    // LINKS:  B verdoppelt (→C/D), A halbiert (→S/T).
     if (move === 'R') {
-      // ── Rechts-Bewegung
-      if (write === '1') {
-        // A → C x c
-        addProd(`A_${name}`, `C_${name}`, `x_${name}`, `c_${name}`);
-        // al → x c
-        addProd(`al_${name}`, `x_${name}`, `c_${name}`);
-        // B → x S
-        addProd(`B_${name}`, `x_${name}`, `S_${name}`);
-      } else {
-        // write=0
-        // A → C x
-        addProd(`A_${name}`, `C_${name}`, `x_${name}`);
-        // al → c x
-        addProd(`al_${name}`, `c_${name}`, `x_${name}`);
-        // B → S
-        addProd(`B_${name}`, `S_${name}`);
-      }
-      // be → s
+      // A verdoppelt (erhält S), B halbiert (liefert nächstes Symbol)
+      if (S === '0') addProd(`A_${name}`, `C_${name}`, `x_${name}`);
+      else           addProd(`A_${name}`, `C_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
+      addProd(`al_${name}`, `c_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
+      addProd(`B_${name}`, `S_${name}`);
       addProd(`be_${name}`, `s_${name}`);
-      // C → D1 D0
-      addProd(`C_${name}`, `D1_${name}`, `D0_${name}`);
-      // c → d1 d0
-      addProd(`c_${name}`, `d1_${name}`, `d0_${name}`);
-      // S → T1 T0
-      addProd(`S_${name}`, `T1_${name}`, `T0_${name}`);
-      // s → t1 t0
-      addProd(`s_${name}`, `t1_${name}`, `t0_${name}`);
-      // N ungerade: D1→Ax, d1→alx, T1→Bx, t1→bex
+    } else {
+      // LINKS: B verdoppelt (erhält S), A halbiert
+      if (S === '0') addProd(`B_${name}`, `C_${name}`, `x_${name}`);
+      else           addProd(`B_${name}`, `C_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
+      addProd(`be_${name}`, `c_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
+      addProd(`A_${name}`, `S_${name}`);
+      addProd(`al_${name}`, `s_${name}`);
+    }
+
+    // Verdoppeln: C → D1 D0;  c → d1 d0
+    addProd(`C_${name}`, `D1_${name}`, `D0_${name}`);
+    addProd(`c_${name}`, `d1_${name}`, `d0_${name}`);
+    // Halbieren: S → T1 T0;  s → t1 t0
+    addProd(`S_${name}`, `T1_${name}`, `T0_${name}`);
+    addProd(`s_${name}`, `t1_${name}`, `t0_${name}`);
+
+    // Step 5/6: verdoppelte Hälfte (D/d) und halbierte Hälfte (T/t) werden
+    // zu den neuen Hälften. Paritätszweig 1→stateF1, 0→stateF0.
+    if (move === 'R') {
+      // D (verdoppelt) → neue linke Hälfte A', T (halbiert) → neue rechte B'
       addProd(`D1_${name}`, `A_${stateF1}`,  `x_${stateF1}`);
       addProd(`d1_${name}`, `al_${stateF1}`, `x_${stateF1}`);
-      addProd(`T1_${name}`, `B_${stateF1}`,  `x_${stateF1}`);
-      addProd(`t1_${name}`, `be_${stateF1}`, `x_${stateF1}`);
-      // N gerade: D0→xAx, d0→alx, T0→Bx, t0→be
       addProd(`D0_${name}`, `x_${stateF0}`,  `A_${stateF0}`, `x_${stateF0}`);
       addProd(`d0_${name}`, `al_${stateF0}`, `x_${stateF0}`);
+      addProd(`T1_${name}`, `B_${stateF1}`,  `x_${stateF1}`);
+      addProd(`t1_${name}`, `be_${stateF1}`, `x_${stateF1}`);
       addProd(`T0_${name}`, `B_${stateF0}`,  `x_${stateF0}`);
-      addProd(`t0_${name}`, `be_${stateF0}`);
-
+      addProd(`t0_${name}`, `be_${stateF0}`, `x_${stateF0}`);
     } else {
-      // ── Links-Bewegung (symmetrisch: A↔B, al↔be)
-      if (write === '1') {
-        // B → C x c
-        addProd(`B_${name}`, `C_${name}`, `x_${name}`, `c_${name}`);
-        // be → x c
-        addProd(`be_${name}`, `x_${name}`, `c_${name}`);
-        // A → x S
-        addProd(`A_${name}`, `x_${name}`, `S_${name}`);
-      } else {
-        // B → C x
-        addProd(`B_${name}`, `C_${name}`, `x_${name}`);
-        // be → c x
-        addProd(`be_${name}`, `c_${name}`, `x_${name}`);
-        // A → S
-        addProd(`A_${name}`, `S_${name}`);
-      }
-      // al → s
-      addProd(`al_${name}`, `s_${name}`);
-      // C → T1 T0
-      addProd(`C_${name}`, `T1_${name}`, `T0_${name}`);
-      // c → t1 t0
-      addProd(`c_${name}`, `t1_${name}`, `t0_${name}`);
-      // S → D1 D0
-      addProd(`S_${name}`, `D1_${name}`, `D0_${name}`);
-      // s → d1 d0
-      addProd(`s_${name}`, `d1_${name}`, `d0_${name}`);
-      // N ungerade: D1→Bx, d1→bex, T1→Ax, t1→alx
+      // LINKS: D (verdoppelt) → neue rechte B', T (halbiert) → neue linke A'
       addProd(`D1_${name}`, `B_${stateF1}`,  `x_${stateF1}`);
       addProd(`d1_${name}`, `be_${stateF1}`, `x_${stateF1}`);
-      addProd(`T1_${name}`, `A_${stateF1}`,  `x_${stateF1}`);
-      addProd(`t1_${name}`, `al_${stateF1}`, `x_${stateF1}`);
-      // N gerade: D0→xBx, d0→bex, T0→Ax, t0→al
       addProd(`D0_${name}`, `x_${stateF0}`,  `B_${stateF0}`, `x_${stateF0}`);
       addProd(`d0_${name}`, `be_${stateF0}`, `x_${stateF0}`);
+      addProd(`T1_${name}`, `A_${stateF1}`,  `x_${stateF1}`);
+      addProd(`t1_${name}`, `al_${stateF1}`, `x_${stateF1}`);
       addProd(`T0_${name}`, `A_${stateF0}`,  `x_${stateF0}`);
-      addProd(`t0_${name}`, `al_${stateF0}`);
+      addProd(`t0_${name}`, `al_${stateF0}`, `x_${stateF0}`);
     }
   }
 
@@ -724,6 +718,9 @@ function serializeTS(result) {
   let out = '';
   out += `; Tag System (p=2) - Cocke-Minsky Konstruktion\n`;
   out += `; Startzustand: ${transState}  M=${M}  N=${N}\n`;
+  out += `; Hinweis: Die Kodierung ist gueltig, solange der TM-Kopf den\n`;
+  out += `; beschriebenen Bandbereich nicht verlaesst (beide Haelften M,N > 0).\n`;
+  out += `; Laeuft die TM in die Blank-Randregion, kann die Simulation abweichen.\n`;
   out += `\n(2)\n\n`;
   out += `(${startTape.join(',')})\n\n`;
   for (const [sym, rhs] of Object.entries(productions)) {
