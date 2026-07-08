@@ -35,7 +35,14 @@ Usage
 * `python3 c64emu.py game.prg`         – boot, then auto-load (& RUN if BASIC)
 * `python3 c64emu.py game.prg --no-run`– load but don't auto-RUN
 * `python3 c64emu.py tune.sid`         – boot, load PSID, play 50 Hz
+* `python3 c64emu.py game.d64`         – mount disk, auto-load & start
 * In the window: F11 = warp speed toggle, F12 = soft reset.
+
+D64 disk images are served through KERNAL traps at two levels: the high-level
+LOAD / OPEN-CHRIN routines, and the low-level serial (IEC) primitives
+(LISTEN/SECOND/CIOUT/UNLSN/TALK/TKSA/ACPTR/UNTALK) that custom game loaders
+use to read files directly off the bus. This lets protected multi-stage
+loaders (e.g. Bruce Lee) boot without a full 1541 CPU emulation.
 
 ROMs: by default the GPL-3 Open Roms (MEGA65 project) are used, embedded
 in this file. Place original C64 ROMs at ./roms/{basic,chargen,kernal}.bin to use
@@ -226,9 +233,19 @@ class Vic:
 
     CYCLES_PER_LINE = 63
     LINES_PER_FRAME = 312
+    # Raster line at which the renderer latches display-relevant registers.
+    # Sits inside the visible playfield (below any top status split), so that
+    # per-frame rendering uses the values active during the main display area
+    # rather than whatever the game left set during vblank. This is what makes
+    # mid-frame raster splits on $D018 (font/screen base double-buffering, as
+    # used by e.g. Bruce Lee) render correctly without full cycle accuracy.
+    SAMPLE_LINE = 150
 
     def __init__(self):
         self.regs = bytearray(0x40)
+        # Snapshot of self.regs taken at SAMPLE_LINE each frame; the frontend
+        # renders from this rather than the live registers.
+        self.display_regs = bytearray(0x40)
         self.raster = 0
         self._line_cycles = 0
         self.raster_compare = 0
@@ -244,6 +261,7 @@ class Vic:
         self.regs[0x11] = 0x1B       # display on, 25 rows, scroll y=3
         self.regs[0x18] = 0x14       # screen mem $0400, char mem $1000
         self.regs[0x16] = 0xC8       # default control reg 2
+        self.display_regs[:] = self.regs
 
     @property
     def irq_line(self):
@@ -296,6 +314,10 @@ class Vic:
             self.raster = (self.raster + 1) % self.LINES_PER_FRAME
             if self.raster == self.raster_compare:
                 self.irq_status |= 0x01
+            if self.raster == self.SAMPLE_LINE:
+                # Latch the registers active during the visible playfield so the
+                # per-frame renderer is immune to mid-frame raster splits.
+                self.display_regs[:] = self.regs
 
 
 # =============================================================================
@@ -614,26 +636,50 @@ class Cia:
     def irq_line(self):
         return (self.icr_data & self.icr_mask & 0x1F) != 0
 
+    def _scan_ports(self):
+        """Resolve the keyboard matrix and joysticks into the electrical pin
+        states of port A and port B.
+
+        Each pressed key at (pa_bit, pb_bit) wires port-A line pa_bit to
+        port-B line pb_bit; a line driven low on one side pulls the connected
+        input line on the other side low. This supports BOTH scan directions:
+        the normal one (drive columns on port A, read rows on port B) and the
+        reverse one (drive rows on port B, read columns on port A) that some
+        games — e.g. Bruce Lee's title menu — use to detect keypresses.
+        """
+        # Pin state ignoring the matrix: output bits drive their register
+        # value, input bits are pulled high.
+        a = ((self.pra & self.ddra) | (self.port_a_in & ~self.ddra)) & 0xFF
+        b = ((self.prb & self.ddrb) | (self.port_b_in & ~self.ddrb)) & 0xFF
+        # Joystick switches short port pins directly to ground.
+        a &= ~self.joystick_state[1] & 0xFF   # joystick 2 on port A
+        b &= ~self.joystick_state[0] & 0xFF   # joystick 1 on port B
+        if self.keyboard_matrix:
+            # A pressed key only pulls a line low if that line is an input
+            # (an output driving high is not overridden). Iterate to a
+            # fixpoint so keys sharing lines resolve correctly.
+            for _ in range(8):
+                changed = False
+                for pa_bit, pb_bit in self.keyboard_matrix:
+                    a_low = not ((a >> pa_bit) & 1)
+                    b_low = not ((b >> pb_bit) & 1)
+                    a_in = not ((self.ddra >> pa_bit) & 1)
+                    b_in = not ((self.ddrb >> pb_bit) & 1)
+                    if a_low and not b_low and b_in:
+                        b &= ~(1 << pb_bit) & 0xFF
+                        changed = True
+                    elif b_low and not a_low and a_in:
+                        a &= ~(1 << pa_bit) & 0xFF
+                        changed = True
+                if not changed:
+                    break
+        return a, b
+
     def _read_port_a(self):
-        v = (self.pra & self.ddra) | (self.port_a_in & ~self.ddra & 0xFF)
-        # Joystick 2 (port A): pressed bits pull lines low
-        v &= ~self.joystick_state[1] & 0xFF
-        return v
+        return self._scan_ports()[0]
 
     def _read_port_b(self):
-        base = (self.prb & self.ddrb) | (self.port_b_in & ~self.ddrb & 0xFF)
-        # Joystick 1 (port B): pressed bits pull lines low
-        base &= ~self.joystick_state[0] & 0xFF
-        if not self.keyboard_matrix:
-            return base
-        # Rows pulled low on Port A (active low) — output bits drive,
-        # input bits float high.
-        row_state = (self.pra | ~self.ddra) & 0xFF
-        col_low = 0
-        for row, col in self.keyboard_matrix:
-            if not (row_state & (1 << row)):
-                col_low |= (1 << col)
-        return base & ~col_low & 0xFF
+        return self._scan_ports()[1]
 
     def read(self, offset):
         offset &= 0x0F
@@ -1606,9 +1652,14 @@ class CPU:
     def step(self):
         # Python-level traps (for KERNAL routine interception). The `self.traps`
         # check short-circuits when no traps installed — important for perf.
+        # All trap addresses live in the KERNAL ROM region ($E000-$FFFF); only
+        # intercept when the KERNAL ROM is actually mapped in. Games that copy
+        # their own code under the KERNAL and bank it out (e.g. custom loaders
+        # that reuse $FFxx addresses) must run that code normally.
         if self.traps and self.pc in self.traps:
-            self.traps[self.pc]()
-            return True
+            if self.mem.pla.address_space(self.pc) == AddressSpace.KERNAL_ROM:
+                self.traps[self.pc]()
+                return True
         if self.nmi_pending:
             self.nmi_pending = False
             self.nmi()
@@ -1828,6 +1879,18 @@ class System:
         self._open_files = {}
         self._current_input_la = None    # LA whose data CHRIN/GETIN return
         self._current_output_la = None   # CHKOUT target (we don't actually write)
+        # Low-level serial (IEC) bus emulation state. Games with custom loaders
+        # bypass the high-level LOAD/OPEN and drive the bus directly with
+        # LISTEN/SECOND/CIOUT/UNLSN (to OPEN a file by name) then
+        # TALK/TKSA/ACPTR/UNTALK (to read it byte-by-byte). We emulate a 1541
+        # at that level, serving files straight from the mounted D64.
+        self._iec_dev = None             # device currently addressed
+        self._iec_mode = None            # 'listen' | 'talk' | None
+        self._iec_opening = False        # collecting a filename after OPEN
+        self._iec_open_chan = 0          # channel being opened / addressed
+        self._iec_name = bytearray()     # filename accumulated via CIOUT
+        self._iec_talk_chan = 0          # channel selected for TALK/ACPTR
+        self._iec_channels = {}          # channel -> {'data': bytes, 'pos': int}
 
     def step(self):
         before = self.cpu.cycles
@@ -1996,6 +2059,16 @@ class System:
         0xFFD5: "_trap_load",
         0xFFE4: "_trap_getin",
         0xF4A5: "_trap_load",     # LOAD impl (target of $0330 indirect vector)
+        # Low-level serial (IEC) bus primitives, used by custom fast/loaders
+        # that open and read files without going through $FFD5/$FFC0.
+        0xFFB1: "_trap_iec_listen",   # LISTEN  (A = device)
+        0xFF93: "_trap_iec_second",   # SECOND  (A = secondary addr, after LISTEN)
+        0xFFA8: "_trap_iec_ciout",    # CIOUT   (A = byte to send)
+        0xFFAE: "_trap_iec_unlsn",    # UNLSN
+        0xFFB4: "_trap_iec_talk",     # TALK    (A = device)
+        0xFF96: "_trap_iec_tksa",     # TKSA    (A = secondary addr, after TALK)
+        0xFFA5: "_trap_iec_acptr",    # ACPTR   (returns byte in A)
+        0xFFAB: "_trap_iec_untalk",   # UNTALK
     }
 
     def mount_d64(self, path):
@@ -2006,6 +2079,7 @@ class System:
             self._open_files.clear()
             self._current_input_la = None
             self._current_output_la = None
+            self._iec_reset()
             for addr in self._KERNAL_TRAPS:
                 self.cpu.traps.pop(addr, None)
             return None
@@ -2013,6 +2087,7 @@ class System:
         self._open_files.clear()
         self._current_input_la = None
         self._current_output_la = None
+        self._iec_reset()
         for addr, name in self._KERNAL_TRAPS.items():
             self.cpu.traps[addr] = getattr(self, name)
         return self._d64
@@ -2150,6 +2225,137 @@ class System:
             return self._passthrough_kernal_jmp()
         return self._trap_chrin()
 
+    # ---------- low-level serial (IEC) bus emulation ----------
+
+    def _iec_reset(self):
+        self._iec_dev = None
+        self._iec_mode = None
+        self._iec_opening = False
+        self._iec_open_chan = 0
+        self._iec_name = bytearray()
+        self._iec_talk_chan = 0
+        self._iec_channels = {}
+
+    def _iec_open_current(self):
+        """Resolve the filename accumulated over CIOUT into a byte stream on the
+        currently-addressed channel, served from the mounted D64."""
+        name = bytes(self._iec_name)
+        chan = self._iec_open_chan
+        if name.startswith(b"$"):
+            data = bytes([0x01, 0x08]) + self._build_dir_listing(load_addr=0x0801)
+        elif name:
+            found = self._d64.find_file(name)
+            data = self._d64.read_file(found[0], found[1]) if found else None
+        else:
+            data = None
+        # A None stream means "file not found" — ACPTR will report device-not-
+        # present / EOF so the loader can react rather than hang.
+        self._iec_channels[chan] = ({"data": data, "pos": 0}
+                                    if data is not None else None)
+
+    def _trap_iec_listen(self):
+        """LISTEN ($FFB1). A = device number. Command that device to listen."""
+        dev = self.cpu.a & 0x1F
+        if dev != 8 or self._d64 is None:
+            return self._passthrough_kernal_jmp()
+        self._iec_dev = dev
+        self._iec_mode = "listen"
+        self.cpu.set_flag(self.cpu.FC, False)
+        self._do_rts()
+
+    def _trap_iec_second(self):
+        """SECOND ($FF93). A = secondary address, sent after LISTEN. The high
+        nibble is the command: $Fx = OPEN channel x, $Ex = CLOSE, $6x = data."""
+        if self._iec_mode != "listen" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        sa = self.cpu.a & 0xFF
+        cmd = sa & 0xF0
+        chan = sa & 0x0F
+        self._iec_open_chan = chan
+        if cmd == 0xF0:                    # OPEN — filename bytes follow
+            self._iec_opening = True
+            self._iec_name = bytearray()
+        else:                             # $Ex CLOSE, $6x plain data channel
+            self._iec_opening = False
+            if cmd == 0xE0:
+                self._iec_channels.pop(chan, None)
+        self._do_rts()
+
+    def _trap_iec_ciout(self):
+        """CIOUT ($FFA8). A = byte to send to the listening device. While an
+        OPEN is in progress these bytes form the filename."""
+        if self._iec_mode != "listen" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        if self._iec_opening:
+            self._iec_name.append(self.cpu.a & 0xFF)
+        # Writes to a data/command channel are ignored (image is read-only).
+        self._do_rts()
+
+    def _trap_iec_unlsn(self):
+        """UNLSN ($FFAE). End the LISTEN transaction; if we were opening a
+        file, resolve it now so a subsequent TALK/ACPTR can read it."""
+        if self._iec_mode != "listen" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        if self._iec_opening:
+            self._iec_open_current()
+            self._iec_opening = False
+        self._iec_mode = None
+        self._iec_dev = None
+        self._do_rts()
+
+    def _trap_iec_talk(self):
+        """TALK ($FFB4). A = device number. Command that device to talk."""
+        dev = self.cpu.a & 0x1F
+        if dev != 8 or self._d64 is None:
+            return self._passthrough_kernal_jmp()
+        self._iec_dev = dev
+        self._iec_mode = "talk"
+        self.cpu.set_flag(self.cpu.FC, False)
+        self._do_rts()
+
+    def _trap_iec_tksa(self):
+        """TKSA ($FF96). A = secondary address after TALK; selects the channel
+        whose bytes ACPTR will return."""
+        if self._iec_mode != "talk" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        self._iec_talk_chan = self.cpu.a & 0x0F
+        self._do_rts()
+
+    def _trap_iec_acptr(self):
+        """ACPTR ($FFA5). Return the next byte from the talking channel in A,
+        updating the KERNAL status byte ($90): bit 6 (EOI) is set on the last
+        byte; bit 1 (timeout) when the channel is empty / file not found."""
+        if self._iec_mode != "talk" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        cpu = self.cpu
+        mem = self.mem
+        stream = self._iec_channels.get(self._iec_talk_chan)
+        if not stream:
+            cpu.a = 0
+            mem.write_ram_direct(0x90, 0x42)      # timeout + EOI (nothing there)
+            cpu.set_flag(cpu.FC, False)
+            self._do_rts()
+            return
+        data = stream["data"]
+        pos = stream["pos"]
+        if pos < len(data):
+            cpu.a = data[pos] & 0xFF
+            stream["pos"] = pos + 1
+            mem.write_ram_direct(0x90, 0x40 if stream["pos"] >= len(data) else 0)
+        else:
+            cpu.a = 0
+            mem.write_ram_direct(0x90, 0x42)      # read past end
+        cpu.set_flag(cpu.FC, False)
+        self._do_rts()
+
+    def _trap_iec_untalk(self):
+        """UNTALK ($FFAB). End the TALK transaction."""
+        if self._iec_mode != "talk" or self._iec_dev != 8:
+            return self._passthrough_kernal_jmp()
+        self._iec_mode = None
+        self._iec_dev = None
+        self._do_rts()
+
     def _build_dir_listing(self, load_addr=0x0801):
         """
         Generate a fake BASIC program containing the disk directory, so that
@@ -2274,7 +2480,12 @@ class System:
 
         file_load = file_data[0] | (file_data[1] << 8)
         payload   = file_data[2:]
-        load_to   = file_load if (sec_addr & 0x01) else load_addr_xy
+        # KERNAL LOAD relocate rule: secondary address == 0 relocates to the
+        # caller's X/Y address; ANY non-zero secondary address performs an
+        # absolute load to the file's own start address. (The real KERNAL tests
+        # the whole SA byte with BNE, not just bit 0 — so LOAD"x",8,8 is
+        # absolute, exactly like LOAD"x",8,1.)
+        load_to   = file_load if (sec_addr != 0) else load_addr_xy
         end       = (load_to + len(payload)) & 0xFFFF
 
         mem.load_ram(load_to, payload)
@@ -2516,7 +2727,7 @@ class PygameFrontend:
         vic = self.system.vic
         mem = self.system.mem
         bank = mem.vic_bank()
-        char_base = ((vic.regs[0x18] >> 1) & 0x07) * 0x0800   # 0..0x3800
+        char_base = ((vic.display_regs[0x18] >> 1) & 0x07) * 0x0800   # 0..0x3800
         if bank in (0, 2) and 0x1000 <= char_base < 0x2000:
             # Chargen ROM shadowed at this position
             cg_off = char_base & 0x0FFF                       # 0 or 0x800
@@ -2527,6 +2738,68 @@ class PygameFrontend:
         # Convert 2048 bytes → (256, 8) → (256, 8, 8) bits
         arr = np.frombuffer(raw, dtype=np.uint8).reshape(256, 8)
         return np.unpackbits(arr, axis=1).reshape(256, 8, 8)
+
+    def _render_charmode_multicolor(self, chargen, codes, color_ram, vic):
+        """
+        Render the background in multicolor character mode (D016 bit 4 set).
+
+        Per character cell the colour RAM nibble decides the sub-mode:
+          * bit 3 = 0  -> standard hi-res, but only the low 3 colour bits are
+                          available (8 colours); fg = colour & 7, bg = D021.
+          * bit 3 = 1  -> multicolor: horizontal pixel pairs (double width)
+                          select one of four colours by their 2-bit value:
+                              00 = background      (D021)
+                              01 = background#1    (D022)
+                              10 = background#2    (D023)
+                              11 = character col   (colour RAM & 7)
+
+        Returns (pixels[200,320,3] uint8, bitmap[200,320] foreground mask).
+        The foreground mask (for sprite priority/collision) counts a pixel as
+        foreground when its 2-bit value has bit 1 set (values 2 and 3) for
+        multicolor cells, or when the bit is set for hi-res cells.
+        """
+        np = self.np
+        pal = self._palette
+        d021 = vic.display_regs[0x21] & 0x0F
+        d022 = vic.display_regs[0x22] & 0x0F
+        d023 = vic.display_regs[0x23] & 0x0F
+
+        masks = chargen[codes]                              # (25,40,8,8) of 0/1
+        cell_col = (color_ram & 0x07)                       # (25,40)
+        mc_cell = (color_ram & 0x08) != 0                   # (25,40) bool
+
+        # --- multicolor interpretation: 2-bit pairs, doubled horizontally ---
+        pairs = masks.reshape(25, 40, 8, 4, 2)
+        twobit = (pairs[..., 0] << 1) | pairs[..., 1]       # (25,40,8,4) values 0..3
+        twobit = np.repeat(twobit, 2, axis=3)               # (25,40,8,8) double-wide
+
+        # colour index per pixel for multicolor cells, via per-cell lookup table
+        choices = np.stack([                                # (25,40,4)
+            np.full((25, 40), d021, dtype=np.uint8),
+            np.full((25, 40), d022, dtype=np.uint8),
+            np.full((25, 40), d023, dtype=np.uint8),
+            cell_col.astype(np.uint8),
+        ], axis=2)
+        choices_b = np.broadcast_to(choices[:, :, None, None, :], (25, 40, 8, 8, 4))
+        colidx_mc = np.take_along_axis(choices_b, twobit[..., None], axis=4)[..., 0]
+
+        # colour index per pixel for hi-res cells (bg where bit clear)
+        colidx_hi = np.where(masks.astype(bool),
+                             cell_col[:, :, None, None].astype(np.uint8),
+                             np.uint8(d021))
+
+        mc_b = mc_cell[:, :, None, None]
+        colidx = np.where(mc_b, colidx_mc, colidx_hi)       # (25,40,8,8)
+
+        # foreground mask for sprite priority / collisions
+        fg_mc = twobit >= 2
+        fg_hi = masks.astype(bool)
+        fg = np.where(mc_b, fg_mc, fg_hi)                   # (25,40,8,8)
+
+        colidx = colidx.transpose(0, 2, 1, 3).reshape(200, 320)
+        bitmap = fg.transpose(0, 2, 1, 3).reshape(200, 320).astype(np.uint8)
+        pixels = pal[colidx].astype(np.uint8)
+        return pixels, bitmap
 
     def _push_audio(self):
         """Generate and enqueue one frame of SID audio."""
@@ -2547,15 +2820,16 @@ class PygameFrontend:
         np = self.np
         vic = self.system.vic
         mem = self.system.mem
-        bg_color   = vic.regs[0x21] & 0x0F
-        border     = vic.regs[0x20] & 0x0F
+        dr = vic.display_regs          # latched mid-frame (raster-split safe)
+        bg_color   = dr[0x21] & 0x0F
+        border     = dr[0x20] & 0x0F
         # Border
         self.frame_surf.fill(C64_PALETTE[border])
 
         # --- Background (text mode) ---
         # Honor VIC bank + $D018 video matrix base for screen RAM lookup
         bank_off = mem.vic_bank() * 0x4000
-        screen_base_in_bank = ((vic.regs[0x18] >> 4) & 0x0F) * 0x0400
+        screen_base_in_bank = ((dr[0x18] >> 4) & 0x0F) * 0x0400
         screen_addr = bank_off + screen_base_in_bank
         screen_ram = np.frombuffer(
             bytes(mem.ram[screen_addr : screen_addr + 1000]),
@@ -2573,13 +2847,18 @@ class PygameFrontend:
         # we just index the chargen directly with the full byte.
         chargen = self._active_chargen()
         codes = (screen_ram & 0xFF).astype(np.int32)
-        masks = chargen[codes]                              # (25, 40, 8, 8)
-        bitmap = masks.transpose(0, 2, 1, 3).reshape(200, 320)   # 0/1 mask of fg pixels
-
-        fg_colors_per_pixel = np.repeat(np.repeat(color_ram, 8, axis=0), 8, axis=1)
-        fg_rgb = self._palette[fg_colors_per_pixel]
-        bg_rgb = self._palette[bg_color]
-        pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
+        # Character display mode: standard hi-res text, or multicolor text
+        # (D016 bit 4). Extended-colour / bitmap modes fall back to hi-res.
+        if dr[0x16] & 0x10:
+            pixels, bitmap = self._render_charmode_multicolor(
+                chargen, codes, color_ram, vic)
+        else:
+            masks = chargen[codes]                          # (25, 40, 8, 8)
+            bitmap = masks.transpose(0, 2, 1, 3).reshape(200, 320)
+            fg_colors_per_pixel = np.repeat(np.repeat(color_ram, 8, axis=0), 8, axis=1)
+            fg_rgb = self._palette[fg_colors_per_pixel]
+            bg_rgb = self._palette[bg_color]
+            pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
 
         # --- Sprites ---
         # bitmap (200, 320) is the foreground mask used for priority + collisions.
@@ -2636,8 +2915,8 @@ class PygameFrontend:
         priority   = (vic.regs[0x1B] >> idx) & 1            # 1 = bg in front
         sprite_color = vic.regs[0x27 + idx] & 0x0F
 
-        # Fetch sprite data via VIC view
-        screen_base_in_bank = ((vic.regs[0x18] >> 4) & 0x0F) * 0x0400
+        # Fetch sprite data via VIC view (pointers live in the displayed matrix)
+        screen_base_in_bank = ((vic.display_regs[0x18] >> 4) & 0x0F) * 0x0400
         pointer = mem.read_vic(screen_base_in_bank + 0x03F8 + idx)
         data_addr = pointer * 64
         sd = mem.read_vic_bytes(data_addr, 63)
