@@ -59,7 +59,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.08-joyport-toggle"
+__version__ = "2026.07.09-default-port2"
 
 
 # =============================================================================
@@ -256,6 +256,11 @@ class Vic:
         # status line in a different font than the playfield below) render
         # correctly even without cycle-accurate emulation.
         self.line_d018 = bytearray(self.LINES_PER_FRAME)
+        # $D011 (mode: BMM/ECM) and $D016 (MCM) per raster line too, so a
+        # mid-screen split between graphics modes — e.g. Elite's bitmap 3D view
+        # above a text dashboard — is rendered per row in the correct mode.
+        self.line_d011 = bytearray(self.LINES_PER_FRAME)
+        self.line_d016 = bytearray(self.LINES_PER_FRAME)
         self.raster = 0
         self._line_cycles = 0
         self.raster_compare = 0
@@ -274,6 +279,8 @@ class Vic:
         self.display_regs[:] = self.regs
         for i in range(self.LINES_PER_FRAME):
             self.line_d018[i] = self.regs[0x18]
+            self.line_d011[i] = self.regs[0x11]
+            self.line_d016[i] = self.regs[0x16]
 
     @property
     def irq_line(self):
@@ -325,6 +332,8 @@ class Vic:
             self._line_cycles -= self.CYCLES_PER_LINE
             self.raster = (self.raster + 1) % self.LINES_PER_FRAME
             self.line_d018[self.raster] = self.regs[0x18]
+            self.line_d011[self.raster] = self.regs[0x11]
+            self.line_d016[self.raster] = self.regs[0x16]
             if self.raster == self.raster_compare:
                 self.irq_status |= 0x01
             if self.raster == self.SAMPLE_LINE:
@@ -2707,10 +2716,11 @@ class PygameFrontend:
         self._keys_down = set()    # host pygame keycodes currently pressed
         # Which control port the numeric-keypad joystick drives: 0 = port 1
         # ($DC01), 1 = port 2 ($DC00). Toggle at runtime with keypad 0.
-        # Default is port 1, because Bruce Lee reads its joystick from $DC01
-        # (verified: it polls $DC01, not $DC00). Most other games use port 2,
-        # so keypad-0 flips between them.
-        self._joy_port = 0
+        # Default is port 2 — the port most C64 games read (Elite, etc.), and
+        # the one that does NOT share row lines with the keyboard, so the
+        # keypad joystick can't "ghost" into menu keys. A few games use port 1
+        # (e.g. Bruce Lee reads $DC01); press keypad 0 to switch for those.
+        self._joy_port = 1
         self.shown_fps = 0.0
         self.warp = False    # True = run as fast as possible (no host frame cap)
 
@@ -2914,6 +2924,65 @@ class PygameFrontend:
         pixels = pal[colidx].astype(np.uint8)
         return pixels, bitmap
 
+    def _render_bitmap_rows(self, rows, d018, d016, color_ram, bank_off):
+        """
+        Render a contiguous span of character rows in VIC bitmap mode (D011
+        bit 5 set). `rows` is a range of char-row indices (0..24) that all share
+        the same $D018/$D016. Returns (pixels[h,320,3], mask[h,320]) for those
+        rows, where h = len(rows)*8.
+
+        Hi-res bitmap (MCM=0): each 8x8 cell has two colours from the video
+        matrix byte — high nibble = set-pixel colour, low nibble = clear-pixel.
+        Multicolor bitmap (MCM=1): 2-bit pixels (double width): 00=$D021,
+        01=matrix high nibble, 10=matrix low nibble, 11=colour-RAM nibble.
+
+        $D018: bit 3 selects the 8 KB bitmap base within the VIC bank; bits 4-7
+        select the video-matrix (colour) base.
+        """
+        np = self.np
+        pal = self._palette
+        mem = self.system.mem
+        bmp_base = bank_off + (((d018 >> 3) & 1) * 0x2000)
+        vm_base  = bank_off + (((d018 >> 4) & 0x0F) * 0x400)
+        r0 = rows[0]
+        nrows = len(rows)
+        ncells = nrows * 40
+        raw = np.frombuffer(
+            bytes(mem.ram[bmp_base + r0 * 320: bmp_base + r0 * 320 + ncells * 8]),
+            dtype=np.uint8).reshape(nrows, 40, 8)
+        vm = np.frombuffer(
+            bytes(mem.ram[vm_base + r0 * 40: vm_base + r0 * 40 + ncells]),
+            dtype=np.uint8).reshape(nrows, 40)
+        bits = np.unpackbits(raw.reshape(ncells, 8), axis=1).reshape(nrows, 40, 8, 8)
+
+        if not (d016 & 0x10):                      # hi-res bitmap
+            fg = pal[(vm >> 4) & 0x0F]             # (nrows,40,3)
+            bg = pal[vm & 0x0F]
+            px = np.where(bits[..., None].astype(bool),
+                          fg[:, :, None, None, :], bg[:, :, None, None, :])
+            mask = bits
+        else:                                      # multicolor bitmap
+            d021 = self.system.vic.display_regs[0x21] & 0x0F
+            pb = bits.reshape(nrows, 40, 8, 4, 2)
+            twobit = (pb[..., 0] << 1) | pb[..., 1]           # (nrows,40,8,4)
+            twobit = np.repeat(twobit, 2, axis=3)             # (nrows,40,8,8)
+            cram = color_ram[rows.start:rows.stop] & 0x0F     # (nrows,40)
+            choices = np.stack([
+                np.full((nrows, 40), d021, dtype=np.uint8),
+                ((vm >> 4) & 0x0F).astype(np.uint8),
+                (vm & 0x0F).astype(np.uint8),
+                cram.astype(np.uint8),
+            ], axis=2)                                        # (nrows,40,4)
+            cb = np.broadcast_to(choices[:, :, None, None, :],
+                                 (nrows, 40, 8, 8, 4))
+            colidx = np.take_along_axis(cb, twobit[..., None], axis=4)[..., 0]
+            px = pal[colidx]
+            mask = (twobit >= 2)
+
+        pixels = px.transpose(0, 2, 1, 3, 4).reshape(nrows * 8, 320, 3).astype(np.uint8)
+        maskout = mask.transpose(0, 2, 1, 3).reshape(nrows * 8, 320).astype(np.uint8)
+        return pixels, maskout
+
     def _push_audio(self):
         """Generate and enqueue one frame of SID audio."""
         samples = self.system.sid.generate_samples(self.samples_per_frame, self.np)
@@ -2973,6 +3042,37 @@ class PygameFrontend:
             fg_rgb = self._palette[fg_colors_per_pixel]
             bg_rgb = self._palette[bg_color]
             pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
+
+        # --- Bitmap-mode overlay ---
+        # Any character row whose $D011 (recorded at its raster line) has BMM
+        # set is drawn in bitmap mode instead of text. Contiguous rows sharing
+        # $D018/$D016 are rendered together. This makes split screens like
+        # Elite (bitmap 3D view above a text dashboard) come out right.
+        ld11 = vic.line_d011
+        ld16 = vic.line_d016
+        ld18 = vic.line_d018
+        n = len(ld11)
+        r = 0
+        while r < 25:
+            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % n
+            if (ld11[raster] >> 5) & 1:                 # BMM set → bitmap row
+                d018 = ld18[raster]
+                d016 = ld16[raster]
+                end = r
+                while end < 25:
+                    rr = (self.FIRST_DISPLAY_LINE + end * 8 + 4) % n
+                    if not ((ld11[rr] >> 5) & 1):
+                        break
+                    if ld18[rr] != d018 or (ld16[rr] & 0x10) != (d016 & 0x10):
+                        break
+                    end += 1
+                rp, rm = self._render_bitmap_rows(range(r, end), d018, d016,
+                                                  color_ram, bank_off)
+                pixels[r * 8:end * 8] = rp
+                bitmap[r * 8:end * 8] = rm
+                r = end
+            else:
+                r += 1
 
         # --- Sprites ---
         # bitmap (200, 320) is the foreground mask used for priority + collisions.
