@@ -59,7 +59,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.09-default-port2"
+__version__ = "2026.07.09-split-vmatrix"
 
 
 # =============================================================================
@@ -1879,6 +1879,88 @@ class D64Image:
         return bytes(out)
 
 
+class T64Image:
+    """
+    Reader for T64 tape-archive images.
+
+    Despite the name, T64 is not a raw tape signal — it's a simple container:
+    a 64-byte header, then a directory of 32-byte records, each pointing at a
+    file's raw bytes elsewhere in the file. Unlike .PRG / D64 files, the stored
+    bytes do NOT carry the 2-byte load-address prefix; the load address lives
+    in the directory record instead.
+
+    We expose the same tiny interface as D64Image (disk_name / list_directory /
+    find_file / read_file / read_sector) so the existing LOAD path serves tape
+    files unchanged. Files are addressed by directory index rather than
+    track/sector, and read_file synthesises the [lo, hi] + data PRG layout the
+    loader expects.
+    """
+
+    def __init__(self, path):
+        with open(path, "rb") as f:
+            self.data = f.read()
+        d = self.data
+        self._name = d[40:64] if len(d) >= 64 else b""
+        maxent = (d[34] | (d[35] << 8)) if len(d) >= 36 else 0
+        self.entries = []
+        for i in range(maxent):
+            off = 64 + i * 32
+            rec = d[off:off + 32]
+            if len(rec) < 32:
+                break
+            if rec[0] == 0:                        # unused slot
+                continue
+            start = rec[2] | (rec[3] << 8)
+            end = rec[4] | (rec[5] << 8)
+            doff = rec[8] | (rec[9] << 8) | (rec[10] << 16) | (rec[11] << 24)
+            name = rec[16:32].rstrip(b"\x20\x00")
+            self.entries.append({"name": name, "start": start,
+                                 "end": end, "doff": doff})
+        # Repair unreliable end addresses (a very common T64 defect): if the
+        # implied length is zero or overruns the next file / end of image,
+        # clamp it to the space actually available.
+        offs = sorted(e["doff"] for e in self.entries)
+        for e in self.entries:
+            length = (e["end"] - e["start"]) & 0xFFFF
+            nxt = min([o for o in offs if o > e["doff"]] + [len(d)])
+            avail = max(0, nxt - e["doff"])
+            if length == 0 or length > avail:
+                length = avail
+            e["length"] = length
+
+    def disk_name(self):
+        return self._name.rstrip(b"\x20\x00") or b"T64 TAPE"
+
+    def list_directory(self):
+        out = []
+        for e in self.entries:
+            blocks = (e["length"] + 253) // 254
+            out.append((e["name"].ljust(16)[:16], "PRG", 0, 0, blocks))
+        return out
+
+    def find_file(self, pattern):
+        pat = pattern.rstrip(b"\x20\x00")
+        # On tape, LOAD with no name (or "*") loads the first/next program.
+        if pat in (b"", b"*"):
+            return (0, 0, 0) if self.entries else None
+        wild = pat.endswith(b"*")
+        core = pat[:-1] if wild else pat
+        for i, e in enumerate(self.entries):
+            nm = e["name"]
+            if (nm == pat) or (wild and nm.startswith(core)) or nm.startswith(pat):
+                return (i, 0, 0)
+        return None
+
+    def read_file(self, index, _sector=0):
+        """Return the file's PRG bytes: [load_lo, load_hi] + raw data."""
+        e = self.entries[index]
+        raw = self.data[e["doff"]:e["doff"] + e["length"]]
+        return bytes([e["start"] & 0xFF, (e["start"] >> 8) & 0xFF]) + raw
+
+    def read_sector(self, track, sector):
+        return bytes(256)          # tape archives have no block-level access
+
+
 def _match_c64_name(name, pattern):
     """C64-style match: ? = any single char, * = matches the rest. Both are
     bytes. Comparison should already be case-folded by the caller."""
@@ -1945,6 +2027,16 @@ class System:
         self._open_files = {}
         self._current_input_la = None    # LA whose data CHRIN/GETIN return
         self._current_output_la = None   # CHKOUT target (we don't actually write)
+        # Direct-access / block-command disk state, for loaders that open the
+        # command channel (SA 15) and a "#" buffer channel and read raw sectors
+        # via "U1"/"B-R" block-read commands (e.g. Lode Runner). da_buffers is
+        # keyed by channel number (secondary address of the "#" open); each is
+        # {'data': bytearray(256), 'pos': int}. _cmd_out accumulates bytes
+        # written to the command channel until a CR triggers execution.
+        self._da_buffers = {}
+        self._cmd_out = bytearray()
+        self._disk_status = b"00, OK,00,00\r"
+        self._is_tape = False    # True when the mounted image is a T64 tape
         # Low-level serial (IEC) bus emulation state. Games with custom loaders
         # bypass the high-level LOAD/OPEN and drive the bus directly with
         # LISTEN/SECOND/CIOUT/UNLSN (to OPEN a file by name) then
@@ -2120,8 +2212,10 @@ class System:
         0xFFC0: "_trap_open",
         0xFFC3: "_trap_close",
         0xFFC6: "_trap_chkin",
+        0xFFC9: "_trap_ckout",
         0xFFCC: "_trap_clrchn",
         0xFFCF: "_trap_chrin",
+        0xFFD2: "_trap_chrout",
         0xFFD5: "_trap_load",
         0xFFE4: "_trap_getin",
         0xF4A5: "_trap_load",     # LOAD impl (target of $0330 indirect vector)
@@ -2153,6 +2247,27 @@ class System:
         self._open_files.clear()
         self._current_input_la = None
         self._current_output_la = None
+        self._da_buffers.clear()
+        self._cmd_out = bytearray()
+        self._disk_status = b"00, OK,00,00\r"
+        self._is_tape = False
+        self._iec_reset()
+        for addr, name in self._KERNAL_TRAPS.items():
+            self.cpu.traps[addr] = getattr(self, name)
+        return self._d64
+
+    def mount_t64(self, path):
+        """Mount a T64 tape-archive image. LOAD from device 1 (tape) will be
+        served from it. Reuses the same KERNAL LOAD path as disk images; the
+        `_is_tape` flag makes the LOAD trap accept device 1."""
+        self._d64 = T64Image(path)
+        self._open_files.clear()
+        self._current_input_la = None
+        self._current_output_la = None
+        self._da_buffers.clear()
+        self._cmd_out = bytearray()
+        self._disk_status = b"00, OK,00,00\r"
+        self._is_tape = True
         self._iec_reset()
         for addr, name in self._KERNAL_TRAPS.items():
             self.cpu.traps[addr] = getattr(self, name)
@@ -2209,6 +2324,25 @@ class System:
             return self._passthrough_kernal_jmp()
         name = bytes(mem.read_ram_direct((fnaddr + i) & 0xFFFF)
                      for i in range(fnlen))
+        # Command channel (secondary address 15): used to send disk commands
+        # (U1/B-R block read, B-P buffer pointer) and to read drive status.
+        if sa == 15:
+            self._open_files[la] = {"dev": dev, "sa": sa, "name": name,
+                                    "cmd": True}
+            cpu.set_flag(cpu.FC, False)
+            mem.write_ram_direct(0x90, 0)
+            self._do_rts()
+            return
+        # Direct-access buffer channel ("#" opens a raw 256-byte sector buffer
+        # on the drive; the loader fills it with U1 block-read commands).
+        if name.startswith(b"#"):
+            self._da_buffers[sa] = {"data": bytearray(256), "pos": 0}
+            self._open_files[la] = {"dev": dev, "sa": sa, "name": name,
+                                    "da_chan": sa}
+            cpu.set_flag(cpu.FC, False)
+            mem.write_ram_direct(0x90, 0)
+            self._do_rts()
+            return
         # Special "$" = directory
         if name.startswith(b"$"):
             data = bytes([0x01, 0x08]) + self._build_dir_listing(load_addr=0x0801)
@@ -2266,14 +2400,44 @@ class System:
         self._do_rts()
 
     def _trap_chrin(self):
-        """KERNAL CHRIN ($FFCF). Read next byte from current input. If no file
-        is selected as input, fall through to the real KERNAL (which reads
-        keyboard/screen as appropriate)."""
-        if self._current_input_la is None or self._current_input_la not in self._open_files:
+        """KERNAL CHRIN ($FFCF). Read next byte from current input. Handles
+        regular files, direct-access buffer channels, and the command channel
+        (which returns the drive status string). Falls through to the real
+        KERNAL when no managed file is selected as input."""
+        la = self._current_input_la
+        if la is None or la not in self._open_files:
             return self._passthrough_kernal_jmp()
         cpu = self.cpu
         mem = self.mem
-        f = self._open_files[self._current_input_la]
+        f = self._open_files[la]
+        if f.get("cmd"):                          # command channel → status
+            data = self._disk_status
+            pos = f.get("pos", 0)
+            if pos < len(data):
+                cpu.a = data[pos]
+                f["pos"] = pos + 1
+                mem.write_ram_direct(0x90, 0x40 if pos + 1 >= len(data) else 0)
+            else:
+                cpu.a = 0x0D
+                mem.write_ram_direct(0x90, 0x40)
+            cpu.set_flag(cpu.FC, False)
+            self._do_rts()
+            return
+        if "da_chan" in f:                        # direct-access sector buffer
+            buf = self._da_buffers.get(f["da_chan"])
+            data = buf["data"] if buf else b""
+            pos = buf["pos"] if buf else 0
+            if pos < len(data):
+                cpu.a = data[pos]
+                buf["pos"] = pos + 1
+                mem.write_ram_direct(0x90, 0x40 if pos + 1 >= len(data) else 0)
+            else:
+                cpu.a = 0
+                mem.write_ram_direct(0x90, 0x40)
+            cpu.set_flag(cpu.FC, False)
+            self._do_rts()
+            return
+        # regular file
         if f["pos"] < len(f["data"]):
             cpu.a = f["data"][f["pos"]]
             f["pos"] += 1
@@ -2283,6 +2447,88 @@ class System:
             mem.write_ram_direct(0x90, 0x40)   # EOF
         cpu.set_flag(cpu.FC, False)
         self._do_rts()
+
+    def _trap_ckout(self):
+        """KERNAL CKOUT ($FFC9). X = LA. Direct output to a channel we manage
+        (e.g. the command channel); otherwise pass through so normal screen /
+        serial output keeps working."""
+        la = self.cpu.x
+        if la not in self._open_files:
+            return self._passthrough_kernal_jmp()
+        self._current_output_la = la
+        self.mem.write_ram_direct(0x9A, self._open_files[la]["dev"])   # DFLTO
+        self.cpu.set_flag(self.cpu.FC, False)
+        self._do_rts()
+
+    def _trap_chrout(self):
+        """KERNAL CHROUT ($FFD2). A = byte. If output is currently directed to
+        the command channel, accumulate command bytes and execute on CR. For
+        anything else (screen output, unmanaged files) pass through."""
+        la = self._current_output_la
+        if la is None or la not in self._open_files:
+            return self._passthrough_kernal_jmp()
+        f = self._open_files[la]
+        if f.get("cmd"):
+            b = self.cpu.a & 0xFF
+            if b == 0x0D:
+                self._exec_disk_command(bytes(self._cmd_out))
+                self._cmd_out = bytearray()
+            else:
+                self._cmd_out.append(b)
+            self.cpu.set_flag(self.cpu.FC, False)
+            self._do_rts()
+            return
+        if "da_chan" in f:
+            # Writing into a direct-access buffer — accept and ignore (the D64
+            # image is read-only), keeping the pointer advancing.
+            buf = self._da_buffers.get(f["da_chan"])
+            if buf and buf["pos"] < 256:
+                buf["pos"] += 1
+            self.cpu.set_flag(self.cpu.FC, False)
+            self._do_rts()
+            return
+        return self._passthrough_kernal_jmp()
+
+    def _exec_disk_command(self, cmd):
+        """Execute a command sent to the drive's command channel. Supports the
+        block-read (U1/UA/B-R) and buffer-pointer (B-P) direct-access commands
+        that block loaders use; everything else is acknowledged as OK."""
+        self._disk_status = b"00, OK,00,00\r"
+        if self._d64 is None:
+            return
+        s = cmd.strip()
+        up = s.upper()
+
+        def nums(rest):
+            return rest.replace(b":", b" ").replace(b",", b" ").split()
+
+        if up[:2] in (b"U1", b"UA") or up.startswith(b"B-R"):
+            pref = 3 if up.startswith(b"B-R") else 2
+            parts = nums(s[pref:])
+            if len(parts) >= 4:
+                try:
+                    chan, drive, track, sector = (int(parts[0]), int(parts[1]),
+                                                  int(parts[2]), int(parts[3]))
+                    data = self._d64.read_sector(track, sector)
+                    buf = self._da_buffers.setdefault(
+                        chan, {"data": bytearray(256), "pos": 0})
+                    buf["data"] = bytearray(data)
+                    buf["pos"] = 0
+                except (ValueError, IndexError):
+                    self._disk_status = b"34,SYNTAX ERROR,00,00\r"
+            return
+        if up.startswith(b"B-P"):
+            parts = nums(s[3:])
+            if len(parts) >= 2:
+                try:
+                    chan, pos = int(parts[0]), int(parts[1])
+                    buf = self._da_buffers.get(chan)
+                    if buf is not None:
+                        buf["pos"] = pos & 0xFF
+                except ValueError:
+                    pass
+            return
+        # Other commands (Initialize, Validate, memory cmds, …): acknowledge OK.
 
     def _trap_getin(self):
         """KERNAL GETIN ($FFE4). Non-blocking get. For files, identical to
@@ -2517,7 +2763,8 @@ class System:
                          for i in range(fnlen))
         load_addr_xy = cpu.x | (cpu.y << 8)
 
-        if device != 8 or self._d64 is None:
+        if self._d64 is None or (device != 8 and
+                                 not (device == 1 and self._is_tape)):
             cpu.a = 4                          # FILE NOT FOUND
             cpu.set_flag(cpu.FC, True)
             self._do_rts()
@@ -3009,13 +3256,20 @@ class PygameFrontend:
         self.frame_surf.fill(C64_PALETTE[border])
 
         # --- Background (text mode) ---
-        # Honor VIC bank + $D018 video matrix base for screen RAM lookup
+        # Honor VIC bank + $D018 video matrix base for screen RAM lookup.
+        # The base can change mid-frame in a raster split (e.g. The Hobbit:
+        # bitmap graphics on top, a text window below with a different $D018),
+        # so read each character row's codes from the base that was active at
+        # that row's raster line rather than a single global base.
         bank_off = mem.vic_bank() * 0x4000
-        screen_base_in_bank = ((dr[0x18] >> 4) & 0x0F) * 0x0400
-        screen_addr = bank_off + screen_base_in_bank
-        screen_ram = np.frombuffer(
-            bytes(mem.ram[screen_addr : screen_addr + 1000]),
-            dtype=np.uint8).reshape(25, 40)
+        ld18 = vic.line_d018
+        nld = len(ld18)
+        screen_ram = np.empty((25, 40), dtype=np.uint8)
+        for r in range(25):
+            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % nld
+            sb = bank_off + ((ld18[raster] >> 4) & 0x0F) * 0x0400
+            screen_ram[r] = np.frombuffer(
+                bytes(mem.ram[sb + r * 40: sb + r * 40 + 40]), dtype=np.uint8)
         color_ram = np.frombuffer(
             bytes(self.system.color_ram.ram[:0x400]),
             dtype=np.uint8)[:1000].reshape(25, 40) & 0x0F
@@ -3778,6 +4032,47 @@ def _launch_d64(system, d64_path, auto_run=True, boot_cycles=3_500_000):
         system.type_string(f"SYS{load_addr}\r")
 
 
+def _launch_t64(system, t64_path, auto_run=True, boot_cycles=3_500_000):
+    """Mount a T64 tape archive, boot to READY, then LOAD from device 1."""
+    tape = system.mount_t64(t64_path)
+    name = tape.disk_name().decode("ascii", "replace")
+    print(f"Mounted tape: {t64_path}  (name {name!r})")
+    files = list(tape.list_directory())
+    print("Files:")
+    for fname, ftype, _t, _s, size in files:
+        print(f"  {fname.decode('ascii','replace'):<16}  PRG  {size} blocks")
+    if not files:
+        print("(empty tape)")
+        return
+
+    found = tape.find_file(b"*")
+    data = tape.read_file(found[0], found[1])
+    load_addr = data[0] | (data[1] << 8)
+    is_basic = (load_addr == 0x0801)
+    kind = "BASIC" if is_basic else "ML"
+    print(f"First file load address ${load_addr:04X} → {kind}")
+
+    print(f"Booting {boot_cycles:,} cycles to reach READY ...")
+    system.run(boot_cycles)
+
+    if not auto_run:
+        print('Type LOAD"*",1 (BASIC) or LOAD"*",1,1 (ML) at the prompt.')
+        return
+
+    if is_basic:
+        print('Auto-typing LOAD"*",1 ⏎ then RUN ⏎ ...')
+        system.type_string('LOAD"*",1\r')
+        system.run(1_500_000)
+        system.type_string("RUN\r")
+    else:
+        print(f'Auto-typing LOAD"*",1,1 ⏎ then SYS {load_addr} ⏎ ...')
+        system.type_string('LOAD"*",1')
+        system.run(400_000)
+        system.type_string(",1\r")
+        system.run(1_500_000)
+        system.type_string(f"SYS{load_addr}\r")
+
+
 def main():
     args = sys.argv[1:]
     print(f"c64emu {__version__}")
@@ -3795,6 +4090,7 @@ def main():
         scale = int(args[i + 1])
     sid_file = None
     d64_file = None
+    t64_file = None
     for a in args:
         if a.lower().endswith(".prg") and os.path.exists(a):
             prg_file = a
@@ -3804,6 +4100,9 @@ def main():
             break
         if a.lower().endswith(".d64") and os.path.exists(a):
             d64_file = a
+            break
+        if a.lower().endswith(".t64") and os.path.exists(a):
+            t64_file = a
             break
 
     if "--headless" in args:
@@ -3819,6 +4118,12 @@ def main():
                     break
         elif d64_file:
             _launch_d64(sysm, d64_file, auto_run=not no_autorun)
+            print("Running for 1,500,000 extra steps...")
+            for _ in range(1_500_000):
+                if not sysm.step():
+                    break
+        elif t64_file:
+            _launch_t64(sysm, t64_file, auto_run=not no_autorun)
             print("Running for 1,500,000 extra steps...")
             for _ in range(1_500_000):
                 if not sysm.step():
@@ -3841,6 +4146,8 @@ def main():
               f"load=${info['load']:04X} init=${info['init']:04X} play=${info['play']:04X}")
     elif d64_file:
         _launch_d64(sysm, d64_file, auto_run=not no_autorun)
+    elif t64_file:
+        _launch_t64(sysm, t64_file, auto_run=not no_autorun)
     front = PygameFrontend(sysm, scale=scale)
     front.run()
 
