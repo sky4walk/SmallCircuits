@@ -59,7 +59,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.09-split-vmatrix"
+__version__ = "2026.07.09-render-at-display"
 
 
 # =============================================================================
@@ -2933,6 +2933,12 @@ class PygameFrontend:
     BORDER_X = 32
     BORDER_Y = 36
     CYCLES_PER_FRAME = 19656    # PAL: 985248 Hz / 50 Hz
+    # Render right after the visible display area rather than at frame end.
+    # Double-buffering games (e.g. The Goonies) redraw the just-shown screen
+    # during the vblank that follows, so rendering at frame end would capture
+    # that redraw and flicker. Splitting the frame so we render at ~raster 251
+    # captures what was actually on screen during the visible area.
+    RENDER_RASTER = 251
 
     def __init__(self, system, scale=2, target_hz=50):
         import pygame
@@ -2961,6 +2967,23 @@ class PygameFrontend:
         self._palette = np.array(C64_PALETTE, dtype=np.uint8)
         self.key_map = _build_key_map(pygame)
         self._keys_down = set()    # host pygame keycodes currently pressed
+        # The character each held key produced (from the KEYDOWN event's
+        # unicode). Punctuation is mapped by CHARACTER rather than key position,
+        # so it works regardless of the host keyboard layout (QWERTZ, AZERTY…):
+        # you type ':' the way your keyboard makes ':', and the emulator presses
+        # the right C64 keys — even though on the C64 the colon is its own key.
+        self._key_chars = {}
+        SH = (1, 7)                # left shift on the C64 matrix (col, row)
+        self._c64_symbols = {
+            "!": [SH, (7, 0)], '"': [SH, (7, 3)], "#": [SH, (1, 0)],
+            "$": [SH, (1, 3)], "%": [SH, (2, 0)], "&": [SH, (2, 3)],
+            "'": [SH, (3, 0)], "(": [SH, (3, 3)], ")": [SH, (4, 0)],
+            ":": [(5, 5)], ";": [(6, 2)], ",": [(5, 7)], ".": [(5, 4)],
+            "/": [(6, 7)], "?": [SH, (6, 7)], "<": [SH, (5, 7)],
+            ">": [SH, (5, 4)], "[": [SH, (5, 5)], "]": [SH, (6, 2)],
+            "=": [(6, 5)], "+": [(5, 0)], "-": [(5, 3)],
+            "@": [(5, 6)], "*": [(6, 1)], "\u00a3": [(6, 0)],   # £
+        }
         # Which control port the numeric-keypad joystick drives: 0 = port 1
         # ($DC01), 1 = port 2 ($DC00). Toggle at runtime with keypad 0.
         # Default is port 2 — the port most C64 games read (Elite, etc.), and
@@ -2982,18 +3005,25 @@ class PygameFrontend:
         except pygame.error as ex:
             print(f"Audio disabled: {ex}")
 
-    def _key_event(self, host_key, pressed):
+    def _key_event(self, host_key, pressed, char=None):
         """
         Update the CIA1 keyboard matrix from a host pygame keystroke.
         UP and LEFT are virtual on the C64 — they're SHIFT + CRSR-DOWN
         and SHIFT + CRSR-RIGHT respectively. We track which host keys are
         physically down and rebuild the matrix each time so the synthesised
         SHIFT doesn't get stripped when the user is also holding real SHIFT.
+        `char` is the unicode character the key produced (KEYDOWN only), used
+        for layout-independent punctuation mapping.
         """
         if pressed:
             self._keys_down.add(host_key)
+            if char and len(char) == 1 and char in self._c64_symbols:
+                self._key_chars[host_key] = char
+            else:
+                self._key_chars.pop(host_key, None)
         else:
             self._keys_down.discard(host_key)
+            self._key_chars.pop(host_key, None)
         self._rebuild_matrix()
 
     def _rebuild_matrix(self):
@@ -3019,6 +3049,15 @@ class PygameFrontend:
         # Keyboard matrix. The PC arrow keys map to the authentic C64 cursor
         # keys: the real machine had only TWO cursor keys — CRSR↕ (0,7) and
         # CRSR⇄ (0,2) — with the up/left directions produced by holding SHIFT.
+        #
+        # Punctuation is mapped by the CHARACTER the key produced (self.
+        # _key_chars), not by key position, so ':' / '"' / etc. work on any
+        # host layout. When a symbol key is active, the symbol table already
+        # encodes the C64 shift it needs, so we drop the host shift for it.
+        active_syms = [self._key_chars[k] for k in self._keys_down
+                       if k in self._key_chars]
+        suppress_shift = any(self._c64_symbols[c][0] == (1, 7)
+                             for c in active_syms) or bool(active_syms)
         for key in self._keys_down:
             if key == p.K_UP:
                 mat.add((1, 7))                # left shift
@@ -3030,6 +3069,11 @@ class PygameFrontend:
                 mat.add((0, 7))                # CRSR↕ (down)
             elif key == p.K_RIGHT:
                 mat.add((0, 2))                # CRSR⇄ (right)
+            elif key in self._key_chars:
+                for pos in self._c64_symbols[self._key_chars[key]]:
+                    mat.add(pos)               # character-mapped punctuation
+            elif key in (p.K_LSHIFT, p.K_RSHIFT) and suppress_shift:
+                continue                       # shift handled by symbol map
             else:
                 m = self.key_map.get(key)
                 if m is not None:
@@ -3244,6 +3288,21 @@ class PygameFrontend:
         elif self.audio_channel.get_queue() is None:
             self.audio_channel.queue(sound)
         # else: queue full, drop this frame's audio (we're behind)
+
+    def step_frame(self):
+        """Advance one full frame worth of cycles, but render right after the
+        visible display area (RENDER_RASTER) rather than at frame end, so
+        double-buffered games don't flicker. Total cycles run == CYCLES_PER_FRAME."""
+        vic = self.system.vic
+        lines1 = (self.RENDER_RASTER - vic.raster) % vic.LINES_PER_FRAME
+        if lines1 == 0:
+            lines1 = vic.LINES_PER_FRAME
+        cyc1 = lines1 * vic.CYCLES_PER_LINE
+        self.system.run(cyc1)
+        if self.audio_enabled:
+            self._push_audio()
+        self.render_frame()
+        self.system.run(self.CYCLES_PER_FRAME - cyc1)
 
     def render_frame(self):
         np = self.np
@@ -3497,17 +3556,12 @@ class PygameFrontend:
                         self.system.cia1.joystick_state[1] = 0
                         print(f"Keypad joystick → Port {self._joy_port + 1}")
                         continue
-                    self._key_event(event.key, True)
+                    self._key_event(event.key, True, event.unicode)
                 elif event.type == self.pygame.KEYUP:
                     self._key_event(event.key, False)
             # SID-file playback (no-op for PRG / native mode)
             self.system.sid_play_tick()
-            # Run one frame's worth of CPU cycles
-            self.system.run(self.CYCLES_PER_FRAME)
-            # Audio out
-            if self.audio_enabled:
-                self._push_audio()
-            self.render_frame()
+            self.step_frame()
             frames += 1
             now = time.perf_counter()
             if now - last >= 1.0:
