@@ -57,6 +57,10 @@ import sys
 import time
 import zlib
 
+# Bump this when rendering/emulation behaviour changes, so it's easy to tell
+# which build is actually running.
+__version__ = "2026.07.08-joyport-toggle"
+
 
 # =============================================================================
 # Config — C64 memory map constants
@@ -246,6 +250,12 @@ class Vic:
         # Snapshot of self.regs taken at SAMPLE_LINE each frame; the frontend
         # renders from this rather than the live registers.
         self.display_regs = bytearray(0x40)
+        # $D018 value active at each raster line, recorded as the beam passes.
+        # Lets the renderer give each character row the font/screen base that
+        # was active at its raster position, so vertical raster splits (e.g. a
+        # status line in a different font than the playfield below) render
+        # correctly even without cycle-accurate emulation.
+        self.line_d018 = bytearray(self.LINES_PER_FRAME)
         self.raster = 0
         self._line_cycles = 0
         self.raster_compare = 0
@@ -262,6 +272,8 @@ class Vic:
         self.regs[0x18] = 0x14       # screen mem $0400, char mem $1000
         self.regs[0x16] = 0xC8       # default control reg 2
         self.display_regs[:] = self.regs
+        for i in range(self.LINES_PER_FRAME):
+            self.line_d018[i] = self.regs[0x18]
 
     @property
     def irq_line(self):
@@ -312,6 +324,7 @@ class Vic:
         while self._line_cycles >= self.CYCLES_PER_LINE:
             self._line_cycles -= self.CYCLES_PER_LINE
             self.raster = (self.raster + 1) % self.LINES_PER_FRAME
+            self.line_d018[self.raster] = self.regs[0x18]
             if self.raster == self.raster_compare:
                 self.irq_status |= 0x01
             if self.raster == self.SAMPLE_LINE:
@@ -343,6 +356,12 @@ class SidVoice:
         self.phase = 0           # 24-bit accumulator (treated as float for vectorisation)
         self.envelope = 0.0      # 0.0..1.0
         self.env_state = 0       # 0=release, 1=attack, 2=decay, 3=sustain
+        # Noise: 23-bit LFSR clocked from the oscillator (bit 19), so the noise
+        # has a frequency-dependent character just like the real SID. noise_acc
+        # accumulates oscillator advance toward the next LFSR shift.
+        self.noise_lfsr = 0x7FFFFF
+        self.noise_acc = 0.0
+        self.noise_out = 0.0
 
     def write_reg(self, offset, val):
         if   offset == 0: self.freq = (self.freq & 0xFF00) | val
@@ -476,13 +495,51 @@ class Sid:
                              np.float32(1.0), np.float32(-1.0))
             n_wave += 1
         if v.control & 0x80:          # NOISE
-            wave += np.random.uniform(-1.0, 1.0, n_samples).astype(np.float32)
+            wave += self._gen_noise(v, n_samples, np, phase_step)
             n_wave += 1
         if n_wave > 1:
             wave /= n_wave
 
         env = self._envelope_chunk(v, n_samples, np)
         return wave * env
+
+    def _gen_noise(self, v, n_samples, np, phase_step):
+        """
+        Generate the SID noise waveform for one voice.
+
+        A 23-bit Fibonacci LFSR (feedback = bit22 XOR bit17) is shifted once
+        each time the oscillator accumulator advances past a 2^20 boundary
+        (i.e. bit 19 goes high), so the shift rate — and therefore the noise's
+        spectral character/'pitch' — scales with the voice frequency, exactly
+        like the real chip. Between shifts the 8-bit output is held (sample &
+        hold), which is why low-frequency noise sounds like a low rumble and
+        high-frequency noise like bright hiss, rather than uniform white noise.
+        """
+        out = np.empty(n_samples, dtype=np.float32)
+        lfsr = v.noise_lfsr
+        acc = v.noise_acc
+        cur = v.noise_out
+        BOUND = 1 << 20
+        for i in range(n_samples):
+            acc += phase_step
+            shifted = False
+            while acc >= BOUND:
+                acc -= BOUND
+                fb = ((lfsr >> 22) ^ (lfsr >> 17)) & 1
+                lfsr = ((lfsr << 1) | fb) & 0x7FFFFF
+                shifted = True
+            if shifted:
+                # 8-bit output tapped from LFSR bits 22,20,16,13,11,7,4,2
+                b = ((((lfsr >> 22) & 1) << 7) | (((lfsr >> 20) & 1) << 6) |
+                     (((lfsr >> 16) & 1) << 5) | (((lfsr >> 13) & 1) << 4) |
+                     (((lfsr >> 11) & 1) << 3) | (((lfsr >>  7) & 1) << 2) |
+                     (((lfsr >>  4) & 1) << 1) |  ((lfsr >>  2) & 1))
+                cur = b / 127.5 - 1.0
+            out[i] = cur
+        v.noise_lfsr = lfsr
+        v.noise_acc = acc
+        v.noise_out = cur
+        return out
 
     def _apply_filter(self, input_arr, n_samples, np):
         """
@@ -2592,9 +2649,8 @@ def _build_key_map(pygame):
         p.K_LEFTBRACKET: (5, 6),               # @
         p.K_RIGHTBRACKET: (6, 1),              # *
         p.K_BACKSLASH: (6, 0),                 # £
-        # Cursor keys (down/right direct; up/left via shift)
-        p.K_DOWN: (0, 7),
-        p.K_RIGHT: (0, 2),
+        # (Arrow keys are handled as joystick-only in _rebuild_matrix; they are
+        #  intentionally not mapped to the C64 cursor keys — see the note there.)
         # Function keys
         p.K_F1: (0, 4),
         p.K_F3: (0, 5),
@@ -2631,7 +2687,7 @@ class PygameFrontend:
         self.scale = scale
         self.target_hz = target_hz
         pygame.init()
-        pygame.display.set_caption("C64 — Python emulator")
+        pygame.display.set_caption(f"C64 — Python emulator  [{__version__}]")
         self.window = pygame.display.set_mode(
             ((self.SCREEN_W + 2 * self.BORDER_X) * scale,
              (self.SCREEN_H + 2 * self.BORDER_Y) * scale))
@@ -2649,6 +2705,12 @@ class PygameFrontend:
         self._palette = np.array(C64_PALETTE, dtype=np.uint8)
         self.key_map = _build_key_map(pygame)
         self._keys_down = set()    # host pygame keycodes currently pressed
+        # Which control port the numeric-keypad joystick drives: 0 = port 1
+        # ($DC01), 1 = port 2 ($DC00). Toggle at runtime with keypad 0.
+        # Default is port 1, because Bruce Lee reads its joystick from $DC01
+        # (verified: it polls $DC01, not $DC00). Most other games use port 2,
+        # so keypad-0 flips between them.
+        self._joy_port = 0
         self.shown_fps = 0.0
         self.warp = False    # True = run as fast as possible (no host frame cap)
 
@@ -2684,24 +2746,33 @@ class PygameFrontend:
         # Joystick: bits 0..4 = up/down/left/right/fire (pressed = 1 in our
         # convention). We mirror state to both port 1 and port 2 so games that
         # use either work — most use port 2, Lode Runner uses port 1.
+        # Joystick is the numeric keypad only (8/2/4/6 = directions, 5 = fire).
+        # Keypad 0 toggles which control port it drives (handled in the event
+        # loop). We drive only the selected port and clear the other, so it
+        # behaves like a single joystick plugged into one port — like real HW.
         joy = 0
         for key in self._keys_down:
-            if   key in (p.K_UP,    p.K_KP8): joy |= 1 << 0   # up
-            elif key in (p.K_DOWN,  p.K_KP2): joy |= 1 << 1   # down
-            elif key in (p.K_LEFT,  p.K_KP4): joy |= 1 << 2   # left
-            elif key in (p.K_RIGHT, p.K_KP6): joy |= 1 << 3   # right
-            elif key in (p.K_LCTRL, p.K_RCTRL, p.K_KP0, p.K_KP5):
-                joy |= 1 << 4                                 # fire
-        self.system.cia1.joystick_state[0] = joy   # port 1
-        self.system.cia1.joystick_state[1] = joy   # port 2
-        # Keyboard mapping (independent of joystick — both fire if user uses arrows)
+            if   key == p.K_KP8: joy |= 1 << 0    # up
+            elif key == p.K_KP2: joy |= 1 << 1    # down
+            elif key == p.K_KP4: joy |= 1 << 2    # left
+            elif key == p.K_KP6: joy |= 1 << 3    # right
+            elif key in (p.K_KP5, p.K_KP_ENTER): joy |= 1 << 4   # fire
+        self.system.cia1.joystick_state[self._joy_port] = joy
+        self.system.cia1.joystick_state[1 - self._joy_port] = 0
+        # Keyboard matrix. The PC arrow keys map to the authentic C64 cursor
+        # keys: the real machine had only TWO cursor keys — CRSR↕ (0,7) and
+        # CRSR⇄ (0,2) — with the up/left directions produced by holding SHIFT.
         for key in self._keys_down:
             if key == p.K_UP:
                 mat.add((1, 7))                # left shift
-                mat.add((0, 7))                # cursor down → with shift = up
+                mat.add((0, 7))                # CRSR↕ → with shift = up
             elif key == p.K_LEFT:
                 mat.add((1, 7))                # left shift
-                mat.add((0, 2))                # cursor right → with shift = left
+                mat.add((0, 2))                # CRSR⇄ → with shift = left
+            elif key == p.K_DOWN:
+                mat.add((0, 7))                # CRSR↕ (down)
+            elif key == p.K_RIGHT:
+                mat.add((0, 2))                # CRSR⇄ (right)
             else:
                 m = self.key_map.get(key)
                 if m is not None:
@@ -2739,7 +2810,49 @@ class PygameFrontend:
         arr = np.frombuffer(raw, dtype=np.uint8).reshape(256, 8)
         return np.unpackbits(arr, axis=1).reshape(256, 8, 8)
 
-    def _render_charmode_multicolor(self, chargen, codes, color_ram, vic):
+    def _chargen_for(self, bank, cb_sel):
+        """Build a (256,8,8) bit array for one character-base selector
+        (D018 bits 3-1) within the given VIC bank."""
+        np = self.np
+        char_base = (cb_sel & 0x07) * 0x0800
+        if bank in (0, 2) and 0x1000 <= char_base < 0x2000:
+            cg_off = char_base & 0x0FFF                       # 0 or 0x800
+            raw = self.system.chargen_rom[cg_off : cg_off + 2048]
+        else:
+            full = bank * 0x4000 + char_base
+            raw = bytes(self.system.mem.ram[full : full + 2048])
+        arr = np.frombuffer(raw, dtype=np.uint8).reshape(256, 8)
+        return np.unpackbits(arr, axis=1).reshape(256, 8, 8)
+
+    # Raster line of the top of the 25-row display window (RSEL=1, YSCROLL=3).
+    FIRST_DISPLAY_LINE = 51
+
+    def _build_char_masks(self, codes):
+        """
+        Return the (25,40,8,8) bit masks for the character cells, giving each
+        text row the font that was active at its raster position. This makes
+        vertical raster splits on $D018 (e.g. a status line in one font over a
+        playfield in another) render correctly. Distinct fonts are built once
+        and cached, so the common case (1-2 fonts per frame) stays cheap.
+        """
+        np = self.np
+        vic = self.system.vic
+        bank = self.system.mem.vic_bank()
+        line_d018 = vic.line_d018
+        n = len(line_d018)
+        cache = {}
+        masks = np.empty((25, 40, 8, 8), dtype=np.uint8)
+        for r in range(25):
+            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % n
+            cb_sel = (line_d018[raster] >> 1) & 0x07
+            cg = cache.get(cb_sel)
+            if cg is None:
+                cg = self._chargen_for(bank, cb_sel)
+                cache[cb_sel] = cg
+            masks[r] = cg[codes[r]]
+        return masks
+
+    def _render_charmode_multicolor(self, masks, color_ram, vic):
         """
         Render the background in multicolor character mode (D016 bit 4 set).
 
@@ -2753,7 +2866,8 @@ class PygameFrontend:
                               10 = background#2    (D023)
                               11 = character col   (colour RAM & 7)
 
-        Returns (pixels[200,320,3] uint8, bitmap[200,320] foreground mask).
+        `masks` is the (25,40,8,8) per-row character bitmap (built with the
+        correct per-row font). Returns (pixels[200,320,3], bitmap[200,320]).
         The foreground mask (for sprite priority/collision) counts a pixel as
         foreground when its 2-bit value has bit 1 set (values 2 and 3) for
         multicolor cells, or when the bit is set for hi-res cells.
@@ -2764,7 +2878,6 @@ class PygameFrontend:
         d022 = vic.display_regs[0x22] & 0x0F
         d023 = vic.display_regs[0x23] & 0x0F
 
-        masks = chargen[codes]                              # (25,40,8,8) of 0/1
         cell_col = (color_ram & 0x07)                       # (25,40)
         mc_cell = (color_ram & 0x08) != 0                   # (25,40) bool
 
@@ -2845,15 +2958,16 @@ class PygameFrontend:
         # reverse-video flag. The chargen ROM already stores the reverse
         # versions at codes $80-$FF (chargen[$A0] = reverse-space bitmap), so
         # we just index the chargen directly with the full byte.
-        chargen = self._active_chargen()
+        # Character bitmaps, one font per row according to the $D018 value
+        # active at that row's raster line (handles vertical raster splits).
         codes = (screen_ram & 0xFF).astype(np.int32)
+        masks = self._build_char_masks(codes)               # (25,40,8,8)
         # Character display mode: standard hi-res text, or multicolor text
         # (D016 bit 4). Extended-colour / bitmap modes fall back to hi-res.
         if dr[0x16] & 0x10:
             pixels, bitmap = self._render_charmode_multicolor(
-                chargen, codes, color_ram, vic)
+                masks, color_ram, vic)
         else:
-            masks = chargen[codes]                          # (25, 40, 8, 8)
             bitmap = masks.transpose(0, 2, 1, 3).reshape(200, 320)
             fg_colors_per_pixel = np.repeat(np.repeat(color_ram, 8, axis=0), 8, axis=1)
             fg_rgb = self._palette[fg_colors_per_pixel]
@@ -2891,7 +3005,8 @@ class PygameFrontend:
                                                  self.window.get_size())
             self.window.blit(scaled, (0, 0))
         self.pygame.display.set_caption(
-            f"C64 — Python emulator   [{self.shown_fps:.1f} fps]")
+            f"C64 — Python emulator   [{self.shown_fps:.1f} fps]"
+            f"   [Joy: Port {self._joy_port + 1}]")
         self.pygame.display.flip()
 
     def _render_sprite(self, idx, pixels, bg_mask, sprite_occupancy):
@@ -3018,6 +3133,15 @@ class PygameFrontend:
                     if event.key == self.pygame.K_F12:
                         print("Soft reset")
                         self.system.reset()
+                        continue
+                    if event.key == self.pygame.K_KP0:
+                        # Toggle the keypad joystick between port 2 and port 1
+                        self._joy_port ^= 1
+                        # Clear both ports so a direction held across the switch
+                        # doesn't linger on the old port.
+                        self.system.cia1.joystick_state[0] = 0
+                        self.system.cia1.joystick_state[1] = 0
+                        print(f"Keypad joystick → Port {self._joy_port + 1}")
                         continue
                     self._key_event(event.key, True)
                 elif event.type == self.pygame.KEYUP:
@@ -3556,6 +3680,7 @@ def _launch_d64(system, d64_path, auto_run=True, boot_cycles=3_500_000):
 
 def main():
     args = sys.argv[1:]
+    print(f"c64emu {__version__}")
 
     if "--cputest" in args:
         ok = C64Emu().test_cpu(verbose=("-v" in args))
