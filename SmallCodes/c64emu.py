@@ -59,7 +59,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.09-render-at-display"
+__version__ = "2026.07.09-sprite-mux2"
 
 
 # =============================================================================
@@ -261,6 +261,22 @@ class Vic:
         # above a text dashboard — is rendered per row in the correct mode.
         self.line_d011 = bytearray(self.LINES_PER_FRAME)
         self.line_d016 = bytearray(self.LINES_PER_FRAME)
+        # Background/border colours per raster line, so a game that changes
+        # them mid-frame (e.g. Exploding Fist recolours $D021 for the sky,
+        # ground and status bands via raster splits) renders each band in its
+        # own colour instead of one latched value.
+        self.line_d020 = bytearray(self.LINES_PER_FRAME)
+        self.line_d021 = bytearray(self.LINES_PER_FRAME)
+        self.line_d022 = bytearray(self.LINES_PER_FRAME)
+        self.line_d023 = bytearray(self.LINES_PER_FRAME)
+        # Per-raster sprite Y position and data pointer for all 8 sprites,
+        # stored flat as [raster*8 + sprite]. A game can reposition sprites
+        # mid-frame via raster IRQs (sprite multiplexing) to draw figures taller
+        # than 21px or show more than 8 sprites; recording Y+pointer per line
+        # lets the renderer redraw each sprite at every position it occupied.
+        self.line_spr_y = bytearray(self.LINES_PER_FRAME * 8)
+        self.line_spr_ptr = bytearray(self.LINES_PER_FRAME * 8)
+        self.mem = None                    # set by System after Memory exists
         self.raster = 0
         self._line_cycles = 0
         self.raster_compare = 0
@@ -334,6 +350,18 @@ class Vic:
             self.line_d018[self.raster] = self.regs[0x18]
             self.line_d011[self.raster] = self.regs[0x11]
             self.line_d016[self.raster] = self.regs[0x16]
+            self.line_d020[self.raster] = self.regs[0x20]
+            self.line_d021[self.raster] = self.regs[0x21]
+            self.line_d022[self.raster] = self.regs[0x22]
+            self.line_d023[self.raster] = self.regs[0x23]
+            mem = self.mem
+            if mem is not None:
+                ras8 = self.raster * 8
+                regs = self.regs
+                self.line_spr_y[ras8:ras8 + 8] = regs[1:16:2]
+                pbase = (mem.vic_bank() * 0x4000
+                         + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
+                self.line_spr_ptr[ras8:ras8 + 8] = mem.ram[pbase:pbase + 8]
             if self.raster == self.raster_compare:
                 self.irq_status |= 0x01
             if self.raster == self.SAMPLE_LINE:
@@ -2019,6 +2047,7 @@ class System:
         self.mem = Memory(basic_rom=basic, char_rom=chargen, kernal_rom=kernal,
                           vic=self.vic, sid=self.sid, color_ram=self.color_ram,
                           cia1=self.cia1, cia2=self.cia2)
+        self.vic.mem = self.mem            # lets VIC record sprite pointers/Y
         self.chargen_rom = bytes(chargen)
         self.cpu = CPU(self.mem)
         self._d64 = None
@@ -3043,9 +3072,15 @@ class PygameFrontend:
             elif key == p.K_KP2: joy |= 1 << 1    # down
             elif key == p.K_KP4: joy |= 1 << 2    # left
             elif key == p.K_KP6: joy |= 1 << 3    # right
-            elif key in (p.K_KP5, p.K_KP_ENTER): joy |= 1 << 4   # fire
-        self.system.cia1.joystick_state[self._joy_port] = joy
-        self.system.cia1.joystick_state[1 - self._joy_port] = 0
+            elif key in (p.K_KP5, p.K_KP_ENTER, p.K_RCTRL): joy |= 1 << 4   # fire
+        # _joy_port: 0 = port 1 only, 1 = port 2 only, 2 = both ports.
+        js = self.system.cia1.joystick_state
+        if self._joy_port == 2:
+            js[0] = joy
+            js[1] = joy
+        else:
+            js[self._joy_port] = joy
+            js[1 - self._joy_port] = 0
         # Keyboard matrix. The PC arrow keys map to the authentic C64 cursor
         # keys: the real machine had only TWO cursor keys — CRSR↕ (0,7) and
         # CRSR⇄ (0,2) — with the up/left directions produced by holding SHIFT.
@@ -3153,7 +3188,8 @@ class PygameFrontend:
             masks[r] = cg[codes[r]]
         return masks
 
-    def _render_charmode_multicolor(self, masks, color_ram, vic):
+    def _render_charmode_multicolor(self, masks, color_ram, d021_row,
+                                    d022_row, d023_row):
         """
         Render the background in multicolor character mode (D016 bit 4 set).
 
@@ -3168,16 +3204,16 @@ class PygameFrontend:
                               11 = character col   (colour RAM & 7)
 
         `masks` is the (25,40,8,8) per-row character bitmap (built with the
-        correct per-row font). Returns (pixels[200,320,3], bitmap[200,320]).
-        The foreground mask (for sprite priority/collision) counts a pixel as
-        foreground when its 2-bit value has bit 1 set (values 2 and 3) for
-        multicolor cells, or when the bit is set for hi-res cells.
+        correct per-row font). d021_row/d022_row/d023_row are (25,) arrays of
+        the background colours active at each row's raster line, so raster
+        splits that recolour the backdrop mid-frame render correctly.
+        Returns (pixels[200,320,3], bitmap[200,320]).
         """
         np = self.np
         pal = self._palette
-        d021 = vic.display_regs[0x21] & 0x0F
-        d022 = vic.display_regs[0x22] & 0x0F
-        d023 = vic.display_regs[0x23] & 0x0F
+        d021c = d021_row[:, None]                            # (25,1)
+        d022c = d022_row[:, None]
+        d023c = d023_row[:, None]
 
         cell_col = (color_ram & 0x07)                       # (25,40)
         mc_cell = (color_ram & 0x08) != 0                   # (25,40) bool
@@ -3189,9 +3225,9 @@ class PygameFrontend:
 
         # colour index per pixel for multicolor cells, via per-cell lookup table
         choices = np.stack([                                # (25,40,4)
-            np.full((25, 40), d021, dtype=np.uint8),
-            np.full((25, 40), d022, dtype=np.uint8),
-            np.full((25, 40), d023, dtype=np.uint8),
+            np.broadcast_to(d021c, (25, 40)).astype(np.uint8),
+            np.broadcast_to(d022c, (25, 40)).astype(np.uint8),
+            np.broadcast_to(d023c, (25, 40)).astype(np.uint8),
             cell_col.astype(np.uint8),
         ], axis=2)
         choices_b = np.broadcast_to(choices[:, :, None, None, :], (25, 40, 8, 8, 4))
@@ -3200,7 +3236,7 @@ class PygameFrontend:
         # colour index per pixel for hi-res cells (bg where bit clear)
         colidx_hi = np.where(masks.astype(bool),
                              cell_col[:, :, None, None].astype(np.uint8),
-                             np.uint8(d021))
+                             d021_row[:, None, None, None].astype(np.uint8))
 
         mc_b = mc_cell[:, :, None, None]
         colidx = np.where(mc_b, colidx_mc, colidx_hi)       # (25,40,8,8)
@@ -3215,7 +3251,8 @@ class PygameFrontend:
         pixels = pal[colidx].astype(np.uint8)
         return pixels, bitmap
 
-    def _render_bitmap_rows(self, rows, d018, d016, color_ram, bank_off):
+    def _render_bitmap_rows(self, rows, d018, d016, color_ram, bank_off,
+                            d021_rows):
         """
         Render a contiguous span of character rows in VIC bitmap mode (D011
         bit 5 set). `rows` is a range of char-row indices (0..24) that all share
@@ -3253,13 +3290,13 @@ class PygameFrontend:
                           fg[:, :, None, None, :], bg[:, :, None, None, :])
             mask = bits
         else:                                      # multicolor bitmap
-            d021 = self.system.vic.display_regs[0x21] & 0x0F
+            d021 = d021_rows[:, None]                        # (nrows,1) per-row bg
             pb = bits.reshape(nrows, 40, 8, 4, 2)
             twobit = (pb[..., 0] << 1) | pb[..., 1]           # (nrows,40,8,4)
             twobit = np.repeat(twobit, 2, axis=3)             # (nrows,40,8,8)
             cram = color_ram[rows.start:rows.stop] & 0x0F     # (nrows,40)
             choices = np.stack([
-                np.full((nrows, 40), d021, dtype=np.uint8),
+                np.broadcast_to(d021, (nrows, 40)).astype(np.uint8),
                 ((vm >> 4) & 0x0F).astype(np.uint8),
                 (vm & 0x0F).astype(np.uint8),
                 cram.astype(np.uint8),
@@ -3333,6 +3370,20 @@ class PygameFrontend:
             bytes(self.system.color_ram.ram[:0x400]),
             dtype=np.uint8)[:1000].reshape(25, 40) & 0x0F
 
+        # Background colours ($D021/$D022/$D023) active at each character row's
+        # raster line, so raster splits that recolour the backdrop mid-frame
+        # (e.g. Exploding Fist's sky/ground bands) render each band correctly
+        # rather than using one latched value.
+        ld21, ld22, ld23 = vic.line_d021, vic.line_d022, vic.line_d023
+        d021_row = np.empty(25, dtype=np.uint8)
+        d022_row = np.empty(25, dtype=np.uint8)
+        d023_row = np.empty(25, dtype=np.uint8)
+        for r in range(25):
+            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % nld
+            d021_row[r] = ld21[raster] & 0x0F
+            d022_row[r] = ld22[raster] & 0x0F
+            d023_row[r] = ld23[raster] & 0x0F
+
         # Char bitmap pulled fresh from VIC memory each frame, so games with
         # custom character sets (e.g. games that build their own fonts in RAM)
         # render correctly. $D018 bits 3-1 select the chargen base.
@@ -3348,12 +3399,12 @@ class PygameFrontend:
         # (D016 bit 4). Extended-colour / bitmap modes fall back to hi-res.
         if dr[0x16] & 0x10:
             pixels, bitmap = self._render_charmode_multicolor(
-                masks, color_ram, vic)
+                masks, color_ram, d021_row, d022_row, d023_row)
         else:
             bitmap = masks.transpose(0, 2, 1, 3).reshape(200, 320)
             fg_colors_per_pixel = np.repeat(np.repeat(color_ram, 8, axis=0), 8, axis=1)
             fg_rgb = self._palette[fg_colors_per_pixel]
-            bg_rgb = self._palette[bg_color]
+            bg_rgb = self._palette[np.repeat(d021_row, 8)][:, None, :]   # (200,1,3)
             pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
 
         # --- Bitmap-mode overlay ---
@@ -3380,7 +3431,8 @@ class PygameFrontend:
                         break
                     end += 1
                 rp, rm = self._render_bitmap_rows(range(r, end), d018, d016,
-                                                  color_ram, bank_off)
+                                                  color_ram, bank_off,
+                                                  d021_row[r:end])
                 pixels[r * 8:end * 8] = rp
                 bitmap[r * 8:end * 8] = rm
                 r = end
@@ -3391,10 +3443,43 @@ class PygameFrontend:
         # bitmap (200, 320) is the foreground mask used for priority + collisions.
         # sprite_occupancy: per-pixel which sprite (bit 0..7) covers each pixel
         sprite_occupancy = np.zeros((200, 320), dtype=np.uint8)
+        # Sprite multiplexing: a sprite's Y register (and data pointer) can be
+        # rewritten mid-frame by a raster IRQ so one hardware sprite is shown at
+        # several vertical positions (tall figures, >8 sprites). We recorded the
+        # Y/pointer active at every raster line; here we replay them. A display
+        # for sprite i starts on the line where the raster equals its Y register;
+        # after it we skip its height (21 or 42 lines) before the next can start.
+        ly = vic.line_spr_y
+        lp = vic.line_spr_ptr
+        nlines = vic.LINES_PER_FRAME
         # Render in REVERSE order so sprite 0 ends up drawn on top of sprite 7
         # (lower sprite number = higher hardware priority on real VIC-II).
         for s in range(7, -1, -1):
-            self._render_sprite(s, pixels, bitmap, sprite_occupancy)
+            if not ((vic.regs[0x15] >> s) & 1):
+                continue
+            height = 42 if ((vic.regs[0x17] >> s) & 1) else 21
+            positions = []
+            R = 0
+            while R < nlines:
+                if ly[R * 8 + s] == R:                # raster == Y reg → display
+                    # The game often rewrites the sprite pointer for this section
+                    # on the very trigger line (as part of the raster IRQ), which
+                    # our per-line recording captures a line or two later. Read
+                    # the pointer a few lines into the section (still constant
+                    # there) so multiplexed figures get the right body part.
+                    pr = R + 3 if R + 3 < nlines else R
+                    positions.append((R, lp[pr * 8 + s]))
+                    R += height
+                else:
+                    R += 1
+            if not positions:                          # sprite never triggered
+                # Fall back to the latched register position (static sprite that
+                # sits above the recording window's first trigger line).
+                positions = [(vic.regs[s * 2 + 1],
+                              vic.line_spr_ptr[vic.SAMPLE_LINE * 8 + s])]
+            for spr_y, pointer in positions:
+                self._render_sprite(s, pixels, bitmap, sprite_occupancy,
+                                    spr_y, pointer)
         # Collision detection: any pixel where 2+ sprites overlap
         multi = sprite_occupancy & (sprite_occupancy - 1)    # clears lowest set bit
         if multi.any():
@@ -3419,33 +3504,30 @@ class PygameFrontend:
             self.window.blit(scaled, (0, 0))
         self.pygame.display.set_caption(
             f"C64 — Python emulator   [{self.shown_fps:.1f} fps]"
-            f"   [Joy: Port {self._joy_port + 1}]")
+            f"   [Joy: {('Port 1', 'Port 2', 'Both ports')[self._joy_port]}]")
         self.pygame.display.flip()
 
-    def _render_sprite(self, idx, pixels, bg_mask, sprite_occupancy):
+    def _render_sprite(self, idx, pixels, bg_mask, sprite_occupancy,
+                       spr_y, pointer):
         """
-        Render sprite `idx` onto `pixels` (200x320x3), respecting priority and
-        recording collisions with `bg_mask` (foreground pixel mask).
+        Render sprite `idx` onto `pixels` (200x320x3) at vertical position
+        `spr_y` (VIC Y coordinate) using data pointer `pointer`, respecting
+        priority and recording collisions with `bg_mask` (foreground mask).
+        Called once per position when the sprite is multiplexed.
         Writes the sprite's bit-flag into `sprite_occupancy` everywhere it draws.
         """
         np = self.np
         vic = self.system.vic
         mem = self.system.mem
-        enabled = (vic.regs[0x15] >> idx) & 1
-        if not enabled:
-            return
         # Position (VIC coordinates: X=24, Y=50 is top-left of visible area)
         spr_x = vic.regs[idx * 2] | (((vic.regs[0x10] >> idx) & 1) << 8)
-        spr_y = vic.regs[idx * 2 + 1]
         multicolor = (vic.regs[0x1C] >> idx) & 1
         y_expand   = (vic.regs[0x17] >> idx) & 1
         x_expand   = (vic.regs[0x1D] >> idx) & 1
         priority   = (vic.regs[0x1B] >> idx) & 1            # 1 = bg in front
         sprite_color = vic.regs[0x27 + idx] & 0x0F
 
-        # Fetch sprite data via VIC view (pointers live in the displayed matrix)
-        screen_base_in_bank = ((vic.display_regs[0x18] >> 4) & 0x0F) * 0x0400
-        pointer = mem.read_vic(screen_base_in_bank + 0x03F8 + idx)
+        # Fetch sprite data via VIC view using the supplied pointer.
         data_addr = pointer * 64
         sd = mem.read_vic_bytes(data_addr, 63)
 
@@ -3547,14 +3629,18 @@ class PygameFrontend:
                         print("Soft reset")
                         self.system.reset()
                         continue
-                    if event.key == self.pygame.K_KP0:
-                        # Toggle the keypad joystick between port 2 and port 1
-                        self._joy_port ^= 1
-                        # Clear both ports so a direction held across the switch
-                        # doesn't linger on the old port.
+                    if event.key in (self.pygame.K_KP0, self.pygame.K_F9):
+                        # Cycle the keypad joystick: Port 2 → Port 1 → Both.
+                        # "Both" drives both control ports at once, so a game
+                        # that only reads port 1 (e.g. Exploding Fist) or port 2
+                        # works without having to guess the right port. KP0 or
+                        # F9 both do this (F9 in case the numeric keypad is
+                        # unavailable / NumLock-dependent).
+                        self._joy_port = {1: 0, 0: 2, 2: 1}[self._joy_port]
                         self.system.cia1.joystick_state[0] = 0
                         self.system.cia1.joystick_state[1] = 0
-                        print(f"Keypad joystick → Port {self._joy_port + 1}")
+                        label = ("Port 1", "Port 2", "Both ports")[self._joy_port]
+                        print(f"Keypad joystick → {label}")
                         continue
                     self._key_event(event.key, True, event.unicode)
                 elif event.type == self.pygame.KEYUP:
