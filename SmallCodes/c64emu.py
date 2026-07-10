@@ -30,6 +30,8 @@ Usage
 -----
 * `python3 c64emu.py`                  – boot in a pygame window
 * `python3 c64emu.py --cputest`        – run the Klaus 6502 functional test
+* `python3 c64emu.py --lorenztest DIR` – run the Wolfgang-Lorenz test suite
+* `python3 c64emu.py --victest DIR`    – run the VIC-II screenshot test suite
 * `python3 c64emu.py --headless N`     – boot, run N steps, dump screen as ASCII
 * `python3 c64emu.py --scale 3`        – set window scale (default 2)
 * `python3 c64emu.py game.prg`         – boot, then auto-load (& RUN if BASIC)
@@ -59,7 +61,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.09-sprite-mux2"
+__version__ = "2026.07.09-sprmux-xy"
 
 
 # =============================================================================
@@ -245,6 +247,10 @@ class Vic:
     # used by e.g. Bruce Lee) render correctly without full cycle accuracy.
     SAMPLE_LINE = 150
 
+    # First visible playfield raster (top of the 25-row text area at Y-scroll 3).
+    # Used to snapshot each character row's screen/colour RAM at its own line.
+    FIRST_DISPLAY_LINE = 51
+
     def __init__(self):
         self.regs = bytearray(0x40)
         # Snapshot of self.regs taken at SAMPLE_LINE each frame; the frontend
@@ -276,9 +282,25 @@ class Vic:
         # lets the renderer redraw each sprite at every position it occupied.
         self.line_spr_y = bytearray(self.LINES_PER_FRAME * 8)
         self.line_spr_ptr = bytearray(self.LINES_PER_FRAME * 8)
+        # Sprite X low byte per line, and the $D010 X-MSB byte per line. The game
+        # rewrites X together with Y when multiplexing (each mid-frame copy sits
+        # at its own horizontal position), so X must be replayed per line too.
+        self.line_spr_x = bytearray(self.LINES_PER_FRAME * 8)
+        self.line_spr_msb = bytearray(self.LINES_PER_FRAME)
+        # Per-character-row snapshot of the 40 screen codes and 40 colour-RAM
+        # nibbles as they were when the VIC fetched that row (its badline).
+        # Reading the whole screen once at frame end tears when a game rewrites
+        # screen RAM mid-frame without vblank sync (crack-intro scrollers do
+        # exactly this); snapshotting per row makes such scrolls render the way
+        # the VIC actually drew them, line by line.
+        self.line_screen = bytearray(25 * 40)
+        self.line_color  = bytearray(25 * 40)
+        self.color_ram   = None            # set by System alongside .mem
         self.mem = None                    # set by System after Memory exists
         self.raster = 0
         self._line_cycles = 0
+        self.ba = True             # bus available to CPU (low on badlines)
+        self._badline = False
         self.raster_compare = 0
         self.irq_status = 0
         self.irq_enable = 0
@@ -359,15 +381,42 @@ class Vic:
                 ras8 = self.raster * 8
                 regs = self.regs
                 self.line_spr_y[ras8:ras8 + 8] = regs[1:16:2]
+                self.line_spr_x[ras8:ras8 + 8] = regs[0:16:2]
+                self.line_spr_msb[self.raster] = regs[0x10]
                 pbase = (mem.vic_bank() * 0x4000
                          + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
                 self.line_spr_ptr[ras8:ras8 + 8] = mem.ram[pbase:pbase + 8]
+                # Snapshot this character row's screen + colour RAM as the beam
+                # reaches it, so mid-frame screen rewrites (unsynced scrollers)
+                # render per row instead of tearing at a single frame-end read.
+                rr = self.raster - (self.FIRST_DISPLAY_LINE + 4)
+                if 0 <= rr <= 192 and (rr & 7) == 0:
+                    row = rr >> 3
+                    sb = (mem.vic_bank() * 0x4000
+                          + ((regs[0x18] >> 4) & 0x0F) * 0x400 + row * 40)
+                    self.line_screen[row * 40:row * 40 + 40] = mem.ram[sb:sb + 40]
+                    if self.color_ram is not None:
+                        self.line_color[row * 40:row * 40 + 40] = \
+                            self.color_ram.ram[row * 40:row * 40 + 40]
             if self.raster == self.raster_compare:
                 self.irq_status |= 0x01
             if self.raster == self.SAMPLE_LINE:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
                 self.display_regs[:] = self.regs
+
+    def clock(self):
+        # One PHI2 tick for cycle-accurate mode. Reuses tick() for the raster
+        # advance + per-line recording + raster-IRQ, then computes BA. A line is
+        # a "badline" when the beam is in the display window and its low 3 raster
+        # bits match Y-scroll with the display enabled; the VIC then holds BA low
+        # across the character-fetch window (~cycles 12..54), stalling CPU reads.
+        self.tick(1)
+        cyc = self._line_cycles
+        self._badline = (0x30 <= self.raster <= 0xF7
+                         and (self.raster & 7) == (self.regs[0x11] & 7)
+                         and (self.regs[0x11] & 0x10) != 0)
+        self.ba = not (self._badline and 12 <= cyc <= 54)
 
 
 # =============================================================================
@@ -596,13 +645,23 @@ class Sid:
         # This approximates the 6581's documented curve well enough for music.
         fc_norm = self.filter_cutoff / 2047.0
         fc_hz   = 30.0 * (12000.0 / 30.0) ** fc_norm
-        # SVF coefficient (Chamberlin form). Clamp for numerical stability.
-        f = min(2.0 * np.sin(np.pi * fc_hz / self.SAMPLE_RATE), 1.6)
+        # SVF coefficient (Chamberlin form). The two-integrator loop is only
+        # stable while fc stays below ~fs/6, i.e. f <= 1.0 — beyond that the
+        # state diverges to +/-inf and then NaN, which silences ALL later audio
+        # (a wide-open low-pass, as e.g. Lazy Jones uses, hit exactly this).
+        # Clamp to 1.0; the low-pass pass-band gain at f<=1 is still ~1.0 so
+        # nothing gets quieter. Damping floored at 0.1 keeps high-resonance
+        # tunes bounded too (poles stay inside the unit circle for all f<=1).
+        f = min(2.0 * np.sin(np.pi * fc_hz / self.SAMPLE_RATE), 1.0)
         # Damping: high resonance ⇒ low damping. Range from 1.4 (Q≈0.7) to 0.1 (Q≈10).
-        damping = 1.4 - (self.filter_resonance / 15.0) * 1.3
+        damping = max(1.4 - (self.filter_resonance / 15.0) * 1.3, 0.1)
 
         low  = self._flt_low
         band = self._flt_band
+        # Recover if a previous frame left the state non-finite (e.g. an older
+        # build blew up): a single NaN would otherwise poison audio forever.
+        if not (np.isfinite(low) and np.isfinite(band)):
+            low = band = 0.0
         # Pre-allocate only outputs we need
         want_lp = mode & 0x01
         want_bp = mode & 0x02
@@ -846,6 +905,12 @@ class Cia:
                     if self.timer_b <= 0:
                         self.timer_b = self.timer_b_latch or 0xFFFF
 
+    def clock(self):
+        # One PHI2 tick for cycle-accurate mode: decrement the timers by a single
+        # cycle. (The fine ICR/IRQ-delay quirks the Lorenz CIA tests check are the
+        # next tuning step; per-cycle decrement is already far closer than batch.)
+        self.tick(1)
+
 
 # =============================================================================
 # Memory — dispatches to RAM, ROM, or chips per PLA state
@@ -997,6 +1062,13 @@ class CPU:
 
     FN, FV, FB, FD, FI, FZ, FC = 7, 6, 4, 3, 2, 1, 0
 
+    # "Magic constant" for the unstable ANE/XAA ($8B) and LXA/LAX-#imm ($AB)
+    # opcodes, whose result is (A | magic) & …  . The real value is chip- and
+    # temperature-dependent; 0xEE is what the Wolfgang-Lorenz suite and most
+    # real programs (e.g. Wizball) expect. Override to model a different die.
+    ANE_MAGIC = 0xEE
+    LXA_MAGIC = 0xEE
+
     def __init__(self, memory):
         self.mem = memory
         self.reg_a = 0
@@ -1014,6 +1086,11 @@ class CPU:
         # KERNAL routine interception (LOAD trap etc.).
         self.traps = {}
         self._build_dispatch()
+        # Cycle-accurate ("clock") mode state: the active microcode generator
+        # and the bus access it is currently waiting on. None => idle, the next
+        # clock() begins a new instruction. Batch step() ignores these.
+        self._micro = None
+        self._pending = None
         self.reset()
         self.trace = False
 
@@ -1090,7 +1167,7 @@ class CPU:
 
     def fetch_byte(self):
         v = self.mem.read_system_byte(self.pc)
-        self.pc = self.pc + 1
+        self.pc = (self.pc + 1) & 0xFFFF
         return v
 
     def fetch_word(self):
@@ -1615,13 +1692,19 @@ class CPU:
         for op in (0x1C, 0x3C, 0x5C, 0x7C, 0xDC, 0xFC):
             d[op] = lambda: (self._abs_x(), self._tick(4))     # NOP abs,X
 
-        # Genuinely unstable / rarely used illegals — provide *something* so
-        # programs don't crash on stray bytes; we don't pretend the behaviour
-        # is right. (Most games avoid these.)
-        d[0x8B] = lambda: (self._imm(), self._tick(2))         # XAA (unstable)
-        d[0xAB] = lambda: (self._imm(), self._tick(2))         # LAX #imm (unstable)
-        for op in (0x93, 0x9B, 0x9C, 0x9E, 0x9F):
-            d[op] = lambda: (self.fetch_byte(), self.fetch_byte(), self._tick(5))
+        # Genuinely unstable / rarely used illegals. ANE ($8B) and LXA ($AB)
+        # follow the (A | magic) & ... model that the Wolfgang-Lorenz suite and
+        # most real programs expect (magic constant configurable, see ANE_MAGIC
+        # / LXA_MAGIC). The SH* stores write reg & (H+1) with the documented
+        # page-crossing corruption of the target's high byte.
+        d[0x8B] = lambda: self._ane()                          # ANE / XAA
+        d[0xAB] = lambda: self._lxa()                          # LXA / LAX #imm
+        d[0x93] = lambda: self._sha_ind_y()                    # SHA / AHX (zp),Y
+        d[0x9F] = lambda: self._sha_abs_y()                    # SHA / AHX abs,Y
+        d[0x9E] = lambda: self._shx_abs_y()                    # SHX / SXA abs,Y
+        d[0x9C] = lambda: self._shy_abs_x()                    # SHY / SYA abs,X
+        d[0x9B] = lambda: self._shs_abs_y()                    # SHS / TAS abs,Y
+        d[0xBB] = lambda: self._las_abs_y()                    # LAS / LAE abs,Y
 
         self._dispatch = d
 
@@ -1706,15 +1789,32 @@ class CPU:
         self.update_nz(self.a)
         self.cycles += 2
 
-    def _arr(self):                             # AND #imm + ROR A (binary mode)
+    def _arr(self):                             # AND #imm + ROR A (ARR, $6B)
         v = self._imm()
-        self.a &= v
-        old_c = 0x80 if self.get_flag_c() else 0
-        self.a = (self.a >> 1) | old_c
-        self.update_nz(self.a)
-        # ARR's C and V come from bits 5 and 6 of the result (binary mode).
-        self.set_flag(self.FC, (self.a & 0x40) != 0)
-        self.set_flag(self.FV, (((self.a >> 5) ^ (self.a >> 6)) & 1) != 0)
+        t = self.a & v
+        carry_in = self.get_flag_c()
+        if self.get_flag_d():
+            # Decimal mode: the rotate is done, N/Z/V come from the rotated
+            # value, then a BCD fix-up adjusts each nibble (and sets C on the
+            # high-nibble carry). This matches the real NMOS 6510 (and VICE).
+            res = (t >> 1) | (0x80 if carry_in else 0)
+            self.set_flag(self.FN, carry_in)
+            self.set_flag(self.FZ, res == 0)
+            self.set_flag(self.FV, ((t ^ res) & 0x40) != 0)
+            if (t & 0x0F) + (t & 0x01) > 0x05:
+                res = (res & 0xF0) | ((res + 0x06) & 0x0F)
+            if (t & 0xF0) + (t & 0x10) > 0x50:
+                res = (res + 0x60) & 0xFF
+                self.set_flag(self.FC, True)
+            else:
+                self.set_flag(self.FC, False)
+            self.a = res & 0xFF
+        else:
+            # Binary mode: C and V come from bits 6 and 5 of the result.
+            self.a = (t >> 1) | (0x80 if carry_in else 0)
+            self.update_nz(self.a)
+            self.set_flag(self.FC, (self.a & 0x40) != 0)
+            self.set_flag(self.FV, (((self.a >> 5) ^ (self.a >> 6)) & 1) != 0)
         self.cycles += 2
 
     def _axs(self):                             # X = (A & X) - #imm, CMP-like flags
@@ -1725,6 +1825,64 @@ class CPU:
         self.update_nz(result)
         self.x = result
         self.cycles += 2
+
+    def _ane(self):                             # ANE / XAA ($8B) — unstable
+        # A = (A | magic) & X & imm. The "magic" byte is chip-/temperature-
+        # dependent on real hardware; ANE_MAGIC selects the modelled die.
+        v = self._imm()
+        self.a = (self.a | self.ANE_MAGIC) & self.x & v
+        self.update_nz(self.a)
+        self.cycles += 2
+
+    def _lxa(self):                             # LXA / LAX #imm ($AB) — unstable
+        # A = X = (A | magic) & imm. Same magic-constant caveat as ANE.
+        v = self._imm()
+        r = (self.a | self.LXA_MAGIC) & v
+        self.a = r
+        self.x = r
+        self.update_nz(r)
+        self.cycles += 2
+
+    def _sh_store(self, base, index, reg_val, cycles):
+        # Store opcodes SHA/SHX/SHY/SHS: the value written is reg & (H+1) where H
+        # is the high byte of the base address. When the indexed address crosses
+        # a page boundary the high byte of the target gets replaced by the value
+        # itself — the documented "unstable" behaviour the Lorenz suite checks.
+        H = (base >> 8) & 0xFF
+        value = reg_val & ((H + 1) & 0xFF)
+        addr = (base + index) & 0xFFFF
+        if (base & 0xFF) + index > 0xFF:            # page crossed
+            addr = (addr & 0x00FF) | (value << 8)
+        self.mem.write_system_byte(addr, value)
+        self._tick(cycles)
+
+    def _sha_abs_y(self):                       # SHA/AHX $9F  (abs,Y)
+        self._sh_store(self.fetch_word(), self.y, self.a & self.x, 5)
+
+    def _sha_ind_y(self):                       # SHA/AHX $93  ((zp),Y)
+        zp = self.fetch_byte()
+        base = make_word(self.mem.read_system_byte(zp),
+                         self.mem.read_system_byte((zp + 1) & 0xFF))
+        self._sh_store(base, self.y, self.a & self.x, 6)
+
+    def _shx_abs_y(self):                       # SHX/SXA $9E  (abs,Y)
+        self._sh_store(self.fetch_word(), self.y, self.x, 5)
+
+    def _shy_abs_x(self):                       # SHY/SYA $9C  (abs,X)
+        self._sh_store(self.fetch_word(), self.x, self.y, 5)
+
+    def _shs_abs_y(self):                       # SHS/TAS $9B  (abs,Y)
+        self.sp = self.a & self.x               # SP = A & X
+        self._sh_store(self.fetch_word(), self.y, self.a & self.x, 5)
+
+    def _las_abs_y(self):                       # LAS / LAE / LAR $BB  (abs,Y)
+        # A = X = SP = (memory AND SP). Sets N/Z from the result.
+        t = self.mem.read_system_byte(self._abs_y()) & self.sp
+        self.a = t
+        self.x = t
+        self.sp = t
+        self.update_nz(t)
+        self._tick(4)
 
 
     # ---------- internal helpers ----------
@@ -1771,6 +1929,73 @@ class CPU:
             self.print_state()
         return True
 
+    # ------------------------------------------------------------------
+    # Cycle-accurate ("clock") execution. One clock() == one PHI2 cycle.
+    # Each opcode is a microcode generator (see _CYC_TABLE) yielding exactly
+    # one bus access per cycle: ('R',addr) / ('W',addr,val) / ('I',). The CPU
+    # can be stalled mid-instruction: when the VIC pulls BA low (badline /
+    # sprite DMA) a READ cycle is repeated instead of advancing — the real
+    # 6510 behaviour every timing test relies on. Writes always proceed.
+    # This runs alongside the batch step()/dispatch, which is untouched; the
+    # System selects which to use via cycle_accurate.
+    # ------------------------------------------------------------------
+    def clock(self, ba=True):
+        if self._micro is None:
+            self._micro = self._cyc_instruction()
+            try:
+                self._pending = next(self._micro)
+            except StopIteration:
+                # A KERNAL trap fired (the sequencer returned without yielding a
+                # bus cycle); it already did its work, so this tick has no CPU
+                # bus access. VIC/CIA still advance in System.clock().
+                self._micro = None
+                return
+        kind = self._pending[0]
+        if kind == 'R':
+            if not ba:                       # BA low -> stall the read cycle
+                self.cycles += 1
+                return
+            try:
+                self._pending = self._micro.send(
+                    self.mem.read_system_byte(self._pending[1] & 0xFFFF))
+            except StopIteration:
+                self._micro = None
+        elif kind == 'W':
+            self.mem.write_system_byte(self._pending[1] & 0xFFFF,
+                                       self._pending[2] & 0xFF)
+            try:
+                self._pending = self._micro.send(None)
+            except StopIteration:
+                self._micro = None
+        else:                                # 'I' internal cycle (no bus)
+            try:
+                self._pending = self._micro.send(None)
+            except StopIteration:
+                self._micro = None
+        self.cycles += 1
+
+    def _cyc_instruction(self):
+        # KERNAL traps (same policy as step()): only when KERNAL ROM is mapped.
+        if self.traps and self.pc in self.traps and \
+           self.mem.pla.address_space(self.pc) == AddressSpace.KERNAL_ROM:
+            self.traps[self.pc]()
+            return
+        if self.nmi_pending:
+            self.nmi_pending = False
+            yield from _cyc_irqseq(self, 0xFFFA, False)
+            return
+        if self.irq_line and not self.get_flag_i():
+            yield from _cyc_irqseq(self, 0xFFFE, False)
+            return
+        op = yield ('R', self.pc)
+        self.pc = (self.pc + 1) & 0xFFFF
+        handler = _CYC_TABLE[op]
+        if handler is None:
+            print(f"Unknown opcode 0x{op:02X} at "
+                  f"{word2hex((self.pc - 1) & 0xFFFF)} (cycle mode)")
+            return
+        yield from handler(self)
+
     def print_state(self):
         flags = ('1' if self.get_flag_n() else '0')
         flags += ('1' if self.get_flag_v() else '0')
@@ -1783,6 +2008,296 @@ class CPU:
         print(f"PC={word2hex(self.pc)} A={byte2hex(self.a)} X={byte2hex(self.x)} "
               f"Y={byte2hex(self.y)} SP={byte2hex(self.sp)} SR={byte2hex(self.sr)} "
               f"NV-BDIZC={flags} cyc={self.cycles}")
+
+
+# =============================================================================
+# Cycle-accurate microcode core (used by CPU.clock / cycle_accurate mode)
+#
+# Each opcode is a generator yielding one bus access per PHI2 cycle. Addressing
+# is factored into ~10 templates (ADDR_R for reads with page-cross dummy read,
+# ADDR_W for writes/RMW with the always-present dummy read); operations reuse
+# the CPU's own semantics (update_nz / _adc / _sbc) so results match the batch
+# core exactly. Verified against the Klaus 6502 functional test.
+# =============================================================================
+_FN, _FV, _FB, _FD, _FI, _FZ, _FC = 7, 6, 4, 3, 2, 1, 0
+
+
+def _a_zp(c):
+    a = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    return a
+def _a_zpx(c):
+    a = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    yield ('R', a); return (a + c.x) & 0xFF
+def _a_zpy(c):
+    a = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    yield ('R', a); return (a + c.y) & 0xFF
+def _a_abs(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    return lo | (hi << 8)
+def _a_abx_r(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    b = lo | (hi << 8); a = (b + c.x) & 0xFFFF
+    if (b & 0xFF00) != (a & 0xFF00): yield ('R', (b & 0xFF00) | (a & 0xFF))
+    return a
+def _a_aby_r(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    b = lo | (hi << 8); a = (b + c.y) & 0xFFFF
+    if (b & 0xFF00) != (a & 0xFF00): yield ('R', (b & 0xFF00) | (a & 0xFF))
+    return a
+def _a_abx_w(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    b = lo | (hi << 8); a = (b + c.x) & 0xFFFF
+    yield ('R', (b & 0xFF00) | (a & 0xFF)); return a
+def _a_aby_w(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    b = lo | (hi << 8); a = (b + c.y) & 0xFFFF
+    yield ('R', (b & 0xFF00) | (a & 0xFF)); return a
+def _a_inx(c):
+    p = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    yield ('R', p); p = (p + c.x) & 0xFF
+    lo = yield ('R', p); hi = yield ('R', (p + 1) & 0xFF)
+    return lo | (hi << 8)
+def _a_iny_r(c):
+    p = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    lo = yield ('R', p); hi = yield ('R', (p + 1) & 0xFF)
+    b = lo | (hi << 8); a = (b + c.y) & 0xFFFF
+    if (b & 0xFF00) != (a & 0xFF00): yield ('R', (b & 0xFF00) | (a & 0xFF))
+    return a
+def _a_iny_w(c):
+    p = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    lo = yield ('R', p); hi = yield ('R', (p + 1) & 0xFF)
+    b = lo | (hi << 8); a = (b + c.y) & 0xFFFF
+    yield ('R', (b & 0xFF00) | (a & 0xFF)); return a
+_ADDR_R = {'zp': _a_zp, 'zpx': _a_zpx, 'zpy': _a_zpy, 'abs': _a_abs,
+           'abx': _a_abx_r, 'aby': _a_aby_r, 'inx': _a_inx, 'iny': _a_iny_r}
+_ADDR_W = {'zp': _a_zp, 'zpx': _a_zpx, 'zpy': _a_zpy, 'abs': _a_abs,
+           'abx': _a_abx_w, 'aby': _a_aby_w, 'inx': _a_inx, 'iny': _a_iny_w}
+
+
+def _oLDA(c, v): c.a = v; c.update_nz(v)
+def _oLDX(c, v): c.x = v; c.update_nz(v)
+def _oLDY(c, v): c.y = v; c.update_nz(v)
+def _oORA(c, v): c.a = c.a | v; c.update_nz(c.a)
+def _oAND(c, v): c.a = c.a & v; c.update_nz(c.a)
+def _oEOR(c, v): c.a = c.a ^ v; c.update_nz(c.a)
+def _oADC(c, v): c._adc(v, 0)
+def _oSBC(c, v): c._sbc(v, 0)
+def _cyc_cmp(c, r, v):
+    t = (r - v) & 0xFF; c.set_flag(_FC, r >= v); c.update_nz(t)
+def _oCMP(c, v): _cyc_cmp(c, c.a, v)
+def _oCPX(c, v): _cyc_cmp(c, c.x, v)
+def _oCPY(c, v): _cyc_cmp(c, c.y, v)
+def _oBIT(c, v):
+    c.set_flag(_FZ, (c.a & v) == 0); c.set_flag(_FN, v & 0x80); c.set_flag(_FV, v & 0x40)
+def _oLAX(c, v): c.a = v; c.x = v; c.update_nz(v)
+def _oNOPr(c, v): pass
+_READ_OPS = {'LDA': _oLDA, 'LDX': _oLDX, 'LDY': _oLDY, 'ORA': _oORA, 'AND': _oAND,
+             'EOR': _oEOR, 'ADC': _oADC, 'SBC': _oSBC, 'CMP': _oCMP, 'CPX': _oCPX,
+             'CPY': _oCPY, 'BIT': _oBIT, 'LAX': _oLAX, 'NOP': _oNOPr}
+_STORE_OPS = {'STA': lambda c: c.a, 'STX': lambda c: c.x, 'STY': lambda c: c.y,
+              'SAX': lambda c: c.a & c.x}
+
+def _rASL(c, v): c.set_flag(_FC, v & 0x80); v = (v << 1) & 0xFF; c.update_nz(v); return v
+def _rLSR(c, v): c.set_flag(_FC, v & 1); v >>= 1; c.update_nz(v); return v
+def _rROL(c, v):
+    nc = v & 0x80; v = ((v << 1) | c.get_flag(_FC)) & 0xFF; c.set_flag(_FC, nc); c.update_nz(v); return v
+def _rROR(c, v):
+    nc = v & 1; v = (v >> 1) | (c.get_flag(_FC) << 7); c.set_flag(_FC, nc); c.update_nz(v); return v
+def _rINC(c, v): v = (v + 1) & 0xFF; c.update_nz(v); return v
+def _rDEC(c, v): v = (v - 1) & 0xFF; c.update_nz(v); return v
+def _rSLO(c, v): v = _rASL(c, v); c.a = c.a | v; c.update_nz(c.a); return v
+def _rRLA(c, v): v = _rROL(c, v); c.a = c.a & v; c.update_nz(c.a); return v
+def _rSRE(c, v): v = _rLSR(c, v); c.a = c.a ^ v; c.update_nz(c.a); return v
+def _rRRA(c, v): v = _rROR(c, v); c._adc(v, 0); return v
+def _rDCP(c, v): v = (v - 1) & 0xFF; _cyc_cmp(c, c.a, v); return v
+def _rISC(c, v): v = (v + 1) & 0xFF; c._sbc(v, 0); return v
+_RMW_OPS = {'ASL': _rASL, 'LSR': _rLSR, 'ROL': _rROL, 'ROR': _rROR, 'INC': _rINC,
+            'DEC': _rDEC, 'SLO': _rSLO, 'RLA': _rRLA, 'SRE': _rSRE, 'RRA': _rRRA,
+            'DCP': _rDCP, 'ISC': _rISC}
+
+
+def _cyc_mk_read(mode, op):
+    fn = _READ_OPS[op]
+    def run(c):
+        if mode == 'imm':
+            v = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+        else:
+            ad = yield from _ADDR_R[mode](c); v = yield ('R', ad)
+        fn(c, v)
+    return run
+def _cyc_mk_store(mode, op):
+    fn = _STORE_OPS[op]
+    def run(c):
+        ad = yield from _ADDR_W[mode](c); yield ('W', ad, fn(c))
+    return run
+def _cyc_mk_rmw(mode, op):
+    fn = _RMW_OPS[op]
+    def run(c):
+        ad = yield from _ADDR_W[mode](c)
+        v = yield ('R', ad); yield ('W', ad, v); yield ('W', ad, fn(c, v))
+    return run
+def _cyc_mk_acc(op):
+    fn = _RMW_OPS[op]
+    def run(c):
+        yield ('R', c.pc); c.a = fn(c, c.a)
+    return run
+def _cyc_mk_imp(fn):
+    def run(c):
+        yield ('R', c.pc); fn(c)
+    return run
+def _cyc_mk_br(bit, want):
+    def run(c):
+        off = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+        if c.get_flag(bit) != want: return
+        yield ('R', c.pc)
+        t = (c.pc + ((off ^ 0x80) - 0x80)) & 0xFFFF
+        if (t & 0xFF00) != (c.pc & 0xFF00): yield ('R', (c.pc & 0xFF00) | (t & 0xFF))
+        c.pc = t
+    return run
+
+
+def _cyc_irqseq(c, vec, brk):
+    yield ('R', c.pc)
+    if brk: c.pc = (c.pc + 1) & 0xFFFF
+    yield ('W', 0x100 + c.sp, (c.pc >> 8) & 0xFF); c.sp = (c.sp - 1) & 0xFF
+    yield ('W', 0x100 + c.sp, c.pc & 0xFF); c.sp = (c.sp - 1) & 0xFF
+    pv = (c.reg_sr | 0x30) if brk else ((c.reg_sr & ~(1 << _FB)) | 0x20)
+    yield ('W', 0x100 + c.sp, pv); c.sp = (c.sp - 1) & 0xFF
+    lo = yield ('R', vec); hi = yield ('R', vec + 1)
+    c.set_flag(_FI, True); c.pc = lo | (hi << 8)
+def _o_jmp(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = lo | (hi << 8)
+def _o_jmpi(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    hi = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    p = lo | (hi << 8)
+    tl = yield ('R', p); th = yield ('R', (p & 0xFF00) | ((p + 1) & 0xFF))
+    c.pc = tl | (th << 8)
+def _o_jsr(c):
+    lo = yield ('R', c.pc); c.pc = (c.pc + 1) & 0xFFFF
+    yield ('I',)
+    yield ('W', 0x100 + c.sp, (c.pc >> 8) & 0xFF); c.sp = (c.sp - 1) & 0xFF
+    yield ('W', 0x100 + c.sp, c.pc & 0xFF); c.sp = (c.sp - 1) & 0xFF
+    hi = yield ('R', c.pc); c.pc = lo | (hi << 8)
+def _o_rts(c):
+    yield ('R', c.pc); yield ('I',)
+    c.sp = (c.sp + 1) & 0xFF; lo = yield ('R', 0x100 + c.sp)
+    c.sp = (c.sp + 1) & 0xFF; hi = yield ('R', 0x100 + c.sp)
+    yield ('R', c.pc); c.pc = ((lo | (hi << 8)) + 1) & 0xFFFF
+def _o_rti(c):
+    yield ('R', c.pc); yield ('I',)
+    c.sp = (c.sp + 1) & 0xFF; p = yield ('R', 0x100 + c.sp)
+    c.reg_sr = (p & ~(1 << _FB)) | (1 << 5)
+    c.sp = (c.sp + 1) & 0xFF; lo = yield ('R', 0x100 + c.sp)
+    c.sp = (c.sp + 1) & 0xFF; hi = yield ('R', 0x100 + c.sp)
+    c.pc = lo | (hi << 8)
+def _o_brk(c):
+    yield from _cyc_irqseq(c, 0xFFFE, True)
+def _o_pha(c):
+    yield ('R', c.pc); yield ('W', 0x100 + c.sp, c.a); c.sp = (c.sp - 1) & 0xFF
+def _o_php(c):
+    yield ('R', c.pc); yield ('W', 0x100 + c.sp, c.reg_sr | 0x30); c.sp = (c.sp - 1) & 0xFF
+def _o_pla(c):
+    yield ('R', c.pc); yield ('I',)
+    c.sp = (c.sp + 1) & 0xFF; c.a = yield ('R', 0x100 + c.sp); c.update_nz(c.a)
+def _o_plp(c):
+    yield ('R', c.pc); yield ('I',)
+    c.sp = (c.sp + 1) & 0xFF; p = yield ('R', 0x100 + c.sp)
+    c.reg_sr = (p & ~(1 << _FB)) | (1 << 5)
+
+def _iCLC(c): c.set_flag(_FC, 0)
+def _iSEC(c): c.set_flag(_FC, 1)
+def _iCLI(c): c.set_flag(_FI, 0)
+def _iSEI(c): c.set_flag(_FI, 1)
+def _iCLD(c): c.set_flag(_FD, 0)
+def _iSED(c): c.set_flag(_FD, 1)
+def _iCLV(c): c.set_flag(_FV, 0)
+def _iTAX(c): c.x = c.a; c.update_nz(c.x)
+def _iTAY(c): c.y = c.a; c.update_nz(c.y)
+def _iTXA(c): c.a = c.x; c.update_nz(c.a)
+def _iTYA(c): c.a = c.y; c.update_nz(c.a)
+def _iTSX(c): c.x = c.sp; c.update_nz(c.x)
+def _iTXS(c): c.sp = c.x
+def _iINX(c): c.x = (c.x + 1) & 0xFF; c.update_nz(c.x)
+def _iINY(c): c.y = (c.y + 1) & 0xFF; c.update_nz(c.y)
+def _iDEX(c): c.x = (c.x - 1) & 0xFF; c.update_nz(c.x)
+def _iDEY(c): c.y = (c.y - 1) & 0xFF; c.update_nz(c.y)
+def _iNOP(c): pass
+
+
+_CYC_TABLE = [None] * 256
+def _cyc_fill():
+    R, W, M = _cyc_mk_read, _cyc_mk_store, _cyc_mk_rmw
+    e = {
+        0xA9: R('imm','LDA'),0xA5: R('zp','LDA'),0xB5: R('zpx','LDA'),0xAD: R('abs','LDA'),
+        0xBD: R('abx','LDA'),0xB9: R('aby','LDA'),0xA1: R('inx','LDA'),0xB1: R('iny','LDA'),
+        0xA2: R('imm','LDX'),0xA6: R('zp','LDX'),0xB6: R('zpy','LDX'),0xAE: R('abs','LDX'),0xBE: R('aby','LDX'),
+        0xA0: R('imm','LDY'),0xA4: R('zp','LDY'),0xB4: R('zpx','LDY'),0xAC: R('abs','LDY'),0xBC: R('abx','LDY'),
+        0x85: W('zp','STA'),0x95: W('zpx','STA'),0x8D: W('abs','STA'),0x9D: W('abx','STA'),
+        0x99: W('aby','STA'),0x81: W('inx','STA'),0x91: W('iny','STA'),
+        0x86: W('zp','STX'),0x96: W('zpy','STX'),0x8E: W('abs','STX'),
+        0x84: W('zp','STY'),0x94: W('zpx','STY'),0x8C: W('abs','STY'),
+        0x09: R('imm','ORA'),0x05: R('zp','ORA'),0x15: R('zpx','ORA'),0x0D: R('abs','ORA'),
+        0x1D: R('abx','ORA'),0x19: R('aby','ORA'),0x01: R('inx','ORA'),0x11: R('iny','ORA'),
+        0x29: R('imm','AND'),0x25: R('zp','AND'),0x35: R('zpx','AND'),0x2D: R('abs','AND'),
+        0x3D: R('abx','AND'),0x39: R('aby','AND'),0x21: R('inx','AND'),0x31: R('iny','AND'),
+        0x49: R('imm','EOR'),0x45: R('zp','EOR'),0x55: R('zpx','EOR'),0x4D: R('abs','EOR'),
+        0x5D: R('abx','EOR'),0x59: R('aby','EOR'),0x41: R('inx','EOR'),0x51: R('iny','EOR'),
+        0x69: R('imm','ADC'),0x65: R('zp','ADC'),0x75: R('zpx','ADC'),0x6D: R('abs','ADC'),
+        0x7D: R('abx','ADC'),0x79: R('aby','ADC'),0x61: R('inx','ADC'),0x71: R('iny','ADC'),
+        0xE9: R('imm','SBC'),0xE5: R('zp','SBC'),0xF5: R('zpx','SBC'),0xED: R('abs','SBC'),
+        0xFD: R('abx','SBC'),0xF9: R('aby','SBC'),0xE1: R('inx','SBC'),0xF1: R('iny','SBC'),0xEB: R('imm','SBC'),
+        0xC9: R('imm','CMP'),0xC5: R('zp','CMP'),0xD5: R('zpx','CMP'),0xCD: R('abs','CMP'),
+        0xDD: R('abx','CMP'),0xD9: R('aby','CMP'),0xC1: R('inx','CMP'),0xD1: R('iny','CMP'),
+        0xE0: R('imm','CPX'),0xE4: R('zp','CPX'),0xEC: R('abs','CPX'),
+        0xC0: R('imm','CPY'),0xC4: R('zp','CPY'),0xCC: R('abs','CPY'),
+        0x24: R('zp','BIT'),0x2C: R('abs','BIT'),
+        0x06: M('zp','ASL'),0x16: M('zpx','ASL'),0x0E: M('abs','ASL'),0x1E: M('abx','ASL'),
+        0x46: M('zp','LSR'),0x56: M('zpx','LSR'),0x4E: M('abs','LSR'),0x5E: M('abx','LSR'),
+        0x26: M('zp','ROL'),0x36: M('zpx','ROL'),0x2E: M('abs','ROL'),0x3E: M('abx','ROL'),
+        0x66: M('zp','ROR'),0x76: M('zpx','ROR'),0x6E: M('abs','ROR'),0x7E: M('abx','ROR'),
+        0xE6: M('zp','INC'),0xF6: M('zpx','INC'),0xEE: M('abs','INC'),0xFE: M('abx','INC'),
+        0xC6: M('zp','DEC'),0xD6: M('zpx','DEC'),0xCE: M('abs','DEC'),0xDE: M('abx','DEC'),
+        0x0A: _cyc_mk_acc('ASL'),0x4A: _cyc_mk_acc('LSR'),0x2A: _cyc_mk_acc('ROL'),0x6A: _cyc_mk_acc('ROR'),
+        0x18: _cyc_mk_imp(_iCLC),0x38: _cyc_mk_imp(_iSEC),0x58: _cyc_mk_imp(_iCLI),0x78: _cyc_mk_imp(_iSEI),
+        0xB8: _cyc_mk_imp(_iCLV),0xD8: _cyc_mk_imp(_iCLD),0xF8: _cyc_mk_imp(_iSED),
+        0xAA: _cyc_mk_imp(_iTAX),0xA8: _cyc_mk_imp(_iTAY),0x8A: _cyc_mk_imp(_iTXA),0x98: _cyc_mk_imp(_iTYA),
+        0xBA: _cyc_mk_imp(_iTSX),0x9A: _cyc_mk_imp(_iTXS),0xE8: _cyc_mk_imp(_iINX),0xC8: _cyc_mk_imp(_iINY),
+        0xCA: _cyc_mk_imp(_iDEX),0x88: _cyc_mk_imp(_iDEY),0xEA: _cyc_mk_imp(_iNOP),
+        0x48: _o_pha,0x08: _o_php,0x68: _o_pla,0x28: _o_plp,
+        0x4C: _o_jmp,0x6C: _o_jmpi,0x20: _o_jsr,0x60: _o_rts,0x40: _o_rti,0x00: _o_brk,
+        0x10: _cyc_mk_br(_FN,0),0x30: _cyc_mk_br(_FN,1),0x50: _cyc_mk_br(_FV,0),0x70: _cyc_mk_br(_FV,1),
+        0x90: _cyc_mk_br(_FC,0),0xB0: _cyc_mk_br(_FC,1),0xD0: _cyc_mk_br(_FZ,0),0xF0: _cyc_mk_br(_FZ,1),
+        0xA3: R('inx','LAX'),0xA7: R('zp','LAX'),0xAF: R('abs','LAX'),0xB3: R('iny','LAX'),
+        0xB7: R('zpy','LAX'),0xBF: R('aby','LAX'),
+        0x87: W('zp','SAX'),0x97: W('zpy','SAX'),0x8F: W('abs','SAX'),0x83: W('inx','SAX'),
+        0x07: M('zp','SLO'),0x17: M('zpx','SLO'),0x0F: M('abs','SLO'),0x1F: M('abx','SLO'),
+        0x1B: M('aby','SLO'),0x03: M('inx','SLO'),0x13: M('iny','SLO'),
+        0x27: M('zp','RLA'),0x37: M('zpx','RLA'),0x2F: M('abs','RLA'),0x3F: M('abx','RLA'),
+        0x3B: M('aby','RLA'),0x23: M('inx','RLA'),0x33: M('iny','RLA'),
+        0x47: M('zp','SRE'),0x57: M('zpx','SRE'),0x4F: M('abs','SRE'),0x5F: M('abx','SRE'),
+        0x5B: M('aby','SRE'),0x43: M('inx','SRE'),0x53: M('iny','SRE'),
+        0x67: M('zp','RRA'),0x77: M('zpx','RRA'),0x6F: M('abs','RRA'),0x7F: M('abx','RRA'),
+        0x7B: M('aby','RRA'),0x63: M('inx','RRA'),0x73: M('iny','RRA'),
+        0xC7: M('zp','DCP'),0xD7: M('zpx','DCP'),0xCF: M('abs','DCP'),0xDF: M('abx','DCP'),
+        0xDB: M('aby','DCP'),0xC3: M('inx','DCP'),0xD3: M('iny','DCP'),
+        0xE7: M('zp','ISC'),0xF7: M('zpx','ISC'),0xEF: M('abs','ISC'),0xFF: M('abx','ISC'),
+        0xFB: M('aby','ISC'),0xE3: M('inx','ISC'),0xF3: M('iny','ISC'),
+    }
+    for op, fn in e.items(): _CYC_TABLE[op] = fn
+    for op in (0x1A,0x3A,0x5A,0x7A,0xDA,0xFA): _CYC_TABLE[op] = _cyc_mk_imp(_iNOP)
+    for op in (0x80,0x82,0x89,0xC2,0xE2): _CYC_TABLE[op] = _cyc_mk_read('imm','NOP')
+    for op in (0x04,0x44,0x64): _CYC_TABLE[op] = _cyc_mk_read('zp','NOP')
+    for op in (0x14,0x34,0x54,0x74,0xD4,0xF4): _CYC_TABLE[op] = _cyc_mk_read('zpx','NOP')
+    _CYC_TABLE[0x0C] = _cyc_mk_read('abs','NOP')
+    for op in (0x1C,0x3C,0x5C,0x7C,0xDC,0xFC): _CYC_TABLE[op] = _cyc_mk_read('abx','NOP')
+_cyc_fill()
 
 
 # =============================================================================
@@ -2017,7 +2532,12 @@ class System:
     edge-triggered from CIA2.
     """
 
-    def __init__(self, rom_dir="roms", verbose=True):
+    def __init__(self, rom_dir="roms", verbose=True, cycle_accurate=False):
+        # cycle_accurate=True switches from the fast instruction-batch scheduler
+        # to a per-PHI2 clock (VIC -> CPU-if-bus-free -> CIAs). The batch path
+        # stays the default for interactive speed; the clock path is for the
+        # Lorenz timing tests / accurate BA (badline) behaviour.
+        self.cycle_accurate = cycle_accurate
         # Try ./roms/*.bin first (original ROMs); fall back to embedded Open Roms.
         def _load(filename, blob_name):
             path = os.path.join(rom_dir, filename)
@@ -2048,6 +2568,7 @@ class System:
                           vic=self.vic, sid=self.sid, color_ram=self.color_ram,
                           cia1=self.cia1, cia2=self.cia2)
         self.vic.mem = self.mem            # lets VIC record sprite pointers/Y
+        self.vic.color_ram = self.color_ram   # for per-row colour-RAM snapshots
         self.chargen_rom = bytes(chargen)
         self.cpu = CPU(self.mem)
         self._d64 = None
@@ -2094,7 +2615,26 @@ class System:
             self.cia2.tick(elapsed)
         return ok
 
+    def clock(self):
+        # One PHI2 tick in cycle-accurate mode. Order matters: the VIC runs
+        # first (it decides whether the bus is available), the CPU only advances
+        # when it has the bus, then the CIAs.
+        cur_nmi = self.cia2.irq_line
+        if cur_nmi and not self.cpu._prev_nmi:
+            self.cpu.nmi_pending = True
+        self.cpu._prev_nmi = cur_nmi
+        self.cpu.irq_line = self.cia1.irq_line or self.vic.irq_line
+        self.vic.clock()
+        self.cpu.clock(ba=self.vic.ba)
+        self.cia1.clock()
+        self.cia2.clock()
+        return True
+
     def run(self, n_cycles):
+        if self.cycle_accurate:
+            for _ in range(n_cycles):
+                self.clock()
+            return True
         target = self.cpu.cycles + n_cycles
         while self.cpu.cycles < target:
             if not self.step():
@@ -2901,6 +3441,123 @@ C64_PALETTE = [
     (0x95, 0x95, 0x95),  # 15 light grey
 ]
 
+
+# ---------------------------------------------------------------------------
+# Minimal dependency-free PNG I/O (stdlib zlib + numpy only). Used by the VIC
+# screenshot test; the emulator's own frames are written as 8-bit truecolour
+# PNGs and the VICE reference PNGs are decoded for comparison.
+# ---------------------------------------------------------------------------
+
+def _png_read_rgb(path):
+    """Decode a non-interlaced PNG to an (H, W, 3) uint8 numpy array. Supports
+    colour types 0/2/3/4/6 at bit depth 8, plus sub-byte indexed/greyscale."""
+    import numpy as np
+    d = open(path, "rb").read()
+    if d[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"not a PNG: {path}")
+    pos = 8
+    W = H = bd = ct = None
+    idat = bytearray()
+    plte = None
+    while pos < len(d):
+        ln = int.from_bytes(d[pos:pos + 4], "big")
+        typ = d[pos + 4:pos + 8]
+        chunk = d[pos + 8:pos + 8 + ln]
+        pos += 12 + ln
+        if typ == b"IHDR":
+            W = int.from_bytes(chunk[0:4], "big")
+            H = int.from_bytes(chunk[4:8], "big")
+            bd, ct = chunk[8], chunk[9]
+            if chunk[12] != 0:
+                raise ValueError("interlaced PNG not supported")
+        elif typ == b"PLTE":
+            plte = np.frombuffer(chunk, np.uint8).reshape(-1, 3)
+        elif typ == b"IDAT":
+            idat += chunk
+        elif typ == b"IEND":
+            break
+    raw = zlib.decompress(bytes(idat))
+    nch = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ct]
+    stride = (W * nch * bd + 7) // 8
+    bpp = max(1, (nch * bd) // 8)
+    out = np.zeros((H, stride), np.uint8)
+    prev = np.zeros(stride, np.int32)
+    p = 0
+    for y in range(H):
+        ft = raw[p]; p += 1
+        line = np.frombuffer(raw[p:p + stride], np.uint8).astype(np.int32).copy()
+        p += stride
+        if ft == 1:
+            for i in range(bpp, stride):
+                line[i] = (line[i] + line[i - bpp]) & 255
+        elif ft == 2:
+            line = (line + prev) & 255
+        elif ft == 3:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                line[i] = (line[i] + ((a + prev[i]) >> 1)) & 255
+        elif ft == 4:
+            for i in range(stride):
+                a = line[i - bpp] if i >= bpp else 0
+                b = prev[i]
+                c = prev[i - bpp] if i >= bpp else 0
+                q = a + b - c
+                pa, pb, pc = abs(q - a), abs(q - b), abs(q - c)
+                pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
+                line[i] = (line[i] + pr) & 255
+        out[y] = line.astype(np.uint8)
+        prev = out[y].astype(np.int32)
+    if bd == 8:
+        px = out.reshape(H, W, nch)
+        if ct in (2, 6):
+            return px[:, :, :3].copy()
+        if ct == 3:
+            return plte[px[:, :, 0]]
+        g = px[:, :, 0]
+        return np.stack([g, g, g], -1)
+    # sub-byte depths (indexed / greyscale), MSB first
+    per = 8 // bd
+    mask = (1 << bd) - 1
+    vals = np.zeros((H, W), np.uint8)
+    for y in range(H):
+        xi = 0
+        for byte in out[y]:
+            for k in range(per):
+                if xi >= W:
+                    break
+                vals[y, xi] = (byte >> (8 - bd * (k + 1))) & mask
+                xi += 1
+    if ct == 3:
+        return plte[vals]
+    scale = 255 // mask
+    g = (vals * scale).astype(np.uint8)
+    return np.stack([g, g, g], -1)
+
+
+def _png_write_rgb(path, arr):
+    """Write an (H, W, 3) uint8 array as an 8-bit truecolour PNG."""
+    import numpy as np
+    a = arr.astype(np.uint8)
+    H, W, _ = a.shape
+
+    def _chunk(typ, data):
+        body = typ + data
+        return (len(data).to_bytes(4, "big") + body
+                + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    ihdr = (W.to_bytes(4, "big") + H.to_bytes(4, "big")
+            + bytes([8, 2, 0, 0, 0]))
+    raw = bytearray()
+    for y in range(H):
+        raw.append(0)                       # filter type 0 (none)
+        raw += a[y].tobytes()
+    png = (b"\x89PNG\r\n\x1a\n"
+           + _chunk(b"IHDR", ihdr)
+           + _chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+           + _chunk(b"IEND", b""))
+    open(path, "wb").write(png)
+
+
 # Host key -> C64 keyboard matrix (row, col). Filled lazily because pygame
 # constants only exist after `import pygame`.
 def _build_key_map(pygame):
@@ -2969,21 +3626,24 @@ class PygameFrontend:
     # captures what was actually on screen during the visible area.
     RENDER_RASTER = 251
 
-    def __init__(self, system, scale=2, target_hz=50):
-        import pygame
+    def __init__(self, system, scale=2, target_hz=50, headless=False):
         import numpy as np
-        self.pygame = pygame
         self.np = np
         self.system = system
         self.scale = scale
         self.target_hz = target_hz
-        pygame.init()
-        pygame.display.set_caption(f"C64 — Python emulator  [{__version__}]")
-        self.window = pygame.display.set_mode(
-            ((self.SCREEN_W + 2 * self.BORDER_X) * scale,
-             (self.SCREEN_H + 2 * self.BORDER_Y) * scale))
-        self.frame_surf = pygame.Surface((self.SCREEN_W + 2 * self.BORDER_X,
-                                          self.SCREEN_H + 2 * self.BORDER_Y))
+        self.headless = headless
+        self.pygame = None
+        if not headless:
+            import pygame
+            self.pygame = pygame
+            pygame.init()
+            pygame.display.set_caption(f"C64 — Python emulator  [{__version__}]")
+            self.window = pygame.display.set_mode(
+                ((self.SCREEN_W + 2 * self.BORDER_X) * scale,
+                 (self.SCREEN_H + 2 * self.BORDER_Y) * scale))
+            self.frame_surf = pygame.Surface((self.SCREEN_W + 2 * self.BORDER_X,
+                                              self.SCREEN_H + 2 * self.BORDER_Y))
         # Precompute chargen as (256, 8, 8) bit array, for both charsets.
         cg = system.chargen_rom
         self._chargen = np.zeros((512, 8, 8), dtype=np.uint8)
@@ -2994,7 +3654,8 @@ class PygameFrontend:
                     if b & (1 << (7 - x)):
                         self._chargen[ch, y, x] = 1
         self._palette = np.array(C64_PALETTE, dtype=np.uint8)
-        self.key_map = _build_key_map(pygame)
+        if not headless:
+            self.key_map = _build_key_map(self.pygame)
         self._keys_down = set()    # host pygame keycodes currently pressed
         # The character each held key produced (from the KEYDOWN event's
         # unicode). Punctuation is mapped by CHARACTER rather than key position,
@@ -3026,13 +3687,14 @@ class PygameFrontend:
         # Audio output — pygame.mixer streaming via Channel.queue()
         self.audio_enabled = False
         self.samples_per_frame = system.sid.SAMPLE_RATE // target_hz
-        try:
-            pygame.mixer.init(frequency=system.sid.SAMPLE_RATE, size=-16,
-                              channels=1, buffer=4096)
-            self.audio_channel = pygame.mixer.Channel(0)
-            self.audio_enabled = True
-        except pygame.error as ex:
-            print(f"Audio disabled: {ex}")
+        if not headless:
+            try:
+                self.pygame.mixer.init(frequency=system.sid.SAMPLE_RATE,
+                                       size=-16, channels=1, buffer=4096)
+                self.audio_channel = self.pygame.mixer.Channel(0)
+                self.audio_enabled = True
+            except self.pygame.error as ex:
+                print(f"Audio disabled: {ex}")
 
     def _key_event(self, host_key, pressed, char=None):
         """
@@ -3341,34 +4003,31 @@ class PygameFrontend:
         self.render_frame()
         self.system.run(self.CYCLES_PER_FRAME - cyc1)
 
-    def render_frame(self):
+    def _compose_pixels(self):
+        """Build the 200x320x3 inner display as a numpy array (no pygame) and
+        return (pixels, border_index). Shared by the windowed renderer and the
+        head-less render_to_array()."""
         np = self.np
         vic = self.system.vic
         mem = self.system.mem
         dr = vic.display_regs          # latched mid-frame (raster-split safe)
         bg_color   = dr[0x21] & 0x0F
         border     = dr[0x20] & 0x0F
-        # Border
-        self.frame_surf.fill(C64_PALETTE[border])
 
         # --- Background (text mode) ---
         # Honor VIC bank + $D018 video matrix base for screen RAM lookup.
-        # The base can change mid-frame in a raster split (e.g. The Hobbit:
-        # bitmap graphics on top, a text window below with a different $D018),
-        # so read each character row's codes from the base that was active at
-        # that row's raster line rather than a single global base.
+        # Screen + colour RAM come from the per-row snapshots the VIC took as
+        # the beam passed each character row (see Vic.tick). This reflects what
+        # was actually on each line when it was drawn, so a scroller that copies
+        # screen RAM mid-frame renders cleanly instead of tearing. The snapshot
+        # already used each row's active $D018 base, so raster splits that change
+        # the screen/font base mid-frame (The Hobbit, Elite) still come out right.
         bank_off = mem.vic_bank() * 0x4000
-        ld18 = vic.line_d018
-        nld = len(ld18)
-        screen_ram = np.empty((25, 40), dtype=np.uint8)
-        for r in range(25):
-            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % nld
-            sb = bank_off + ((ld18[raster] >> 4) & 0x0F) * 0x0400
-            screen_ram[r] = np.frombuffer(
-                bytes(mem.ram[sb + r * 40: sb + r * 40 + 40]), dtype=np.uint8)
-        color_ram = np.frombuffer(
-            bytes(self.system.color_ram.ram[:0x400]),
-            dtype=np.uint8)[:1000].reshape(25, 40) & 0x0F
+        nld = vic.LINES_PER_FRAME
+        screen_ram = np.frombuffer(bytes(vic.line_screen),
+                                   dtype=np.uint8).reshape(25, 40)
+        color_ram = np.frombuffer(bytes(vic.line_color),
+                                  dtype=np.uint8).reshape(25, 40) & 0x0F
 
         # Background colours ($D021/$D022/$D023) active at each character row's
         # raster line, so raster splits that recolour the backdrop mid-frame
@@ -3451,6 +4110,8 @@ class PygameFrontend:
         # after it we skip its height (21 or 42 lines) before the next can start.
         ly = vic.line_spr_y
         lp = vic.line_spr_ptr
+        lx = vic.line_spr_x
+        lmsb = vic.line_spr_msb
         nlines = vic.LINES_PER_FRAME
         # Render in REVERSE order so sprite 0 ends up drawn on top of sprite 7
         # (lower sprite number = higher hardware priority on real VIC-II).
@@ -3461,25 +4122,38 @@ class PygameFrontend:
             positions = []
             R = 0
             while R < nlines:
-                if ly[R * 8 + s] == R:                # raster == Y reg → display
-                    # The game often rewrites the sprite pointer for this section
-                    # on the very trigger line (as part of the raster IRQ), which
-                    # our per-line recording captures a line or two later. Read
-                    # the pointer a few lines into the section (still constant
-                    # there) so multiplexed figures get the right body part.
+                Rn = R + 1 if R + 1 < nlines else 0
+                # A display triggers on the line where the raster equals the
+                # sprite's Y register. Multiplexers often write the new Y from
+                # inside the raster IRQ *during* that very line, so the write is
+                # only visible in our per-line snapshot one line later. Accept
+                # both ly[R]==R (Y set in advance) and ly[R+1]==R (Y set during
+                # line R, before the VIC's Y-compare) so late-written multiplex
+                # positions aren't missed.
+                if ly[R * 8 + s] == R or ly[Rn * 8 + s] == R:
+                    # The game often rewrites the sprite pointer AND X position
+                    # for this section on the very trigger line (as part of the
+                    # raster IRQ), which our per-line recording captures a line
+                    # or two later. Read pointer and X a few lines into the
+                    # section (still constant there) so multiplexed figures get
+                    # the right body part and horizontal position.
                     pr = R + 3 if R + 3 < nlines else R
-                    positions.append((R, lp[pr * 8 + s]))
+                    spr_x = lx[pr * 8 + s] | (((lmsb[pr] >> s) & 1) << 8)
+                    positions.append((R, lp[pr * 8 + s], spr_x))
                     R += height
                 else:
                     R += 1
             if not positions:                          # sprite never triggered
                 # Fall back to the latched register position (static sprite that
                 # sits above the recording window's first trigger line).
+                sl = vic.SAMPLE_LINE
                 positions = [(vic.regs[s * 2 + 1],
-                              vic.line_spr_ptr[vic.SAMPLE_LINE * 8 + s])]
-            for spr_y, pointer in positions:
+                              vic.line_spr_ptr[sl * 8 + s],
+                              vic.line_spr_x[sl * 8 + s]
+                              | (((vic.line_spr_msb[sl] >> s) & 1) << 8))]
+            for spr_y, pointer, spr_x in positions:
                 self._render_sprite(s, pixels, bitmap, sprite_occupancy,
-                                    spr_y, pointer)
+                                    spr_y, pointer, spr_x)
         # Collision detection: any pixel where 2+ sprites overlap
         multi = sprite_occupancy & (sprite_occupancy - 1)    # clears lowest set bit
         if multi.any():
@@ -3493,7 +4167,24 @@ class PygameFrontend:
             if old == 0 and ss:
                 vic.irq_status |= 0x04                        # sprite-sprite IRQ src
 
-        # Render to surface
+        return pixels, border
+
+    def render_to_array(self):
+        """Compose a full 384x272x3 uint8 frame (border + display) as a numpy
+        array, without any pygame dependency. Used by the VIC screenshot test."""
+        np = self.np
+        pixels, border = self._compose_pixels()
+        h = self.SCREEN_H + 2 * self.BORDER_Y
+        w = self.SCREEN_W + 2 * self.BORDER_X
+        canvas = np.empty((h, w, 3), np.uint8)
+        canvas[:, :] = self._palette[border]
+        canvas[self.BORDER_Y:self.BORDER_Y + self.SCREEN_H,
+               self.BORDER_X:self.BORDER_X + self.SCREEN_W] = pixels
+        return canvas
+
+    def render_frame(self):
+        pixels, border = self._compose_pixels()
+        self.frame_surf.fill(C64_PALETTE[border])
         surf = self.pygame.surfarray.make_surface(pixels.swapaxes(0, 1))
         self.frame_surf.blit(surf, (self.BORDER_X, self.BORDER_Y))
         if self.scale == 1:
@@ -3508,19 +4199,22 @@ class PygameFrontend:
         self.pygame.display.flip()
 
     def _render_sprite(self, idx, pixels, bg_mask, sprite_occupancy,
-                       spr_y, pointer):
+                       spr_y, pointer, spr_x=None):
         """
         Render sprite `idx` onto `pixels` (200x320x3) at vertical position
         `spr_y` (VIC Y coordinate) using data pointer `pointer`, respecting
         priority and recording collisions with `bg_mask` (foreground mask).
-        Called once per position when the sprite is multiplexed.
+        Called once per position when the sprite is multiplexed. `spr_x` is the
+        VIC X coordinate active for this position (multiplexing rewrites X along
+        with Y); when None the current register X is used.
         Writes the sprite's bit-flag into `sprite_occupancy` everywhere it draws.
         """
         np = self.np
         vic = self.system.vic
         mem = self.system.mem
         # Position (VIC coordinates: X=24, Y=50 is top-left of visible area)
-        spr_x = vic.regs[idx * 2] | (((vic.regs[0x10] >> idx) & 1) << 8)
+        if spr_x is None:
+            spr_x = vic.regs[idx * 2] | (((vic.regs[0x10] >> idx) & 1) << 8)
         multicolor = (vic.regs[0x1C] >> idx) & 1
         y_expand   = (vic.regs[0x17] >> idx) & 1
         x_expand   = (vic.regs[0x1D] >> idx) & 1
@@ -3752,23 +4446,36 @@ class C64Emu:
         self.mem = Memory()
         self.cpu = CPU(self.mem)
 
-    def test_cpu(self, stop_val=-1, pass_pc=0x3463, verbose=False):
+    def test_cpu(self, stop_val=-1, pass_pc=0x3463, verbose=False, cycle=False):
         """
         Load and run the Klaus Dormann 6502 functional test.
         Returns True if PC reaches `pass_pc`, False on any infinite-loop trap.
+        cycle=True drives the cycle-accurate clock() core instead of step(),
+        verifying that core executes the whole documented instruction set.
         """
         load_addr = 0x0400
         self.mem.write_system_byte(Config.ADDR_PROCESSOR_PORT_REG, 0)
         self.mem.load_ram(load_addr, _get_test_program())
         self.cpu.pc = load_addr
         self.cpu.trace = verbose
+        self.cpu._micro = None
+
+        def advance():
+            if not cycle:
+                return self.cpu.step()
+            # run one whole instruction's worth of clock() calls
+            self.cpu.clock()
+            while self.cpu._micro is not None:
+                self.cpu.clock()
+            return True
 
         prev_pc = -1
         steps = 0
         while True:
             if self.cpu.pc == pass_pc:
                 print(f"TEST PASSED at PC={word2hex(self.cpu.pc)} "
-                      f"after {steps} steps, {self.cpu.cycles} cycles.")
+                      f"after {steps} steps, {self.cpu.cycles} cycles"
+                      f"{' [cycle-accurate core]' if cycle else ''}.")
                 return True
             if self.cpu.pc == prev_pc:
                 print(f"Infinite loop (trap) at PC={word2hex(self.cpu.pc)} "
@@ -3777,7 +4484,7 @@ class C64Emu:
             if 0 <= stop_val < 0x10000 and self.cpu.pc == stop_val:
                 print(f"Debug stop at PC={word2hex(self.cpu.pc)}")
             prev_pc = self.cpu.pc
-            if not self.cpu.step():
+            if not advance():
                 return False
             steps += 1
             if steps % 1_000_000 == 0:
@@ -4213,12 +4920,542 @@ def _launch_t64(system, t64_path, auto_run=True, boot_cycles=3_500_000):
         system.type_string(f"SYS{load_addr}\r")
 
 
+# =============================================================================
+# Wolfgang-Lorenz "C64 Emulator Test Suite" (2.15) runner
+# =============================================================================
+# The Lorenz suite is a linear chain: every test exhaustively exercises one
+# (documented or illegal) 6510 opcode, prints "<NAME> - OK" on success and
+# KERNAL-LOADs the next test. On a mismatch it prints "BEFORE/AFTER/RIGHT" with
+# the offending values and halts.
+#
+# We run it exactly like a real C64 + 1541: the test files are served through
+# the existing LOAD trap ($FFD5) from an in-memory shim "disk", and the suite
+# is kicked off authentically at the READY prompt (LOAD"*",8 : RUN) so that the
+# current device ($BA) is 8 and the chain hangs itself along.
+#
+# Pass detection: test N counts as PASSED once the LOAD for test N+1 arrives
+# (a test only loads its successor after its own "- OK"). If no follow-up LOAD
+# comes within the per-test cycle budget, the transcript is inspected:
+# "BEFORE" present -> FAIL (with the diagnostic), otherwise -> HANG (typical for
+# cycle-exact CIA/IRQ/timing tests on an instruction-stepped core).
+
+
+def _lorenz_petscii(buf):
+    """Rough PETSCII->ASCII for the transcript (letters/digits + CR)."""
+    out = []
+    for b in buf:
+        if b == 0x0D:
+            out.append("\n")
+        elif 0x20 <= b < 0x60:
+            out.append(chr(b))
+    return "".join(out)
+
+
+def _lorenz_norm(name_bytes):
+    """PETSCII/ASCII filename -> normalised upper-case key."""
+    out = bytearray()
+    for b in name_bytes:
+        if 0xC1 <= b <= 0xDA:      # shifted PETSCII a-z -> A-Z
+            b -= 0x80
+        if 0x61 <= b <= 0x7A:      # ASCII a-z -> A-Z
+            b -= 0x20
+        out.append(b)
+    return bytes(out).decode("latin1").strip().upper()
+
+
+class _LorenzShim:
+    """Stand-in for a mounted D64: serves the Lorenz test files by name from
+    RAM. Implements only the handful of methods the LOAD/OPEN traps call."""
+
+    def __init__(self, tests):
+        self.tests = tests            # {UPPER_NAME: prg_bytes}
+        self.requested = []           # log of every requested name
+
+    def find_file(self, name):
+        key = _lorenz_norm(name)
+        if key in ("*", ""):
+            key = "START"             # first LOAD"*",8 -> " start"
+        self.requested.append(key)
+        return (key, 0, 0) if key in self.tests else None
+
+    def read_file(self, track, sector):
+        return self.tests[track]      # 'track' carries the name here
+
+    def read_sector(self, track, sector):
+        return bytes(256)
+
+    def disk_name(self):
+        return b"LORENZ 2.15"
+
+    def list_directory(self):
+        return []
+
+
+def _lorenz_parse_sys(payload, load_addr):
+    """Read the SYS target from the BASIC stub (token $9E + ASCII digits)."""
+    i = payload.find(0x9E)
+    if i < 0:
+        return load_addr
+    j = i + 1
+    digits = ""
+    while j < len(payload) and 0x30 <= payload[j] <= 0x39:
+        digits += chr(payload[j])
+        j += 1
+    return int(digits) if digits else load_addr
+
+
+def _lorenz_force_run(sysm, tests, key):
+    """Load test `key` at $0801 and jump to its SYS entry (used by
+    --continue-from to skip past a stuck test)."""
+    data = tests[key]
+    load = data[0] | (data[1] << 8)
+    payload = data[2:]
+    sysm.mem.load_ram(load, payload)
+    end = (load + len(payload)) & 0xFFFF
+    for a in (0x2D, 0x2F, 0x31, 0xAE):
+        sysm.mem.write_ram_direct(a, end & 0xFF)
+        sysm.mem.write_ram_direct(a + 1, (end >> 8) & 0xFF)
+    sysm.cpu.pc = _lorenz_parse_sys(payload, load)
+
+
+def _lorenz_successor(data, own_name, valid):
+    """Read the name of the next test a Lorenz test chains to (the file it
+    LOADs after printing '<NAME> - OK'), so the runner can tell the user what
+    to --continue-from after a hang/fail. Returns a lower-case name or None."""
+    own = own_name.strip().upper()
+    ok = data.find(b"\x20\x2d\x20\x4f\x4b")          # ' - OK'
+    runs = []
+    cur = bytearray()
+    start = 0
+    for i, b in enumerate(data):
+        if (0x41 <= b <= 0x5A) or b in (0x28, 0x29):   # A-Z plus '(' ')'
+            if not cur:
+                start = i
+            cur.append(b)
+        else:
+            if len(cur) >= 2:
+                runs.append((start, bytes(cur).decode("latin1")))
+            cur = bytearray()
+    if len(cur) >= 2:
+        runs.append((start, bytes(cur).decode("latin1")))
+    cands = [(o, t) for o, t in runs if t != own and t in valid]
+    after = [t for o, t in cands if ok >= 0 and o > ok]
+    pick = after[0] if after else (cands[-1][1] if cands else None)
+    return pick.lower() if pick else None
+
+
+def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
+                      wall_limit=0, continue_from=None, do_list=False,
+                      cycle_accurate=False):
+    """Run the Lorenz suite from `directory`. Returns True if nothing failed."""
+    if not os.path.isdir(directory):
+        print(f"Lorenz directory {directory!r} not found. Point --lorenztest "
+              f"at the folder holding the extracted test files.")
+        return False
+
+    tests = {}
+    for fn in os.listdir(directory):
+        p = os.path.join(directory, fn)
+        if os.path.isfile(p) and fn.lower() != "readme.md":
+            tests[fn.strip().upper()] = open(p, "rb").read()
+
+    print(f"Lorenz suite: {len(tests)} files from {directory!r}")
+    if do_list:
+        for n in sorted(tests):
+            print(" ", n.lower())
+        return True
+
+    sysm = System(verbose=False, cycle_accurate=cycle_accurate)
+    if cycle_accurate:
+        print("  [cycle-accurate core — slower; exercises BA/CIA per cycle]")
+    shim = _LorenzShim(tests)
+    sysm._d64 = shim
+    for addr, name in sysm._KERNAL_TRAPS.items():
+        sysm.cpu.traps[addr] = getattr(sysm, name)
+
+    transcript = bytearray()
+    orig_chrout = sysm._trap_chrout
+
+    def chrout_tap():
+        la = sysm._current_output_la
+        if la is None or la not in sysm._open_files:
+            transcript.append(sysm.cpu.a & 0xFF)
+        return orig_chrout()
+
+    sysm.cpu.traps[0xFFD2] = chrout_tap
+
+    results = []
+    t0 = time.time()
+
+    # Boot to READY, then authentic LOAD"*",8 : RUN
+    sysm.run(3_000_000)
+    sysm.type_string('LOAD"*",8\r')
+    sysm.run(500_000)
+    sysm.type_string("RUN\r")
+    if continue_from:
+        _lorenz_force_run(sysm, tests, continue_from.upper())
+        current = continue_from.upper()
+    else:
+        current = None
+    current_start_cyc = sysm.cpu.cycles
+    transcript_mark = 0
+    # When resuming mid-chain, the boot LOAD"*",8 above queued a stale START
+    # request; skip everything requested before the forced jump so it can't
+    # reset `current` back to START and disable hang detection.
+    seen_requests = len(shim.requested) if continue_from else 0
+    done = False
+
+    def _pass(name):
+        results.append((name, "PASS"))
+        print(f"  \033[32mPASS\033[0m  {name}")
+
+    while not done:
+        if wall_limit and time.time() - t0 > wall_limit:
+            print(f"\n[wall-clock limit {wall_limit}s reached — stopping]")
+            break
+        sysm.run(400_000)
+
+        while seen_requests < len(shim.requested):
+            name = shim.requested[seen_requests]
+            seen_requests += 1
+
+            if name == "FINISH":
+                if current and current not in ("START", None):
+                    _pass(current)
+                results.append(("finish", "DONE"))
+                print("  \033[36mDONE\033[0m  suite ran through to 'finish'.")
+                done = True
+                break
+
+            if name == "START":
+                current = "START"
+                current_start_cyc = sysm.cpu.cycles
+                transcript_mark = len(transcript)
+                continue
+
+            if current and current != "START":
+                _pass(current)
+
+            if name not in shim.tests:
+                results.append((name, "MISSING"))
+                print(f"  \033[33m????\033[0m  {name} (file missing)")
+            current = name
+            current_start_cyc = sysm.cpu.cycles
+            transcript_mark = len(transcript)
+
+            run_count = sum(1 for _, s in results
+                            if s in ("PASS", "FAIL", "HANG"))
+            if max_tests and run_count >= max_tests:
+                print(f"\n[--max-tests {max_tests} reached]")
+                done = True
+                break
+
+        if done:
+            break
+
+        if current and current != "START" and \
+                sysm.cpu.cycles - current_start_cyc > budget:
+            tail = _lorenz_petscii(transcript[transcript_mark:])
+            if "BEFORE" in tail or "AFTER" in tail:
+                detail = " | ".join(l.strip() for l in tail.splitlines()
+                                    if l.strip())[-200:]
+                results.append((current, "FAIL"))
+                print(f"  \033[31mFAIL\033[0m  {current}")
+                print(f"        {detail}")
+            else:
+                results.append((current, "HANG"))
+                print(f"  \033[35mHANG\033[0m  {current} "
+                      f"(>{budget/1e6:.0f}M cycles, likely cycle-exact test)")
+            nxt = _lorenz_successor(shim.tests.get(current, b""), current,
+                                    set(shim.tests))
+            if nxt:
+                print(f"        [chain stopped — resume with "
+                      f"--continue-from {nxt}]")
+            else:
+                print("        [chain stopped — resume with "
+                      "--continue-from <next test>]")
+            break
+
+    npass = sum(1 for _, s in results if s == "PASS")
+    nbad = sum(1 for _, s in results if s in ("FAIL", "HANG"))
+    print("\n" + "=" * 60)
+    print(f"Result: {npass} passed, {nbad} failed/hung, {time.time()-t0:.1f}s")
+    if nbad:
+        print("Failed/hung:")
+        for n, s in results:
+            if s in ("FAIL", "HANG"):
+                nxt = _lorenz_successor(shim.tests.get(n, b""), n,
+                                        set(shim.tests))
+                hint = (f"   → resume with: --continue-from {nxt}"
+                        if nxt else "")
+                print(f"  {s:5s} {n}{hint}")
+    print("=" * 60)
+    return nbad == 0
+
+
+# =============================================================================
+# VIC-II screenshot test (VICE testprogs)
+# =============================================================================
+# Unlike Lorenz, the VIC-II tests are visual: a test PRG draws a screen that is
+# compared against a reference image. We render the emulator's frame head-less
+# into a numpy array (same 384x272 geometry as the VICE references), save it as
+# a PNG, and — if a reference is present — compare them.
+#
+# The comparison is done at the C64 colour-INDEX level: every pixel of both
+# images is mapped to the nearest of the 16 C64 colours and the index maps are
+# compared. This is robust against small palette-RGB differences between VICE
+# and this emulator (a native VIC image only ever uses the 16 fixed colours).
+# A small +/- offset search absorbs minor border-crop differences.
+
+
+def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
+                  save_only=False, align=3):
+    """Run one VIC-II test PRG (or every *.prg under a directory), render a
+    frame, save it, and compare against references/<name>.png if present.
+    Returns True if nothing scored below the threshold."""
+    import glob
+    import numpy as np
+
+    # collect test files
+    if os.path.isdir(path):
+        prgs = sorted(glob.glob(os.path.join(path, "**", "*.prg"),
+                                recursive=True))
+    elif os.path.isfile(path):
+        prgs = [path]
+    else:
+        print(f"VIC test path {path!r} not found.")
+        return False
+    if not prgs:
+        print(f"No .prg files under {path!r}.")
+        return False
+
+    os.makedirs(out_dir, exist_ok=True)
+    pal = np.array(C64_PALETTE, dtype=np.int32)
+
+    def to_index(img):
+        d = ((img[:, :, None, :].astype(np.int32)
+              - pal[None, None, :, :]) ** 2).sum(-1)
+        return d.argmin(-1)
+
+    def best_match(mine, ref):
+        ai, bi = to_index(mine), to_index(ref)
+        if ai.shape != bi.shape:
+            return None, None
+        H, W = ai.shape
+        best, best_off = -1.0, (0, 0)
+        for dy in range(-align, align + 1):
+            for dx in range(-align, align + 1):
+                h, w = H - abs(dy), W - abs(dx)
+                a = ai[max(0, dy):max(0, dy) + h, max(0, dx):max(0, dx) + w]
+                b = bi[max(0, -dy):max(0, -dy) + h, max(0, -dx):max(0, -dx) + w]
+                m = float((a == b).mean())
+                if m > best:
+                    best, best_off = m, (dy, dx)
+        return best * 100.0, best_off
+
+    # one head-less frontend, reused across tests (chargen/palette are ROM-fixed)
+    fe = None
+    results = []
+
+    for prg in prgs:
+        name = os.path.basename(prg)
+        sysm = System(verbose=False)
+        sysm.run(3_000_000)                     # boot to READY
+        try:
+            load_addr, _len, is_basic = sysm.load_prg(prg)
+        except Exception as ex:
+            print(f"  \033[33mSKIP\033[0m  {name} (load error: {ex})")
+            continue
+        if is_basic:
+            sysm.type_string("RUN\r")
+        else:
+            sysm.type_string(f"SYS{load_addr}\r")
+
+        if fe is None:
+            fe = PygameFrontend(sysm, headless=True)
+        else:
+            fe.system = sysm
+
+        vic = sysm.vic
+        arr = None
+        for _ in range(frames):
+            lines1 = (fe.RENDER_RASTER - vic.raster) % vic.LINES_PER_FRAME
+            if lines1 == 0:
+                lines1 = vic.LINES_PER_FRAME
+            cyc1 = lines1 * vic.CYCLES_PER_LINE
+            sysm.run(cyc1)
+            arr = fe.render_to_array()
+            sysm.run(fe.CYCLES_PER_FRAME - cyc1)
+
+        shot = os.path.join(out_dir, name + ".png")
+        _png_write_rgb(shot, arr)
+
+        border = vic.regs[0x20] & 0x0F
+        ssc = getattr(vic, "sprite_sprite_coll", 0)
+        reg = f"$D020={border:X} $D01E={ssc:02X}"
+
+        ref = os.path.join(os.path.dirname(prg), "references", name + ".png")
+        if save_only or not os.path.isfile(ref):
+            tag = "SAVE" if save_only else "NOREF"
+            print(f"  \033[36m{tag}\033[0m {name}  ({reg})  -> {shot}")
+            results.append((name, tag, 0.0))
+            continue
+
+        pct, off = best_match(arr, _png_read_rgb(ref))
+        if pct is None:
+            print(f"  \033[33mSIZE\033[0m {name}  (Referenz-Format weicht ab, "
+                  f"z.B. NTSC)")
+            results.append((name, "SIZE", 0.0))
+        elif pct >= threshold:
+            print(f"  \033[32mPASS\033[0m {name}  {pct:5.1f}%  off{off}  ({reg})")
+            results.append((name, "PASS", pct))
+        else:
+            print(f"  \033[31mDIFF\033[0m {name}  {pct:5.1f}%  off{off}  ({reg})")
+            results.append((name, "DIFF", pct))
+
+    npass = sum(1 for _, s, _ in results if s == "PASS")
+    ndiff = sum(1 for _, s, _ in results if s == "DIFF")
+    print("\n" + "=" * 60)
+    print(f"VIC test: {len(results)} run, {npass} PASS, {ndiff} DIFF "
+          f"(threshold {threshold:.0f}%). Screenshots in {out_dir}/")
+    print("=" * 60)
+    return ndiff == 0
+
+
+def _print_help():
+    """Print a full overview of command-line usage and options."""
+    print(f"""
+c64emu {__version__} — Commodore 64 emulator (single file)
+
+USAGE
+  python3 c64emu.py [FILE] [OPTIONS]
+
+  With no arguments a pygame window opens and boots to the BASIC prompt.
+  A FILE argument is auto-detected by extension and loaded on boot:
+    game.prg    load program (auto-RUN if BASIC, else auto-SYS)
+    game.d64    mount disk image, auto-load first file & start
+    game.t64    mount tape archive, auto-load first file & start
+    tune.sid    load PSID and play at 50 Hz
+
+GENERAL OPTIONS
+  -h, --help            show this help and exit
+  --scale N             window scale factor (default 2)
+  --no-run              load FILE but do not auto-RUN / auto-SYS
+  --cycle               run FILE on the cycle-accurate core (badline BA-stall
+                        + per-cycle CIA; slower than real time, but accurate
+                        raster/badline timing). Works for .prg/.d64/.t64 and
+                        with --headless too.
+  --headless N          boot head-less, run N CPU steps, dump the text
+                        screen as ASCII and exit (combine with a FILE to
+                        load it first; FILE then runs 1,500,000 extra steps)
+
+TEST MODES
+  --cputest [-v]        run the Klaus Dormann 6502 functional test
+                          add --cycle to run it on the cycle-accurate core
+                        (-v traces every instruction)
+
+  --lorenztest [DIR]    run the Wolfgang-Lorenz test suite from DIR
+                        (default 'lorenz'); serves the test files through
+                        the LOAD trap like a real 1541 and reports PASS /
+                        FAIL / HANG per test. Sub-options:
+      --list              list all test names in DIR and exit
+      --max-tests N       stop after N tests (0 = all, default)
+      --budget N          per-test cycle budget before a test counts as
+                          FAIL/HANG (default 120,000,000)
+      --wall N            overall wall-clock limit in seconds (0 = none)
+      --continue-from T   skip ahead and resume the chain at test T
+      --cycle             run on the cycle-accurate core (slower; needed for
+                          the timing tests — cputiming/cia*/irq/nmi/trap*)
+                          (use after a stuck cycle-exact CIA/IRQ test)
+
+  --victest [PATH]      run the VIC-II screenshot test on PATH (a .prg or a
+                        directory of them; default 'vicii'). Renders a frame,
+                        saves it as PNG, and compares against the sibling
+                        references/<name>.png at the C64 colour-index level.
+                        Sub-options:
+      --frames N          frames to run before capture (default 20)
+      --out DIR           where to save screenshots (default 'victest_out')
+      --threshold P       match percent needed for PASS (default 95)
+      --align N           +/- pixel offset search for border crop (default 3)
+      --save-only         only render+save, do not compare
+
+IN-WINDOW KEYS
+  F11                   toggle warp (unthrottled) speed
+  F12                   soft reset
+  arrow keys            authentic C64 cursor keys
+  numeric keypad        joystick; KP0 toggles between port 1 and port 2
+
+EXAMPLES
+  python3 c64emu.py bruce_lee.d64
+  python3 c64emu.py music.sid
+  python3 c64emu.py --cputest
+  python3 c64emu.py --lorenztest lorenz --max-tests 5
+  python3 c64emu.py --lorenztest lorenz --continue-from oraa
+  python3 c64emu.py game.prg --headless 2000000
+""")
+
+
 def main():
     args = sys.argv[1:]
+
+    if "--help" in args or "-h" in args:
+        _print_help()
+        return
+
     print(f"c64emu {__version__}")
 
     if "--cputest" in args:
-        ok = C64Emu().test_cpu(verbose=("-v" in args))
+        cyc = "--cycle" in args
+        if cyc:
+            print("Running Klaus functional test on the CYCLE-ACCURATE core...")
+        ok = C64Emu().test_cpu(verbose=("-v" in args), cycle=cyc)
+        sys.exit(0 if ok else 1)
+
+    if "--lorenztest" in args:
+        i = args.index("--lorenztest")
+        tdir = "lorenz"
+        if i + 1 < len(args) and not args[i + 1].startswith("-"):
+            tdir = args[i + 1]
+
+        def _optval(flag, default, cast=int):
+            if flag in args:
+                j = args.index(flag)
+                if j + 1 < len(args):
+                    return cast(args[j + 1])
+            return default
+
+        ok = _run_lorenz_suite(
+            tdir,
+            budget=_optval("--budget", 120_000_000),
+            max_tests=_optval("--max-tests", 0),
+            wall_limit=_optval("--wall", 0),
+            continue_from=_optval("--continue-from", None, str),
+            do_list=("--list" in args),
+            cycle_accurate=("--cycle" in args),
+        )
+        sys.exit(0 if ok else 1)
+
+    if "--victest" in args:
+        i = args.index("--victest")
+        vpath = "vicii"
+        if i + 1 < len(args) and not args[i + 1].startswith("-"):
+            vpath = args[i + 1]
+
+        def _vopt(flag, default, cast):
+            if flag in args:
+                j = args.index(flag)
+                if j + 1 < len(args):
+                    return cast(args[j + 1])
+            return default
+
+        ok = _run_vic_test(
+            vpath,
+            frames=_vopt("--frames", 20, int),
+            out_dir=_vopt("--out", "victest_out", str),
+            threshold=_vopt("--threshold", 95.0, float),
+            save_only=("--save-only" in args),
+            align=_vopt("--align", 3, int),
+        )
         sys.exit(0 if ok else 1)
 
     # Scan args for options + an optional .prg path
@@ -4247,36 +5484,30 @@ def main():
 
     if "--headless" in args:
         i = args.index("--headless")
-        n = int(args[i + 1]) if i + 1 < len(args) else 1_500_000
-        sysm = System()
+        n = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 1_500_000
+        sysm = System(cycle_accurate=("--cycle" in args))
         if prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
-            # Run extra cycles to let RUN execute and produce output
-            print("Running PRG for 1,500,000 extra steps...")
-            for _ in range(1_500_000):
-                if not sysm.step():
-                    break
+            print("Running PRG for 1,500,000 extra cycles...")
+            sysm.run(1_500_000)
         elif d64_file:
             _launch_d64(sysm, d64_file, auto_run=not no_autorun)
-            print("Running for 1,500,000 extra steps...")
-            for _ in range(1_500_000):
-                if not sysm.step():
-                    break
+            print("Running for 1,500,000 extra cycles...")
+            sysm.run(1_500_000)
         elif t64_file:
             _launch_t64(sysm, t64_file, auto_run=not no_autorun)
-            print("Running for 1,500,000 extra steps...")
-            for _ in range(1_500_000):
-                if not sysm.step():
-                    break
+            print("Running for 1,500,000 extra cycles...")
+            sysm.run(1_500_000)
         else:
-            print(f"Booting for {n} steps (headless)...")
-            for _ in range(n):
-                if not sysm.step():
-                    break
+            print(f"Booting for {n} cycles (headless)...")
+            sysm.run(n)
         _dump_screen(sysm)
         return
 
-    sysm = System()
+    sysm = System(cycle_accurate=("--cycle" in args))
+    if "--cycle" in args:
+        print("Cycle-accurate mode: badline BA-stall + per-cycle CIA. "
+              "Runs slower than real time in pure Python.")
     if prg_file:
         _launch_prg(sysm, prg_file, auto_run=not no_autorun)
     elif sid_file:
