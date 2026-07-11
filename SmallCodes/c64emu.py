@@ -61,7 +61,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.09-sprmux-xy"
+__version__ = "2026.07.11-spr-coll-perraster"
 
 
 # =============================================================================
@@ -275,6 +275,11 @@ class Vic:
         self.line_d021 = bytearray(self.LINES_PER_FRAME)
         self.line_d022 = bytearray(self.LINES_PER_FRAME)
         self.line_d023 = bytearray(self.LINES_PER_FRAME)
+        # $D01B (sprite/background priority) per raster line. Games raster-split
+        # this so a sprite is in front of the backdrop in one screen band and
+        # behind the foreground in another (Pitfall: Harry is in front up top,
+        # behind the ground below). Evaluated per sprite row at render time.
+        self.line_d01b = bytearray(self.LINES_PER_FRAME)
         # Per-raster sprite Y position and data pointer for all 8 sprites,
         # stored flat as [raster*8 + sprite]. A game can reposition sprites
         # mid-frame via raster IRQs (sprite multiplexing) to draw figures taller
@@ -376,6 +381,7 @@ class Vic:
             self.line_d021[self.raster] = self.regs[0x21]
             self.line_d022[self.raster] = self.regs[0x22]
             self.line_d023[self.raster] = self.regs[0x23]
+            self.line_d01b[self.raster] = self.regs[0x1b]
             mem = self.mem
             if mem is not None:
                 ras8 = self.raster * 8
@@ -404,6 +410,158 @@ class Vic:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
                 self.display_regs[:] = self.regs
+            if self.mem is not None and self.regs[0x15]:
+                # Accumulate sprite collisions on this raster line as the beam
+                # draws it, so $D01E/$D01F read mid-frame reflect the collisions
+                # up to the current line (games read at several rasters to tell
+                # which band a collision came from).
+                self._collide_at_raster(self.raster)
+
+    @staticmethod
+    @staticmethod
+    def _row_bits(d0, d1, d2, mc, xex):
+        """Bitmask for one sprite row: bit `c` (LSB) set when local column `c`
+        is non-transparent. Handles multicolor (2-wide) and X-expand. In the
+        sprite's own space; caller shifts by X."""
+        local = 0
+        if mc:
+            for bi, dv in enumerate((d0, d1, d2)):
+                for p in range(4):
+                    if (dv >> (6 - 2 * p)) & 3:
+                        local |= (0b11 << (bi * 8 + p * 2))
+        else:
+            for bi, dv in enumerate((d0, d1, d2)):
+                for bit in range(8):
+                    if (dv >> (7 - bit)) & 1:
+                        local |= 1 << (bi * 8 + bit)
+        if xex:
+            exp = 0
+            for c in range(24):
+                if (local >> c) & 1:
+                    exp |= (0b11 << (2 * c))
+            local = exp
+        return local
+
+    def _sprite_colbits_at(self, i, r):
+        """Column bitmask (bit == VIC X) of sprite i's non-transparent pixels on
+        raster line r, or 0 if the sprite does not cover r. Reads sprite data
+        live so the value reflects the sprite state as the beam passes."""
+        regs = self.regs
+        sy = regs[i * 2 + 1]
+        yex = (regs[0x17] >> i) & 1
+        height = 42 if yex else 21
+        if not (sy <= r < sy + height):
+            return 0
+        row = (r - sy) >> 1 if yex else (r - sy)
+        mem = self.mem
+        pbase = (mem.vic_bank() * 0x4000
+                 + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
+        da = mem.ram[pbase + i] * 64 + row * 3
+        local = self._row_bits(mem.read_vic(da), mem.read_vic(da + 1),
+                               mem.read_vic(da + 2),
+                               (regs[0x1C] >> i) & 1, (regs[0x1D] >> i) & 1)
+        if not local:
+            return 0
+        x = regs[i * 2] | (((regs[0x10] >> i) & 1) << 8)
+        return local << x
+
+    def _foreground_bits_at(self, r, col0=0, col1=40):
+        """Foreground (non-background) column bitmask (bit == VIC X) of the
+        displayed graphics on raster line r, restricted to character columns
+        [col0, col1) for speed. Character modes only (hi-res + per-cell
+        multicolor); bit c set == screen col c-24 is foreground."""
+        dr = self.display_regs
+        if (dr[0x11] >> 5) & 1:                    # bitmap mode: not modeled
+            return 0
+        sy = r - 50
+        if sy < 0 or sy >= 200:
+            return 0
+        char_row = sy >> 3
+        if char_row >= 25:
+            return 0
+        ls = self.line_screen
+        lc = self.line_color
+        if ls is None or lc is None:
+            return 0
+        cy = sy & 7
+        base = char_row * 40
+        char_base = ((dr[0x18] >> 1) & 0x07) * 0x0800
+        mcm = (dr[0x16] >> 4) & 1
+        mem = self.mem
+        bits = 0
+        for col in range(col0, col1):
+            byte = mem.read_vic(char_base + ls[base + col] * 8 + cy)
+            if not byte:
+                continue
+            vx0 = 24 + col * 8
+            if mcm and (lc[base + col] & 0x08):
+                for p in range(4):
+                    if ((byte >> (6 - 2 * p)) & 3) >= 2:
+                        bits |= (0b11 << (vx0 + p * 2))
+            else:
+                for bx in range(8):
+                    if (byte >> (7 - bx)) & 1:
+                        bits |= (1 << (vx0 + bx))
+        return bits
+
+    def _collide_at_raster(self, r):
+        """Accumulate sprite-sprite ($D01E) and sprite-data ($D01F) collisions
+        occurring on raster line r into their latches, as real hardware does
+        while the beam draws. Called once per raster so a game that reads the
+        latches mid-frame (clearing them) sees the collisions of each screen band
+        separately — the technique many titles use to localise collisions."""
+        regs = self.regs
+        en = regs[0x15]
+        if en == 0:
+            return
+        active = []
+        allbits = 0
+        for i in range(8):
+            if not (en >> i) & 1:
+                continue
+            cb = self._sprite_colbits_at(i, r)
+            if cb:
+                active.append((i, cb))
+                allbits |= cb
+        if not active:
+            return
+        # sprite-sprite: any pair sharing a column on this line
+        if len(active) >= 2:
+            ss = 0
+            for a in range(len(active)):
+                ia, ba = active[a]
+                for b in range(a + 1, len(active)):
+                    ib, bb = active[b]
+                    if ba & bb:
+                        ss |= (1 << ia) | (1 << ib)
+            if ss:
+                old = self.sprite_sprite_coll
+                self.sprite_sprite_coll |= ss
+                if old == 0:
+                    self.irq_status |= 0x04
+        # sprite-data: sprite pixels over foreground graphics on this line.
+        # Only decode the character columns the sprites actually span.
+        lo = (allbits & -allbits).bit_length() - 1
+        hi = allbits.bit_length() - 1
+        col0 = (lo - 24) >> 3
+        col1 = ((hi - 24) >> 3) + 1
+        if col0 < 0:
+            col0 = 0
+        if col1 > 40:
+            col1 = 40
+        if col0 >= col1:
+            return
+        fg = self._foreground_bits_at(r, col0, col1)
+        if fg:
+            sd = 0
+            for i, cb in active:
+                if cb & fg:
+                    sd |= (1 << i)
+            if sd:
+                old = self.sprite_data_coll
+                self.sprite_data_coll |= sd
+                if old == 0:
+                    self.irq_status |= 0x02
 
     def clock(self):
         # One PHI2 tick for cycle-accurate mode. Reuses tick() for the raster
@@ -4154,18 +4312,10 @@ class PygameFrontend:
             for spr_y, pointer, spr_x in positions:
                 self._render_sprite(s, pixels, bitmap, sprite_occupancy,
                                     spr_y, pointer, spr_x)
-        # Collision detection: any pixel where 2+ sprites overlap
-        multi = sprite_occupancy & (sprite_occupancy - 1)    # clears lowest set bit
-        if multi.any():
-            # OR sprites involved into the collision latch
-            cols = sprite_occupancy[multi != 0]
-            ss = 0
-            for v in cols:
-                ss |= int(v)
-            old = vic.sprite_sprite_coll
-            vic.sprite_sprite_coll |= ss
-            if old == 0 and ss:
-                vic.irq_status |= 0x04                        # sprite-sprite IRQ src
+        # Sprite-sprite collision ($D01E) is maintained by the VIC during
+        # emulation (Vic._update_sprite_sprite_collision), not here, so that the
+        # latch is correct whenever the game polls it rather than only when a
+        # frame happens to be composed for display.
 
         return pixels, border
 
@@ -4218,7 +4368,6 @@ class PygameFrontend:
         multicolor = (vic.regs[0x1C] >> idx) & 1
         y_expand   = (vic.regs[0x17] >> idx) & 1
         x_expand   = (vic.regs[0x1D] >> idx) & 1
-        priority   = (vic.regs[0x1B] >> idx) & 1            # 1 = bg in front
         sprite_color = vic.regs[0x27 + idx] & 0x0F
 
         # Fetch sprite data via VIC view using the supplied pointer.
@@ -4281,20 +4430,24 @@ class PygameFrontend:
             rgb_pixels = np.broadcast_to(sprite_rgb,
                                          sprite_slice.shape + (3,)).copy()
 
-        # Priority mask: if priority bit, only draw where bg is bg (mask==0)
+        # Priority mask, evaluated per rendered row: $D01B is often raster-split
+        # (a sprite in front of the backdrop in one band, behind the foreground
+        # in another), so use the value recorded at each row's raster rather than
+        # one latched value. priority row = 1 -> only draw over background.
         bg_slice = bg_mask[dst_y0:dst_y1, dst_x0:dst_x1]
-        if priority:
-            draw_mask = nonzero & (bg_slice == 0)
+        ld1b = vic.line_d01b
+        nld = len(ld1b)
+        prio_col = np.array(
+            [(ld1b[(spr_y + sy) % nld] >> idx) & 1
+             for sy in range(src_y0, src_y1)], dtype=bool)[:, None]
+        if prio_col.any():
+            draw_mask = nonzero & (~prio_col | (bg_slice == 0))
         else:
             draw_mask = nonzero
 
-        # Sprite-background collision: where sprite non-transparent meets fg pixel
-        coll_mask = nonzero & (bg_slice != 0)
-        if coll_mask.any():
-            old = vic.sprite_data_coll
-            vic.sprite_data_coll |= (1 << idx)
-            if old == 0:
-                vic.irq_status |= 0x02                        # sprite-data IRQ src
+        # Sprite-data collision ($D01F) is maintained by the VIC during
+        # emulation (Vic._update_sprite_data_collision); bg_slice is used here
+        # only for sprite/foreground priority.
 
         # Write sprite pixels
         target = pixels[dst_y0:dst_y1, dst_x0:dst_x1]
