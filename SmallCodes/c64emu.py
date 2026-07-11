@@ -38,7 +38,8 @@ Usage
 * `python3 c64emu.py game.prg --no-run`– load but don't auto-RUN
 * `python3 c64emu.py tune.sid`         – boot, load PSID, play 50 Hz
 * `python3 c64emu.py game.d64`         – mount disk, auto-load & start
-* In the window: F11 = warp speed toggle, F12 = soft reset.
+* In the window: F8 = sprite-collision on/off, F10 = sprite/collision dump,
+  F11 = warp speed toggle, F12 = soft reset.
 
 D64 disk images are served through KERNAL traps at two levels: the high-level
 LOAD / OPEN-CHRIN routines, and the low-level serial (IEC) primitives
@@ -61,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.11-spr-coll-perraster"
+__version__ = "2026.07.11-bitmap-coll-fix"
 
 
 # =============================================================================
@@ -313,6 +314,19 @@ class Vic:
         # Bits are set as collisions occur; reading clears the register.
         self.sprite_sprite_coll = 0
         self.sprite_data_coll = 0
+        # F8 runtime toggle: when False, _collide_at_raster is skipped so the
+        # sprite-collision latches never set. Purely a diagnostic switch to test
+        # whether per-raster collision is what a game is reacting to.
+        self.collision_enabled = True
+        # F10 diagnostic recorders (do not affect emulation). Accumulate the
+        # collision bits/rasters of the current frame, snapshotting the last
+        # complete frame so an F10 press reports a stable, whole-frame picture.
+        self._dbg_dc_frame = 0        # sprite-data ($D01F) bits this frame
+        self._dbg_sc_frame = 0        # sprite-sprite ($D01E) bits this frame
+        self._dbg_dc_rasters = []     # [(raster, sprite-bits), ...] this frame
+        self._dbg_dc_last = 0         # snapshot: last complete frame
+        self._dbg_sc_last = 0
+        self._dbg_dc_rasters_last = []
         # Boot-time defaults to match the kernal's expectations
         self.regs[0x20] = 0x0E       # border = light blue
         self.regs[0x21] = 0x06       # background = blue
@@ -374,6 +388,14 @@ class Vic:
         while self._line_cycles >= self.CYCLES_PER_LINE:
             self._line_cycles -= self.CYCLES_PER_LINE
             self.raster = (self.raster + 1) % self.LINES_PER_FRAME
+            if self.raster == 0:
+                # New frame: freeze this frame's collision recording for F10.
+                self._dbg_dc_last = self._dbg_dc_frame
+                self._dbg_sc_last = self._dbg_sc_frame
+                self._dbg_dc_rasters_last = self._dbg_dc_rasters
+                self._dbg_dc_frame = 0
+                self._dbg_sc_frame = 0
+                self._dbg_dc_rasters = []
             self.line_d018[self.raster] = self.regs[0x18]
             self.line_d011[self.raster] = self.regs[0x11]
             self.line_d016[self.raster] = self.regs[0x16]
@@ -410,7 +432,7 @@ class Vic:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
                 self.display_regs[:] = self.regs
-            if self.mem is not None and self.regs[0x15]:
+            if self.mem is not None and self.regs[0x15] and self.collision_enabled:
                 # Accumulate sprite collisions on this raster line as the beam
                 # draws it, so $D01E/$D01F read mid-frame reflect the collisions
                 # up to the current line (games read at several rasters to tell
@@ -468,22 +490,49 @@ class Vic:
     def _foreground_bits_at(self, r, col0=0, col1=40):
         """Foreground (non-background) column bitmask (bit == VIC X) of the
         displayed graphics on raster line r, restricted to character columns
-        [col0, col1) for speed. Character modes only (hi-res + per-cell
-        multicolor); bit c set == screen col c-24 is foreground."""
+        [col0, col1) for speed. Handles character modes (hi-res + per-cell
+        multicolor) AND bitmap mode (hi-res + multicolor); bit c set == VIC
+        X-coordinate c is a foreground pixel. Bitmap support matters because
+        several titles run their playfield in bitmap mode and rely on
+        sprite-background collision ($D01F) for wall/exit detection."""
         dr = self.display_regs
-        if (dr[0x11] >> 5) & 1:                    # bitmap mode: not modeled
-            return 0
         sy = r - 50
         if sy < 0 or sy >= 200:
             return 0
         char_row = sy >> 3
         if char_row >= 25:
             return 0
+        cy = sy & 7
+        mem = self.mem
+        if (dr[0x11] >> 5) & 1:
+            # Bitmap mode. Bit3 of $D018 picks the 8 KB bitmap base in the VIC
+            # bank; each 8x8 cell is 8 bytes, 40 cells per row (stride 320).
+            # Hi-res: a set bit is foreground. Multicolor: a 2-bit pixel is
+            # foreground when its high bit is set (values 10/11), and each such
+            # pixel is two VIC-X wide.
+            bmbase = ((dr[0x18] >> 3) & 1) * 0x2000
+            mcm = (dr[0x16] >> 4) & 1
+            row_off = bmbase + char_row * 320 + cy
+            bits = 0
+            for col in range(col0, col1):
+                byte = mem.read_vic(row_off + col * 8)
+                if not byte:
+                    continue
+                vx0 = 24 + col * 8
+                if mcm:
+                    for p in range(4):
+                        if ((byte >> (6 - 2 * p)) & 3) >= 2:
+                            bits |= (0b11 << (vx0 + p * 2))
+                else:
+                    for bx in range(8):
+                        if (byte >> (7 - bx)) & 1:
+                            bits |= (1 << (vx0 + bx))
+            return bits
+        # --- character modes ---
         ls = self.line_screen
         lc = self.line_color
         if ls is None or lc is None:
             return 0
-        cy = sy & 7
         base = char_row * 40
         char_base = ((dr[0x18] >> 1) & 0x07) * 0x0800
         mcm = (dr[0x16] >> 4) & 1
@@ -537,6 +586,7 @@ class Vic:
             if ss:
                 old = self.sprite_sprite_coll
                 self.sprite_sprite_coll |= ss
+                self._dbg_sc_frame |= ss
                 if old == 0:
                     self.irq_status |= 0x04
         # sprite-data: sprite pixels over foreground graphics on this line.
@@ -560,6 +610,9 @@ class Vic:
             if sd:
                 old = self.sprite_data_coll
                 self.sprite_data_coll |= sd
+                self._dbg_dc_frame |= sd
+                if len(self._dbg_dc_rasters) < 96:
+                    self._dbg_dc_rasters.append((r, sd))
                 if old == 0:
                     self.irq_status |= 0x02
 
@@ -4457,6 +4510,73 @@ class PygameFrontend:
         occ_slice = sprite_occupancy[dst_y0:dst_y1, dst_x0:dst_x1]
         occ_slice |= (nonzero.astype(np.uint8) << idx)
 
+    def _sprite_diag_dump(self):
+        """F10: print a full sprite + collision snapshot to the console.
+
+        Meant for debugging 'missing enemy' / 'movement blocked by phantom wall'
+        style issues: stand at the spot where the bug happens, press F10, and
+        copy the output. It shows which sprites are on, where, and whether the
+        per-raster sprite collision fired during the last complete frame."""
+        vic = self.system.vic
+        r = vic.regs
+        en = r[0x15]
+        msb = r[0x10]
+        print("=" * 60)
+        print(f"SPRITE DIAG  v{__version__}   collision_enabled={vic.collision_enabled}")
+        print(f"$D015 enable = {en:08b}   $D010 X-MSB = {msb:08b}")
+        print(f"$D011={r[0x11]:02X} $D016={r[0x16]:02X} $D018={r[0x18]:02X} "
+              f"$D01A(irq-en)={vic.irq_enable:02X} bank={self.system.mem.vic_bank()} "
+              f"bitmap={(r[0x11]>>5)&1} mcm={(r[0x16]>>4)&1}")
+        print(f"$D01C mc={r[0x1C]:08b}  $D01D Xexp={r[0x1D]:08b}  "
+              f"$D017 Yexp={r[0x17]:08b}  $D01B prio={r[0x1B]:08b}")
+        pbase = (self.system.mem.vic_bank() * 0x4000
+                 + ((r[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
+        for i in range(8):
+            on = (en >> i) & 1
+            x = r[i * 2] | (((msb >> i) & 1) << 8)
+            y = r[i * 2 + 1]
+            ptr = self.system.mem.ram[pbase + i]
+            flags = []
+            if (r[0x1C] >> i) & 1: flags.append("mc")
+            if (r[0x1D] >> i) & 1: flags.append("Xexp")
+            if (r[0x17] >> i) & 1: flags.append("Yexp")
+            if (r[0x1B] >> i) & 1: flags.append("behind")
+            print(f"  spr{i} {'ON ' if on else 'off'} "
+                  f"X={x:3d} Y={y:3d} ptr=${ptr:02X}(${ptr*0x40:04X}) "
+                  f"col=${r[0x27+i]:X} {' '.join(flags)}")
+        print(f"collision last full frame:  $D01E(spr-spr)={vic._dbg_sc_last:08b}  "
+              f"$D01F(spr-data)={vic._dbg_dc_last:08b}")
+        if vic._dbg_dc_rasters_last:
+            spans = vic._dbg_dc_rasters_last
+            lo = min(t[0] for t in spans); hi = max(t[0] for t in spans)
+            bits = 0
+            for _, sd in spans: bits |= sd
+            print(f"  spr-data coll fired on rasters {lo}..{hi} "
+                  f"({len(spans)} lines), sprites={bits:08b}")
+        else:
+            print("  spr-data coll: none last frame")
+        # --- input / joystick state (press F10 while pushing a direction) ---
+        c = self.system.cia1
+        js0, js1 = c.joystick_state[0], c.joystick_state[1]
+        portname = ("Port 1", "Port 2", "Both ports")[self._joy_port]
+        try:
+            dc00 = c.read(0) & 0xFF
+            dc01 = c.read(1) & 0xFF
+        except Exception:
+            dc00 = dc01 = -1
+
+        def decode(v):
+            if v < 0:
+                return "?"
+            # active-low on the port: 0 = pressed
+            names = ["up", "down", "left", "right", "fire"]
+            return " ".join(n for b, n in enumerate(names) if not (v >> b) & 1) or "-"
+        print(f"input: keypad-joy={portname}  joystick_state[0]={js0:05b} "
+              f"[1]={js1:05b}")
+        print(f"  $DC00={dc00:08b} (P2 dir/fire -> {decode(dc00)})  "
+              f"$DC01={dc01:08b} (P1 dir/fire -> {decode(dc01)})")
+        print("=" * 60)
+
     def run(self):
         clock = self.pygame.time.Clock()
         last = time.perf_counter()
@@ -4475,6 +4595,18 @@ class PygameFrontend:
                     if event.key == self.pygame.K_F12:
                         print("Soft reset")
                         self.system.reset()
+                        continue
+                    if event.key == self.pygame.K_F8:
+                        vic = self.system.vic
+                        vic.collision_enabled = not vic.collision_enabled
+                        if not vic.collision_enabled:
+                            vic.sprite_sprite_coll = 0
+                            vic.sprite_data_coll = 0
+                        print("Sprite collision: "
+                              f"{'ON' if vic.collision_enabled else 'OFF'}")
+                        continue
+                    if event.key == self.pygame.K_F10:
+                        self._sprite_diag_dump()
                         continue
                     if event.key in (self.pygame.K_KP0, self.pygame.K_F9):
                         # Cycle the keypad joystick: Port 2 → Port 1 → Both.
