@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.11-bitmap-coll-fix"
+__version__ = "2026.07.12-sprite-perline3"
 
 
 # =============================================================================
@@ -293,6 +293,34 @@ class Vic:
         # at its own horizontal position), so X must be replayed per line too.
         self.line_spr_x = bytearray(self.LINES_PER_FRAME * 8)
         self.line_spr_msb = bytearray(self.LINES_PER_FRAME)
+        # --- Canonical per-line sprite display state ---
+        # line_spr_row[r*8+i] is the sprite row (0..20) sprite i DISPLAYS on
+        # raster r, or 0xFF when it isn't displaying there. It is produced by a
+        # line-level model of the VIC's sprite display sequencer (see tick()):
+        # display starts on the line where raster matches the Y register, a row
+        # counter walks 0..20, and the Y-expansion flip-flop makes each row
+        # repeat when $D017 is set — including mid-sprite toggles. The frame
+        # renderer and the $D01E/$D01F collision logic BOTH consume these
+        # records, so "where is sprite pixel data" has one source of truth,
+        # like row_gfx_mode() is for the background graphics.
+        self.line_spr_row = bytearray(b"\xFF" * (self.LINES_PER_FRAME * 8))
+        # Remaining per-line sprite attributes so mid-frame register splits
+        # (colour / multicolor / expansion / priority changed per zone, as
+        # multiplexers do) render and collide with the value active on each
+        # line: sprite colours $D027-2E, MC flags $D01C, X-expand $D01D,
+        # shared MC colours $D025/26.
+        self.line_spr_col = bytearray(self.LINES_PER_FRAME * 8)
+        self.line_d01c = bytearray(self.LINES_PER_FRAME)
+        self.line_d01d = bytearray(self.LINES_PER_FRAME)
+        self.line_d025 = bytearray(self.LINES_PER_FRAME)
+        self.line_d026 = bytearray(self.LINES_PER_FRAME)
+        # Sequencer state per sprite: displaying?, current row, Y-expand
+        # flip-flop; _spr_disp_mask mirrors the displaying set as a bitmask so
+        # tick() can skip the per-sprite loop when nothing is active.
+        self._spr_disp = [False] * 8
+        self._spr_row = [0] * 8
+        self._spr_ff = [False] * 8
+        self._spr_disp_mask = 0
         # Per-character-row snapshot of the 40 screen codes and 40 colour-RAM
         # nibbles as they were when the VIC fetched that row (its badline).
         # Reading the whole screen once at frame end tears when a game rewrites
@@ -382,6 +410,38 @@ class Vic:
             self.irq_enable = val & 0x0F
         else:
             self.regs[offset] = val
+            # The VIC's sprite Y-compare runs continuously during the line, not
+            # once at line start like our per-line sequencer step in tick().
+            # Multiplexers routinely write the next segment's Y (or enable the
+            # sprite) DURING the very line it should trigger on — Pitfall
+            # builds its vine and crocodiles from such back-to-back segments.
+            # So: a write that makes an enabled, idle sprite's Y match the
+            # current raster starts its display right here, mid-line.
+            if offset <= 0x0F and (offset & 1):
+                i = offset >> 1
+                if (not self._spr_disp[i] and (self.regs[0x15] >> i) & 1
+                        and val == (self.raster & 0xFF)):
+                    self._start_sprite_display_now(i)
+            elif offset == 0x15 and val:
+                r8 = self.raster & 0xFF
+                for i in range(8):
+                    if ((val >> i) & 1 and not self._spr_disp[i]
+                            and self.regs[i * 2 + 1] == r8):
+                        self._start_sprite_display_now(i)
+
+    def _start_sprite_display_now(self, i):
+        """Begin sprite i's display on the raster line currently being drawn
+        (mid-line Y-compare hit). Records row 0 for this line and leaves the
+        sequencer state exactly as tick()'s display step would have."""
+        self._spr_disp[i] = True
+        self._spr_disp_mask |= (1 << i)
+        self.line_spr_row[self.raster * 8 + i] = 0
+        if (self.regs[0x17] >> i) & 1:          # Y-expanded: row 0 repeats
+            self._spr_row[i] = 0
+            self._spr_ff[i] = True
+        else:
+            self._spr_row[i] = 1
+            self._spr_ff[i] = False
 
     def tick(self, cycles):
         self._line_cycles += cycles
@@ -411,9 +471,52 @@ class Vic:
                 self.line_spr_y[ras8:ras8 + 8] = regs[1:16:2]
                 self.line_spr_x[ras8:ras8 + 8] = regs[0:16:2]
                 self.line_spr_msb[self.raster] = regs[0x10]
+                self.line_spr_col[ras8:ras8 + 8] = regs[0x27:0x2F]
+                self.line_d01c[self.raster] = regs[0x1C]
+                self.line_d01d[self.raster] = regs[0x1D]
+                self.line_d025[self.raster] = regs[0x25]
+                self.line_d026[self.raster] = regs[0x26]
                 pbase = (mem.vic_bank() * 0x4000
                          + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
                 self.line_spr_ptr[ras8:ras8 + 8] = mem.ram[pbase:pbase + 8]
+                # --- Sprite display sequencer (line-level VIC model) ---
+                # A sprite starts displaying on the line where the raster's low
+                # byte matches its Y register (if enabled); a row counter then
+                # walks 0..20. With Y-expansion the flip-flop makes every row
+                # display on two lines; clearing $D017 mid-sprite resumes
+                # single-line stepping from the current row, setting it starts
+                # doubling — matching the observable line-level behaviour that
+                # the spritesplit tests exercise and multiplexers rely on.
+                en = regs[0x15]
+                if en or self._spr_disp_mask:
+                    r8 = self.raster & 0xFF
+                    disp = self._spr_disp
+                    srow = self._spr_row
+                    sff = self._spr_ff
+                    d017 = regs[0x17]
+                    for i in range(8):
+                        if not disp[i]:
+                            if (en >> i) & 1 and regs[i * 2 + 1] == r8:
+                                disp[i] = True
+                                srow[i] = 0
+                                sff[i] = False
+                                self._spr_disp_mask |= (1 << i)
+                            else:
+                                self.line_spr_row[ras8 + i] = 0xFF
+                                continue
+                        self.line_spr_row[ras8 + i] = srow[i]
+                        if (d017 >> i) & 1:
+                            if sff[i]:
+                                srow[i] += 1
+                            sff[i] = not sff[i]
+                        else:
+                            srow[i] += 1
+                            sff[i] = False
+                        if srow[i] > 20:
+                            disp[i] = False
+                            self._spr_disp_mask &= ~(1 << i)
+                else:
+                    self.line_spr_row[ras8:ras8 + 8] = b"\xFF" * 8
                 # Snapshot this character row's screen + colour RAM as the beam
                 # reaches it, so mid-frame screen rewrites (unsynced scrollers)
                 # render per row instead of tearing at a single frame-end read.
@@ -432,14 +535,14 @@ class Vic:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
                 self.display_regs[:] = self.regs
-            if self.mem is not None and self.regs[0x15] and self.collision_enabled:
+            if (self.mem is not None and self.collision_enabled
+                    and (self.regs[0x15] or self._spr_disp_mask)):
                 # Accumulate sprite collisions on this raster line as the beam
                 # draws it, so $D01E/$D01F read mid-frame reflect the collisions
                 # up to the current line (games read at several rasters to tell
                 # which band a collision came from).
                 self._collide_at_raster(self.raster)
 
-    @staticmethod
     @staticmethod
     def _row_bits(d0, d1, d2, mc, xex):
         """Bitmask for one sprite row: bit `c` (LSB) set when local column `c`
@@ -466,36 +569,54 @@ class Vic:
 
     def _sprite_colbits_at(self, i, r):
         """Column bitmask (bit == VIC X) of sprite i's non-transparent pixels on
-        raster line r, or 0 if the sprite does not cover r. Reads sprite data
-        live so the value reflects the sprite state as the beam passes."""
-        regs = self.regs
-        sy = regs[i * 2 + 1]
-        yex = (regs[0x17] >> i) & 1
-        height = 42 if yex else 21
-        if not (sy <= r < sy + height):
+        raster line r, or 0 if the sprite does not display on r.
+
+        All state comes from the canonical per-line recordings written by the
+        sprite display sequencer in tick() — the same records the frame
+        renderer draws from — so collision and rendering can never disagree
+        about where a sprite's pixels are, which attributes were active on the
+        line, or which row of the sprite the beam was showing."""
+        ras8 = r * 8
+        row = self.line_spr_row[ras8 + i]
+        if row == 0xFF:
             return 0
-        row = (r - sy) >> 1 if yex else (r - sy)
         mem = self.mem
-        pbase = (mem.vic_bank() * 0x4000
-                 + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
-        da = mem.ram[pbase + i] * 64 + row * 3
+        da = self.line_spr_ptr[ras8 + i] * 64 + row * 3
         local = self._row_bits(mem.read_vic(da), mem.read_vic(da + 1),
                                mem.read_vic(da + 2),
-                               (regs[0x1C] >> i) & 1, (regs[0x1D] >> i) & 1)
+                               (self.line_d01c[r] >> i) & 1,
+                               (self.line_d01d[r] >> i) & 1)
         if not local:
             return 0
-        x = regs[i * 2] | (((regs[0x10] >> i) & 1) << 8)
+        x = self.line_spr_x[ras8 + i] | (((self.line_spr_msb[r] >> i) & 1) << 8)
         return local << x
+
+    def row_gfx_mode(self, row):
+        """CANONICAL per-character-row graphics mode decision.
+
+        Returns (bmm, mcm, d018) for text row `row` (0..24), sampled from the
+        per-raster register recordings at the same raster line the renderer
+        uses for that row. This is the single source of truth for "what mode
+        is this row in / which bases does it use": the frame renderer, the
+        sprite-priority foreground mask and the $D01F sprite-data collision
+        must all derive their decisions from here, so they can never diverge
+        (a divergence between renderer and collision is exactly the class of
+        bug that broke Friday the 13th's exits)."""
+        raster = (self.FIRST_DISPLAY_LINE + row * 8 + 4) % self.LINES_PER_FRAME
+        return ((self.line_d011[raster] >> 5) & 1,
+                (self.line_d016[raster] >> 4) & 1,
+                self.line_d018[raster])
 
     def _foreground_bits_at(self, r, col0=0, col1=40):
         """Foreground (non-background) column bitmask (bit == VIC X) of the
         displayed graphics on raster line r, restricted to character columns
         [col0, col1) for speed. Handles character modes (hi-res + per-cell
         multicolor) AND bitmap mode (hi-res + multicolor); bit c set == VIC
-        X-coordinate c is a foreground pixel. Bitmap support matters because
-        several titles run their playfield in bitmap mode and rely on
-        sprite-background collision ($D01F) for wall/exit detection."""
-        dr = self.display_regs
+        X-coordinate c is a foreground pixel.
+
+        Mode/base decisions come from row_gfx_mode() — the same canonical
+        per-row source the frame renderer uses — so collision, priority and
+        rendering can never disagree about what a row contains."""
         sy = r - 50
         if sy < 0 or sy >= 200:
             return 0
@@ -504,14 +625,14 @@ class Vic:
             return 0
         cy = sy & 7
         mem = self.mem
-        if (dr[0x11] >> 5) & 1:
+        bmm, mcm, d018 = self.row_gfx_mode(char_row)
+        if bmm:
             # Bitmap mode. Bit3 of $D018 picks the 8 KB bitmap base in the VIC
             # bank; each 8x8 cell is 8 bytes, 40 cells per row (stride 320).
             # Hi-res: a set bit is foreground. Multicolor: a 2-bit pixel is
             # foreground when its high bit is set (values 10/11), and each such
             # pixel is two VIC-X wide.
-            bmbase = ((dr[0x18] >> 3) & 1) * 0x2000
-            mcm = (dr[0x16] >> 4) & 1
+            bmbase = ((d018 >> 3) & 1) * 0x2000
             row_off = bmbase + char_row * 320 + cy
             bits = 0
             for col in range(col0, col1):
@@ -534,9 +655,7 @@ class Vic:
         if ls is None or lc is None:
             return 0
         base = char_row * 40
-        char_base = ((dr[0x18] >> 1) & 0x07) * 0x0800
-        mcm = (dr[0x16] >> 4) & 1
-        mem = self.mem
+        char_base = ((d018 >> 1) & 0x07) * 0x0800
         bits = 0
         for col in range(col0, col1):
             byte = mem.read_vic(char_base + ls[base + col] * 8 + cy)
@@ -559,14 +678,12 @@ class Vic:
         while the beam draws. Called once per raster so a game that reads the
         latches mid-frame (clearing them) sees the collisions of each screen band
         separately — the technique many titles use to localise collisions."""
-        regs = self.regs
-        en = regs[0x15]
-        if en == 0:
-            return
+        lrow = self.line_spr_row
+        ras8 = r * 8
         active = []
         allbits = 0
         for i in range(8):
-            if not (en >> i) & 1:
+            if lrow[ras8 + i] == 0xFF:
                 continue
             cb = self._sprite_colbits_at(i, r)
             if cb:
@@ -1195,6 +1312,23 @@ class Memory:
     def read_vic_bytes(self, addr, n):
         """Read n bytes via VIC view as a Python bytes object."""
         return bytes(self.read_vic(addr + i) for i in range(n))
+
+    def read_vic_block(self, addr, n):
+        """Read n bytes via the VIC view as one fast RAM slice, with the
+        character-ROM shadow ($1000-$1FFF in banks 0/2) overlaid — i.e. exactly
+        what the VIC would fetch. Use this for bulk fetches (bitmap data,
+        video matrix) so the renderer sees the same memory as read_vic()."""
+        addr &= 0x3FFF
+        bank = self.vic_bank()
+        base = bank * 0x4000
+        out = bytearray(self.ram[base + addr: base + addr + n])
+        if bank in (0, 2):
+            lo = max(addr, 0x1000)
+            hi = min(addr + n, 0x2000)
+            if lo < hi:
+                ro = 0xD000 + (lo & 0x0FFF)
+                out[lo - addr: hi - addr] = self.rom[ro: ro + (hi - lo)]
+        return bytes(out)
 
     # --- system access ---
 
@@ -4061,10 +4195,11 @@ class PygameFrontend:
             masks[r] = cg[codes[r]]
         return masks
 
-    def _render_charmode_multicolor(self, masks, color_ram, d021_row,
+    def _render_charmode_multicolor(self, rows, masks, color_ram, d021_row,
                                     d022_row, d023_row):
         """
-        Render the background in multicolor character mode (D016 bit 4 set).
+        Render text rows `rows` (a range within 0..24) in multicolor character
+        mode (D016 bit 4 set for these rows).
 
         Per character cell the colour RAM nibble decides the sub-mode:
           * bit 3 = 0  -> standard hi-res, but only the low 3 colour bits are
@@ -4076,87 +4211,109 @@ class PygameFrontend:
                               10 = background#2    (D023)
                               11 = character col   (colour RAM & 7)
 
-        `masks` is the (25,40,8,8) per-row character bitmap (built with the
-        correct per-row font). d021_row/d022_row/d023_row are (25,) arrays of
-        the background colours active at each row's raster line, so raster
+        `masks` is the full (25,40,8,8) per-row character bitmap (built with
+        the correct per-row font); d021_row/d022_row/d023_row are (25,) arrays
+        of the background colours active at each row's raster line, so raster
         splits that recolour the backdrop mid-frame render correctly.
-        Returns (pixels[200,320,3], bitmap[200,320]).
+        Returns (pixels[h,320,3], bitmap[h,320]) for h = len(rows)*8.
         """
         np = self.np
         pal = self._palette
-        d021c = d021_row[:, None]                            # (25,1)
-        d022c = d022_row[:, None]
-        d023c = d023_row[:, None]
+        r0, r1 = rows.start, rows.stop
+        nr = r1 - r0
+        masks = masks[r0:r1]
+        color_ram = color_ram[r0:r1]
+        d021c = d021_row[r0:r1, None]                        # (nr,1)
+        d022c = d022_row[r0:r1, None]
+        d023c = d023_row[r0:r1, None]
 
-        cell_col = (color_ram & 0x07)                       # (25,40)
-        mc_cell = (color_ram & 0x08) != 0                   # (25,40) bool
+        cell_col = (color_ram & 0x07)                       # (nr,40)
+        mc_cell = (color_ram & 0x08) != 0                   # (nr,40) bool
 
         # --- multicolor interpretation: 2-bit pairs, doubled horizontally ---
-        pairs = masks.reshape(25, 40, 8, 4, 2)
-        twobit = (pairs[..., 0] << 1) | pairs[..., 1]       # (25,40,8,4) values 0..3
-        twobit = np.repeat(twobit, 2, axis=3)               # (25,40,8,8) double-wide
+        pairs = masks.reshape(nr, 40, 8, 4, 2)
+        twobit = (pairs[..., 0] << 1) | pairs[..., 1]       # (nr,40,8,4) values 0..3
+        twobit = np.repeat(twobit, 2, axis=3)               # (nr,40,8,8) double-wide
 
         # colour index per pixel for multicolor cells, via per-cell lookup table
-        choices = np.stack([                                # (25,40,4)
-            np.broadcast_to(d021c, (25, 40)).astype(np.uint8),
-            np.broadcast_to(d022c, (25, 40)).astype(np.uint8),
-            np.broadcast_to(d023c, (25, 40)).astype(np.uint8),
+        choices = np.stack([                                # (nr,40,4)
+            np.broadcast_to(d021c, (nr, 40)).astype(np.uint8),
+            np.broadcast_to(d022c, (nr, 40)).astype(np.uint8),
+            np.broadcast_to(d023c, (nr, 40)).astype(np.uint8),
             cell_col.astype(np.uint8),
         ], axis=2)
-        choices_b = np.broadcast_to(choices[:, :, None, None, :], (25, 40, 8, 8, 4))
+        choices_b = np.broadcast_to(choices[:, :, None, None, :], (nr, 40, 8, 8, 4))
         colidx_mc = np.take_along_axis(choices_b, twobit[..., None], axis=4)[..., 0]
 
         # colour index per pixel for hi-res cells (bg where bit clear)
         colidx_hi = np.where(masks.astype(bool),
                              cell_col[:, :, None, None].astype(np.uint8),
-                             d021_row[:, None, None, None].astype(np.uint8))
+                             d021_row[r0:r1, None, None, None].astype(np.uint8))
 
         mc_b = mc_cell[:, :, None, None]
-        colidx = np.where(mc_b, colidx_mc, colidx_hi)       # (25,40,8,8)
+        colidx = np.where(mc_b, colidx_mc, colidx_hi)       # (nr,40,8,8)
 
         # foreground mask for sprite priority / collisions
         fg_mc = twobit >= 2
         fg_hi = masks.astype(bool)
-        fg = np.where(mc_b, fg_mc, fg_hi)                   # (25,40,8,8)
+        fg = np.where(mc_b, fg_mc, fg_hi)                   # (nr,40,8,8)
 
-        colidx = colidx.transpose(0, 2, 1, 3).reshape(200, 320)
-        bitmap = fg.transpose(0, 2, 1, 3).reshape(200, 320).astype(np.uint8)
+        colidx = colidx.transpose(0, 2, 1, 3).reshape(nr * 8, 320)
+        bitmap = fg.transpose(0, 2, 1, 3).reshape(nr * 8, 320).astype(np.uint8)
         pixels = pal[colidx].astype(np.uint8)
         return pixels, bitmap
 
-    def _render_bitmap_rows(self, rows, d018, d016, color_ram, bank_off,
-                            d021_rows):
+    def _render_charmode_hires(self, rows, masks, color_ram, d021_row):
         """
-        Render a contiguous span of character rows in VIC bitmap mode (D011
-        bit 5 set). `rows` is a range of char-row indices (0..24) that all share
-        the same $D018/$D016. Returns (pixels[h,320,3], mask[h,320]) for those
-        rows, where h = len(rows)*8.
+        Render text rows `rows` in standard hi-res character mode: a set bit
+        is the cell's colour-RAM colour, a clear bit is $D021 (per row).
+        Returns (pixels[h,320,3], bitmap[h,320]) for h = len(rows)*8.
+        """
+        np = self.np
+        r0, r1 = rows.start, rows.stop
+        nr = r1 - r0
+        m = masks[r0:r1]
+        bitmap = m.transpose(0, 2, 1, 3).reshape(nr * 8, 320)
+        fg_colors = np.repeat(np.repeat(color_ram[r0:r1], 8, axis=0), 8, axis=1)
+        fg_rgb = self._palette[fg_colors]
+        bg_rgb = self._palette[np.repeat(d021_row[r0:r1], 8)][:, None, :]
+        pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
+        return pixels, bitmap.astype(np.uint8)
 
-        Hi-res bitmap (MCM=0): each 8x8 cell has two colours from the video
+    def _render_bitmap_rows(self, rows, d018, mcm, color_ram, d021_rows):
+        """
+        Render a contiguous span of character rows in VIC bitmap mode (BMM
+        set for these rows). `rows` is a range of char-row indices (0..24)
+        that all share the same $D018 bases; `mcm` selects multicolor.
+        Returns (pixels[h,320,3], mask[h,320]) for those rows, h = len(rows)*8.
+
+        Hi-res bitmap (mcm=0): each 8x8 cell has two colours from the video
         matrix byte — high nibble = set-pixel colour, low nibble = clear-pixel.
-        Multicolor bitmap (MCM=1): 2-bit pixels (double width): 00=$D021,
+        Multicolor bitmap (mcm=1): 2-bit pixels (double width): 00=$D021,
         01=matrix high nibble, 10=matrix low nibble, 11=colour-RAM nibble.
 
         $D018: bit 3 selects the 8 KB bitmap base within the VIC bank; bits 4-7
-        select the video-matrix (colour) base.
+        select the video-matrix (colour) base. Fetches go through the VIC's
+        view of memory (read_vic_block), so the chargen-ROM shadow behaves as
+        on hardware and matches the collision logic byte-for-byte.
         """
         np = self.np
         pal = self._palette
         mem = self.system.mem
-        bmp_base = bank_off + (((d018 >> 3) & 1) * 0x2000)
-        vm_base  = bank_off + (((d018 >> 4) & 0x0F) * 0x400)
+        bmp_rel = ((d018 >> 3) & 1) * 0x2000
+        vm_rel  = ((d018 >> 4) & 0x0F) * 0x400
         r0 = rows[0]
         nrows = len(rows)
         ncells = nrows * 40
         raw = np.frombuffer(
-            bytes(mem.ram[bmp_base + r0 * 320: bmp_base + r0 * 320 + ncells * 8]),
+            mem.read_vic_block(bmp_rel + r0 * 320, ncells * 8),
             dtype=np.uint8).reshape(nrows, 40, 8)
         vm = np.frombuffer(
-            bytes(mem.ram[vm_base + r0 * 40: vm_base + r0 * 40 + ncells]),
+            mem.read_vic_block(vm_rel + r0 * 40, ncells),
             dtype=np.uint8).reshape(nrows, 40)
         bits = np.unpackbits(raw.reshape(ncells, 8), axis=1).reshape(nrows, 40, 8, 8)
 
-        if not (d016 & 0x10):                      # hi-res bitmap
+        if not mcm:                                # hi-res bitmap
             fg = pal[(vm >> 4) & 0x0F]             # (nrows,40,3)
             bg = pal[vm & 0x0F]
             px = np.where(bits[..., None].astype(bool),
@@ -4233,7 +4390,6 @@ class PygameFrontend:
         # screen RAM mid-frame renders cleanly instead of tearing. The snapshot
         # already used each row's active $D018 base, so raster splits that change
         # the screen/font base mid-frame (The Hobbit, Elite) still come out right.
-        bank_off = mem.vic_bank() * 0x4000
         nld = vic.LINES_PER_FRAME
         screen_ram = np.frombuffer(bytes(vic.line_screen),
                                    dtype=np.uint8).reshape(25, 40)
@@ -4265,110 +4421,113 @@ class PygameFrontend:
         # active at that row's raster line (handles vertical raster splits).
         codes = (screen_ram & 0xFF).astype(np.int32)
         masks = self._build_char_masks(codes)               # (25,40,8,8)
-        # Character display mode: standard hi-res text, or multicolor text
-        # (D016 bit 4). Extended-colour / bitmap modes fall back to hi-res.
-        if dr[0x16] & 0x10:
-            pixels, bitmap = self._render_charmode_multicolor(
-                masks, color_ram, d021_row, d022_row, d023_row)
-        else:
-            bitmap = masks.transpose(0, 2, 1, 3).reshape(200, 320)
-            fg_colors_per_pixel = np.repeat(np.repeat(color_ram, 8, axis=0), 8, axis=1)
-            fg_rgb = self._palette[fg_colors_per_pixel]
-            bg_rgb = self._palette[np.repeat(d021_row, 8)][:, None, :]   # (200,1,3)
-            pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
 
-        # --- Bitmap-mode overlay ---
-        # Any character row whose $D011 (recorded at its raster line) has BMM
-        # set is drawn in bitmap mode instead of text. Contiguous rows sharing
-        # $D018/$D016 are rendered together. This makes split screens like
-        # Elite (bitmap 3D view above a text dashboard) come out right.
-        ld11 = vic.line_d011
-        ld16 = vic.line_d016
-        ld18 = vic.line_d018
-        n = len(ld11)
+        # --- Unified per-row mode dispatch ---
+        # Each text row's graphics mode comes from Vic.row_gfx_mode() — the
+        # SAME canonical decision the $D01F collision logic uses. Contiguous
+        # rows with equal mode (and, for bitmap, equal $D018 bases) render as
+        # one band. This handles split screens (Elite: bitmap 3D view over a
+        # text dashboard; MC playfield over a hi-res status line) and, by
+        # construction, keeps renderer and collision in agreement.
+        modes = [vic.row_gfx_mode(r) for r in range(25)]    # (bmm, mcm, d018)
+        pixels = np.empty((200, 320, 3), dtype=np.uint8)
+        bitmap = np.empty((200, 320), dtype=np.uint8)
         r = 0
         while r < 25:
-            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % n
-            if (ld11[raster] >> 5) & 1:                 # BMM set → bitmap row
-                d018 = ld18[raster]
-                d016 = ld16[raster]
-                end = r
-                while end < 25:
-                    rr = (self.FIRST_DISPLAY_LINE + end * 8 + 4) % n
-                    if not ((ld11[rr] >> 5) & 1):
-                        break
-                    if ld18[rr] != d018 or (ld16[rr] & 0x10) != (d016 & 0x10):
-                        break
-                    end += 1
-                rp, rm = self._render_bitmap_rows(range(r, end), d018, d016,
-                                                  color_ram, bank_off,
+            bmm, mcm, d018 = modes[r]
+            end = r + 1
+            while end < 25:
+                b2, m2, d2 = modes[end]
+                if b2 != bmm or m2 != mcm:
+                    break
+                if bmm and d2 != d018:      # bitmap bands need equal bases
+                    break
+                end += 1
+            rows = range(r, end)
+            if bmm:
+                rp, rm = self._render_bitmap_rows(rows, d018, mcm, color_ram,
                                                   d021_row[r:end])
-                pixels[r * 8:end * 8] = rp
-                bitmap[r * 8:end * 8] = rm
-                r = end
+            elif mcm:
+                rp, rm = self._render_charmode_multicolor(
+                    rows, masks, color_ram, d021_row, d022_row, d023_row)
             else:
-                r += 1
+                rp, rm = self._render_charmode_hires(rows, masks, color_ram,
+                                                     d021_row)
+            pixels[r * 8:end * 8] = rp
+            bitmap[r * 8:end * 8] = rm
+            r = end
+        # Keep the frame's foreground mask for verify_foreground(): the
+        # enforcement tool that asserts renderer and collision agree.
+        self._last_fg_bitmap = bitmap
 
         # --- Sprites ---
         # bitmap (200, 320) is the foreground mask used for priority + collisions.
         # sprite_occupancy: per-pixel which sprite (bit 0..7) covers each pixel
         sprite_occupancy = np.zeros((200, 320), dtype=np.uint8)
-        # Sprite multiplexing: a sprite's Y register (and data pointer) can be
-        # rewritten mid-frame by a raster IRQ so one hardware sprite is shown at
-        # several vertical positions (tall figures, >8 sprites). We recorded the
-        # Y/pointer active at every raster line; here we replay them. A display
-        # for sprite i starts on the line where the raster equals its Y register;
-        # after it we skip its height (21 or 42 lines) before the next can start.
-        ly = vic.line_spr_y
-        lp = vic.line_spr_ptr
+        # Sprites are drawn from the canonical per-line records produced by the
+        # sprite display sequencer in Vic.tick(): line_spr_row says which sprite
+        # row the beam displayed on every raster line, and the per-line
+        # attribute recordings say with which X/pointer/colour/MC/expansion/
+        # priority. Multiplexing (Y and pointer rewritten mid-frame to reuse a
+        # hardware sprite) falls out of this naturally — the sequencer simply
+        # starts a new 0..20 row walk at each Y match — as do mid-sprite
+        # attribute splits (colour/expansion/priority changed per raster zone).
+        # Consecutive lines with identical attributes render as one numpy block
+        # (fancy-indexed by their recorded row numbers, which also encodes
+        # Y-expansion doubling), so ordinary games still cost one blit per
+        # sprite. Render in REVERSE order so sprite 0 lands on top of sprite 7
+        # (lower sprite number = higher hardware priority).
+        lrow = vic.line_spr_row
         lx = vic.line_spr_x
+        lp = vic.line_spr_ptr
         lmsb = vic.line_spr_msb
-        nlines = vic.LINES_PER_FRAME
-        # Render in REVERSE order so sprite 0 ends up drawn on top of sprite 7
-        # (lower sprite number = higher hardware priority on real VIC-II).
+        lcol = vic.line_spr_col
+        l1c = vic.line_d01c
+        l1d = vic.line_d01d
+        l1b = vic.line_d01b
+        l25 = vic.line_d025
+        l26 = vic.line_d026
+        decode_cache = {}
         for s in range(7, -1, -1):
-            if not ((vic.regs[0x15] >> s) & 1):
-                continue
-            height = 42 if ((vic.regs[0x17] >> s) & 1) else 21
-            positions = []
-            R = 0
-            while R < nlines:
-                Rn = R + 1 if R + 1 < nlines else 0
-                # A display triggers on the line where the raster equals the
-                # sprite's Y register. Multiplexers often write the new Y from
-                # inside the raster IRQ *during* that very line, so the write is
-                # only visible in our per-line snapshot one line later. Accept
-                # both ly[R]==R (Y set in advance) and ly[R+1]==R (Y set during
-                # line R, before the VIC's Y-compare) so late-written multiplex
-                # positions aren't missed.
-                if ly[R * 8 + s] == R or ly[Rn * 8 + s] == R:
-                    # The game often rewrites the sprite pointer AND X position
-                    # for this section on the very trigger line (as part of the
-                    # raster IRQ), which our per-line recording captures a line
-                    # or two later. Read pointer and X a few lines into the
-                    # section (still constant there) so multiplexed figures get
-                    # the right body part and horizontal position.
-                    pr = R + 3 if R + 3 < nlines else R
-                    spr_x = lx[pr * 8 + s] | (((lmsb[pr] >> s) & 1) << 8)
-                    positions.append((R, lp[pr * 8 + s], spr_x))
-                    R += height
-                else:
-                    R += 1
-            if not positions:                          # sprite never triggered
-                # Fall back to the latched register position (static sprite that
-                # sits above the recording window's first trigger line).
-                sl = vic.SAMPLE_LINE
-                positions = [(vic.regs[s * 2 + 1],
-                              vic.line_spr_ptr[sl * 8 + s],
-                              vic.line_spr_x[sl * 8 + s]
-                              | (((vic.line_spr_msb[sl] >> s) & 1) << 8))]
-            for spr_y, pointer, spr_x in positions:
-                self._render_sprite(s, pixels, bitmap, sprite_occupancy,
-                                    spr_y, pointer, spr_x)
+            sy = 0
+            while sy < 200:
+                r = sy + 50
+                if lrow[r * 8 + s] == 0xFF:
+                    sy += 1
+                    continue
+                a0 = (lx[r * 8 + s] | (((lmsb[r] >> s) & 1) << 8),
+                      lp[r * 8 + s],
+                      lcol[r * 8 + s] & 0x0F,
+                      (l1c[r] >> s) & 1,
+                      (l1d[r] >> s) & 1,
+                      (l1b[r] >> s) & 1,
+                      l25[r] & 0x0F,
+                      l26[r] & 0x0F)
+                rows = [lrow[r * 8 + s]]
+                end = sy + 1
+                while end < 200:
+                    rr = end + 50
+                    if lrow[rr * 8 + s] == 0xFF:
+                        break
+                    an = (lx[rr * 8 + s] | (((lmsb[rr] >> s) & 1) << 8),
+                          lp[rr * 8 + s],
+                          lcol[rr * 8 + s] & 0x0F,
+                          (l1c[rr] >> s) & 1,
+                          (l1d[rr] >> s) & 1,
+                          (l1b[rr] >> s) & 1,
+                          l25[rr] & 0x0F,
+                          l26[rr] & 0x0F)
+                    if an != a0:
+                        break
+                    rows.append(lrow[rr * 8 + s])
+                    end += 1
+                self._render_sprite_run(s, pixels, bitmap, sprite_occupancy,
+                                        sy, rows, a0, decode_cache)
+                sy = end
         # Sprite-sprite collision ($D01E) is maintained by the VIC during
-        # emulation (Vic._update_sprite_sprite_collision), not here, so that the
-        # latch is correct whenever the game polls it rather than only when a
-        # frame happens to be composed for display.
+        # emulation (Vic._collide_at_raster) from the same per-line records,
+        # so the latch is correct whenever the game polls it rather than only
+        # when a frame happens to be composed for display.
 
         return pixels, border
 
@@ -4401,78 +4560,64 @@ class PygameFrontend:
             f"   [Joy: {('Port 1', 'Port 2', 'Both ports')[self._joy_port]}]")
         self.pygame.display.flip()
 
-    def _render_sprite(self, idx, pixels, bg_mask, sprite_occupancy,
-                       spr_y, pointer, spr_x=None):
+    def _render_sprite_run(self, idx, pixels, bg_mask, sprite_occupancy,
+                           sy0, rows, attrs, decode_cache):
         """
-        Render sprite `idx` onto `pixels` (200x320x3) at vertical position
-        `spr_y` (VIC Y coordinate) using data pointer `pointer`, respecting
-        priority and recording collisions with `bg_mask` (foreground mask).
-        Called once per position when the sprite is multiplexed. `spr_x` is the
-        VIC X coordinate active for this position (multiplexing rewrites X along
-        with Y); when None the current register X is used.
-        Writes the sprite's bit-flag into `sprite_occupancy` everywhere it draws.
+        Render a run of consecutive screen lines of sprite `idx` that share one
+        attribute set. `sy0` is the first screen line (0..199), `rows` the
+        recorded sprite row (0..20) displayed on each line — Y-expansion
+        doubling and any mid-frame row effects are already encoded in this
+        sequence, so the block is built by fancy-indexing the decoded sprite.
+        `attrs` = (x, pointer, colour, mc, x_expand, priority, mc0, mc1) as
+        recorded for these lines. `decode_cache` memoises decoded sprite shapes
+        per (pointer, mc) within the frame.
+        Writes the sprite's bit into `sprite_occupancy` everywhere it draws.
         """
         np = self.np
-        vic = self.system.vic
         mem = self.system.mem
-        # Position (VIC coordinates: X=24, Y=50 is top-left of visible area)
-        if spr_x is None:
-            spr_x = vic.regs[idx * 2] | (((vic.regs[0x10] >> idx) & 1) << 8)
-        multicolor = (vic.regs[0x1C] >> idx) & 1
-        y_expand   = (vic.regs[0x17] >> idx) & 1
-        x_expand   = (vic.regs[0x1D] >> idx) & 1
-        sprite_color = vic.regs[0x27 + idx] & 0x0F
+        spr_x, pointer, sprite_color, multicolor, x_expand, prio, mc0, mc1 = attrs
 
-        # Fetch sprite data via VIC view using the supplied pointer.
-        data_addr = pointer * 64
-        sd = mem.read_vic_bytes(data_addr, 63)
+        grid = decode_cache.get((pointer, multicolor))
+        if grid is None:
+            sd = mem.read_vic_bytes(pointer * 64, 63)
+            if multicolor:
+                # (21,12) 2-bit values 0..3, each MC pixel two wide -> (21,24)
+                raw = np.frombuffer(sd, dtype=np.uint8).reshape(21, 3)
+                g = np.zeros((21, 12), dtype=np.uint8)
+                for p in range(4):
+                    g[:, p::4] = (raw >> (6 - 2 * p)) & 0x03
+                grid = np.repeat(g, 2, axis=1)
+            else:
+                bits_flat = np.unpackbits(np.frombuffer(sd, dtype=np.uint8))
+                grid = bits_flat[:21 * 24].reshape(21, 24)
+            decode_cache[(pointer, multicolor)] = grid
 
-        # Build pixel grid (h, w) with color-index values:
-        #   hi-res:     0=transparent, 1=sprite color
-        #   multicolor: 0=transparent, 1=MC0, 2=spritecol, 3=MC1
-        if multicolor:
-            bits = np.zeros((21, 12), dtype=np.uint8)
-            for y in range(21):
-                for bx in range(3):
-                    b = sd[y * 3 + bx]
-                    bits[y, bx * 4 + 0] = (b >> 6) & 0x03
-                    bits[y, bx * 4 + 1] = (b >> 4) & 0x03
-                    bits[y, bx * 4 + 2] = (b >> 2) & 0x03
-                    bits[y, bx * 4 + 3] = b & 0x03
-            bits = np.repeat(bits, 2, axis=1)                # multicolor pixel is 2 wide
-        else:
-            bits_flat = np.unpackbits(np.frombuffer(sd, dtype=np.uint8))
-            bits = bits_flat[:21 * 24].reshape(21, 24)
-        if x_expand: bits = np.repeat(bits, 2, axis=1)
-        if y_expand: bits = np.repeat(bits, 2, axis=0)
-        h, w = bits.shape
+        block = grid[np.asarray(rows, dtype=np.intp)]        # (n, 24)
+        if x_expand:
+            block = np.repeat(block, 2, axis=1)
+        h, w = block.shape
 
-        # Convert VIC coords to inner-area (0..319, 0..199)
+        # Convert VIC X to inner-area (0..319); vertical is already screen rows.
         inner_x = spr_x - 24
-        inner_y = spr_y - 50
-        # Clip
         src_x0 = max(0, -inner_x)
-        src_y0 = max(0, -inner_y)
         src_x1 = min(w, 320 - inner_x)
-        src_y1 = min(h, 200 - inner_y)
-        if src_x0 >= src_x1 or src_y0 >= src_y1:
-            return                                            # off-screen
+        if src_x0 >= src_x1:
+            return                                            # fully off-screen
         dst_x0 = max(0, inner_x)
-        dst_y0 = max(0, inner_y)
         dst_x1 = dst_x0 + (src_x1 - src_x0)
-        dst_y1 = dst_y0 + (src_y1 - src_y0)
+        dst_y0 = sy0
+        dst_y1 = sy0 + h
 
-        sprite_slice = bits[src_y0:src_y1, src_x0:src_x1]
+        sprite_slice = block[:, src_x0:src_x1]
         nonzero = sprite_slice != 0
         if not nonzero.any():
             return
 
-        # Build color RGB for each visible pixel
+        # Colours: hi-res -> 0=transparent, 1=sprite colour; multicolor ->
+        # 0=transparent, 1=$D025, 2=sprite colour, 3=$D026.
         if multicolor:
-            mc0 = vic.regs[0x25] & 0x0F
-            mc1 = vic.regs[0x26] & 0x0F
             color_lookup = np.array([
-                [0, 0, 0],                                   # idx 0 unused (transparent)
+                [0, 0, 0],                                   # transparent
                 C64_PALETTE[mc0],
                 C64_PALETTE[sprite_color],
                 C64_PALETTE[mc1],
@@ -4483,18 +4628,11 @@ class PygameFrontend:
             rgb_pixels = np.broadcast_to(sprite_rgb,
                                          sprite_slice.shape + (3,)).copy()
 
-        # Priority mask, evaluated per rendered row: $D01B is often raster-split
-        # (a sprite in front of the backdrop in one band, behind the foreground
-        # in another), so use the value recorded at each row's raster rather than
-        # one latched value. priority row = 1 -> only draw over background.
+        # Priority ($D01B, constant within the run): 1 -> behind foreground
+        # graphics, so only draw where the background mask is clear.
         bg_slice = bg_mask[dst_y0:dst_y1, dst_x0:dst_x1]
-        ld1b = vic.line_d01b
-        nld = len(ld1b)
-        prio_col = np.array(
-            [(ld1b[(spr_y + sy) % nld] >> idx) & 1
-             for sy in range(src_y0, src_y1)], dtype=bool)[:, None]
-        if prio_col.any():
-            draw_mask = nonzero & (~prio_col | (bg_slice == 0))
+        if prio:
+            draw_mask = nonzero & (bg_slice == 0)
         else:
             draw_mask = nonzero
 
@@ -4509,6 +4647,37 @@ class PygameFrontend:
         # Record where this sprite drew (for sprite-sprite collision pass)
         occ_slice = sprite_occupancy[dst_y0:dst_y1, dst_x0:dst_x1]
         occ_slice |= (nonzero.astype(np.uint8) << idx)
+
+    def verify_foreground(self, verbose=False):
+        """Cross-check the renderer's foreground mask against the VIC's
+        per-raster foreground function (used for $D01F collision).
+
+        Both derive from Vic.row_gfx_mode(), so they must agree bit for bit;
+        any mismatch means the single-source-of-truth contract is broken and
+        a Friday-the-13th-class bug (renderer and collision disagreeing about
+        what is 'solid') has crept back in. Returns (bad_lines, bad_pixels);
+        (0, 0) == all 64000 pixels agree. Call after a frame was composed."""
+        vic = self.system.vic
+        bm = getattr(self, "_last_fg_bitmap", None)
+        if bm is None:
+            print("verify_foreground: no frame composed yet")
+            return (-1, -1)
+        bad_lines = 0
+        bad_pixels = 0
+        for sy in range(200):
+            want = vic._foreground_bits_at(sy + 50, 0, 40)
+            got = 0
+            row = bm[sy]
+            for x in range(320):
+                if row[x]:
+                    got |= (1 << (24 + x))
+            if got != want:
+                bad_lines += 1
+                bad_pixels += bin(got ^ want).count("1")
+                if verbose and bad_lines <= 5:
+                    print(f"  fg mismatch at line {sy}: "
+                          f"{bin(got ^ want).count('1')} px differ")
+        return (bad_lines, bad_pixels)
 
     def _sprite_diag_dump(self):
         """F10: print a full sprite + collision snapshot to the console.
@@ -4575,6 +4744,28 @@ class PygameFrontend:
               f"[1]={js1:05b}")
         print(f"  $DC00={dc00:08b} (P2 dir/fire -> {decode(dc00)})  "
               f"$DC01={dc01:08b} (P1 dir/fire -> {decode(dc01)})")
+        # --- host / audio status (for "no sound" style reports) ---
+        ch = getattr(self, "audio_channel", None)
+        busy = qd = "n/a"
+        if ch is not None:
+            try:
+                busy = ch.get_busy()
+                qd = ch.get_queue() is not None
+            except Exception:
+                pass
+        mix = None
+        try:
+            mix = self.pygame.mixer.get_init()
+        except Exception:
+            pass
+        sid = self.system.sid
+        gates = sum(1 for v in getattr(sid, "voices", [])
+                    if getattr(v, "control", 0) & 1)
+        print(f"host: warp={self.warp} fps={self.shown_fps:.1f} "
+              f"audio_enabled={self.audio_enabled} mixer={mix} "
+              f"channel_busy={busy} queued={qd}")
+        print(f"SID: $D418(vol)={sid.regs[0x18] & 0x0F if hasattr(sid, 'regs') else '?'} "
+              f"gates_on={gates}")
         print("=" * 60)
 
     def run(self):
@@ -5329,6 +5520,15 @@ def _lorenz_successor(data, own_name, valid):
     return pick.lower() if pick else None
 
 
+def _tcol(code, text):
+    """Wrap `text` in an ANSI colour code when stdout is a real terminal;
+    return it plain otherwise, so `--victest ... > log.txt` produces a clean,
+    grep-able file instead of escape-code salad."""
+    if sys.stdout.isatty():
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
 def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
                       wall_limit=0, continue_from=None, do_list=False,
                       cycle_accurate=False):
@@ -5392,7 +5592,7 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
 
     def _pass(name):
         results.append((name, "PASS"))
-        print(f"  \033[32mPASS\033[0m  {name}")
+        print(f"  {_tcol(32, 'PASS')}  {name}", flush=True)
 
     while not done:
         if wall_limit and time.time() - t0 > wall_limit:
@@ -5408,7 +5608,7 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
                 if current and current not in ("START", None):
                     _pass(current)
                 results.append(("finish", "DONE"))
-                print("  \033[36mDONE\033[0m  suite ran through to 'finish'.")
+                print(f"  {_tcol(36, 'DONE')}  suite ran through to 'finish'.", flush=True)
                 done = True
                 break
 
@@ -5423,7 +5623,7 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
 
             if name not in shim.tests:
                 results.append((name, "MISSING"))
-                print(f"  \033[33m????\033[0m  {name} (file missing)")
+                print(f"  {_tcol(33, '????')}  {name} (file missing)", flush=True)
             current = name
             current_start_cyc = sysm.cpu.cycles
             transcript_mark = len(transcript)
@@ -5445,11 +5645,11 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
                 detail = " | ".join(l.strip() for l in tail.splitlines()
                                     if l.strip())[-200:]
                 results.append((current, "FAIL"))
-                print(f"  \033[31mFAIL\033[0m  {current}")
+                print(f"  {_tcol(31, 'FAIL')}  {current}", flush=True)
                 print(f"        {detail}")
             else:
                 results.append((current, "HANG"))
-                print(f"  \033[35mHANG\033[0m  {current} "
+                print(f"  {_tcol(35, 'HANG')}  {current} "
                       f"(>{budget/1e6:.0f}M cycles, likely cycle-exact test)")
             nxt = _lorenz_successor(shim.tests.get(current, b""), current,
                                     set(shim.tests))
@@ -5494,7 +5694,7 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
 
 
 def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
-                  save_only=False, align=3):
+                  save_only=False, align=3, fgcheck=False):
     """Run one VIC-II test PRG (or every *.prg under a directory), render a
     frame, save it, and compare against references/<name>.png if present.
     Returns True if nothing scored below the threshold."""
@@ -5549,7 +5749,7 @@ def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
         try:
             load_addr, _len, is_basic = sysm.load_prg(prg)
         except Exception as ex:
-            print(f"  \033[33mSKIP\033[0m  {name} (load error: {ex})")
+            print(f"  {_tcol(33, 'SKIP')}  {name} (load error: {ex})", flush=True)
             continue
         if is_basic:
             sysm.type_string("RUN\r")
@@ -5563,17 +5763,33 @@ def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
 
         vic = sysm.vic
         arr = None
-        for _ in range(frames):
+        fg_result = None
+        for fno in range(frames):
             lines1 = (fe.RENDER_RASTER - vic.raster) % vic.LINES_PER_FRAME
             if lines1 == 0:
                 lines1 = vic.LINES_PER_FRAME
             cyc1 = lines1 * vic.CYCLES_PER_LINE
             sysm.run(cyc1)
             arr = fe.render_to_array()
+            if fgcheck and fno == frames - 1:
+                # Verify NOW, while memory and the per-raster recordings are in
+                # exactly the state the frame was composed from. Verifying
+                # after the frame's remaining cycles would compare against a
+                # moved-on machine state and report false mismatches on any test
+                # that animates or retriggers raster effects.
+                fg_result = fe.verify_foreground()
             sysm.run(fe.CYCLES_PER_FRAME - cyc1)
 
         shot = os.path.join(out_dir, name + ".png")
         _png_write_rgb(shot, arr)
+
+        if fg_result is not None:
+            bl, bp = fg_result
+            if bl:
+                print(f"  {_tcol(31, 'FGCHECK')} {name}: renderer/collision "
+                      f"foreground DISAGREE on {bl} lines ({bp} px)")
+            else:
+                print(f"  {_tcol(32, 'FGCHECK')} {name}: renderer==collision", flush=True)
 
         border = vic.regs[0x20] & 0x0F
         ssc = getattr(vic, "sprite_sprite_coll", 0)
@@ -5582,20 +5798,20 @@ def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
         ref = os.path.join(os.path.dirname(prg), "references", name + ".png")
         if save_only or not os.path.isfile(ref):
             tag = "SAVE" if save_only else "NOREF"
-            print(f"  \033[36m{tag}\033[0m {name}  ({reg})  -> {shot}")
+            print(f"  {_tcol(36, tag)} {name}  ({reg})  -> {shot}", flush=True)
             results.append((name, tag, 0.0))
             continue
 
         pct, off = best_match(arr, _png_read_rgb(ref))
         if pct is None:
-            print(f"  \033[33mSIZE\033[0m {name}  (Referenz-Format weicht ab, "
+            print(f"  {_tcol(33, 'SIZE')} {name}  (Referenz-Format weicht ab, "
                   f"z.B. NTSC)")
             results.append((name, "SIZE", 0.0))
         elif pct >= threshold:
-            print(f"  \033[32mPASS\033[0m {name}  {pct:5.1f}%  off{off}  ({reg})")
+            print(f"  {_tcol(32, 'PASS')} {name}  {pct:5.1f}%  off{off}  ({reg})", flush=True)
             results.append((name, "PASS", pct))
         else:
-            print(f"  \033[31mDIFF\033[0m {name}  {pct:5.1f}%  off{off}  ({reg})")
+            print(f"  {_tcol(31, 'DIFF')} {name}  {pct:5.1f}%  off{off}  ({reg})", flush=True)
             results.append((name, "DIFF", pct))
 
     npass = sum(1 for _, s, _ in results if s == "PASS")
@@ -5663,6 +5879,8 @@ TEST MODES
       --threshold P       match percent needed for PASS (default 95)
       --align N           +/- pixel offset search for border crop (default 3)
       --save-only         only render+save, do not compare
+      --fgcheck           also verify renderer's foreground mask == VIC's
+                          per-raster collision foreground (single-source check)
 
 IN-WINDOW KEYS
   F11                   toggle warp (unthrottled) speed
@@ -5739,6 +5957,7 @@ def main():
             out_dir=_vopt("--out", "victest_out", str),
             threshold=_vopt("--threshold", 95.0, float),
             save_only=("--save-only" in args),
+            fgcheck=("--fgcheck" in args),
             align=_vopt("--align", 3, int),
         )
         sys.exit(0 if ok else 1)
