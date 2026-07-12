@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.12-sprite-perline3"
+__version__ = "2026.07.12-audio-pacing"
 
 
 # =============================================================================
@@ -4038,6 +4038,12 @@ class PygameFrontend:
                                        size=-16, channels=1, buffer=4096)
                 self.audio_channel = self.pygame.mixer.Channel(0)
                 self.audio_enabled = True
+                # One frame of silence, used to re-prime the channel after an
+                # underrun so playback regains ~2 chunks of lead instead of
+                # running chunk-to-mouth (which turns every host hiccup into
+                # an audible dropout).
+                z = self.np.zeros((self.samples_per_frame, 2), self.np.int16)
+                self._silence_sound = self.pygame.sndarray.make_sound(z)
             except self.pygame.error as ex:
                 print(f"Audio disabled: {ex}")
 
@@ -4349,12 +4355,18 @@ class PygameFrontend:
         # Duplicate mono to stereo for the default pygame mixer config
         s16 = self.np.column_stack((s16_mono, s16_mono))
         sound = self.pygame.sndarray.make_sound(s16)
-        # If channel is busy, queue; else play. Keeps a 1-2 frame buffer.
+        # Steady state: previous chunk playing, this one queued (~2 frames of
+        # lead). When the channel has drained (startup or a host hiccup ate
+        # our lead), re-prime with one silence chunk BEFORE the real audio:
+        # that restores the lead so the next small hiccup doesn't cause an
+        # audible gap — a drained channel fed chunk-to-mouth turns every
+        # scheduling wobble into a dropout.
         if not self.audio_channel.get_busy():
-            self.audio_channel.play(sound)
+            self.audio_channel.play(self._silence_sound)
+            self.audio_channel.queue(sound)
         elif self.audio_channel.get_queue() is None:
             self.audio_channel.queue(sound)
-        # else: queue full, drop this frame's audio (we're behind)
+        # else: queue full, drop this frame's audio (we're ahead, e.g. warp)
 
     def step_frame(self):
         """Advance one full frame worth of cycles, but render right after the
@@ -4825,7 +4837,13 @@ class PygameFrontend:
                 frames = 0
                 last = now
             if not self.warp:
-                clock.tick(self.target_hz)
+                # tick_busy_loop instead of tick: plain tick() sleeps with the
+                # OS timer's coarse granularity (~10-15 ms on some systems),
+                # which can overshoot the 20 ms frame budget and silently drag
+                # the effective rate below 50 fps — starving the audio queue
+                # (heard as intermittent music dropouts that "warp mode fixes").
+                # The busy-wait costs a little CPU but paces frames precisely.
+                clock.tick_busy_loop(self.target_hz)
         self.pygame.quit()
 
 
