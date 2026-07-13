@@ -300,6 +300,7 @@
   <h1><span>C</span> → <span style="color:var(--accent2)">6510</span> <small>&nbsp;MOS 6510 Compiler — Standalone</small></h1>
   <div class="spacer"></div>
   <button class="btn secondary" id="btn-example">📄 Beispiel</button>
+  <button class="btn secondary" id="btn-example2">🖥️ Beispiel: Bildschirmausgabe</button>
   <label class="btn" style="cursor:pointer">📂 Öffnen<input type="file" id="file-input" accept=".c,.h,.txt" style="display:none"></label>
   <button class="btn primary" id="btn-compile">▶ Kompilieren</button>
 </header>
@@ -573,7 +574,10 @@ function astToString(node, indent) {
 //  CODE GENERATOR — MOS 6510
 // ══════════════════════════════════════
 class CodeGenerator6510 {
-  constructor(){this.code=[];this.labelCounter=0;this.zeroPageOffset=0x02;this.varToZp={};this.tempCounter=0;this.arrayBaseAddresses={};this.currentMemoryOffset=0x0400;}
+  constructor(){this.code=[];this.labelCounter=0;this.zeroPageOffset=0x02;this.varToZp={};this.tempCounter=0;this.arrayBaseAddresses={};this.currentMemoryOffset=0xC000;/* freies RAM ab $C000 statt Bildschirmspeicher $0400 */}
+  petscii(ch){if(ch==='\\n')return 13;return ch.charCodeAt(0)&0xFF;}
+  emitCharOut(code){this.emit(`    LDA #$${this.h2(code&0xFF)}`);this.emit('    JSR $FFD2    ; CHROUT — Zeichen ausgeben');}
+  genPrintCall(node){if(node.args.length>=1&&node.args[0]instanceof Literal&&node.args[0].litType==='string'){const s=node.args[0].value;this.emit(`    ; ${node.name}("${s}")`);for(const ch of s){this.emitCharOut(this.petscii(ch));}return true;}return false;}
   newLabel(p){return(p||'L')+(this.labelCounter++);}
   allocZP(vn){if(!(vn in this.varToZp)){this.varToZp[vn]=this.zeroPageOffset;this.zeroPageOffset++;if(this.zeroPageOffset>0xFF)throw new Error("Zero-Page voll!");}return this.varToZp[vn];}
   emit(l){this.code.push(l);}
@@ -581,7 +585,7 @@ class CodeGenerator6510 {
   h4(n){return n.toString(16).toUpperCase().padStart(4,'0');}
 
   generate(node){
-    if(node instanceof Program){this.emit('; MOS 6510 Assembler Code');this.emit('; Generiert aus C-Code');this.emit('');node.declarations.forEach(d=>this.generate(d));return this.code.join('\n');}
+    if(node instanceof Program){this.emit('; MOS 6510 Assembler Code');this.emit('; Generiert aus C-Code');this.emit('');const hasMain=node.declarations.some(d=>d instanceof FunctionDecl&&d.name==='main');if(hasMain){this.emit('    JMP main    ; Programmstart (Einsprungpunkt fix, unabhängig von Deklarationsreihenfolge)');this.emit('');}node.declarations.forEach(d=>this.generate(d));return this.code.join('\n');}
     if(node instanceof FunctionDecl){this.emit(`; Funktion: ${node.returnType} ${node.name}`);this.emit(`${node.name}:`);node.params.forEach(p=>{const z=this.allocZP(p.name);this.emit(`    ; Parameter ${p.name} bei $${this.h2(z)}`);});this.generate(node.body);this.emit('    RTS');this.emit('');return;}
     if(node instanceof CompoundStmt){node.statements.forEach(s=>this.generate(s));return;}
     if(node instanceof VarDecl){const z=this.allocZP(node.name);this.emit(`    ; Variable ${node.varType} ${node.name} bei $${this.h2(z)}`);if(node.initValue){this.genExpr(node.initValue);this.emit(`    STA $${this.h2(z)}    ; ${node.name} = Akkumulator`);}return;}
@@ -594,7 +598,11 @@ class CodeGenerator6510 {
     if(node instanceof ForStmt){const lp=this.newLabel('FOR'),en=this.newLabel('ENDFOR');if(node.init)this.generate(node.init);this.emit(`${lp}:`);if(node.condition){this.genExpr(node.condition);this.emit('    CMP #$00');this.emit(`    BEQ ${en}`);}this.generate(node.body);if(node.increment)this.generate(node.increment);this.emit(`    JMP ${lp}`);this.emit(`${en}:`);return;}
     if(node instanceof StructDecl){this.emit(`    ; Struct ${node.name} definiert`);return;}
     if(node instanceof StructVarDecl){this.emit(`    ; Struct-Variable ${node.structName} ${node.varName}`);return;}
-    if(node instanceof FunctionCall){this.emit(`    JSR ${node.name}`);return;}
+    if(node instanceof FunctionCall){
+      if((node.name==='printf'||node.name==='puts'||node.name==='print_str')&&this.genPrintCall(node))return;
+      if(node.name==='putchar'&&node.args.length===1){this.genExpr(node.args[0]);this.emit('    JSR $FFD2    ; CHROUT — Zeichen aus Akkumulator ausgeben');return;}
+      this.emit(`    JSR ${node.name}`);return;
+    }
   }
 
   genExpr(node){
@@ -608,7 +616,11 @@ class CodeGenerator6510 {
       if(['<','>','<=','>=','==','!='].includes(node.op)){this.genExpr(node.left);const t=this.allocZP(`_temp${this.tempCounter++}`);this.emit(`    STA $${this.h2(t)}`);this.genExpr(node.right);this.emit(`    CMP $${this.h2(t)}`);const tl=this.newLabel('TRUE'),el=this.newLabel('ENDCMP');if(node.op==='<')this.emit(`    BCC ${tl}`);if(node.op==='>'){this.emit(`    BEQ ${el}`);this.emit(`    BCS ${tl}`);}if(node.op==='==')this.emit(`    BEQ ${tl}`);if(node.op==='!=')this.emit(`    BNE ${tl}`);if(node.op==='<='){this.emit(`    BCC ${tl}`);this.emit(`    BEQ ${tl}`);}if(node.op==='>=')this.emit(`    BCS ${tl}`);this.emit('    LDA #$00');this.emit(`    JMP ${el}`);this.emit(`${tl}:`);this.emit('    LDA #$01');this.emit(`${el}:`);return'A';}
     }
     if(node instanceof UnaryOp&&node.op==='-'){this.genExpr(node.operand);this.emit('    EOR #$FF    ; Bitweise invertieren');this.emit('    CLC');this.emit('    ADC #$01    ; +1 für Two\'s Complement');return'A';}
-    if(node instanceof FunctionCall){this.emit(`    JSR ${node.name}`);return'A';}
+    if(node instanceof FunctionCall){
+      if((node.name==='printf'||node.name==='puts'||node.name==='print_str')&&this.genPrintCall(node))return'A';
+      if(node.name==='putchar'&&node.args.length===1){this.genExpr(node.args[0]);this.emit('    JSR $FFD2    ; CHROUT — Zeichen aus Akkumulator ausgeben');return'A';}
+      this.emit(`    JSR ${node.name}`);return'A';
+    }
     if(node instanceof ArrayAccess){if(node.arrayName in this.arrayBaseAddresses){this.genExpr(node.index);this.emit('    TAY');const pl=this.varToZp[node.arrayName+'_ptr_lo'],ph=this.varToZp[node.arrayName+'_ptr_hi'];if(pl!==undefined&&ph!==undefined)this.emit(`    LDA ($${this.h2(pl)}),Y    ; ${node.arrayName}[index]`);}return'A';}
     if(node instanceof Dereference){if(node.pointer instanceof Identifier){const pn=node.pointer.name,pl=this.varToZp[pn+'_lo'],ph=this.varToZp[pn+'_hi'];if(pl!==undefined&&ph!==undefined){this.emit('    LDY #$00');this.emit(`    LDA ($${this.h2(pl)}),Y    ; *${pn}`);}}return'A';}
     if(node instanceof AddressOf){if(node.operand instanceof Identifier){const vn=node.operand.name;if(vn in this.varToZp){const z=this.varToZp[vn];this.emit(`    LDA #$${this.h2(z)}    ; Low-Byte von &${vn}`);this.emit('    LDX #$00    ; High-Byte');return'A';}if(vn in this.arrayBaseAddresses){const a=this.arrayBaseAddresses[vn];this.emit(`    LDA #<$${this.h4(a)}    ; Low-Byte von &${vn}`);this.emit(`    LDX #>$${this.h4(a)}    ; High-Byte`);return'A';}}return'A';}
@@ -722,7 +734,7 @@ const Assembler6510 = (() => {
   }
 
   function assemble(asmText, baseAddr) {
-    baseAddr = baseAddr || 0xC000;
+    baseAddr = baseAddr || 0x080E; // direkt hinter dem "10 SYS 2062"-BASIC-Stub bei $0801
     const lines = asmText.split('\n');
     const parsed = lines.map(l => parseLine(l));
 
@@ -821,7 +833,7 @@ class CPU6502 {
 
   reset() {
     this.mem = new Uint8Array(65536);
-    this.A = 0; this.X = 0; this.Y = 0; this.SP = 0xFD; this.PC = 0xC000;
+    this.A = 0; this.X = 0; this.Y = 0; this.SP = 0xFD; this.PC = 0x080E;
     this.N = 0; this.V = 0; this.B = 0; this.D = 0; this.I = 0; this.Z = 0; this.C = 0;
     this.cycles = 0; this.halted = false; this.prevMem = null;
     this.prevRegs = null;
@@ -1066,7 +1078,7 @@ function compileC(source) {
     result.ast = astToString(ast).join('\n');
     const codegen = new CodeGenerator6510();
     result.asm = codegen.generate(ast);
-    result.hex = Assembler6510.assemble(result.asm, 0xC000);
+    result.hex = Assembler6510.assemble(result.asm, 0x080E);
   } catch (e) {
     result.error = e.message || String(e);
   }
@@ -1132,6 +1144,32 @@ int main() {
     }
 
     return x;
+}`;
+
+const EXAMPLE_C2 = `// Beispiel: Textausgabe auf dem C64-Bildschirm
+// printf("...") und putchar(13) werden auf den KERNAL-Aufruf
+// CHROUT ($FFD2) abgebildet -> echte Ausgabe auf einem echten C64/VICE.
+
+void print_line() {
+    printf("HELLO FROM 6510 COMPILER");
+    putchar(13);
+}
+
+void print_counter() {
+    int i = 0;
+    while (i < 5) {
+        putchar(48 + i);
+        putchar(13);
+        i = i + 1;
+    }
+}
+
+int main() {
+    print_line();
+    print_counter();
+    printf("FERTIG");
+    putchar(13);
+    return 0;
 }`;
 
 // ══════════════════════════════════════
@@ -1412,12 +1450,18 @@ function getPrgBytes() {
   if (!lastResult || !lastResult.hex) return null;
   const allBytes = [];
   lastResult.hex.lines.forEach(e => e.bytes.forEach(b => allBytes.push(b)));
-  // PRG format: 2-byte load address (little endian) + code
-  const base = lastResult.hex.baseAddr;
-  const prg = new Uint8Array(2 + allBytes.length);
-  prg[0] = base & 0xFF;
-  prg[1] = (base >> 8) & 0xFF;
-  allBytes.forEach((b, i) => prg[i+2] = b);
+
+  // Minimaler BASIC-Loader "10 SYS 2062" bei Ladeadresse $0801.
+  // $080E ($0801+13 Bytes) ist danach exakt die Startadresse unseres Maschinencodes,
+  // sodass LOAD"...",8,1 + RUN das Programm auf einem echten C64 automatisch startet.
+  const BASIC_STUB = [0x0C,0x08, 0x0A,0x00, 0x9E,0x20,0x32,0x30,0x36,0x32, 0x00, 0x00,0x00];
+  const loadAddr = 0x0801;
+
+  const prg = new Uint8Array(2 + BASIC_STUB.length + allBytes.length);
+  prg[0] = loadAddr & 0xFF;
+  prg[1] = (loadAddr >> 8) & 0xFF;
+  BASIC_STUB.forEach((b, i) => prg[2 + i] = b);
+  allBytes.forEach((b, i) => prg[2 + BASIC_STUB.length + i] = b);
   return prg;
 }
 
@@ -1428,7 +1472,8 @@ editor.addEventListener('keydown', e => {
 });
 editor.addEventListener('input', updateStats);
 
-document.getElementById('btn-example').addEventListener('click', () => { editor.value = EXAMPLE_C; updateStats(); });
+document.getElementById('btn-example').addEventListener('click', () => { editor.value = EXAMPLE_C; updateStats(); syncHighlight(); });
+document.getElementById('btn-example2').addEventListener('click', () => { editor.value = EXAMPLE_C2; updateStats(); syncHighlight(); });
 document.getElementById('btn-compile').addEventListener('click', compile);
 document.getElementById('file-input').addEventListener('change', e => {
   const f=e.target.files[0]; if(!f)return;
@@ -1466,8 +1511,8 @@ const cpu = new CPU6502();
 let emuLoaded = false;
 let emuRunning = false;
 let emuTimer = null;
-let emuBaseAddr = 0xC000;
-let emuEndAddr = 0xC000;
+let emuBaseAddr = 0x080E;
+let emuEndAddr = 0x080E;
 let traceHistory = [];
 
 function toggleEmulator() {
