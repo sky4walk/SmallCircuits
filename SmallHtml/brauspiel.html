@@ -43,6 +43,9 @@ button.ghost{background:var(--panel);color:var(--text);border:1px solid var(--li
 .pb:active,.pb.on{background:var(--copper);color:#241f1a;}
 #pbAct{width:110px;font-size:15px;}
 #hintbar{color:var(--dim);font-size:12px;text-align:center;margin-top:8px;min-height:16px;}
+button.snd{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+  padding:3px 9px;font-size:11px;font-weight:400;border-radius:5px;}
+button.snd:hover{color:var(--text);}
 
 #guide{background:var(--panel);border:1px solid var(--line);border-radius:8px;
   padding:12px 14px;margin-top:12px;}
@@ -95,7 +98,8 @@ button.ghost{background:var(--panel);color:var(--text);border:1px solid var(--li
       <div class="pb" id="pbAct">Aktion</div>
     </div>
   </div>
-  <div id="hintbar">Tastatur: &#8592; &#8594; laufen &middot; Leertaste = Aktion</div>
+  <div id="hintbar">Tastatur: &#8592; &#8594; laufen &middot; Leertaste = Aktion
+    &middot; <button id="btnSound" class="snd">Ton an</button></div>
   <div id="guide"></div>
 </div>
 
@@ -398,7 +402,132 @@ document.addEventListener('keyup', e=>{
   if(e.key===' '||e.key==='ArrowUp') input.action=false;
 });
 
+/* ================= Audio: alles zur Laufzeit synthetisiert ================= */
+const mtof = m => 440*Math.pow(2, (m - 69)/12);
+
+const MELODIE = [78,81,78, 76,79,76, 74,78,81, 78,81,84, 83,79,83, 81,78,74, 73,76,79, 74,0,0];
+const AKKORDE = [
+  { bass:38, ton:[62,66,69] }, { bass:45, ton:[61,64,67] },
+  { bass:38, ton:[62,66,69] }, { bass:38, ton:[66,69,72] },
+  { bass:43, ton:[59,62,67] }, { bass:38, ton:[62,66,69] },
+  { bass:45, ton:[61,64,67] }, { bass:38, ton:[62,66,69] }
+];
+const TEMPO = { 0:0.42, 1:0.42, 2:0.46, 3:0.44, 4:0.36, 5:0.58, 6:0.40 };
+
+const AUDIO = {
+  on:true, ready:false, ctx:null, step:0, next:0, timer:null, beat:0.42,
+  init(){
+    if(this.ready) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) return;
+    const c = new AC();
+    this.ctx = c;
+    this.master = c.createGain(); this.master.gain.value = 0.5; this.master.connect(c.destination);
+    this.mg = c.createGain(); this.mg.gain.value = 0.20; this.mg.connect(this.master);
+    this.sg = c.createGain(); this.sg.gain.value = 0.55; this.sg.connect(this.master);
+    const len = c.sampleRate*2;
+    const buf = c.createBuffer(1, len, c.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i = 0; i < len; i++) d[i] = Math.random()*2 - 1;
+    this.nb = buf;
+    const src = c.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    this.af = c.createBiquadFilter(); this.af.type = 'lowpass'; this.af.frequency.value = 400;
+    this.ag = c.createGain(); this.ag.gain.value = 0;
+    src.connect(this.af); this.af.connect(this.ag); this.ag.connect(this.master);
+    src.start();
+    this.ready = true;
+    this.next = c.currentTime + 0.05;
+    this.timer = setInterval(() => this.sched(), 80);
+  },
+  resume(){ if(this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  amb(g, cut){
+    if(!this.ready) return;
+    const t = this.ctx.currentTime;
+    this.ag.gain.setTargetAtTime(this.on ? g : 0, t, 0.15);
+    this.af.frequency.setTargetAtTime(cut, t, 0.15);
+  },
+  ton(f, dur, type, g, when, dest){
+    if(!this.ready || !this.on) return;
+    const c = this.ctx, t = when || c.currentTime;
+    const o = c.createOscillator(), v = c.createGain();
+    o.type = type || 'square'; o.frequency.value = f;
+    v.gain.setValueAtTime(0, t);
+    v.gain.linearRampToValueAtTime(g, t + 0.008);
+    v.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(v); v.connect(dest || this.sg);
+    o.start(t); o.stop(t + dur + 0.02);
+  },
+  rausch(dur, cut, g, type){
+    if(!this.ready || !this.on) return;
+    const c = this.ctx, t = c.currentTime;
+    const s = c.createBufferSource(); s.buffer = this.nb;
+    s.loop = true;
+    const f = c.createBiquadFilter(); f.type = type || 'lowpass'; f.frequency.value = cut;
+    const v = c.createGain();
+    v.gain.setValueAtTime(g, t);
+    v.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    s.connect(f); f.connect(v); v.connect(this.sg);
+    s.start(t); s.stop(t + dur + 0.02);
+  },
+  sched(){
+    if(!this.ready) return;
+    const c = this.ctx;
+    while(this.next < c.currentTime + 0.25){
+      if(this.on){
+        const b = this.step % 24, takt = Math.floor(b/3), schlag = b % 3;
+        const a = AKKORDE[takt];
+        if(schlag === 0) this.ton(mtof(a.bass), this.beat*0.9, 'triangle', 0.16, this.next, this.mg);
+        else a.ton.forEach(n => this.ton(mtof(n), this.beat*0.35, 'triangle', 0.05, this.next, this.mg));
+        const m = MELODIE[b];
+        if(m) this.ton(mtof(m), this.beat*(b === 21 ? 2.6 : 0.75), 'square', 0.055, this.next, this.mg);
+      }
+      this.next += this.beat;
+      this.step = (this.step + 1) % 24;
+    }
+  },
+  station(id){ this.beat = TEMPO[id] || 0.42; },
+  fx(n){
+    if(!this.ready || !this.on) return;
+    const c = this.ctx, t = c.currentTime;
+    switch(n){
+      case 'nimm':    this.ton(320, 0.07, 'square', 0.10); this.ton(480, 0.05, 'square', 0.06, t + 0.05); break;
+      case 'wumms':   this.rausch(0.14, 260, 0.34); this.ton(88, 0.12, 'triangle', 0.16); break;
+      case 'klick':   this.ton(900, 0.03, 'square', 0.07); break;
+      case 'klack':   this.ton(240, 0.05, 'square', 0.10); this.rausch(0.05, 2600, 0.10, 'highpass'); break;
+      case 'kurbel':  this.ton(180 + Math.random()*40, 0.04, 'sawtooth', 0.09); break;
+      case 'ding':    this.ton(1180, 0.20, 'sine', 0.12); this.ton(1760, 0.16, 'sine', 0.05, t + 0.02); break;
+      case 'fertig':  [74,78,81,86].forEach((m,i) => this.ton(mtof(m), 0.22, 'square', 0.09, t + i*0.09)); break;
+      case 'schlecht':[70,66,62].forEach((m,i) => this.ton(mtof(m), 0.26, 'sawtooth', 0.10, t + i*0.13)); break;
+      case 'warnung': this.ton(660, 0.09, 'square', 0.09); this.ton(660, 0.09, 'square', 0.09, t + 0.14); break;
+      case 'zisch':   this.rausch(0.55, 5200, 0.16, 'highpass'); break;
+      case 'plopp':   this.ton(420, 0.05, 'sine', 0.20); this.ton(180, 0.06, 'sine', 0.14, t + 0.03); break;
+      case 'glas':    this.ton(2100, 0.09, 'sine', 0.08); this.ton(3100, 0.07, 'sine', 0.04, t + 0.01); break;
+      case 'eis':     this.ton(1400, 0.05, 'triangle', 0.09); this.rausch(0.09, 4200, 0.09, 'highpass'); break;
+      case 'blubb':   this.ton(150 + Math.random()*60, 0.07, 'sine', 0.07); break;
+      case 'schwapp': this.rausch(0.40, 900, 0.26); break;
+      case 'kork':    this.ton(300, 0.03, 'square', 0.14); this.ton(700, 0.06, 'sine', 0.12, t + 0.02); break;
+      case 'gluck': {
+        const o = c.createOscillator(), v = c.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(230 + Math.random()*40, t);
+        o.frequency.exponentialRampToValueAtTime(95, t + 0.11);
+        v.gain.setValueAtTime(0, t);
+        v.gain.linearRampToValueAtTime(0.16, t + 0.015);
+        v.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+        o.connect(v); v.connect(this.sg); o.start(t); o.stop(t + 0.15);
+        this.rausch(0.08, 900, 0.05);
+        break;
+      }
+      case 'ahh':     this.rausch(0.45, 700, 0.07); this.ton(160, 0.35, 'sawtooth', 0.03); break;
+    }
+  }
+};
+function sfx(n){ AUDIO.fx(n); }
+
 function px(x, y, w, h, col){ ctx.fillStyle = col; ctx.fillRect(x|0, y|0, w|0, h|0); }
+
+
 function spr(img, x, y, flip){
   x = Math.round(x); y = Math.round(y);
   if(flip){
@@ -507,11 +636,11 @@ S1.update = function(dt){
 
   if(atStack && !p.carry){
     prompt = s.sacksLeft > 0 ? 'Aktion: Sack aufnehmen (5 kg)' : 'Vorrat leer';
-    if(actionEdge && s.sacksLeft > 0){ s.sacksLeft--; p.carry = 'sack'; s.sackKg = SACK_KG; }
+    if(actionEdge && s.sacksLeft > 0){ s.sacksLeft--; p.carry = 'sack'; s.sackKg = SACK_KG; sfx('nimm'); }
   }
   if(atWheel && !p.carry){
     prompt = 'Aktion: Spaltweite \u2013 ' + GRIND[s.setting].label;
-    if(actionEdge){ s.setting = ORDER[(ORDER.indexOf(s.setting)+1) % ORDER.length]; s.flash = 0.4; }
+    if(actionEdge){ s.setting = ORDER[(ORDER.indexOf(s.setting)+1) % ORDER.length]; s.flash = 0.4; sfx('klack'); }
   }
   if(atCrank && s.hopper <= 0.01 && !p.carry) prompt = 'Trichter ist leer';
 
@@ -529,6 +658,7 @@ S1.update = function(dt){
       if(s.sackKg <= 0.01){ s.sackKg = 0; p.carry = null; }
     }
   }
+  AUDIO.amb(s.pouring ? (s.aligned ? 0.10 : 0.14) : 0, s.pouring ? 1400 : 400);
   if(s.pouring) s.stream.push({ x: p.x + 7 + (Math.random()*4 - 2), y: 122, v: 60 + Math.random()*30 });
   for(let i = s.stream.length - 1; i >= 0; i--){
     s.stream[i].y += s.stream[i].v * dt;
@@ -542,6 +672,7 @@ S1.update = function(dt){
 };
 S1.crank = function(){
   const s = this.s;
+  sfx('kurbel');
   const step = Math.min(0.32, s.hopper);
   s.hopper -= step; s.bin += step; s.groundKg += step;
   s.yieldSum += GRIND[s.setting].yield * step;
@@ -682,8 +813,9 @@ S2.update = function(dt){
   s.inBand = Math.abs(s.temp - rast.temp) <= BAND;
   if(s.inBand && s.hold < rast.dur) s.hold += dt;
   if(s.hold >= rast.dur) s.rastOk = true;
+  if(s.hold >= rast.dur && !s.rastGong){ s.rastGong = true; sfx('ding'); }
   if(s.rastOk && s.idx < RASTS.length - 1 && s.temp >= RASTS[s.idx+1].temp - BAND){
-    s.idx++; s.hold = 0; s.rastOk = false;
+    s.idx++; s.hold = 0; s.rastOk = false; s.rastGong = false;
   }
 
   const atWood = near(X_WOOD, 18), atFire = near(X_FIRE, 12), atFlap = near(X_FLAP, 10);
@@ -695,19 +827,23 @@ S2.update = function(dt){
   if(s.stirring) s.bottom = Math.max(0, s.bottom - 26*dt);
   else if(s.temp > 45) s.bottom = Math.min(140, s.bottom + heat*0.22*dt);
   if(s.bottom > 100 && !s.done){
+    sfx('schlecht'); AUDIO.rausch(0.8, 700, 0.3);
     s.scorch = 100;
     s.warnT = 99;
     s.done = true; s.reason = 'angebrannt';
     endStation(1100);
   }
   if(s.warnT > 0) s.warnT -= dt;
+  AUDIO.amb(0.02 + (heat/100)*0.09 + (s.stirring ? 0.07 : 0), s.stirring ? 900 : 320);
+  if(s.bottom > 80 && !s.warned){ s.warned = true; sfx('warnung'); }
+  if(s.bottom < 60) s.warned = false;
 
   if(s.jodT > 0){
     s.jodT -= dt;
     prompt = 'Jodprobe l\u00e4uft\u2026';
     if(s.jodT <= 0){
-      if(s.starch <= 8){ s.jodOk = true; s.jodRes = 'bernstein \u2013 verzuckert!'; }
-      else s.jodRes = 'blauschwarz \u2013 St\u00e4rke da';
+      if(s.starch <= 8){ s.jodOk = true; s.jodRes = 'bernstein \u2013 verzuckert!'; sfx('ding'); }
+      else { s.jodRes = 'blauschwarz \u2013 St\u00e4rke da'; sfx('klick'); }
       s.jodShow = 2.4;
     }
   } else walk(dt, p.carry ? 26 : 44);
@@ -715,23 +851,23 @@ S2.update = function(dt){
 
   if(atWood && !p.carry && s.jodT <= 0){
     prompt = s.wood > 0 ? 'Aktion: Armvoll Holz' : 'Holz ist alle';
-    if(actionEdge && s.wood > 0){ s.wood--; p.carry = 'wood'; }
+    if(actionEdge && s.wood > 0){ s.wood--; p.carry = 'wood'; sfx('nimm'); }
   }
   if(atFire && p.carry === 'wood'){
     prompt = 'Aktion: Holz nachlegen';
-    if(actionEdge){ s.fuel = Math.min(100, s.fuel + 18); p.carry = null; }
+    if(actionEdge){ s.fuel = Math.min(100, s.fuel + 18); p.carry = null; sfx('wumms'); }
   }
   if(atFlap && !p.carry){
     prompt = 'Aktion: Luftklappe ' + (s.flap ? 'schlie\u00dfen' : '\u00f6ffnen');
-    if(actionEdge) s.flap = !s.flap;
+    if(actionEdge){ s.flap = !s.flap; sfx('klack'); }
   }
   if(atBucket && !p.carry){
     prompt = 'Aktion: Kelle kaltes Wasser';
-    if(actionEdge){ s.temp = Math.max(15, s.temp - 6); s.dilute++; }
+    if(actionEdge){ s.temp = Math.max(15, s.temp - 6); s.dilute++; sfx('schwapp'); }
   }
   if(atTable && !p.carry && s.jodT <= 0 && !s.jodOk){
     prompt = 'Aktion: Jodprobe';
-    if(actionEdge) s.jodT = 1.3;
+    if(actionEdge){ s.jodT = 1.3; sfx('glas'); }
   }
   if(atKettle && !p.carry && s.jodT <= 0){
     if(abmaischbar){
@@ -983,12 +1119,14 @@ S3.update = function(dt){
 
   if(atHahn){
     prompt = 'Aktion: Hahn \u2013 ' + FLOWS[s.pos].label;
-    if(actionEdge) s.pos = (s.pos + 1) % FLOWS.length;
+    if(actionEdge){ s.pos = (s.pos + 1) % FLOWS.length; sfx('klick'); }
   }
   if(atHebel){
     prompt = 'Aktion: ' + (s.route === 'zurueck' ? 'in den Beh\u00e4lter leiten' : 'zur\u00fcck in den Bottich');
-    if(actionEdge) s.route = s.route === 'zurueck' ? 'behaelter' : 'zurueck';
+    if(actionEdge){ s.route = s.route === 'zurueck' ? 'behaelter' : 'zurueck'; sfx('klack'); }
   }
+  AUDIO.amb(clamp(eff*0.10, 0, 0.16) + (s.hacking ? 0.10 : 0) + (s.pouring ? 0.09 : 0),
+    s.hacking ? 2400 : (s.pouring ? 1600 : 900));
   if(atNach && !s.pouring) prompt = 'Aktion halten: Nachguss';
   else if(s.pouring) prompt = 'Nachguss\u2026';
   if(atHarke && !s.hacking) prompt = 'Aktion halten: aufhacken';
@@ -1178,18 +1316,21 @@ S4.update = function(dt){
     if(s.foam >= 100){
       s.vol -= 8; s.spills++; s.foam = 35;
       s.msg = '\u00fcbergekocht! 8 l weg'; s.msgT = 2.4;
+      sfx('schwapp'); sfx('zisch');
     }
+    if(s.foam > 78 && !s.fWarn){ s.fWarn = true; sfx('warnung'); }
+    if(s.foam < 55) s.fWarn = false;
     if(s.wall >= 0.35){
       s.left -= dt; s.boilT += dt;
       s.dms = Math.max(0, s.dms - s.wall*1.3*dt);
       s.hotbreak = Math.min(100, s.hotbreak + s.wall*1.1*dt);
       s.vol -= s.wall*0.09*dt;
     }
-    if(s.left <= 0){ s.left = 0; s.phase = 'whirlpool'; s.msg = 'Kochzeit vorbei \u2013 Whirlpool!'; s.msgT = 2.6; }
+    if(s.left <= 0){ s.left = 0; s.phase = 'whirlpool'; s.msg = 'Kochzeit vorbei \u2013 Whirlpool!'; s.msgT = 2.6; sfx('ding'); }
   } else if(s.phase === 'whirlpool'){
     if(s.stirring){ s.spin = Math.min(100, s.spin + 34*dt); s.rest = 0; }
     else s.spin = Math.max(0, s.spin - 3*dt);
-    if(s.spin >= 80){ s.phase = 'ruhe'; s.msg = 'jetzt ruhen lassen'; s.msgT = 2.4; }
+    if(s.spin >= 80){ s.phase = 'ruhe'; s.msg = 'jetzt ruhen lassen'; s.msgT = 2.4; sfx('ding'); }
   } else if(s.phase === 'ruhe'){
     if(s.stirring){ s.rest = 0; s.spin = Math.min(100, s.spin + 20*dt); }
     else { s.rest += dt; s.spin = Math.max(0, s.spin - 2*dt); }
@@ -1197,23 +1338,23 @@ S4.update = function(dt){
 
   if(atWood && !p.carry){
     prompt = s.wood > 0 ? 'Aktion: Armvoll Holz' : 'Holz ist alle';
-    if(actionEdge && s.wood > 0){ s.wood--; p.carry = 'wood'; }
+    if(actionEdge && s.wood > 0){ s.wood--; p.carry = 'wood'; sfx('nimm'); }
   }
   if(atFire && p.carry === 'wood'){
     prompt = 'Aktion: Holz nachlegen';
-    if(actionEdge){ s.fuel = Math.min(100, s.fuel + 25); p.carry = null; }
+    if(actionEdge){ s.fuel = Math.min(100, s.fuel + 25); p.carry = null; sfx('wumms'); }
   }
   if(atFlap && !p.carry){
     prompt = 'Aktion: Luftklappe ' + (s.flap ? 'schlie\u00dfen' : '\u00f6ffnen');
-    if(actionEdge) s.flap = !s.flap;
+    if(actionEdge){ s.flap = !s.flap; sfx('klack'); }
   }
   if(atBitter && !p.carry && s.phase === 'kochen'){
     prompt = s.bitterLeft > 0 ? 'Aktion: Bitterhopfen holen' : 'kein Bitterhopfen mehr';
-    if(actionEdge && s.bitterLeft > 0){ s.bitterLeft--; p.carry = 'bitter'; }
+    if(actionEdge && s.bitterLeft > 0){ s.bitterLeft--; p.carry = 'bitter'; sfx('nimm'); }
   }
   if(atAroma && !p.carry && s.phase === 'kochen'){
     prompt = s.aromaLeft > 0 ? 'Aktion: Aromahopfen holen' : 'kein Aromahopfen mehr';
-    if(actionEdge && s.aromaLeft > 0){ s.aromaLeft--; p.carry = 'aroma'; }
+    if(actionEdge && s.aromaLeft > 0){ s.aromaLeft--; p.carry = 'aroma'; sfx('nimm'); }
   }
   if(atPfanne && (p.carry === 'bitter' || p.carry === 'aroma')){
     prompt = 'Aktion: Hopfen zugeben';
@@ -1232,6 +1373,7 @@ S4.update = function(dt){
       }
       s.msg = (p.carry === 'bitter' ? 'Bitterhopfen' : 'Aromahopfen') + ' bei ' + Math.round(R) + ' min';
       s.msgT = 2.0;
+      sfx('ding'); AUDIO.rausch(0.3, 3800, 0.10, 'highpass');
       p.carry = null;
     }
   }
@@ -1261,6 +1403,8 @@ S4.update = function(dt){
     } else prompt = 'Hahn (erst nach dem Whirlpool)';
   }
 
+  AUDIO.amb(s.temp >= 99.5 ? 0.06 + s.wall*0.10 + (s.stirring ? 0.05 : 0) : 0.02 + (heat/100)*0.05,
+    s.temp >= 99.5 ? 700 : 300);
   if(!s.done && s.vol < MIN_VOL){ s.done = true; s.reason = 'leer'; endStation(900); }
   if(!s.done && s.phase === 'kochen' && s.wood === 0 && !p.carry && s.fuel < 2 && s.temp < 99){
     s.done = true; s.reason = 'holz'; endStation(900);
@@ -1496,6 +1640,7 @@ S5.update = function(dt){
       s.risk = Math.min(120, s.risk + (s.clean ? 8 : 18) * clamp(tf, 0.4, 1.6));
       s.clean = false;
       s.msg = 'gemessen: ' + s.ext.toFixed(1) + ' \u00b0P'; s.msgT = 2.6;
+      sfx('klick');
     }
   } else walk(dt, p.carry === 'eis' ? 28 : 44);
 
@@ -1504,35 +1649,42 @@ S5.update = function(dt){
 
   if(atEis && !p.carry && s.busy <= 0){
     prompt = s.eisVorrat > 0 ? 'Aktion: Eisblock nehmen' : 'Eiskeller ist leer';
-    if(actionEdge && s.eisVorrat > 0){ s.eisVorrat--; p.carry = 'eis'; }
+    if(actionEdge && s.eisVorrat > 0){ s.eisVorrat--; p.carry = 'eis'; sfx('eis'); }
   }
   if(atKuehl && p.carry === 'eis'){
     prompt = 'Aktion: Eis einlegen';
-    if(actionEdge){ s.ice = Math.min(3.2, s.ice + 0.9); p.carry = null; }
+    if(actionEdge){ s.ice = Math.min(3.2, s.ice + 0.9); p.carry = null; sfx('eis'); sfx('wumms'); }
   }
   if(atRegal && s.busy <= 0){
     if(!p.carry){
       prompt = 'Aktion: Spindel nehmen';
-      if(actionEdge){ p.carry = 'spindel'; s.clean = false; }
+      if(actionEdge){ p.carry = 'spindel'; s.clean = false; sfx('glas'); }
     } else if(p.carry === 'spindel'){
       prompt = 'Aktion: Spindel zur\u00fccklegen';
-      if(actionEdge){ p.carry = null; s.clean = false; }
+      if(actionEdge){ p.carry = null; s.clean = false; sfx('glas'); }
     }
   }
   if(atEimer && p.carry === 'spindel' && s.busy <= 0){
     prompt = s.clean ? 'Spindel ist desinfiziert' : 'Aktion: Spindel desinfizieren';
-    if(actionEdge && !s.clean){ s.clean = true; s.msg = 'Spindel desinfiziert'; s.msgT = 1.8; }
+    if(actionEdge && !s.clean){ s.clean = true; s.msg = 'Spindel desinfiziert'; s.msgT = 1.8; sfx('schwapp'); }
   }
   if(atBottich && s.busy <= 0){
     if(p.carry === 'spindel'){
       prompt = s.clean ? 'Aktion: messen (desinfiziert)' : 'Aktion: messen (ungereinigt!)';
-      if(actionEdge) s.busy = 1.4;
+      if(actionEdge){ s.busy = 1.4; sfx('glas'); }
     } else if(!p.carry){
       prompt = s.spund < 40 ? 'Aktion: G\u00e4rspund nachf\u00fcllen' : 'G\u00e4rspund ist voll';
-      if(actionEdge && s.spund < 40){ s.spund = 100; s.msg = 'G\u00e4rspund nachgef\u00fcllt'; s.msgT = 1.8; }
+      if(actionEdge && s.spund < 40){ s.spund = 100; s.msg = 'G\u00e4rspund nachgef\u00fcllt'; s.msgT = 1.8; sfx('schwapp'); }
     }
   }
 
+  AUDIO.amb(0.015 + s.act*0.03, 240);
+  s.blubT = (s.blubT || 0) + dt;
+  const blubTakt = 0.35 + (1 - s.act)*2.4;
+  if(s.blubT > blubTakt && s.act > 0.04 && s.spund > 0){
+    s.blubT = 0; sfx(Math.random() > 0.35 ? 'blubb' : 'plopp');
+  }
+  if(s.tag !== s.lastTag){ s.lastTag = s.tag; if(s.tag > 1) sfx('klick'); }
   const fertig = s.ext <= s.fg + 0.25;
   if(!s.done && s.risk >= 100){ s.done = true; s.reason = 'infektion'; endStation(1400); }
   else if(!s.done && fertig){ s.done = true; s.reason = 'fertig'; endStation(800); }
@@ -1707,7 +1859,7 @@ S6.update = function(dt){
     if(atMind && input.action){
       s.purgeT += dt; busy = true;
       prompt = 'CO\u2082-Sp\u00fclung\u2026 ' + Math.round(clamp(s.purgeT/2, 0, 1)*100) + '%';
-      if(s.purgeT >= 2 && !s.purged){ s.purged = true; s.msg = 'Tank ist mit CO\u2082 gef\u00fcllt'; s.msgT = 2.2; }
+      if(s.purgeT >= 2 && !s.purged){ s.purged = true; s.msg = 'Tank ist mit CO\u2082 gef\u00fcllt'; s.msgT = 2.2; sfx('ding'); }
     } else if(atMind && !s.purged) prompt = 'Aktion halten: Tank mit CO\u2082 sp\u00fclen';
     else if(atMind) prompt = 'Tank ist gesp\u00fclt';
 
@@ -1715,7 +1867,7 @@ S6.update = function(dt){
       s.umT += dt; busy = true;
       prompt = 'umschlauchen\u2026 ' + Math.round(clamp(s.umT/2.5, 0, 1)*100) + '%';
       if(s.umT >= 2.5){
-        s.phase = 'abfuellen';
+        s.phase = 'abfuellen'; sfx('ding');
         s.msg = s.purged ? 'umgeschlaucht' : 'umgeschlaucht \u2013 ohne CO\u2082-Sp\u00fclung!';
         s.msgT = 2.6;
       }
@@ -1734,21 +1886,21 @@ S6.update = function(dt){
     }
     if(atMind && !p.carry){
       prompt = 'Aktion: Druckminderer \u2013 ' + P.toFixed(1) + ' bar';
-      if(actionEdge) s.pi = (s.pi + 1) % DRUECKE.length;
+      if(actionEdge){ s.pi = (s.pi + 1) % DRUECKE.length; sfx('klick'); }
     }
     if(atKiste && !p.carry){
       prompt = 'Aktion: leere Flasche nehmen';
-      if(actionEdge) p.carry = 'fl_dreckig';
+      if(actionEdge){ p.carry = 'fl_dreckig'; sfx('glas'); }
     }
     if(atSpuel && p.carry === 'fl_dreckig'){
       if(input.action){
         s.spuelT += dt; busy = true;
         prompt = 'sp\u00fclen\u2026 ' + Math.round(clamp(s.spuelT/1.2, 0, 1)*100) + '%';
-        if(s.spuelT >= 1.2){ p.carry = 'fl_sauber'; s.spuelT = 0; }
+        if(s.spuelT >= 1.2){ p.carry = 'fl_sauber'; s.spuelT = 0; sfx('klick'); }
       } else prompt = 'Aktion halten: Flasche sp\u00fclen';
     }
     if(atFuell && (p.carry === 'fl_dreckig' || p.carry === 'fl_sauber')){
-      busy = true;
+      if(s.fState !== 'none') busy = true;
       if(s.fState === 'none'){
         prompt = 'Aktion halten: vorspannen + f\u00fcllen';
         if(input.action){
@@ -1769,11 +1921,13 @@ S6.update = function(dt){
           prompt = s.level > 92 ? '\u00fcberf\u00fcllt!' : s.level >= 75 ? 'jetzt loslassen!' : 'f\u00fcllen\u2026';
           if(s.foam >= 100){
             s.msg = 'Schaumausbruch \u2013 Flasche hin'; s.msgT = 2.4;
+            sfx('zisch'); sfx('schwapp');
             s.flSchlecht++; s.flFertig++; s.verlust += 0.4;
             p.carry = null; s.fState = 'none';
           }
           if(s.level > 110){
             s.msg = '\u00fcbergelaufen'; s.msgT = 2.2;
+            sfx('schwapp');
             s.flSchlecht++; s.flFertig++; s.verlust += 0.5;
             p.carry = null; s.fState = 'none';
           }
@@ -1786,6 +1940,7 @@ S6.update = function(dt){
             s.lastFl = { lvl: s.level, sauber: s.lastSauber, co2: s.co2 };
             p.carry = 'fl_voll';
             s.fState = 'none';
+            sfx('zisch');
           }
         } else prompt = 'Aktion halten: langsam entlasten';
       }
@@ -1806,12 +1961,16 @@ S6.update = function(dt){
         if(!f.sauber) s.ungespuelt++;
         s.flFertig++;
         p.carry = null;
+        sfx('kork');
       }
     }
   }
 
   if(!busy) walk(dt, p.carry ? 32 : 44);
 
+  const zisch = (s.phase === 'umschlauchen' && near(X_MIND, 11) && input.action) ? 0.14 : 0;
+  AUDIO.amb(zisch + (s.rousing ? 0.10 : 0) + (s.fState === 'fuellen' ? 0.09 : 0)
+    + (s.spuelT > 0 ? 0.10 : 0), zisch ? 5000 : (s.fState === 'fuellen' ? 1200 : 1800));
   if(!s.done && s.flFertig >= FLASCHEN){ s.done = true; s.reason = 'fertig'; endStation(800); }
 };
 S6.draw = function(){
@@ -1953,6 +2112,7 @@ function startStation(n){
   if(endTimer){ clearTimeout(endTimer); endTimer = null; }
   cur = STATIONS[n];
   cur.reset();
+  AUDIO.init(); AUDIO.resume(); AUDIO.station(n); AUDIO.amb(0, 400);
   document.getElementById('guide').innerHTML = cur.guide || '';
   input.left = input.right = input.action = false;
   document.getElementById('title').style.display = 'none';
@@ -1965,7 +2125,9 @@ function startStation(n){
 function finishStation(){
   endTimer = null;
   running = false;
+  AUDIO.amb(0, 400);
   const r = cur.result();
+  sfx(r.ok ? 'fertig' : 'schlecht');
   document.getElementById('game').style.display = 'none';
   const res = document.getElementById('result');
   res.style.display = 'block';
@@ -1982,14 +2144,25 @@ function finishStation(){
 }
 function showTitle(){
   running = false;
+  AUDIO.station(0); AUDIO.amb(0, 400);
   if(endTimer){ clearTimeout(endTimer); endTimer = null; }
   document.getElementById('game').style.display = 'none';
   document.getElementById('result').style.display = 'none';
   document.getElementById('title').style.display = 'block';
 }
 
-document.getElementById('btnStart').addEventListener('click', () => startStation(1));
-document.getElementById('btnAgain').addEventListener('click', () => startStation(cur.id));
+/* Audio darf erst nach einer Nutzeraktion starten (Browser-Regel) */
+['pointerdown','keydown'].forEach(ev =>
+  document.addEventListener(ev, () => { AUDIO.init(); AUDIO.resume(); }, { once:false }));
+const btnSnd = document.getElementById('btnSound');
+btnSnd.addEventListener('click', e => {
+  e.stopPropagation();
+  AUDIO.on = !AUDIO.on;
+  btnSnd.textContent = AUDIO.on ? 'Ton an' : 'Ton aus';
+  if(!AUDIO.on) AUDIO.amb(0, 400);
+});
+
+document.getElementById('btnStart').addEventListener('click', () => startStation(1));document.getElementById('btnAgain').addEventListener('click', () => startStation(cur.id));
 document.getElementById('btnNext').addEventListener('click', e => {
   const n = parseInt(e.currentTarget.dataset.next, 10);
   if(n) startStation(n);
@@ -2035,7 +2208,8 @@ document.addEventListener('keydown', e => {
   const t2 = tc.getContext('2d');
   t2.imageSmoothingEnabled = false;
   const FL = 96;
-  let tt = 0, mode = 'walk', modeT = 0, dir = 1, bx = 140, sip = 0;
+  let tt = 0, mode = 'walk', modeT = 0, dir = 1, bx = 140, sip = 0, prevSip = 0;
+  const sichtbar = () => document.getElementById('title').style.display !== 'none';
   function put(img, x, y, flip){
     x = Math.round(x); y = Math.round(y);
     if(flip){ t2.save(); t2.translate(x + img.width, y); t2.scale(-1, 1); t2.drawImage(img, 0, 0); t2.restore(); }
@@ -2048,10 +2222,12 @@ document.addEventListener('keydown', e => {
       bx += dir * 20 * dt;
       if(bx > 214){ dir = -1; }
       if(bx < 84){ dir = 1; }
-      if(modeT > 4){ mode = 'drink'; modeT = 0; sip = 0; }
+      if(modeT > 4){ mode = 'drink'; modeT = 0; sip = 0; prevSip = 0; }
     } else {
-      if(modeT > 2.6){ mode = 'walk'; modeT = 0; }
+      if(modeT > 2.6){ mode = 'walk'; modeT = 0; if(sichtbar()) sfx('ahh'); }
       sip = Math.sin(modeT * 3.2) > 0.3 ? 1 : 0;
+      if(sip && !prevSip && sichtbar()) sfx('gluck');
+      prevSip = sip;
     }
 
     t2.fillStyle = '#2c2620'; t2.fillRect(0, 0, 320, 120);
