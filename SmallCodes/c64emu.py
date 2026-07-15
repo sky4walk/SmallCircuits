@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.12-audio-pacing"
+__version__ = "2026.07.15-sid-timing"
 
 
 # =============================================================================
@@ -321,6 +321,29 @@ class Vic:
         self._spr_row = [0] * 8
         self._spr_ff = [False] * 8
         self._spr_disp_mask = 0
+        # --- Canonical per-line DISPLAY-LOGIC state (badline / idle / border) ---
+        # A line-level model of the VIC's display logic: a badline (DEN armed
+        # at raster $30, raster in $30..$F7, raster&7 == YSCROLL) starts a text
+        # row: the row's screen/colour data is fetched THERE (not on a fixed
+        # schedule), RC walks 0..7, and when no badline follows the sequencer
+        # drops to IDLE state, displaying the byte at $3FFF. This is what FLD
+        # (badline suppression via YSCROLL) and DEN blanking actually do, and
+        # renderer + collision both consume these records.
+        self.line_idle = bytearray(b"\x01" * self.LINES_PER_FRAME)
+        self.line_text_row = bytearray(b"\xFF" * self.LINES_PER_FRAME)
+        self.line_rc = bytearray(self.LINES_PER_FRAME)
+        self.line_vborder = bytearray(self.LINES_PER_FRAME)
+        # Per-row graphics mode/base, recorded at the row's badline and refined
+        # mid-row (RC==4) so raster splits keep the old sampling semantics.
+        self.row_mode_d011 = bytearray(25)
+        self.row_mode_d016 = bytearray(25)
+        self.row_mode_d018 = bytearray(25)
+        self._den_frame = True
+        self._vborder = True
+        self._display_state = False
+        self._rc = 0
+        self._disp_row = 0
+        self._vcbase_row = 0
         # Per-character-row snapshot of the 40 screen codes and 40 colour-RAM
         # nibbles as they were when the VIC fetched that row (its badline).
         # Reading the whole screen once at frame end tears when a game rewrites
@@ -337,6 +360,9 @@ class Vic:
         self._badline = False
         self.raster_compare = 0
         self.irq_status = 0
+        self._raster_irq_pending = False
+        self._d021_splits = {}
+        self._vc_offset = 0
         self.irq_enable = 0
         # Sprite-sprite ($D01E) and sprite-data ($D01F) collision latches.
         # Bits are set as collisions occur; reading clears the register.
@@ -396,6 +422,53 @@ class Vic:
             return v
         return self.regs[offset]
 
+    VSP_BASE = 15          # cycle whose mid-line badline gives VC offset 0
+    VSP_WINDOW_END = 48    # last stamp that still starts this line's fetch
+
+    def _trigger_badline_now(self, r, val):
+        """Establish a badline for the CURRENT line retroactively (the
+        condition was made true by a mid-line YSCROLL/DEN write). Fetches the
+        row honouring the persistent VC offset (VSP)."""
+        row = self._vcbase_row
+        self._display_state = True
+        self._disp_row = row
+        self._rc = 1                 # this line shows RC 0; tick
+        self.line_idle[r] = 0        # already ran, next line is RC 1
+        self.line_text_row[r] = row
+        self.line_rc[r] = 0
+        self.row_mode_d011[row] = val
+        self.row_mode_d016[row] = self.regs[0x16]
+        self.row_mode_d018[row] = self.regs[0x18]
+        self._fetch_row(row)
+
+    def _fetch_row(self, row):
+        """Copy a text row's 40 matrix + colour bytes into the canonical row
+        snapshot, addressed via VC = row*40 + the persistent VSP offset
+        (wrapped inside the 1 KB video matrix, as the 10-bit VC does)."""
+        if self.mem is None:
+            return
+        base = (self.mem.vic_bank() * 0x4000
+                + ((self.regs[0x18] >> 4) & 0x0F) * 0x400)
+        vc = (row * 40 + self._vc_offset) % 1024
+        if vc + 40 <= 1024:
+            self.line_screen[row * 40:row * 40 + 40] = \
+                self.mem.ram[base + vc:base + vc + 40]
+            if self.color_ram is not None:
+                self.line_color[row * 40:row * 40 + 40] = \
+                    self.color_ram.ram[vc:vc + 40]
+        else:                                   # wrap inside the matrix
+            k = 1024 - vc
+            self.line_screen[row * 40:row * 40 + k] = \
+                self.mem.ram[base + vc:base + 1024]
+            self.line_screen[row * 40 + k:row * 40 + 40] = \
+                self.mem.ram[base:base + 40 - k]
+            if self.color_ram is not None:
+                self.line_color[row * 40:row * 40 + k] = \
+                    self.color_ram.ram[vc:1024]
+                self.line_color[row * 40 + k:row * 40 + 40] = \
+                    self.color_ram.ram[0:40 - k]
+
+
     def write(self, offset, val):
         offset &= 0x3F
         val &= 0xFF
@@ -404,6 +477,57 @@ class Vic:
         elif offset == self.REG_CTRL1:
             self.regs[offset] = val
             self.raster_compare = (self.raster_compare & 0xFF) | ((val & 0x80) << 1)
+            # DEN is armed if set at ANY point during raster line $30 — the
+            # per-line state machine samples it at line start, so a write
+            # during the line must arm the frame too (dentest den01-49-*).
+            if self.raster == 0x30 and (val & 0x10):
+                self._den_frame = True
+            # The border unit's comparisons are asymmetric in time: the bottom
+            # (SET) comparison counts at cycle 63 — so a mid-line RSEL flip
+            # away from the compare line cancels the closing (the classic
+            # border-opening trick). The top (RESET) comparison fires at the
+            # left edge AND at cycle 63 — once a line has opened, a later
+            # DEN-off write cannot close it again; conversely a DEN/RSEL write
+            # that makes this line the top line opens it retroactively.
+            rb = self.raster
+            state = bool(self.line_vborder[rb])
+            rsel_n = (val >> 3) & 1
+            bot = 251 if rsel_n else 247
+            top = 51 if rsel_n else 55
+            if rb == bot:
+                state = True
+            elif rb in (247, 251) and state:
+                # tick closed this line under the old RSEL; new RSEL says this
+                # is not the bottom line -> closing never happens (cycle 63)
+                state = bool(self.line_vborder[(rb - 1) % self.LINES_PER_FRAME])
+            if rb == top and (val & 0x10):
+                state = False
+            self._vborder = state
+            self.line_vborder[rb] = 1 if state else 0
+            # The badline condition is evaluated continuously by the VIC, but
+            # the row's DMA fetch window starts around cycle 15 — a YSCROLL
+            # write establishing the match EARLY in the line starts a badline
+            # there (linecrunch/FLD variants rely on it), while a late write
+            # leaves the line as it was. Our tick sampled the condition at
+            # line start; honour early mid-line writes retroactively.
+            r = self.raster
+            if (self._den_frame and 0x30 <= r <= 0xF7
+                    and (r & 7) == (val & 7)
+                    and self.line_idle[r]
+                    and self._vcbase_row < 25):
+                cyc = self._line_cycles
+                if cyc <= 14:
+                    self._trigger_badline_now(r, val)
+                elif cyc <= self.VSP_WINDOW_END:
+                    # DMA DELAY / VSP: the badline condition arises while the
+                    # row's c-accesses should already be running — the fetch
+                    # starts late and the video counter falls short by one
+                    # character per cycle of delay. The deficit persists in
+                    # VC/VCBASE for the rest of the frame, shifting every
+                    # following row's matrix read: the classic full-screen
+                    # horizontal scroll trick (Mayhem in Monsterland).
+                    self._vc_offset = -(cyc - self.VSP_BASE)
+                    self._trigger_badline_now(r, val)
         elif offset == self.REG_IRQ_STATUS:
             self.irq_status &= ~(val & 0x0F)
         elif offset == self.REG_IRQ_ENABLE:
@@ -428,23 +552,34 @@ class Vic:
                     if ((val >> i) & 1 and not self._spr_disp[i]
                             and self.regs[i * 2 + 1] == r8):
                         self._start_sprite_display_now(i)
+            elif offset == 0x21:
+                # Mid-line background-colour split: record the intra-line
+                # cycle so the renderer can recolour flat background pixels in
+                # horizontal segments (per-cycle $D021 raster bars — the
+                # spritesplit tests paint one through the opened border).
+                segs = self._d021_splits.get(self.raster)
+                cur = (segs[-1][1] if segs
+                       else self.line_d021[self.raster] & 0x0F)
+                if (val & 0x0F) != cur:
+                    if segs is None:
+                        segs = self._d021_splits[self.raster] = []
+                    segs.append((self._line_cycles, val & 0x0F))
 
     def _start_sprite_display_now(self, i):
-        """Begin sprite i's display on the raster line currently being drawn
-        (mid-line Y-compare hit). Records row 0 for this line and leaves the
-        sequencer state exactly as tick()'s display step would have."""
+        """Arm sprite i's display from a mid-line Y-compare hit (Y or $D015
+        written during the very line it matches). The VIC fetches the first
+        sprite data at the end of this line, so display begins on the NEXT
+        line — the sequencer in tick() records row 0 from there."""
         self._spr_disp[i] = True
         self._spr_disp_mask |= (1 << i)
-        self.line_spr_row[self.raster * 8 + i] = 0
-        if (self.regs[0x17] >> i) & 1:          # Y-expanded: row 0 repeats
-            self._spr_row[i] = 0
-            self._spr_ff[i] = True
-        else:
-            self._spr_row[i] = 1
-            self._spr_ff[i] = False
+        self._spr_row[i] = 0
+        self._spr_ff[i] = False
 
     def tick(self, cycles):
         self._line_cycles += cycles
+        if self._raster_irq_pending and self._line_cycles >= 2:
+            self._raster_irq_pending = False
+            self.irq_status |= 0x01
         while self._line_cycles >= self.CYCLES_PER_LINE:
             self._line_cycles -= self.CYCLES_PER_LINE
             self.raster = (self.raster + 1) % self.LINES_PER_FRAME
@@ -456,6 +591,7 @@ class Vic:
                 self._dbg_dc_frame = 0
                 self._dbg_sc_frame = 0
                 self._dbg_dc_rasters = []
+                self._d021_splits = {}
             self.line_d018[self.raster] = self.regs[0x18]
             self.line_d011[self.raster] = self.regs[0x11]
             self.line_d016[self.raster] = self.regs[0x16]
@@ -464,6 +600,57 @@ class Vic:
             self.line_d022[self.raster] = self.regs[0x22]
             self.line_d023[self.raster] = self.regs[0x23]
             self.line_d01b[self.raster] = self.regs[0x1b]
+            # --- Display-logic state machine (badline / idle / vborder) ---
+            # Hardware rules at line granularity: DEN sampled at raster $30
+            # arms the frame; a badline (raster $30..$F7, raster&7 == YSCROLL)
+            # fetches a text row and enters display state with RC=0; RC walks
+            # to 7, then the sequencer goes idle until the next badline. The
+            # vertical border flip-flop opens at line 51/55 (RSEL) when DEN is
+            # set and closes at 251/247. FLD and DEN blanking fall out of
+            # these rules; renderer and collision consume the records.
+            r = self.raster
+            d011 = self.regs[0x11]
+            if r == 0:
+                self._vcbase_row = 0
+                self._vc_offset = 0
+            if r == 0x30:
+                self._den_frame = bool(d011 & 0x10)
+            rsel = (d011 >> 3) & 1
+            if r == (251 if rsel else 247):
+                self._vborder = True
+            elif r == (51 if rsel else 55) and (d011 & 0x10):
+                self._vborder = False
+            self.line_vborder[r] = 1 if self._vborder else 0
+            if (self._den_frame and 0x30 <= r <= 0xF7
+                    and (r & 7) == (d011 & 7) and self._vcbase_row < 25):
+                # Badline: fetch this row's matrix data and start displaying.
+                self._display_state = True
+                self._rc = 0
+                self._disp_row = row = self._vcbase_row
+                self.row_mode_d011[row] = d011
+                self.row_mode_d016[row] = self.regs[0x16]
+                self.row_mode_d018[row] = self.regs[0x18]
+                self._fetch_row(row)
+            if self._display_state:
+                self.line_idle[r] = 0
+                self.line_text_row[r] = self._disp_row
+                self.line_rc[r] = self._rc
+                if self._rc == 4:
+                    # Mid-row refinement: raster splits that change mode/bases
+                    # inside a row keep the old "sampled at row centre"
+                    # semantics for that row's rendering and collision.
+                    self.row_mode_d011[self._disp_row] = d011
+                    self.row_mode_d016[self._disp_row] = self.regs[0x16]
+                    self.row_mode_d018[self._disp_row] = self.regs[0x18]
+                if self._rc == 7:
+                    self._vcbase_row = self._disp_row + 1
+                    self._display_state = False
+                else:
+                    self._rc += 1
+            else:
+                self.line_idle[r] = 1
+                self.line_text_row[r] = 0xFF
+                self.line_rc[r] = 0
             mem = self.mem
             if mem is not None:
                 ras8 = self.raster * 8
@@ -497,13 +684,16 @@ class Vic:
                     for i in range(8):
                         if not disp[i]:
                             if (en >> i) & 1 and regs[i * 2 + 1] == r8:
+                                # Y match: the VIC fetches the sprite's first
+                                # data at the END of this line; display begins
+                                # on the NEXT line (sprite Y=50 tops out level
+                                # with text row 0 at raster 51).
                                 disp[i] = True
                                 srow[i] = 0
                                 sff[i] = False
                                 self._spr_disp_mask |= (1 << i)
-                            else:
-                                self.line_spr_row[ras8 + i] = 0xFF
-                                continue
+                            self.line_spr_row[ras8 + i] = 0xFF
+                            continue
                         self.line_spr_row[ras8 + i] = srow[i]
                         if (d017 >> i) & 1:
                             if sff[i]:
@@ -515,22 +705,28 @@ class Vic:
                         if srow[i] > 20:
                             disp[i] = False
                             self._spr_disp_mask &= ~(1 << i)
+                            # The DMA-off decision and the Y compare share the
+                            # same cycle window: a sprite whose Y matches the
+                            # line its display ENDS on re-triggers immediately
+                            # (back-to-back multiplex segments — Pitfall's
+                            # vine and crocodiles chain exactly like this).
+                            if (en >> i) & 1 and regs[i * 2 + 1] == r8:
+                                disp[i] = True
+                                srow[i] = 0
+                                sff[i] = False
+                                self._spr_disp_mask |= (1 << i)
                 else:
                     self.line_spr_row[ras8:ras8 + 8] = b"\xFF" * 8
-                # Snapshot this character row's screen + colour RAM as the beam
-                # reaches it, so mid-frame screen rewrites (unsynced scrollers)
-                # render per row instead of tearing at a single frame-end read.
-                rr = self.raster - (self.FIRST_DISPLAY_LINE + 4)
-                if 0 <= rr <= 192 and (rr & 7) == 0:
-                    row = rr >> 3
-                    sb = (mem.vic_bank() * 0x4000
-                          + ((regs[0x18] >> 4) & 0x0F) * 0x400 + row * 40)
-                    self.line_screen[row * 40:row * 40 + 40] = mem.ram[sb:sb + 40]
-                    if self.color_ram is not None:
-                        self.line_color[row * 40:row * 40 + 40] = \
-                            self.color_ram.ram[row * 40:row * 40 + 40]
             if self.raster == self.raster_compare:
-                self.irq_status |= 0x01
+                # Don't assert immediately: on hardware the raster IRQ is
+                # raised a cycle into the line and the CPU only recognises an
+                # interrupt asserted at least two cycles before the end of the
+                # current instruction — a net ~2-3 cycle latency our
+                # line-boundary tick otherwise lacks. Raster-IRQ stabilizers
+                # (double-IRQ + `inc $d012`) budget exactly for this margin:
+                # without it, the re-read of $D012 lands one line early and
+                # the routine's anchor drifts one line per frame (dentest).
+                self._raster_irq_pending = True
             if self.raster == self.SAMPLE_LINE:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
@@ -594,18 +790,16 @@ class Vic:
     def row_gfx_mode(self, row):
         """CANONICAL per-character-row graphics mode decision.
 
-        Returns (bmm, mcm, d018) for text row `row` (0..24), sampled from the
-        per-raster register recordings at the same raster line the renderer
-        uses for that row. This is the single source of truth for "what mode
-        is this row in / which bases does it use": the frame renderer, the
-        sprite-priority foreground mask and the $D01F sprite-data collision
-        must all derive their decisions from here, so they can never diverge
-        (a divergence between renderer and collision is exactly the class of
-        bug that broke Friday the 13th's exits)."""
-        raster = (self.FIRST_DISPLAY_LINE + row * 8 + 4) % self.LINES_PER_FRAME
-        return ((self.line_d011[raster] >> 5) & 1,
-                (self.line_d016[raster] >> 4) & 1,
-                self.line_d018[raster])
+        Returns (bmm, mcm, d018) for text row `row` (0..24) as recorded by the
+        display-logic state machine: captured at the row's badline and refined
+        mid-row (RC==4), so it reflects the registers active when the row was
+        actually fetched/displayed — including FLD-displaced rows. This is the
+        single source of truth for "what mode is this row in / which bases
+        does it use": the frame renderer, the sprite-priority foreground mask
+        and the $D01F sprite-data collision all derive from here."""
+        return ((self.row_mode_d011[row] >> 5) & 1,
+                (self.row_mode_d016[row] >> 4) & 1,
+                self.row_mode_d018[row])
 
     def _foreground_bits_at(self, r, col0=0, col1=40):
         """Foreground (non-background) column bitmask (bit == VIC X) of the
@@ -617,14 +811,29 @@ class Vic:
         Mode/base decisions come from row_gfx_mode() — the same canonical
         per-row source the frame renderer uses — so collision, priority and
         rendering can never disagree about what a row contains."""
-        sy = r - 50
+        sy = r - 51
         if sy < 0 or sy >= 200:
             return 0
-        char_row = sy >> 3
+        mem = self.mem
+        if self.line_idle[r]:
+            # Idle state: the sequencer displays the byte at $3FFF ($39FF with
+            # ECM) across the whole line, foreground colour black. Set bits
+            # ARE foreground graphics and do collide with sprites.
+            byte = mem.read_vic(0x39FF if (self.line_d011[r] & 0x40)
+                                else 0x3FFF)
+            if not byte:
+                return 0
+            bits = 0
+            for col in range(col0, col1):
+                vx0 = 24 + col * 8
+                for bx in range(8):
+                    if (byte >> (7 - bx)) & 1:
+                        bits |= (1 << (vx0 + bx))
+            return bits
+        char_row = self.line_text_row[r]
         if char_row >= 25:
             return 0
-        cy = sy & 7
-        mem = self.mem
+        cy = self.line_rc[r]
         bmm, mcm, d018 = self.row_gfx_mode(char_row)
         if bmm:
             # Bitmap mode. Bit3 of $D018 picks the 8 KB bitmap base in the VIC
@@ -825,6 +1034,17 @@ class Sid:
         self.filter_mode = 0            # bit 0=LP, 1=BP, 2=HP, 3=v3-disconnect
         self._flt_low = 0.0             # integrator 1 (lowpass output)
         self._flt_band = 0.0            # integrator 2 (bandpass output)
+        # --- Sample-accurate write timing ---
+        # Register writes are queued with their CPU cycle and replayed in
+        # segments by generate_samples(). _cpu is wired by System.
+        self._cpu = None
+        self._queue = []
+        self._gen_t = None              # CPU cycle count at last generate
+        # Output DC blocker (the real C64's audio out is AC-coupled). Needed
+        # because the volume DAC carries a DC offset — the $D418 digi trick —
+        # which must move the output momentarily but not sit on it.
+        self._dcb_x = 0.0
+        self._dcb_y = 0.0
 
     def read(self, offset):
         offset &= 0x1F
@@ -835,9 +1055,27 @@ class Sid:
         return 0                          # writeable regs read as 0
 
     def write(self, offset, val):
+        """CPU write to a SID register. The raw register value is visible to
+        reads immediately, but the AUDIBLE effect is queued with the current
+        CPU cycle and applied sample-accurately during generate_samples() —
+        the renderer replays the queue in segments, so mid-frame gate flips,
+        multispeed player calls and $D418 volume digis land at the right
+        sample instead of being quantised to 20 ms frame boundaries."""
         offset &= 0x1F
         val &= 0xFF
         self.regs[offset] = val
+        t = self._cpu.cycles if self._cpu is not None else None
+        self._queue.append((t, offset, val))
+        if len(self._queue) > 20000:
+            # No consumer (audio disabled / headless): keep state correct and
+            # the queue bounded by applying eagerly.
+            for _, o, v in self._queue:
+                self._apply_write(o, v)
+            self._queue.clear()
+
+    def _apply_write(self, offset, val):
+        """Apply a register write's audible effect to the synthesis state.
+        Called by the renderer at the write's sample position."""
         if offset < 0x07:
             self.voices[0].write_reg(offset, val)
         elif offset < 0x0E:
@@ -864,10 +1102,85 @@ class Sid:
     # ------------------------------------------------------------------
 
     def generate_samples(self, n_samples, np):
+        """Render one frame of audio, replaying the timestamped register-write
+        queue: audio is generated in segments between writes, and each write's
+        audible effect lands at its true sample position. This is what makes
+        multispeed players tight and $D418 volume digis audible at all."""
+        q = self._queue
+        self._queue = []
+        t1 = self._cpu.cycles if self._cpu is not None else None
+        t0 = self._gen_t
+        self._gen_t = t1
+        out = np.empty(n_samples, dtype=np.float32)
+        if (t1 is None or t0 is None or t1 <= t0
+                or not q or q[0][0] is None):
+            for _, off, val in q:
+                self._apply_write(off, val)
+            out[:] = self._render_chunk(n_samples, np)
+        else:
+            span = t1 - t0
+            pos = 0
+            MIN_CHUNK = 4          # >= 11 kHz effective update rate is plenty
+            for (t, off, val) in q:
+                sp = int((t - t0) * n_samples / span) if t is not None else pos
+                sp = min(max(sp, pos), n_samples)
+                if sp - pos >= MIN_CHUNK:
+                    out[pos:sp] = self._render_chunk(sp - pos, np)
+                    pos = sp
+                self._apply_write(off, val)
+            if pos < n_samples:
+                out[pos:] = self._render_chunk(n_samples - pos, np)
+        # AC coupling: one-pole DC blocker so the volume DAC's DC offset (and
+        # the 12-bit waveforms' baseline) produce transients, not a bias.
+        # y[n] = x[n] - x[n-1] + R*y[n-1], vectorised via the closed form
+        # y[n] = k[n] * (R*y_prev + cumsum(d/k)[n]) with k[n] = R^n.
+        R = 0.9985
+        d = np.empty(n_samples, dtype=np.float64)
+        d[0] = out[0] - self._dcb_x
+        if n_samples > 1:
+            d[1:] = np.diff(out.astype(np.float64))
+        k = R ** np.arange(n_samples, dtype=np.float64)
+        y = k * (R * self._dcb_y + np.cumsum(d / k))
+        self._dcb_x = float(out[-1])
+        self._dcb_y = float(y[-1])
+        return y.astype(np.float32)
+
+    def _render_chunk(self, n_samples, np):
         cycles_per_sample = self.CPU_CLOCK / self.SAMPLE_RATE
-        # Generate each voice's (waveform * envelope), keep them separate
-        v_out = [self._gen_voice(v, n_samples, np, cycles_per_sample)
-                 for v in self.voices]
+        # --- Phase 1: all three oscillator accumulators ---------------------
+        # Computed up front (before any waveform) because voices are coupled:
+        # hard sync resets a voice's accumulator whenever its neighbour's
+        # accumulator wraps, and ring modulation XORs the neighbour's MSB into
+        # the triangle. Source voice for voice i is voice (i+2) % 3
+        # (0<-2, 1<-0, 2<-1), as on the real chip.
+        idx = np.arange(1, n_samples + 1, dtype=np.float64)
+        steps = [v.freq * cycles_per_sample for v in self.voices]
+        raws = [v.phase + idx * steps[i] for i, v in enumerate(self.voices)]
+        accs = [None] * 3
+        for i, v in enumerate(self.voices):
+            if v.control & 0x08:                       # TEST: oscillator held
+                accs[i] = np.zeros(n_samples, dtype=np.int64)
+                v.phase = 0.0
+                continue
+            raw = raws[i]
+            if v.control & 0x02 and steps[(i + 2) % 3] > 0:
+                # Hard sync: reset at every wrap of the (unsynced) source ramp.
+                src = self.voices[(i + 2) % 3]
+                src_hi = np.floor(
+                    np.concatenate(([src.phase], raws[(i + 2) % 3]))
+                    / (1 << 24))
+                wraps = np.flatnonzero(src_hi[1:] > src_hi[:-1])
+                if len(wraps):
+                    tmp = np.zeros(n_samples, dtype=np.float64)
+                    tmp[wraps] = raw[wraps]
+                    raw = raw - np.maximum.accumulate(tmp)
+            ph = np.mod(raw, float(1 << 24))
+            accs[i] = ph.astype(np.int64)
+            v.phase = float(ph[-1])
+
+        # --- Phase 2: 12-bit DAC waveforms, combined by AND -----------------
+        v_out = [self._gen_voice(i, accs, n_samples, np, steps[i])
+                 for i in range(3)]
 
         # Split into filtered vs direct paths according to $D417 routing
         filter_in = np.zeros(n_samples, dtype=np.float32)
@@ -883,39 +1196,53 @@ class Sid:
                 direct += vo
 
         filtered = self._apply_filter(filter_in, n_samples, np)
-        out = direct + filtered
+        # The volume DAC carries a DC offset: changing $D418 moves the output
+        # baseline even with all voices silent — the mechanism 4-bit sample
+        # playback ("volume digis") is built on. The DC itself is removed by
+        # the output AC coupling; only the CHANGES remain audible.
+        out = direct + filtered + np.float32(0.9)
         out *= self.master_vol / 15.0 / 3.0
         return out
 
-    def _gen_voice(self, v, n_samples, np, cycles_per_sample):
-        """Compute one voice's (waveform * envelope) — vectorised in numpy."""
-        phase_step = v.freq * cycles_per_sample
-        idx = np.arange(1, n_samples + 1, dtype=np.float64)
-        phases = (v.phase + idx * phase_step) % (1 << 24)
-        v.phase = float(phases[-1])
+    def _gen_voice(self, i, accs, n_samples, np, phase_step):
+        """One voice's (waveform * envelope), from the precomputed accumulator.
 
-        wave = np.zeros(n_samples, dtype=np.float32)
-        n_wave = 0
-        if v.control & 0x10:          # TRIANGLE
-            half = 1 << 23
-            tri = np.where(phases < half,
-                           phases / (1 << 22) - 1.0,
-                           ((1 << 24) - phases) / (1 << 22) - 1.0)
-            wave += tri.astype(np.float32); n_wave += 1
-        if v.control & 0x20:          # SAWTOOTH
-            wave += (phases / (1 << 23) - 1.0).astype(np.float32); n_wave += 1
-        if v.control & 0x40:          # PULSE
-            wave += np.where((phases.astype(np.int64) >> 12) < v.pulse_width,
-                             np.float32(1.0), np.float32(-1.0))
-            n_wave += 1
-        if v.control & 0x80:          # NOISE
-            wave += self._gen_noise(v, n_samples, np, phase_step)
-            n_wave += 1
-        if n_wave > 1:
-            wave /= n_wave
+        Waveforms are generated as 12-bit DAC values (0..$FFF) like the chip's
+        waveform selector outputs, and SELECTING SEVERAL AT ONCE combines them
+        with a bitwise AND — the classic approximation of the analog bus fight
+        on the real DAC. This is what makes $51 (pulse+triangle) sound thin
+        and hollow instead of like a mixed chord (Giana 2 plays almost
+        entirely on $50/$51). Ring modulation (bit 2) XORs the sync source's
+        accumulator MSB into the triangle's mirror decision, turning the
+        triangle into sum/difference metallic tones."""
+        v = self.voices[i]
+        acc = accs[i]
+        ctrl = v.control
+        wave = None
+        if ctrl & 0x10:                              # TRIANGLE (with ring mod)
+            eff = acc
+            if ctrl & 0x04:
+                eff = acc ^ accs[(i + 2) % 3]
+            mirrored = np.where(eff & 0x800000, ~acc & 0xFFFFFF, acc)
+            tri = (mirrored >> 11) & 0xFFF
+            wave = tri
+        if ctrl & 0x20:                              # SAWTOOTH
+            saw = acc >> 12
+            wave = saw if wave is None else (wave & saw)
+        if ctrl & 0x40:                              # PULSE
+            if ctrl & 0x08:                          # TEST forces pulse high
+                pulse = np.full(n_samples, 0xFFF, dtype=np.int64)
+            else:
+                pulse = np.where((acc >> 12) >= v.pulse_width, 0xFFF, 0)
+            wave = pulse if wave is None else (wave & pulse)
+        if ctrl & 0x80:                              # NOISE
+            noise = self._gen_noise(v, n_samples, np, phase_step)
+            wave = noise if wave is None else (wave & noise)
+        if wave is None:                             # no waveform selected
+            return np.zeros(n_samples, dtype=np.float32)
 
         env = self._envelope_chunk(v, n_samples, np)
-        return wave * env
+        return ((wave.astype(np.float32) / 2047.5) - 1.0) * env
 
     def _gen_noise(self, v, n_samples, np, phase_step):
         """
@@ -929,10 +1256,10 @@ class Sid:
         hold), which is why low-frequency noise sounds like a low rumble and
         high-frequency noise like bright hiss, rather than uniform white noise.
         """
-        out = np.empty(n_samples, dtype=np.float32)
+        out = np.empty(n_samples, dtype=np.int64)
         lfsr = v.noise_lfsr
         acc = v.noise_acc
-        cur = v.noise_out
+        cur = int(v.noise_out)
         BOUND = 1 << 20
         for i in range(n_samples):
             acc += phase_step
@@ -943,12 +1270,13 @@ class Sid:
                 lfsr = ((lfsr << 1) | fb) & 0x7FFFFF
                 shifted = True
             if shifted:
-                # 8-bit output tapped from LFSR bits 22,20,16,13,11,7,4,2
+                # 8-bit output tapped from LFSR bits 22,20,16,13,11,7,4,2,
+                # presented as the top bits of the 12-bit waveform value.
                 b = ((((lfsr >> 22) & 1) << 7) | (((lfsr >> 20) & 1) << 6) |
                      (((lfsr >> 16) & 1) << 5) | (((lfsr >> 13) & 1) << 4) |
                      (((lfsr >> 11) & 1) << 3) | (((lfsr >>  7) & 1) << 2) |
                      (((lfsr >>  4) & 1) << 1) |  ((lfsr >>  2) & 1))
-                cur = b / 127.5 - 1.0
+                cur = b << 4
             out[i] = cur
         v.noise_lfsr = lfsr
         v.noise_acc = acc
@@ -1530,6 +1858,24 @@ class CPU:
     def _abs_x(self):  return (self.fetch_word() + self.x) & 0xFFFF
     def _abs_y(self):  return (self.fetch_word() + self.y) & 0xFFFF
 
+    # Read-access variants: indexed READS cost +1 cycle when indexing crosses
+    # a page boundary (the 6502 re-reads with the fixed high byte). Stores and
+    # RMW instructions always pay the fixed penalty (their dispatch cycle
+    # counts already include it), so they keep using the plain variants.
+    def _abs_x_rd(self):
+        base = self.fetch_word()
+        ea = (base + self.x) & 0xFFFF
+        if (base ^ ea) & 0xFF00:
+            self.cycles += 1
+        return ea
+
+    def _abs_y_rd(self):
+        base = self.fetch_word()
+        ea = (base + self.y) & 0xFFFF
+        if (base ^ ea) & 0xFF00:
+            self.cycles += 1
+        return ea
+
     def _ind_x(self):
         zp = (self.fetch_byte() + self.x) & 0xFF
         lo = self.mem.read_system_byte(zp)
@@ -1541,6 +1887,16 @@ class CPU:
         lo = self.mem.read_system_byte(zp)
         hi = self.mem.read_system_byte((zp + 1) & 0xFF)
         return (make_word(lo, hi) + self.y) & 0xFFFF
+
+    def _ind_y_rd(self):
+        zp = self.fetch_byte()
+        lo = self.mem.read_system_byte(zp)
+        hi = self.mem.read_system_byte((zp + 1) & 0xFF)
+        base = make_word(lo, hi)
+        ea = (base + self.y) & 0xFFFF
+        if (base ^ ea) & 0xFF00:
+            self.cycles += 1
+        return ea
 
     # ---------- arithmetic / logic ----------
 
@@ -1751,60 +2107,60 @@ class CPU:
         d[0x05] = lambda: self._ora(M.read_system_byte(self._zp()), 3)
         d[0x15] = lambda: self._ora(M.read_system_byte(self._zp_x()), 4)
         d[0x0D] = lambda: self._ora(M.read_system_byte(self._abs()), 4)
-        d[0x1D] = lambda: self._ora(M.read_system_byte(self._abs_x()), 4)
-        d[0x19] = lambda: self._ora(M.read_system_byte(self._abs_y()), 4)
+        d[0x1D] = lambda: self._ora(M.read_system_byte(self._abs_x_rd()), 4)
+        d[0x19] = lambda: self._ora(M.read_system_byte(self._abs_y_rd()), 4)
         d[0x01] = lambda: self._ora(M.read_system_byte(self._ind_x()), 6)
-        d[0x11] = lambda: self._ora(M.read_system_byte(self._ind_y()), 5)
+        d[0x11] = lambda: self._ora(M.read_system_byte(self._ind_y_rd()), 5)
 
         # AND
         d[0x29] = lambda: self._and(self._imm(), 2)
         d[0x25] = lambda: self._and(M.read_system_byte(self._zp()), 3)
         d[0x35] = lambda: self._and(M.read_system_byte(self._zp_x()), 4)
         d[0x2D] = lambda: self._and(M.read_system_byte(self._abs()), 4)
-        d[0x3D] = lambda: self._and(M.read_system_byte(self._abs_x()), 4)
-        d[0x39] = lambda: self._and(M.read_system_byte(self._abs_y()), 4)
+        d[0x3D] = lambda: self._and(M.read_system_byte(self._abs_x_rd()), 4)
+        d[0x39] = lambda: self._and(M.read_system_byte(self._abs_y_rd()), 4)
         d[0x21] = lambda: self._and(M.read_system_byte(self._ind_x()), 6)
-        d[0x31] = lambda: self._and(M.read_system_byte(self._ind_y()), 5)
+        d[0x31] = lambda: self._and(M.read_system_byte(self._ind_y_rd()), 5)
 
         # EOR
         d[0x49] = lambda: self._eor(self._imm(), 2)
         d[0x45] = lambda: self._eor(M.read_system_byte(self._zp()), 3)
         d[0x55] = lambda: self._eor(M.read_system_byte(self._zp_x()), 4)
         d[0x4D] = lambda: self._eor(M.read_system_byte(self._abs()), 4)
-        d[0x5D] = lambda: self._eor(M.read_system_byte(self._abs_x()), 4)
-        d[0x59] = lambda: self._eor(M.read_system_byte(self._abs_y()), 4)
+        d[0x5D] = lambda: self._eor(M.read_system_byte(self._abs_x_rd()), 4)
+        d[0x59] = lambda: self._eor(M.read_system_byte(self._abs_y_rd()), 4)
         d[0x41] = lambda: self._eor(M.read_system_byte(self._ind_x()), 6)
-        d[0x51] = lambda: self._eor(M.read_system_byte(self._ind_y()), 5)
+        d[0x51] = lambda: self._eor(M.read_system_byte(self._ind_y_rd()), 5)
 
         # ADC
         d[0x69] = lambda: self._adc(self._imm(), 2)
         d[0x65] = lambda: self._adc(M.read_system_byte(self._zp()), 3)
         d[0x75] = lambda: self._adc(M.read_system_byte(self._zp_x()), 4)
         d[0x6D] = lambda: self._adc(M.read_system_byte(self._abs()), 4)
-        d[0x7D] = lambda: self._adc(M.read_system_byte(self._abs_x()), 4)
-        d[0x79] = lambda: self._adc(M.read_system_byte(self._abs_y()), 4)
+        d[0x7D] = lambda: self._adc(M.read_system_byte(self._abs_x_rd()), 4)
+        d[0x79] = lambda: self._adc(M.read_system_byte(self._abs_y_rd()), 4)
         d[0x61] = lambda: self._adc(M.read_system_byte(self._ind_x()), 6)
-        d[0x71] = lambda: self._adc(M.read_system_byte(self._ind_y()), 5)
+        d[0x71] = lambda: self._adc(M.read_system_byte(self._ind_y_rd()), 5)
 
         # SBC
         d[0xE9] = lambda: self._sbc(self._imm(), 2)
         d[0xE5] = lambda: self._sbc(M.read_system_byte(self._zp()), 3)
         d[0xF5] = lambda: self._sbc(M.read_system_byte(self._zp_x()), 4)
         d[0xED] = lambda: self._sbc(M.read_system_byte(self._abs()), 4)
-        d[0xFD] = lambda: self._sbc(M.read_system_byte(self._abs_x()), 4)
-        d[0xF9] = lambda: self._sbc(M.read_system_byte(self._abs_y()), 4)
+        d[0xFD] = lambda: self._sbc(M.read_system_byte(self._abs_x_rd()), 4)
+        d[0xF9] = lambda: self._sbc(M.read_system_byte(self._abs_y_rd()), 4)
         d[0xE1] = lambda: self._sbc(M.read_system_byte(self._ind_x()), 6)
-        d[0xF1] = lambda: self._sbc(M.read_system_byte(self._ind_y()), 5)
+        d[0xF1] = lambda: self._sbc(M.read_system_byte(self._ind_y_rd()), 5)
 
         # CMP / CPX / CPY
         d[0xC9] = lambda: self._cmp_reg(self.a, self._imm(), 2)
         d[0xC5] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._zp()), 3)
         d[0xD5] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._zp_x()), 4)
         d[0xCD] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._abs()), 4)
-        d[0xDD] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._abs_x()), 4)
-        d[0xD9] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._abs_y()), 4)
+        d[0xDD] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._abs_x_rd()), 4)
+        d[0xD9] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._abs_y_rd()), 4)
         d[0xC1] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._ind_x()), 6)
-        d[0xD1] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._ind_y()), 5)
+        d[0xD1] = lambda: self._cmp_reg(self.a, M.read_system_byte(self._ind_y_rd()), 5)
         d[0xE0] = lambda: self._cmp_reg(self.x, self._imm(), 2)
         d[0xE4] = lambda: self._cmp_reg(self.x, M.read_system_byte(self._zp()), 3)
         d[0xEC] = lambda: self._cmp_reg(self.x, M.read_system_byte(self._abs()), 4)
@@ -1821,22 +2177,22 @@ class CPU:
         d[0xA5] = lambda: self._lda_from(self._zp(), 3)
         d[0xB5] = lambda: self._lda_from(self._zp_x(), 4)
         d[0xAD] = lambda: self._lda_from(self._abs(), 4)
-        d[0xBD] = lambda: self._lda_from(self._abs_x(), 4)
-        d[0xB9] = lambda: self._lda_from(self._abs_y(), 4)
+        d[0xBD] = lambda: self._lda_from(self._abs_x_rd(), 4)
+        d[0xB9] = lambda: self._lda_from(self._abs_y_rd(), 4)
         d[0xA1] = lambda: self._lda_from(self._ind_x(), 6)
-        d[0xB1] = lambda: self._lda_from(self._ind_y(), 5)
+        d[0xB1] = lambda: self._lda_from(self._ind_y_rd(), 5)
 
         d[0xA2] = lambda: (setattr(self, 'x', self._imm()), self.update_nz(self.x), self._tick(2))
         d[0xA6] = lambda: self._ldx_from(self._zp(), 3)
         d[0xB6] = lambda: self._ldx_from(self._zp_y(), 4)
         d[0xAE] = lambda: self._ldx_from(self._abs(), 4)
-        d[0xBE] = lambda: self._ldx_from(self._abs_y(), 4)
+        d[0xBE] = lambda: self._ldx_from(self._abs_y_rd(), 4)
 
         d[0xA0] = lambda: (setattr(self, 'y', self._imm()), self.update_nz(self.y), self._tick(2))
         d[0xA4] = lambda: self._ldy_from(self._zp(), 3)
         d[0xB4] = lambda: self._ldy_from(self._zp_x(), 4)
         d[0xAC] = lambda: self._ldy_from(self._abs(), 4)
-        d[0xBC] = lambda: self._ldy_from(self._abs_x(), 4)
+        d[0xBC] = lambda: self._ldy_from(self._abs_x_rd(), 4)
 
         # STA / STX / STY
         d[0x85] = lambda: self._sta_at(self._zp(), 3)
@@ -1953,9 +2309,9 @@ class CPU:
         d[0xA7] = lambda: self._lax_from(self._zp(),    3)
         d[0xB7] = lambda: self._lax_from(self._zp_y(),  4)
         d[0xA3] = lambda: self._lax_from(self._ind_x(), 6)
-        d[0xB3] = lambda: self._lax_from(self._ind_y(), 5)
+        d[0xB3] = lambda: self._lax_from(self._ind_y_rd(), 5)
         d[0xAF] = lambda: self._lax_from(self._abs(),   4)
-        d[0xBF] = lambda: self._lax_from(self._abs_y(), 4)
+        d[0xBF] = lambda: self._lax_from(self._abs_y_rd(), 4)
 
         # SLO  = ASL memory, then ORA result into A
         d[0x07] = lambda: self._slo(self._zp(),    5)
@@ -2035,7 +2391,7 @@ class CPU:
             d[op] = lambda: (self._zp_x(), self._tick(4))      # NOP zp,X
         d[0x0C] = lambda: (self._abs(), self._tick(4))         # NOP abs
         for op in (0x1C, 0x3C, 0x5C, 0x7C, 0xDC, 0xFC):
-            d[op] = lambda: (self._abs_x(), self._tick(4))     # NOP abs,X
+            d[op] = lambda: (self._abs_x_rd(), self._tick(4))  # NOP abs,X
 
         # Genuinely unstable / rarely used illegals. ANE ($8B) and LXA ($AB)
         # follow the (A | magic) & ... model that the Wolfgang-Lorenz suite and
@@ -2222,7 +2578,7 @@ class CPU:
 
     def _las_abs_y(self):                       # LAS / LAE / LAR $BB  (abs,Y)
         # A = X = SP = (memory AND SP). Sets N/Z from the result.
-        t = self.mem.read_system_byte(self._abs_y()) & self.sp
+        t = self.mem.read_system_byte(self._abs_y_rd()) & self.sp
         self.a = t
         self.x = t
         self.sp = t
@@ -2916,6 +3272,7 @@ class System:
         self.vic.color_ram = self.color_ram   # for per-row colour-RAM snapshots
         self.chargen_rom = bytes(chargen)
         self.cpu = CPU(self.mem)
+        self.sid._cpu = self.cpu          # cycle timestamps for write queue
         self._d64 = None
         # KERNAL file-I/O state: open files keyed by logical address (LA).
         # Each entry: {'dev': int, 'sa': int, 'name': bytes, 'data': bytes, 'pos': int}
@@ -3090,8 +3447,16 @@ class System:
         # Boot the kernal first so the C64 is in a sensible state
         if self.cpu.cycles < 2_000_000:
             self.run(3_500_000)
-        # Bank ROMs out — PSID code typically uses RAM under ROMs
-        self.mem.write_system_byte(Config.ADDR_PROCESSOR_PORT_REG, 0x37)
+        # Environment depends on the format:
+        #  - PSID with a play address: WE drive the player. Lean environment,
+        #    I/O in, BASIC/KERNAL ROMs banked OUT ($35) — tunes routinely load
+        #    their data under the ROM areas and read it back.
+        #  - RSID (or play == 0): the tune brings its own interrupt handler
+        #    and/or main loop and expects a REAL C64: ROMs banked in ($37),
+        #    kernal IRQ chain alive, machine free-running after init.
+        is_selfdriving = (data[:4] == b"RSID") or (play_addr == 0)
+        self.mem.write_system_byte(Config.ADDR_PROCESSOR_PORT_REG,
+                                   0x37 if is_selfdriving else 0x35)
         # Write payload
         self.mem.load_ram(load_addr, payload)
         # Call init with A = song index (0-based), interrupts disabled
@@ -3100,9 +3465,31 @@ class System:
         self.cpu.a = song_num & 0xFF
         self.cpu.x = 0
         self.cpu.y = 0
-        self.cpu.set_flag(self.cpu.FI, True)
-        self.call_routine(init_addr)
+        self.cpu.set_flag(self.cpu.FI, not is_selfdriving)
+        init_returned = self.call_routine(init_addr)
         self._sid_play_addr = play_addr
+        # Park the CPU only where that's correct:
+        #  - PSID (we call play each frame): always park in a JMP * idle loop,
+        #    otherwise the CPU free-runs into zeroed RAM between our calls.
+        #  - Self-driving tune whose init RETURNED: park too, but with
+        #    interrupts ENABLED so the tune's own IRQ handler keeps playing.
+        #  - Self-driving tune whose init did NOT return (it IS the player's
+        #    main loop): leave the PC alone — the timeout just means the tune
+        #    is running, and yanking the PC out of the loop kills the music.
+        load_end = load_addr + len(payload)
+        self._sid_idle_addr = 0
+        for cand in (0x03C0, 0x02A7, 0xFFF9):
+            if cand == 0xFFF9 and is_selfdriving:
+                continue                      # ROM banked in there under $37
+            if not (load_addr <= cand + 2 and cand <= load_end):
+                self._sid_idle_addr = cand
+                break
+        ia = self._sid_idle_addr
+        if ia and (not is_selfdriving or init_returned):
+            self.mem.load_ram(ia, bytes((0x4C, ia & 0xFF, (ia >> 8) & 0xFF)))
+            self.cpu.pc = ia
+            if is_selfdriving:
+                self.cpu.set_flag(self.cpu.FI, False)   # tune plays via IRQ
         return {"format": data[:4].decode("ascii"), "version": version,
                 "load": load_addr, "init": init_addr, "play": play_addr,
                 "songs": songs, "start_song": start_song,
@@ -3113,6 +3500,8 @@ class System:
         addr = getattr(self, "_sid_play_addr", 0)
         if addr:
             self.call_routine(addr)
+            if self._sid_idle_addr:
+                self.cpu.pc = self._sid_idle_addr    # back to the idle loop
 
     # ---------- D64 disk image + KERNAL LOAD trap ----------
 
@@ -3756,6 +4145,7 @@ class System:
         self.mem.reset()
         self.vic.__init__()
         self.sid.__init__()
+        self.sid._cpu = self.cpu
         self.cia1.__init__("CIA1")
         self.cia2.__init__("CIA2")
         self.cpu.reset()
@@ -4187,13 +4577,10 @@ class PygameFrontend:
         np = self.np
         vic = self.system.vic
         bank = self.system.mem.vic_bank()
-        line_d018 = vic.line_d018
-        n = len(line_d018)
         cache = {}
         masks = np.empty((25, 40, 8, 8), dtype=np.uint8)
         for r in range(25):
-            raster = (self.FIRST_DISPLAY_LINE + r * 8 + 4) % n
-            cb_sel = (line_d018[raster] >> 1) & 0x07
+            cb_sel = (vic.row_mode_d018[r] >> 1) & 0x07
             cg = cache.get(cb_sel)
             if cg is None:
                 cg = self._chargen_for(bank, cb_sel)
@@ -4468,9 +4855,47 @@ class PygameFrontend:
             pixels[r * 8:end * 8] = rp
             bitmap[r * 8:end * 8] = rm
             r = end
+        # --- Per-line display remap (badline / FLD / idle) ---
+        # The 25-row grid above is the canonical row content; the display-logic
+        # records now say WHICH row line and the beam actually showed on every
+        # raster line. In the normal case this is the identity and costs one
+        # comparison; with FLD the rows are displaced downward and the gap
+        # shows the idle pattern; with DEN off (or outside display state) the
+        # whole area is idle. Idle lines display the byte at $3FFF ($39FF in
+        # ECM) with black foreground over the line's $D021 — those set bits
+        # are real foreground for sprite priority and $D01F collision.
+        lt = vic.line_text_row
+        lrc = vic.line_rc
+        lid = vic.line_idle
+        src = np.empty(200, dtype=np.intp)
+        idle_lines = []
+        for sy in range(200):
+            rr = sy + 51
+            if lid[rr]:
+                idle_lines.append(sy)
+                src[sy] = 0
+            else:
+                src[sy] = lt[rr] * 8 + lrc[rr]
+        if idle_lines or not np.array_equal(src, np.arange(200)):
+            pixels = pixels[src].copy()
+            bitmap = bitmap[src].copy()
+            for sy in idle_lines:
+                rr = sy + 51
+                byte = mem.read_vic(0x39FF if (vic.line_d011[rr] & 0x40)
+                                    else 0x3FFF)
+                brow = np.tile(np.unpackbits(np.array([byte], np.uint8)), 40)
+                bitmap[sy] = brow
+                bg = self._palette[vic.line_d021[rr] & 0x0F]
+                prow = np.where(brow[:, None].astype(bool),
+                                np.zeros(3, np.uint8), bg).astype(np.uint8)
+                pixels[sy] = prow
         # Keep the frame's foreground mask for verify_foreground(): the
         # enforcement tool that asserts renderer and collision agree.
         self._last_fg_bitmap = bitmap
+        # Mid-line $D021 raster bars on background pixels (colour only —
+        # foreground mask and collision are unaffected).
+        if vic._d021_splits:
+            self._apply_d021_splits_inner(pixels, bitmap)
 
         # --- Sprites ---
         # bitmap (200, 320) is the foreground mask used for priority + collisions.
@@ -4503,7 +4928,7 @@ class PygameFrontend:
         for s in range(7, -1, -1):
             sy = 0
             while sy < 200:
-                r = sy + 50
+                r = sy + 51
                 if lrow[r * 8 + s] == 0xFF:
                     sy += 1
                     continue
@@ -4518,7 +4943,7 @@ class PygameFrontend:
                 rows = [lrow[r * 8 + s]]
                 end = sy + 1
                 while end < 200:
-                    rr = end + 50
+                    rr = end + 51
                     if lrow[rr * 8 + s] == 0xFF:
                         break
                     an = (lx[rr * 8 + s] | (((lmsb[rr] >> s) & 1) << 8),
@@ -4541,26 +4966,152 @@ class PygameFrontend:
         # so the latch is correct whenever the game polls it rather than only
         # when a frame happens to be composed for display.
 
+        # --- Vertical border overlay ---
+        # Lines where the vertical border flip-flop is set are covered by the
+        # border colour — over graphics AND sprites (the border has priority
+        # over everything). With DEN off the flip-flop never opens, which is
+        # how blanked loading screens actually look; RSEL=0 covers 4 lines at
+        # top and bottom. In the normal 25-row case no line inside the window
+        # is bordered, so this costs nothing.
+        for sy in range(200):
+            rr = sy + 51
+            if vic.line_vborder[rr]:
+                pixels[sy] = self._palette[vic.line_d020[rr] & 0x0F]
+
         return pixels, border
+
+    def _d021_row_colors(self, r):
+        """(320,3) background colour row for raster r, honouring recorded
+        mid-line $D021 splits. Cycle→pixel mapping: x = (cycle-14)*8."""
+        np = self.np
+        vic = self.system.vic
+        base = self._palette[vic.line_d021[r] & 0x0F]
+        segs = vic._d021_splits.get(r)
+        row = np.empty((320, 3), np.uint8)
+        row[:] = base
+        if segs:
+            for cyc, col in segs:
+                x = max(0, min(320, (cyc - 14) * 8))
+                row[x:] = self._palette[col]
+        return row
+
+    def _apply_d021_splits_inner(self, pixels, bitmap):
+        """Recolour flat background pixels of playfield lines that had
+        mid-line $D021 writes. Only pixels that are (a) not foreground and
+        (b) currently the line's base background colour are touched, so
+        glyph/bitmap art and multicolour intermediates stay intact."""
+        np = self.np
+        vic = self.system.vic
+        for r, segs in vic._d021_splits.items():
+            sy = r - 51
+            if not (0 <= sy < 200) or vic.line_vborder[r]:
+                continue
+            base = self._palette[vic.line_d021[r] & 0x0F]
+            is_bg = (bitmap[sy] == 0) & (pixels[sy] == base).all(axis=1)
+            if not is_bg.any():
+                continue
+            row = self._d021_row_colors(r)
+            pixels[sy] = np.where(is_bg[:, None], row, pixels[sy])
+
+    def _compose_canvas(self):
+        """Compose the full 384x272 frame: per-line border colours, the inner
+        display window, and — where the vertical border flip-flop was tricked
+        open (RSEL flip on the compare line) — idle graphics and SPRITES in
+        the top/bottom border areas. The side borders stay closed (horizontal
+        opening is cycle-exact territory)."""
+        np = self.np
+        vic = self.system.vic
+        mem = self.system.mem
+        pixels, border = self._compose_pixels()
+        h = self.SCREEN_H + 2 * self.BORDER_Y          # 272
+        w = self.SCREEN_W + 2 * self.BORDER_X          # 384
+        r_first = 51 - self.BORDER_Y                   # raster of canvas row 0
+        canvas = np.empty((h, w, 3), np.uint8)
+        # Per-line border colour for every canvas row (raster bars for free).
+        l20 = np.frombuffer(bytes(vic.line_d020), dtype=np.uint8)
+        canvas[:, :] = self._palette[
+            l20[r_first:r_first + h] & 0x0F][:, None, :]
+        canvas[self.BORDER_Y:self.BORDER_Y + self.SCREEN_H,
+               self.BORDER_X:self.BORDER_X + self.SCREEN_W] = pixels
+        # Opened top/bottom border: idle pattern + sprites in the centre.
+        lvb = vic.line_vborder
+        for r0, r1 in ((r_first, 51), (251, r_first + h)):
+            open_rs = [r for r in range(r0, r1) if not lvb[r]]
+            if not open_rs:
+                continue
+            n = r1 - r0
+            buf = canvas[r0 - r_first:r1 - r_first,
+                         self.BORDER_X:self.BORDER_X + 320]
+            fg = np.zeros((n, 320), np.uint8)
+            for r in open_rs:
+                byte = mem.read_vic(0x39FF if (vic.line_d011[r] & 0x40)
+                                    else 0x3FFF)
+                bits = np.tile(np.unpackbits(
+                    np.array([byte], np.uint8)), 40)
+                fg[r - r0] = bits
+                bgrow = self._d021_row_colors(r)
+                buf[r - r0] = np.where(bits[:, None].astype(bool),
+                                       np.zeros(3, np.uint8), bgrow)
+            self._border_sprite_pass(buf, fg, r0, r1, set(open_rs))
+        return canvas
+
+    def _border_sprite_pass(self, buf, fg, r0, r1, open_set):
+        """Render sprites into an opened border region. `buf` is the region's
+        centre-320px pixel buffer (rows = rasters r0..r1), `fg` the idle
+        foreground mask used for sprite priority. Consumes the same canonical
+        per-line sprite records as the main pass."""
+        np = self.np
+        vic = self.system.vic
+        lrow = vic.line_spr_row
+        lx = vic.line_spr_x
+        lp = vic.line_spr_ptr
+        lmsb = vic.line_spr_msb
+        lcol = vic.line_spr_col
+        l1c = vic.line_d01c
+        l1d = vic.line_d01d
+        l1b = vic.line_d01b
+        l25 = vic.line_d025
+        l26 = vic.line_d026
+        occ = np.zeros((r1 - r0, 320), np.uint8)
+        cache = {}
+
+        def attrs(rr, s):
+            return (lx[rr * 8 + s] | (((lmsb[rr] >> s) & 1) << 8),
+                    lp[rr * 8 + s],
+                    lcol[rr * 8 + s] & 0x0F,
+                    (l1c[rr] >> s) & 1,
+                    (l1d[rr] >> s) & 1,
+                    (l1b[rr] >> s) & 1,
+                    l25[rr] & 0x0F,
+                    l26[rr] & 0x0F)
+
+        for s in range(7, -1, -1):
+            r = r0
+            while r < r1:
+                if r not in open_set or lrow[r * 8 + s] == 0xFF:
+                    r += 1
+                    continue
+                a0 = attrs(r, s)
+                rows = [lrow[r * 8 + s]]
+                end = r + 1
+                while (end < r1 and end in open_set
+                        and lrow[end * 8 + s] != 0xFF
+                        and attrs(end, s) == a0):
+                    rows.append(lrow[end * 8 + s])
+                    end += 1
+                self._render_sprite_run(s, buf, fg, occ,
+                                        r - r0, rows, a0, cache)
+                r = end
 
     def render_to_array(self):
         """Compose a full 384x272x3 uint8 frame (border + display) as a numpy
         array, without any pygame dependency. Used by the VIC screenshot test."""
-        np = self.np
-        pixels, border = self._compose_pixels()
-        h = self.SCREEN_H + 2 * self.BORDER_Y
-        w = self.SCREEN_W + 2 * self.BORDER_X
-        canvas = np.empty((h, w, 3), np.uint8)
-        canvas[:, :] = self._palette[border]
-        canvas[self.BORDER_Y:self.BORDER_Y + self.SCREEN_H,
-               self.BORDER_X:self.BORDER_X + self.SCREEN_W] = pixels
-        return canvas
+        return self._compose_canvas()
 
     def render_frame(self):
-        pixels, border = self._compose_pixels()
-        self.frame_surf.fill(C64_PALETTE[border])
-        surf = self.pygame.surfarray.make_surface(pixels.swapaxes(0, 1))
-        self.frame_surf.blit(surf, (self.BORDER_X, self.BORDER_Y))
+        canvas = self._compose_canvas()
+        surf = self.pygame.surfarray.make_surface(canvas.swapaxes(0, 1))
+        self.frame_surf.blit(surf, (0, 0))
         if self.scale == 1:
             self.window.blit(self.frame_surf, (0, 0))
         else:
@@ -4677,7 +5228,7 @@ class PygameFrontend:
         bad_lines = 0
         bad_pixels = 0
         for sy in range(200):
-            want = vic._foreground_bits_at(sy + 50, 0, 40)
+            want = vic._foreground_bits_at(sy + 51, 0, 40)
             got = 0
             row = bm[sy]
             for x in range(320):
