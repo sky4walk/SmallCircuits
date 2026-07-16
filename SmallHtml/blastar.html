@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BLASTAR (1984 original by E.R. Musk, faithfully reconstructed)</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #05040a;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+  }
+  #bezel {
+    position: relative;
+    padding: 28px 28px 40px 28px;
+    background: linear-gradient(160deg, #1b1830, #0c0a16 60%, #050208);
+    border-radius: 18px;
+    box-shadow:
+      0 0 0 2px #2a2542,
+      0 0 40px 8px rgba(255, 255, 85, 0.06),
+      inset 0 0 30px rgba(0,0,0,0.8);
+  }
+  #screenwrap {
+    position: relative;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: inset 0 0 60px rgba(0,0,0,0.9), 0 0 2px #000;
+  }
+  canvas {
+    display: block;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #000000;
+  }
+  #scanlines {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0,0,0,0) 0px,
+      rgba(0,0,0,0.18) 1px,
+      rgba(0,0,0,0) 3px
+    );
+    mix-blend-mode: multiply;
+  }
+  #vignette {
+    position: absolute; inset: 0;
+    pointer-events: none;
+    box-shadow: inset 0 0 60px 20px rgba(0,0,0,0.65);
+  }
+  #label {
+    text-align: center;
+    margin-top: 10px;
+    letter-spacing: 2px;
+    font-size: 11px;
+    color: #4b466e;
+  }
+  #label b { color: #6a63a0; }
+</style>
+</head>
+<body>
+<div id="bezel">
+  <div id="screenwrap">
+    <canvas id="game" width="320" height="200"></canvas>
+    <div id="scanlines"></div>
+    <div id="vignette"></div>
+  </div>
+  <div id="label">BLASTAR 1983 &mdash; <b>ARROW KEYS</b> = JOYSTICK &nbsp; <b>SPACE</b> = FIRE (tap it, holding it resets the shot &mdash; just like the original!)</div>
+</div>
+
+<script>
+(() => {
+"use strict";
+
+/* =========================================================================
+   Faithful reconstruction of BLASTAR BY E.R.MUSK (1983 GW-BASIC / PCjr)
+   Every rule below is taken directly from the original line-numbered
+   BASIC source, referenced in comments as [LINE nnn].
+   ========================================================================= */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+const SCALE = 3;
+canvas.style.width = (320 * SCALE) + 'px';
+canvas.style.height = (200 * SCALE) + 'px';
+
+/* ---------- sprites, decoded verbatim from the DATA statements ---------- */
+const SPR = {
+  ship: ["10011001","10011001","10011001","11100111","11000011","11000011","11000011","11000011"], // SPRITE$(1) lines 1260-1330
+  rock: ["00000000","00000000","01000010","10100101","01000010","00000000","00000000","00000000"], // SPRITE$(2) lines 1340-1410
+  ufo:  ["00011000","01000010","11100111","10111101","01011010","00100100","00111100","01100110"], // SPRITE$(3) lines 1420-1490
+  boom: ["01010110","11001101","10010101","01011011","00011001","11010011","01100101","01011100"], // SPRITE$(4) lines 1500-1570
+  beam: ["00000000","00010000","00111000","01111100","01111100","00111000","00010000","00000000"], // SPRITE$(5) lines 1580-1650
+};
+
+/* ---------- true CGA/PCjr 16-colour palette, using the exact COLOR
+   indices the original PUTSPRITE calls specify ---------- */
+const CGA = {
+  0:"#000000", 1:"#0000AA", 2:"#00AA00", 3:"#00AAAA", 4:"#AA0000", 5:"#AA00AA",
+  6:"#AA5500", 7:"#AAAAAA", 8:"#555555", 9:"#5555FF", 10:"#55FF55", 11:"#55FFFF",
+  12:"#FF5555", 13:"#FF55FF", 14:"#FFFF55", 15:"#FFFFFF",
+};
+
+// numeric bitmaps for pixel-perfect collision, mirroring checkCollisions()
+// in the reference HTML5 port (each row's leftmost char is the high bit,
+// exactly matching the original CHR$(VAL("&B"+...)) conversion)
+const BITS = {};
+for (const k in SPR) BITS[k] = SPR[k].map(r => parseInt(r, 2));
+
+// true bitmap overlap test between two 8x8 sprites, bit-shifted into the
+// same coordinate space before ANDing — not a bounding-box guess
+function pixelOverlap(bitsA, xA, yA, bitsB, xB, yB) {
+  if (Math.abs(xA - xB) >= 8 || Math.abs(yA - yB) >= 8) return false;
+  const yStart = Math.max(yA, yB), yEnd = Math.min(yA + 8, yB + 8);
+  for (let y = yStart; y < yEnd; y++) {
+    const rowA = bitsA[y - yA], rowB = bitsB[y - yB];
+    const overlap = (xB < xA) ? ((rowA << (xA - xB)) & rowB) : ((rowB << (xB - xA)) & rowA);
+    if (overlap) return true;
+  }
+  return false;
+}
+
+function drawSprite(name, x, y, colorIndex) {
+  const bits = SPR[name];
+  ctx.fillStyle = CGA[colorIndex];
+  for (let row = 0; row < 8; row++) {
+    for (let col = 0; col < 8; col++) {
+      if (bits[row][col] === '1') ctx.fillRect(Math.round(x) + col, Math.round(y) + row, 1, 1);
+    }
+  }
+}
+
+/* ---------- sound: reconstruction of the PLAY strings via WebAudio ---------- */
+let actx = null;
+function ensureAudio() { if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)(); }
+// frequencies for octaves 2,3,4 (Hz)
+const FREQ = {
+  2: {C:65.41,D:73.42,E:82.41,F:87.31,G:98.00,A:110.00,B:123.47},
+  3: {C:130.81,D:146.83,E:164.81,F:174.61,G:196.00,A:220.00,B:246.94},
+  4: {C:261.63,D:293.66,E:329.63,F:349.23,G:392.00,A:440.00,B:493.88},
+};
+function beep(freq, dur, vol = 0.06) {
+  if (!actx) return;
+  const osc = actx.createOscillator(), gain = actx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  osc.connect(gain).connect(actx.destination);
+  const t = actx.currentTime;
+  gain.gain.setValueAtTime(vol, t);
+  gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.start(t); osc.stop(t + dur);
+}
+// [LINES 90-120] PLAY"O3L50CECECDBABADACECEBDACDBDCEGG" then O4, O3, O4 — same melody, alternating octaves, four times
+function playTitleTune() {
+  ensureAudio();
+  const seq = "CECECDBABADACECEBDACDBDCEGG";
+  const octaves = [3, 4, 3, 4];
+  const noteDur = 0.09, gap = 0.1;
+  let t = 0;
+  octaves.forEach(oct => {
+    for (const ch of seq) {
+      const f = FREQ[oct][ch];
+      if (f) setTimeout(() => beep(f, noteDur * 0.9, 0.045), t * 1000);
+      t += gap;
+    }
+  });
+}
+// [LINE 880] PLAY"O4V6L50DL30F" — quick two-note shot
+function sfxShoot() { ensureAudio(); beep(FREQ[4].D, 0.05, 0.05); setTimeout(() => beep(FREQ[4].F, 0.07, 0.05), 55); }
+// [LINE 1130] PLAY"O2L15G" — low warning tone, repeats each beam tick
+function sfxBeam() { ensureAudio(); beep(FREQ[2].G, 0.1, 0.035); }
+// [LINE 210] BEEP
+function sfxBeep() { ensureAudio(); beep(800, 0.15, 0.06); }
+function sfxHit()  { ensureAudio(); beep(110, 0.3, 0.08); }
+function sfxBoom() { ensureAudio(); beep(180, 0.15, 0.07); beep(90, 0.25, 0.06); }
+
+/* ---------- input: arrow keys stand in for STICK(1), space for STRIG(1) ---------- */
+const keyState = {};
+window.addEventListener('keydown', e => {
+  keyState[e.code] = true;
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Space"].includes(e.code)) e.preventDefault();
+  onKey(e.code);
+});
+window.addEventListener('keyup', e => { keyState[e.code] = false; });
+
+// D = STICK(1): 0 = neutral, 1..8 clockwise from up, exactly as the original's D values
+function readD() {
+  // mirrors the reference port's stick(): opposite keys cancel out
+  const r = keyState['ArrowRight'] && !keyState['ArrowLeft'];
+  const l = keyState['ArrowLeft'] && !keyState['ArrowRight'];
+  const u = keyState['ArrowUp'] && !keyState['ArrowDown'];
+  const d = keyState['ArrowDown'] && !keyState['ArrowUp'];
+  if (r) { if (u) return 2; if (d) return 4; return 3; }
+  if (l) { if (u) return 8; if (d) return 6; return 7; }
+  if (u) return 1;
+  if (d) return 5;
+  return 0;
+}
+function readF() { return !!keyState['Space']; } // STRIG(1)
+
+/* ---------- game state, named exactly like the BASIC variables ---------- */
+let SC = 0, SH = 5;          // [LINE 10] SH=5
+let P = 120, C = 180;        // [LINE 590] player position
+let H = 30, G = 15;          // [LINE 600] alien position
+let U = 0, W = 0;            // rocket position (active only in ROCKET mode)
+let OO = 0, NN = 0;          // beam position (active only in BEAM mode)
+let lockedP = 0;             // player's frozen horizontal position during BEAM mode
+let mode = 'TITLE';          // TITLE, INSTRUCTIONS, MAIN, ROCKET, BEAM, BOOM, HIT, GAMEOVER
+let pauseUntil = 0;
+let afterPause = null;
+let titlePlayed = false;
+let boomAt = null, hitFlashAt = null, beamParked = null;
+
+function onKey(code) {
+  if (mode === 'TITLE') {
+    // [LINES 190-230] any key advances; Y/y goes to instructions, anything else starts the game
+    sfxBeep();
+    if (!titlePlayed) { playTitleTune(); titlePlayed = true; }
+    if (code === 'KeyY') { mode = 'INSTRUCTIONS'; }
+    else { beginGame(); }
+  } else if (mode === 'INSTRUCTIONS') {
+    // [LINE 270] any key continues
+    beginGame();
+  } else if (mode === 'GAMEOVER') {
+    // [LINE 1220] IFA$="Y"ORA$="y"THENRUN
+    if (code === 'KeyY') { fullReset(); mode = 'TITLE'; }
+  }
+}
+
+function beginGame() {
+  // [LINES 570-610]
+  SC = 0; SH = 5;
+  P = 120; C = 180;
+  H = 30; G = 15;
+  U = W = OO = NN = null;
+  mode = 'MAIN';
+}
+function fullReset() { titlePlayed = false; }
+
+/* ---------- movement deltas, copied exactly from lines 660-730 ----------
+   D:   1     2     3     4     5     6     7     8
+   dP:  0    +2    +4    +2     0    -2    -4    -2
+   dC: -4    -2     0    +2    +4    +2     0    -2
+*/
+const DELTA = {
+  0:[0,0], 1:[0,-4], 2:[2,-2], 3:[4,0], 4:[2,2], 5:[0,4], 6:[-2,2], 7:[-4,0], 8:[-2,-2],
+};
+
+function movePlayer() {
+  const D = readD();
+  const [dp, dc] = DELTA[D];
+  P += dp; C += dc;
+  // [LINES 750-780] clamp / snap-back exactly as original
+  if (C < 10) C = 10;
+  if (C > 190) C = 180;
+  if (P < 10) P = 10;
+  if (P > 240) P = 240;
+}
+
+/* ---------- fixed-timestep game loop: the original BASIC loop ran at
+   whatever speed the interpreter + PUTSPRITE/PLAY calls allowed — this
+   approximates that unhurried early-80s pace ---------- */
+// [reference port] kMainLoopMillis=150, kRocketsLoopMillis=150, kStatusBeamLoopMillis=220
+function currentTickMs() { return mode === 'BEAM' ? 220 : 150; }
+let acc = 0, last = performance.now();
+
+function tick() {
+  if (mode === 'MAIN') tickMain();
+  else if (mode === 'ROCKET') tickRocket();
+  else if (mode === 'BEAM') tickBeam();
+}
+
+function tickMain() {
+  // [LINES 620-850]
+  const F = readF();
+  movePlayer();
+  // [LINE 810] alien catches player's column (tolerance of 1 either side)
+  if (Math.abs(H - P) <= 1) {
+    enterBeam();
+    return;
+  }
+  // [LINE 820-830] alien drifts right at speed 3, wraps at 250
+  H += 3;
+  if (H > 250) H = 10;
+  // [LINE 840] fire button pressed -> shoot
+  if (F) enterRocket();
+}
+
+function enterRocket() {
+  // [LINE 870]
+  U = P; W = C - 5;
+  sfxShoot();
+  mode = 'ROCKET';
+}
+
+function tickRocket() {
+  // [LINES 890-1010], alien moves faster (4/tick) while a rocket is live
+  H += 4;
+  W -= 6;
+  // [LINE 950] exact alignment check while a shot is in flight
+  if (H === P) { enterBeam(); return; }
+  // pixel-perfect collision, matching checkCollisions() in the reference port:
+  // rocket-vs-freighter is the intended hit, but ramming the freighter with
+  // the ship itself also counts (only ship-vs-rocket is excluded as "friendly fire")
+  if (pixelOverlap(BITS.rock, U, W, BITS.ufo, H, G) || pixelOverlap(BITS.ship, P, C, BITS.ufo, H, G)) {
+    enterBoom();
+    return;
+  }
+  // [LINE 960] player still moves every tick, but the alien/fire branch is skipped (Y=1)
+  movePlayer();
+  const F = readF();
+  // [LINE 990] holding fire re-spawns the shot at the ship instead of letting it travel
+  if (F) { U = P; W = C - 5; return; }
+  // [LINE 1000] shot left the screen without a hit
+  if (W < -10) { mode = 'MAIN'; U = W = null; return; }
+  // otherwise the shot keeps flying next tick [LINE 1010 GOTO890]
+}
+
+function enterBoom() {
+  // [LINE 1030]
+  SC += 80;
+  boomAt = { x: H, y: G };
+  sfxBoom();
+  U = W = null;
+  mode = 'BOOM';
+  pauseUntil = performance.now() + 800; // [reference] 20 * kPutSpriteMillis(40)
+  afterPause = () => {
+    boomAt = null;
+    G = 20 + Math.floor(150 * Math.random()); // H is deliberately left untouched
+    mode = 'MAIN';
+  };
+}
+
+function enterBeam() {
+  // [LINE 1050]
+  OO = H; NN = G + 5;
+  lockedP = P;
+  mode = 'BEAM';
+  U = W = null;
+}
+
+function tickBeam() {
+  // [LINES 1080-1170]
+  NN += 4;
+  sfxBeam();
+  // pixel-perfect collision: the beam itself, or ramming the freighter
+  // directly while it's attacking, both cost you a ship
+  if (pixelOverlap(BITS.beam, OO, NN, BITS.ship, P, C) || pixelOverlap(BITS.ufo, H, G, BITS.ship, P, C)) {
+    enterHit();
+    return;
+  }
+  if (NN > 205) {
+    // [LINE 1140] beam missed — back to normal flight, alien H/G unchanged
+    mode = 'MAIN'; OO = NN = null;
+    return;
+  }
+  // [LINE 1090] player keeps moving vertically; horizontal position is frozen
+  movePlayer();
+  P = lockedP;
+}
+
+function enterHit() {
+  // [LINE 1180]
+  SH -= 1;
+  sfxHit();
+  beamParked = { x: 128, y: 205 };
+  hitFlashAt = { x: P, y: C };
+  mode = 'HIT';
+  pauseUntil = performance.now() + 240; // [reference] 60 * kEmptyIterationMillis(4)
+  afterPause = () => {
+    beamParked = null; hitFlashAt = null; OO = NN = null;
+    G = 20 + Math.floor(170 * Math.random());
+    H = 0;
+    if (SH < 0) { mode = 'GAMEOVER'; }
+    else { mode = 'MAIN'; }
+  };
+}
+
+/* ---------- frame pump ---------- */
+function frame(now) {
+  const dt = now - last; last = now;
+
+  if (mode === 'BOOM' || mode === 'HIT') {
+    if (now >= pauseUntil && afterPause) { const fn = afterPause; afterPause = null; fn(); }
+  } else if (mode === 'MAIN' || mode === 'ROCKET' || mode === 'BEAM') {
+    acc += dt;
+    while (acc >= currentTickMs()) {
+      const step = currentTickMs();
+      tick();
+      acc -= step;
+      if (mode === 'BOOM' || mode === 'HIT') break; // pause states aren't ticked
+    }
+  }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+/* ---------- rendering ---------- */
+function clear() { ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 320, 200); }
+
+function hud() {
+  ctx.fillStyle = CGA[15];
+  ctx.font = '8px monospace';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`SCORE ${SC}`, 6, 4);
+  ctx.fillText(`SHIPS ${Math.max(SH, 0)}`, 250, 4);
+}
+
+function center(text, y, colorIndex, size = 8) {
+  ctx.fillStyle = CGA[colorIndex];
+  ctx.font = `${size}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.fillText(text, 160, y);
+  ctx.textAlign = 'left';
+}
+
+function render() {
+  clear();
+
+  if (mode === 'TITLE') {
+    center('BLASTAR', 55, 14, 20);
+    center('BY E.R. MUSK', 80, 7, 8);
+    center('DO YOU NEED INSTRUCTIONS', 130, 15, 8);
+    center('(Y/N)', 144, 15, 8);
+    center('PRESS ANY KEY', 175, 8, 7);
+    return;
+  }
+  if (mode === 'INSTRUCTIONS') {
+    center('USE ARROW KEYS FOR CONTROL', 30, 15, 8);
+    center('AND SPACE TO SHOOT', 42, 15, 8);
+    center('MISSION: DESTROY ALIEN FREIGHTER', 80, 14, 7);
+    center('CARRYING DEADLY HYDROGEN BOMBS', 92, 14, 7);
+    center('AND STATUS BEAM MACHINES', 104, 14, 7);
+    drawSprite('ufo', 150, 130, 14);
+    center('PRESS ANY KEY', 175, 8, 7);
+    return;
+  }
+
+  // gameplay states share the same view
+  hud();
+
+  if (mode === 'GAMEOVER') {
+    center('BLASTAR', 60, 14, 14);
+    center('FLEET DESTROYED', 90, 4, 10);
+    center('WOULD YOU LIKE ANOTHER GAME', 120, 15, 8);
+    center('(Y/N)', 134, 15, 8);
+    return;
+  }
+
+  // alien / rocket / beam / boom
+  if (mode === 'BOOM' && boomAt) {
+    drawSprite('boom', boomAt.x, boomAt.y, 14);
+  } else if (mode === 'HIT') {
+    if (beamParked) drawSprite('beam', beamParked.x, beamParked.y, 14);
+    if (hitFlashAt) drawSprite('beam', hitFlashAt.x, hitFlashAt.y, 8);
+  } else {
+    drawSprite('ufo', H, G, 14);
+    if (mode === 'ROCKET' && U !== null) drawSprite('rock', U, W, 9);
+    if (mode === 'BEAM' && OO !== null) {
+      drawSprite('beam', OO, NN, 4);
+      center('STATUS BEAM', 30, 4, 7);
+    }
+  }
+
+  drawSprite('ship', P, C, 14);
+}
+
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
