@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.15-sid-timing"
+__version__ = "2026.07.16-diskswap"
 
 
 # =============================================================================
@@ -1422,6 +1422,8 @@ class Cia:
         self.pra = 0xFF; self.prb = 0xFF
         self.ddra = 0x00; self.ddrb = 0x00
         self.port_a_in = 0xFF
+        self.port_a_in_fn = None
+        self.port_a_write_hook = None
         self.port_b_in = 0xFF
         self.timer_a = 0xFFFF
         self.timer_a_latch = 0xFFFF
@@ -1458,7 +1460,9 @@ class Cia:
         """
         # Pin state ignoring the matrix: output bits drive their register
         # value, input bits are pulled high.
-        a = ((self.pra & self.ddra) | (self.port_a_in & ~self.ddra)) & 0xFF
+        in_a = (self.port_a_in_fn() if self.port_a_in_fn is not None
+                else self.port_a_in)
+        a = ((self.pra & self.ddra) | (in_a & ~self.ddra)) & 0xFF
         b = ((self.prb & self.ddrb) | (self.port_b_in & ~self.ddrb)) & 0xFF
         # Joystick switches short port pins directly to ground.
         a &= ~self.joystick_state[1] & 0xFF   # joystick 2 on port A
@@ -1511,7 +1515,10 @@ class Cia:
     def write(self, offset, val):
         offset &= 0x0F
         val &= 0xFF
-        if offset == self.R_PRA:    self.pra = val
+        if offset == self.R_PRA:
+            if self.port_a_write_hook is not None:
+                self.port_a_write_hook()
+            self.pra = val
         elif offset == self.R_PRB:  self.prb = val
         elif offset == self.R_DDRA: self.ddra = val
         elif offset == self.R_DDRB: self.ddrb = val
@@ -3005,6 +3012,442 @@ _cyc_fill()
 # D64 disk image
 # =============================================================================
 
+class Via:
+    """MOS 6522 VIA — the 1541 has two ($1800 serial bus, $1C00 drive
+    mechanics). Ports with data direction, both timers (T1 one-shot and
+    free-run, T2 one-shot), IFR/IER interrupt logic. Port inputs come from
+    callbacks so the serial bus / mechanics can be wired in later milestones."""
+
+    def __init__(self, name="VIA"):
+        self.name = name
+        self.ora = 0
+        self.orb = 0
+        self.ddra = 0
+        self.ddrb = 0
+        self.t1_counter = 0xFFFF
+        self.t1_latch = 0xFFFF
+        self.t1_running = False
+        self.t2_counter = 0xFFFF
+        self.t2_latch_lo = 0
+        self.t2_running = False
+        self.acr = 0
+        self.pcr = 0
+        self.sr = 0
+        self.ifr = 0
+        self.ier = 0
+        self.port_a_in = lambda: 0xFF
+        self.port_b_in = lambda: 0xFF
+
+    def _set_flag(self, bit):
+        self.ifr |= bit
+
+    def irq(self):
+        return (self.ifr & self.ier & 0x7F) != 0
+
+    def read(self, off):
+        off &= 0x0F
+        if off == 0x0:
+            self.ifr &= ~0x18
+            return ((self.orb & self.ddrb)
+                    | (self.port_b_in() & ~self.ddrb)) & 0xFF
+        if off == 0x1 or off == 0xF:
+            if off == 0x1:
+                self.ifr &= ~0x03
+            return ((self.ora & self.ddra)
+                    | (self.port_a_in() & ~self.ddra)) & 0xFF
+        if off == 0x2: return self.ddrb
+        if off == 0x3: return self.ddra
+        if off == 0x4:
+            self.ifr &= ~0x40
+            return self.t1_counter & 0xFF
+        if off == 0x5: return (self.t1_counter >> 8) & 0xFF
+        if off == 0x6: return self.t1_latch & 0xFF
+        if off == 0x7: return (self.t1_latch >> 8) & 0xFF
+        if off == 0x8:
+            self.ifr &= ~0x20
+            return self.t2_counter & 0xFF
+        if off == 0x9: return (self.t2_counter >> 8) & 0xFF
+        if off == 0xA: return self.sr
+        if off == 0xB: return self.acr
+        if off == 0xC: return self.pcr
+        if off == 0xD:
+            v = self.ifr & 0x7F
+            if v & self.ier:
+                v |= 0x80
+            return v
+        if off == 0xE: return self.ier | 0x80
+        return 0xFF
+
+    def write(self, off, val):
+        off &= 0x0F
+        val &= 0xFF
+        if off == 0x0:
+            self.orb = val
+            self.ifr &= ~0x18
+        elif off == 0x1 or off == 0xF:
+            self.ora = val
+            if off == 0x1:
+                self.ifr &= ~0x03
+        elif off == 0x2: self.ddrb = val
+        elif off == 0x3: self.ddra = val
+        elif off == 0x4 or off == 0x6:
+            self.t1_latch = (self.t1_latch & 0xFF00) | val
+        elif off == 0x5:
+            self.t1_latch = (self.t1_latch & 0x00FF) | (val << 8)
+            self.t1_counter = self.t1_latch
+            self.ifr &= ~0x40
+            self.t1_running = True
+        elif off == 0x7:
+            self.t1_latch = (self.t1_latch & 0x00FF) | (val << 8)
+            self.ifr &= ~0x40
+        elif off == 0x8:
+            self.t2_latch_lo = val
+        elif off == 0x9:
+            self.t2_counter = (val << 8) | self.t2_latch_lo
+            self.ifr &= ~0x20
+            self.t2_running = True
+        elif off == 0xA: self.sr = val
+        elif off == 0xB: self.acr = val
+        elif off == 0xC: self.pcr = val
+        elif off == 0xD: self.ifr &= ~val
+        elif off == 0xE:
+            if val & 0x80:
+                self.ier |= (val & 0x7F)
+            else:
+                self.ier &= ~(val & 0x7F)
+
+    def tick(self, cycles):
+        if self.t1_running:
+            self.t1_counter -= cycles
+            while self.t1_counter < 0:
+                self._set_flag(0x40)
+                if self.acr & 0x40:
+                    self.t1_counter += self.t1_latch + 2
+                    if self.t1_latch == 0:
+                        self.t1_counter = 0
+                        break
+                else:
+                    self.t1_counter &= 0xFFFF
+                    self.t1_running = False
+                    break
+        if self.t2_running and not (self.acr & 0x20):
+            self.t2_counter -= cycles
+            if self.t2_counter < 0:
+                self._set_flag(0x20)
+                self.t2_counter &= 0xFFFF
+                self.t2_running = False
+
+
+class IecBus:
+    """IEC serial bus — ATN/CLK/DATA as open-collector wired-AND between the
+    C64 (CIA2 port A, inverting 7406 drivers: output bit 1 = line pulled low)
+    and the 1541 (VIA1 port B, same driver arrangement). Includes the 1541's
+    ATN auto-acknowledge gate: whenever the ATNA output does not match the
+    ATN line, DATA is pulled low in hardware — this is how a drive answers
+    an attention call even before its CPU reacts.
+
+    Line state convention: True = pulled low = asserted.
+    Input polarities of both receivers are calibratable (CPU_IN_INV /
+    DRV_IN_INV) and were validated empirically against the original KERNAL
+    and DOS ROMs talking to each other."""
+
+    CPU_IN_INV = False     # $DD00 bits 6/7 read the electrical line level
+    DRV_IN_INV = True      # 1541 receivers invert: pulled line reads 1
+
+    def __init__(self, cia2, via1):
+        self.cia2 = cia2
+        self.via1 = via1
+        self._atn_prev = False
+
+    def _cpu_out(self):
+        eff = self.cia2.pra & self.cia2.ddra
+        return bool(eff & 0x08), bool(eff & 0x10), bool(eff & 0x20)
+
+    def _drv_out(self):
+        eff = self.via1.orb & self.via1.ddrb
+        # The ATNA XOR gate is fed by the PB4 PIN level: driven by ORB when
+        # DDR makes it an output, but pulled HIGH when configured as input.
+        # Fastloaders exploit exactly this to neutralise the auto-acknowledge
+        # hardware (set DDRB bit4=0 -> pin high -> gate matches asserted ATN).
+        atna = bool((self.via1.orb | ~self.via1.ddrb) & 0x10)
+        return bool(eff & 0x08), bool(eff & 0x02), atna
+
+    def lines(self):
+        atn, cclk, cdata = self._cpu_out()
+        dclk, ddata, atna = self._drv_out()
+        clk = cclk or dclk
+        data = cdata or ddata or (atn != atna)     # auto-acknowledge XOR
+        return atn, clk, data
+
+    def poll(self):
+        """Propagate ATN edges into the drive's VIA1 CA1 interrupt flag —
+        the wire the whole 1541 attention handling hangs on."""
+        atn, _, _ = self.lines()
+        if atn != self._atn_prev:
+            self._atn_prev = atn
+            if atn:
+                self.via1._set_flag(0x02)          # CA1: ATN asserted edge
+
+    def cia2_port_a_in(self):
+        _, clk, data = self.lines()
+        v = 0xFF
+        if clk != self.CPU_IN_INV:
+            v &= ~0x40
+        if data != self.CPU_IN_INV:
+            v &= ~0x80
+        return v
+
+    def via1_port_b_in(self):
+        atn, clk, data = self.lines()
+        v = 0xFF
+        # Device-number jumpers on PB5/PB6: both closed (0) = device 8.
+        v &= ~0x60
+        if clk != self.DRV_IN_INV:
+            v &= ~0x04
+        if data != self.DRV_IN_INV:
+            v &= ~0x01
+        if atn != self.DRV_IN_INV:
+            v &= ~0x80
+        return v
+
+
+class DriveMemory:
+    """1541 address space: 2 KB RAM (mirrored below $1800), VIA1 at $1800,
+    VIA2 at $1C00, 16 KB DOS ROM in the upper half."""
+
+    def __init__(self, rom, via1, via2):
+        self.ram = bytearray(0x0800)
+        self.rom = rom
+        self.via1 = via1
+        self.via2 = via2
+
+    def read_system_byte(self, addr):
+        addr &= 0xFFFF
+        if addr >= 0x8000:
+            return self.rom[addr & 0x3FFF]
+        if 0x1800 <= addr < 0x1C00:
+            return self.via1.read(addr)
+        if 0x1C00 <= addr < 0x2000:
+            return self.via2.read(addr)
+        return self.ram[addr & 0x07FF]
+
+    def write_system_byte(self, addr, val):
+        addr &= 0xFFFF
+        if addr >= 0x8000:
+            return
+        if 0x1800 <= addr < 0x1C00:
+            self.via1.write(addr, val)
+        elif 0x1C00 <= addr < 0x2000:
+            self.via2.write(addr, val)
+        else:
+            self.ram[addr & 0x07FF] = val & 0xFF
+
+    def read_system_word(self, addr):
+        return (self.read_system_byte(addr)
+                | (self.read_system_byte(addr + 1) << 8))
+
+
+class Drive:
+    """Commodore 1541 disk drive — milestone M0: the drive computer itself.
+    Reuses the emulator's 6502 core with the 1541 memory map and boots the
+    original DOS ROM to its idle loop. Serial bus and GCR disk follow in
+    later milestones ($ python3 c64emu.py --drive game.d64)."""
+
+    def __init__(self, dos_rom):
+        self.via1 = Via("VIA1")
+        self.via2 = Via("VIA2")
+        self.mem = DriveMemory(bytes(dos_rom), self.via1, self.via2)
+        self.cpu = CPU(self.mem)
+        self.cpu.reset()
+        self._cycle_debt = 0.0
+        self._clock_base = None
+        self.blocks_read = 0
+        self.tracks = []
+
+    @property
+    def led(self):
+        return bool(self.via2.orb & self.via2.ddrb & 0x08)
+
+    @property
+    def motor(self):
+        return bool(self.via2.orb & self.via2.ddrb & 0x04)
+
+    # ------------------------------------------------------------------
+    # M2: the spinning GCR disk
+    # ------------------------------------------------------------------
+    GCR_TAB = (0x0A, 0x0B, 0x12, 0x13, 0x0E, 0x0F, 0x16, 0x17,
+               0x09, 0x19, 0x1A, 0x1B, 0x0D, 0x1D, 0x1E, 0x15)
+    # Raw GCR bytes per track by speed zone (approx. real capacities)
+    ZONE_TRACK_LEN = (7692, 7142, 6666, 6250)
+    ZONE_CYC_PER_BYTE = (26, 28, 30, 32)
+
+    @staticmethod
+    def _zone(track):
+        if track <= 17: return 0
+        if track <= 24: return 1
+        if track <= 30: return 2
+        return 3
+
+    def _gcr_encode(self, data):
+        """Encode a byte string to GCR (4 data bytes -> 5 GCR bytes)."""
+        out = bytearray()
+        for i in range(0, len(data), 4):
+            b = data[i:i + 4]
+            bits = 0
+            for byte in b:
+                bits = (bits << 5) | self.GCR_TAB[byte >> 4]
+                bits = (bits << 5) | self.GCR_TAB[byte & 0x0F]
+            out += bits.to_bytes(5, 'big')
+        return bytes(out)
+
+    def insert_disk(self, d64):
+        """Build the rotating GCR image from a D64: per track a byte stream
+        of SYNC marks, GCR header blocks, gaps and GCR data blocks — exactly
+        what the DOS expects to see passing under the read head."""
+        bam = d64.read_sector(18, 0)
+        id1, id2 = bam[0xA2], bam[0xA3]
+        self.tracks = []
+        for track in range(1, 36):
+            zone = self._zone(track)
+            spt = d64.SECTORS_PER_TRACK[track - 1]
+            buf = bytearray()
+            sync = bytearray()
+
+            def emit(bs, is_sync=False):
+                buf.extend(bs)
+                sync.extend((1 if is_sync else 0,) * len(bs))
+
+            for sector in range(spt):
+                data = d64.read_sector(track, sector)
+                # header block: 08 cks S T ID2 ID1 0F 0F
+                cks = sector ^ track ^ id2 ^ id1
+                hdr = bytes((0x08, cks, sector, track, id2, id1, 0x0F, 0x0F))
+                emit(b"\xFF" * 5, is_sync=True)
+                emit(self._gcr_encode(hdr))
+                emit(b"\x55" * 9)
+                # data block: 07 <256 bytes> cks 00 00
+                dcks = 0
+                for byte in data:
+                    dcks ^= byte
+                blk = bytes((0x07,)) + bytes(data) + bytes((dcks, 0, 0))
+                emit(b"\xFF" * 5, is_sync=True)
+                emit(self._gcr_encode(blk))
+                emit(b"\x55" * 9)
+            # pad to nominal track length with gap bytes
+            pad = self.ZONE_TRACK_LEN[zone] - len(buf)
+            if pad > 0:
+                emit(b"\x55" * pad)
+            self.tracks.append((bytes(buf), bytes(sync)))
+        # Disk-change: the write-protect photo sensor goes dark while the
+        # disk is out of the slot — loaders watch VIA2 PB4 for exactly this
+        # flicker to detect a swap. Simulate ~0.6s of "no disk in slot".
+        self._wp_flicker_until = self.cpu.cycles + 600_000
+        self.halftrack = 36              # head parked over track 18
+        self.disk_pos = 0
+        self._byte_frac = 0.0
+        self._head_byte = 0xFF
+        self._head_sync = False
+        self._prev_step_phase = self.via2.orb & 0x03
+        self._prev_sync = False
+        # VIA2 wiring: port A = byte under the head, PB7 = /SYNC, PB4 = not
+        # write-protected.
+        self.via2.port_a_in = lambda: self._head_byte
+        self.via2.port_b_in = self._via2_port_b_in
+
+    def _via2_port_b_in(self):
+        v = 0xFF
+        if self._head_sync:
+            v &= ~0x80                   # /SYNC active (low) under a sync mark
+        if self.cpu.cycles < getattr(self, "_wp_flicker_until", 0):
+            v &= ~0x10                   # WP sensor dark: disk being swapped
+        return v
+
+    def _disk_tick(self, cycles):
+        """Advance the rotating disk under the head and deliver byte-ready
+        pulses to the CPU's Set-Overflow pin (the DOS reads with CLV/BVC *)."""
+        # stepper: VIA2 PB0/PB1 phase changes move the head by half tracks
+        phase = self.via2.orb & 0x03
+        if phase != self._prev_step_phase:
+            d = (phase - self._prev_step_phase) & 0x03
+            if d == 1 and self.halftrack < 70:
+                self.halftrack += 1
+            elif d == 3 and self.halftrack > 2:
+                self.halftrack -= 1
+            self._prev_step_phase = phase
+        if not (self.via2.orb & self.via2.ddrb & 0x04):
+            return                        # motor off: disk not spinning
+        track = self.halftrack >> 1
+        if track < 1 or track > 35 or not self.tracks:
+            return
+        data, sync = self.tracks[track - 1]
+        zone = self._zone(track)
+        self._byte_frac += cycles / self.ZONE_CYC_PER_BYTE[zone]
+        n = int(self._byte_frac)
+        if n <= 0:
+            return
+        self._byte_frac -= n
+        pos = self.disk_pos
+        tl = len(data)
+        # deliver at most a few byte events; skipping is harmless in gaps
+        for _ in range(min(n, 4)):
+            pos = (pos + 1) % tl
+            if sync[pos]:
+                self._head_sync = True
+            else:
+                if self._head_sync:
+                    # first byte after a sync mark — count data blocks for
+                    # the title-bar counter (every 2nd sync is a data block)
+                    self._sync_toggle = not getattr(self, '_sync_toggle', False)
+                    if self._sync_toggle is False:
+                        self.blocks_read += 1
+                self._head_sync = False
+                self._head_byte = data[pos]
+                # byte-ready -> CPU SO pin: sets the 6502 overflow flag
+                self.cpu.set_flag(self.cpu.FV, True)
+                self.via2._set_flag(0x02)      # CA1 byte-ready flag too
+        self.disk_pos = pos
+
+    def sync_to(self, cpu_cycles):
+        """Catch the drive up to the C64 clock (M3 fastloader timing).
+        Called before every C64 instruction and — crucially — on demand from
+        the $DD00 read/write hooks, so both sides of a cycle-counted 2-bit
+        transfer see each other's line edges with instruction-level accuracy
+        instead of batch-level lag."""
+        if self._clock_base is None:
+            self._clock_base = cpu_cycles - self.cpu.cycles
+        target = cpu_cycles - self._clock_base
+        cpu = self.cpu
+        via1, via2 = self.via1, self.via2
+        while cpu.cycles < target:
+            cpu.irq_line = via1.irq() or via2.irq()
+            before = cpu.cycles
+            if not cpu.step():
+                self._clock_base = None      # JAM: resync when it recovers
+                break
+            elapsed = cpu.cycles - before
+            via1.tick(elapsed)
+            via2.tick(elapsed)
+            if self.tracks:
+                self._disk_tick(elapsed)
+
+    def run(self, cycles):
+        self._cycle_debt += cycles
+        cpu = self.cpu
+        via1, via2 = self.via1, self.via2
+        while self._cycle_debt > 0:
+            cpu.irq_line = via1.irq() or via2.irq()
+            before = cpu.cycles
+            if not cpu.step():
+                self._cycle_debt = 0
+                break
+            elapsed = cpu.cycles - before
+            via1.tick(elapsed)
+            via2.tick(elapsed)
+            if self.tracks:
+                self._disk_tick(elapsed)
+            self._cycle_debt -= elapsed
+
+
 class D64Image:
     """
     Read-only D64 disk image (Commodore 1541 floppy).
@@ -3274,6 +3717,12 @@ class System:
         self.cpu = CPU(self.mem)
         self.sid._cpu = self.cpu          # cycle timestamps for write queue
         self._d64 = None
+        # --- 1541 drive emulation (M0: drive computer boots alongside) ---
+        # Opt-in via --drive; the KERNAL trap loader stays the default path.
+        self.drive = None
+        self.disk_blocks = 0              # blocks served (traps or drive)
+        self.disk_led_timer = 0           # frames the activity LED stays lit
+        self._rom_dir = rom_dir
         # KERNAL file-I/O state: open files keyed by logical address (LA).
         # Each entry: {'dev': int, 'sa': int, 'name': bytes, 'data': bytes, 'pos': int}
         self._open_files = {}
@@ -3309,12 +3758,17 @@ class System:
             self.cpu.nmi_pending = True
         self.cpu._prev_nmi = cur_nmi
         self.cpu.irq_line = self.cia1.irq_line or self.vic.irq_line
+        if self.drive is not None:
+            self.drive.sync_to(self.cpu.cycles)
+            self.iec.poll()
         ok = self.cpu.step()
         elapsed = self.cpu.cycles - before
         if elapsed > 0:
             self.vic.tick(elapsed)
             self.cia1.tick(elapsed)
             self.cia2.tick(elapsed)
+            if self.drive is not None:
+                self.iec.poll()
         return ok
 
     def clock(self):
@@ -3330,6 +3784,62 @@ class System:
         self.cpu.clock(ba=self.vic.ba)
         self.cia1.clock()
         self.cia2.clock()
+        return True
+
+    def swap_disk(self, path):
+        """Change the disk at runtime (drag & drop a .d64 onto the window or
+        cycle with F6). Re-mounts for the trap loader and — with --drive —
+        re-encodes the GCR image and flickers the write-protect sensor so
+        loaders detect the change like on real hardware."""
+        try:
+            self.mount_d64(path)
+        except Exception as e:
+            print(f"Diskwechsel fehlgeschlagen: {e}")
+            return
+        name = self._d64.disk_name().decode("ascii", "replace")
+        src_note = " (Laufwerk)" if self.drive is not None else " (Traps)"
+        print(f"Diskette gewechselt: {path}  [{name}]{src_note}")
+
+    def enable_drive(self):
+        """Attach a true 1541 (milestone M0: the drive computer runs and
+        boots its DOS to the idle loop). Requires roms/dos1541.bin."""
+        import os
+        path = os.path.join(self._rom_dir, "dos1541.bin")
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                rom = f.read()
+            rom_src = "roms/"
+        else:
+            rom = _get_embedded_rom("dos1541")
+            rom_src = "eingebettet"
+        if len(rom) != 16384:
+            print(f"1541: DOS-ROM hat {len(rom)} Bytes (erwartet 16384)")
+            return False
+        self.drive = Drive(rom)
+        self.iec = IecBus(self.cia2, self.drive.via1)
+        # Sync-on-demand (M3): every $DD00 read or write first pulls the
+        # drive up to the present C64 cycle, so cycle-counted fastloader
+        # protocols see each other's edges with instruction accuracy.
+        def _sync_then_read():
+            self.drive.sync_to(self.cpu.cycles + 3)
+            self.iec.poll()
+            return self.iec.cia2_port_a_in()
+        def _sync_before_write():
+            self.drive.sync_to(self.cpu.cycles + 3)
+            self.iec.poll()
+        self.cia2.port_a_in_fn = _sync_then_read
+        self.cia2.port_a_write_hook = _sync_before_write
+        self.drive.via1.port_b_in = self.iec.via1_port_b_in
+        # With a real drive on the bus, the KERNAL IEC shortcuts step aside —
+        # device 8 now answers over the wire.
+        for addr in self._KERNAL_TRAPS:
+            self.cpu.traps.pop(addr, None)
+        self._drive_traps_blocked = True
+        if self._d64 is not None:
+            self.drive.insert_disk(self._d64)
+            print(f"1541: DOS-ROM geladen ({rom_src}), IEC-Bus verdrahtet, Diskette eingelegt")
+        else:
+            print(f"1541: DOS-ROM geladen ({rom_src}), IEC-Bus verdrahtet (keine Diskette)")
         return True
 
     def run(self, n_cycles):
@@ -3555,8 +4065,11 @@ class System:
         self._disk_status = b"00, OK,00,00\r"
         self._is_tape = False
         self._iec_reset()
-        for addr, name in self._KERNAL_TRAPS.items():
-            self.cpu.traps[addr] = getattr(self, name)
+        if self.drive is None:
+            for addr, name in self._KERNAL_TRAPS.items():
+                self.cpu.traps[addr] = getattr(self, name)
+        elif not self._is_tape:
+            self.drive.insert_disk(self._d64)
         return self._d64
 
     def mount_t64(self, path):
@@ -3572,8 +4085,9 @@ class System:
         self._disk_status = b"00, OK,00,00\r"
         self._is_tape = True
         self._iec_reset()
-        for addr, name in self._KERNAL_TRAPS.items():
-            self.cpu.traps[addr] = getattr(self, name)
+        if self.drive is None:
+            for addr, name in self._KERNAL_TRAPS.items():
+                self.cpu.traps[addr] = getattr(self, name)
         return self._d64
 
     def _do_rts(self):
@@ -3658,6 +4172,8 @@ class System:
                 self._do_rts()
                 return
             data = self._d64.read_file(found[0], found[1])
+            self.disk_blocks += (len(data) + 253) // 254
+            self.disk_led_timer = 30
         self._open_files[la] = {
             "dev": dev, "sa": sa, "name": name, "data": data, "pos": 0
         }
@@ -3813,6 +4329,8 @@ class System:
                     chan, drive, track, sector = (int(parts[0]), int(parts[1]),
                                                   int(parts[2]), int(parts[3]))
                     data = self._d64.read_sector(track, sector)
+                    self.disk_blocks += 1
+                    self.disk_led_timer = 15
                     buf = self._da_buffers.setdefault(
                         chan, {"data": bytearray(256), "pos": 0})
                     buf["data"] = bytearray(data)
@@ -3861,6 +4379,9 @@ class System:
         elif name:
             found = self._d64.find_file(name)
             data = self._d64.read_file(found[0], found[1]) if found else None
+            if data is not None:
+                self.disk_blocks += (len(data) + 253) // 254
+                self.disk_led_timer = 30
         else:
             data = None
         # A None stream means "file not found" — ACPTR will report device-not-
@@ -4088,6 +4609,8 @@ class System:
                 return
             track, sector, _size_sectors = found
             file_data = self._d64.read_file(track, sector)
+            self.disk_blocks += (len(file_data) + 253) // 254
+            self.disk_led_timer = 30
             if len(file_data) < 2:
                 cpu.a = 4
                 cpu.set_flag(cpu.FC, True)
@@ -4416,6 +4939,8 @@ class PygameFrontend:
         # keypad joystick can't "ghost" into menu keys. A few games use port 1
         # (e.g. Bruce Lee reads $DC01); press keypad 0 to switch for those.
         self._joy_port = 1
+        self.disk_list = []
+        self._disk_idx = 0
         self.shown_fps = 0.0
         self.warp = False    # True = run as fast as possible (no host frame cap)
 
@@ -5108,6 +5633,20 @@ class PygameFrontend:
         array, without any pygame dependency. Used by the VIC screenshot test."""
         return self._compose_canvas()
 
+    def _fd_status(self):
+        """Floppy status for the title bar: activity LED + block counter.
+        Lit by real 1541 VIA activity when --drive is on, and by the KERNAL
+        trap loader otherwise, so the indicator is live in both modes."""
+        s = self.system
+        if s._d64 is None and s.drive is None:
+            return ""
+        if s.disk_led_timer > 0:
+            s.disk_led_timer -= 1
+        led = (s.disk_led_timer > 0
+               or (s.drive is not None and (s.drive.led or s.drive.motor)))
+        blocks = s.disk_blocks + (s.drive.blocks_read if s.drive else 0)
+        return f"   [FD:{'*' if led else '-'} {blocks:04d}]"
+
     def render_frame(self):
         canvas = self._compose_canvas()
         surf = self.pygame.surfarray.make_surface(canvas.swapaxes(0, 1))
@@ -5120,7 +5659,8 @@ class PygameFrontend:
             self.window.blit(scaled, (0, 0))
         self.pygame.display.set_caption(
             f"C64 — Python emulator   [{self.shown_fps:.1f} fps]"
-            f"   [Joy: {('Port 1', 'Port 2', 'Both ports')[self._joy_port]}]")
+            f"   [Joy: {('Port 1', 'Port 2', 'Both ports')[self._joy_port]}]"
+            + self._fd_status())
         self.pygame.display.flip()
 
     def _render_sprite_run(self, idx, pixels, bg_mask, sprite_occupancy,
@@ -5340,6 +5880,12 @@ class PygameFrontend:
             for event in self.pygame.event.get():
                 if event.type == self.pygame.QUIT:
                     running = False
+                elif event.type == self.pygame.DROPFILE:
+                    path = event.file
+                    if path.lower().endswith(".d64"):
+                        self.system.swap_disk(path)
+                    else:
+                        print(f"Kein D64: {path}")
                 elif event.type == self.pygame.KEYDOWN:
                     # Host hotkeys (not passed to the C64)
                     if event.key == self.pygame.K_F11:
@@ -5349,6 +5895,18 @@ class PygameFrontend:
                     if event.key == self.pygame.K_F12:
                         print("Soft reset")
                         self.system.reset()
+                        continue
+                    if event.key == self.pygame.K_F6:
+                        # Diskwechsel: durch die auf der Kommandozeile
+                        # angegebenen D64s rotieren (F6 ist am C64 keine
+                        # eigene Taste — dort ist es Shift+F5, was weiter
+                        # funktioniert).
+                        if len(self.disk_list) > 1:
+                            self._disk_idx = (self._disk_idx + 1) % len(self.disk_list)
+                            self.system.swap_disk(self.disk_list[self._disk_idx])
+                        elif self.disk_list:
+                            print("Nur eine Diskette angegeben — weitere per "
+                                  "Kommandozeile oder Drag&Drop aufs Fenster")
                         continue
                     if event.key == self.pygame.K_F8:
                         vic = self.system.vic
@@ -5559,6 +6117,213 @@ class C64Emu:
 # =============================================================================
 
 _ROM_BLOBS = {
+    "dos1541":
+        "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"
+    ,
     "basic":
         "eNp9eXtcU1e+786DV3hFAU1Pp86agAiKGl/TaG07iIFENwnlYUGPsoGE7ihWcO50PuJppZ2sHA4d"
         "z4R72jvY3trtJitmh6KhojyE6ukRmnhm7Lb1Tqfz6KgVBjrTmd1aj1Xbyf2tYHvu/HMjWVlrr7V+"
@@ -6411,7 +7176,7 @@ GENERAL OPTIONS
   -h, --help            show this help and exit
   --scale N             window scale factor (default 2)
   --no-run              load FILE but do not auto-RUN / auto-SYS
-  --cycle               run FILE on the cycle-accurate core (badline BA-stall
+  --cycle               run FILE on the cycle-accurate core (badline BA-stall\n  --drive              echte 1541-Emulation aktivieren (M0; braucht roms/dos1541.bin)\n  F6 / Drag&Drop       Diskette wechseln (mehrere .d64 auf Kommandozeile = F6-Rotation)
                         + per-cycle CIA; slower than real time, but accurate
                         raster/badline timing). Works for .prg/.d64/.t64 and
                         with --headless too.
@@ -6540,6 +7305,7 @@ def main():
         scale = int(args[i + 1])
     sid_file = None
     d64_file = None
+    d64_list = []
     t64_file = None
     for a in args:
         if a.lower().endswith(".prg") and os.path.exists(a):
@@ -6549,7 +7315,9 @@ def main():
             sid_file = a
             break
         if a.lower().endswith(".d64") and os.path.exists(a):
-            d64_file = a
+            if d64_file is None:
+                d64_file = a
+            d64_list.append(a)
             break
         if a.lower().endswith(".t64") and os.path.exists(a):
             t64_file = a
@@ -6559,6 +7327,8 @@ def main():
         i = args.index("--headless")
         n = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 1_500_000
         sysm = System(cycle_accurate=("--cycle" in args))
+        if "--drive" in args:
+            sysm.enable_drive()
         if prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
             print("Running PRG for 1,500,000 extra cycles...")
@@ -6578,6 +7348,8 @@ def main():
         return
 
     sysm = System(cycle_accurate=("--cycle" in args))
+    if "--drive" in args:
+        sysm.enable_drive()
     if "--cycle" in args:
         print("Cycle-accurate mode: badline BA-stall + per-cycle CIA. "
               "Runs slower than real time in pure Python.")
@@ -6593,6 +7365,7 @@ def main():
     elif t64_file:
         _launch_t64(sysm, t64_file, auto_run=not no_autorun)
     front = PygameFrontend(sysm, scale=scale)
+    front.disk_list = d64_list
     front.run()
 
 
