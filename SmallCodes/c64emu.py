@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.16-diskswap"
+__version__ = "2026.07.16-drive-m4"
 
 
 # =============================================================================
@@ -1519,6 +1519,9 @@ class Cia:
             if self.port_a_write_hook is not None:
                 self.port_a_write_hook()
             self.pra = val
+        elif offset == self.R_DDRA and self.port_a_write_hook is not None:
+            self.port_a_write_hook()
+            self.ddra = val
         elif offset == self.R_PRB:  self.prb = val
         elif offset == self.R_DDRA: self.ddra = val
         elif offset == self.R_DDRB: self.ddrb = val
@@ -3261,6 +3264,8 @@ class Drive:
         self.cpu.reset()
         self._cycle_debt = 0.0
         self._clock_base = None
+        self._idle_streak = 0
+        self.idle_until = 0          # c64-cycle horizon while provably idle
         self.blocks_read = 0
         self.tracks = []
 
@@ -3407,6 +3412,14 @@ class Drive:
                 self.via2._set_flag(0x02)      # CA1 byte-ready flag too
         self.disk_pos = pos
 
+    # DOS idle/job-scan loop of the stock 1541 ROM: while the PC is in here
+    # with the motor off and no interrupt pending, the drive is provably
+    # doing nothing — the M4 fast path skips the clock forward in one jump,
+    # but never past the next VIA timer event, so every job-scheduler IRQ
+    # still executes exactly like before. Any bus activity (ATN edge -> CA1
+    # flag -> pending IRQ) wakes it instantly.
+    IDLE_LO, IDLE_HI = 0xEBFF, 0xEC9F
+
     def sync_to(self, cpu_cycles):
         """Catch the drive up to the C64 clock (M3 fastloader timing).
         Called before every C64 instruction and — crucially — on demand from
@@ -3419,7 +3432,31 @@ class Drive:
         cpu = self.cpu
         via1, via2 = self.via1, self.via2
         while cpu.cycles < target:
-            cpu.irq_line = via1.irq() or via2.irq()
+            if ((via1.ifr & via1.ier) or (via2.ifr & via2.ier)):
+                cpu.irq_line = True
+                self._idle_streak = 0
+            elif (self._idle_streak >= 150
+                    and self.IDLE_LO <= cpu.pc <= self.IDLE_HI
+                    and not (via2.orb & via2.ddrb & 0x04)):
+                # Idle fast path: jump to the next VIA event or the target,
+                # whichever comes first.
+                skip = target - cpu.cycles
+                if via1.t1_running:
+                    skip = min(skip, via1.t1_counter + 1)
+                if via2.t1_running:
+                    skip = min(skip, via2.t1_counter + 1)
+                if via1.t2_running and not (via1.acr & 0x20):
+                    skip = min(skip, via1.t2_counter + 1)
+                if via2.t2_running and not (via2.acr & 0x20):
+                    skip = min(skip, via2.t2_counter + 1)
+                if skip > 0:
+                    cpu.cycles += skip
+                    via1.tick(skip)
+                    via2.tick(skip)
+                    continue
+                cpu.irq_line = False
+            else:
+                cpu.irq_line = False
             before = cpu.cycles
             if not cpu.step():
                 self._clock_base = None      # JAM: resync when it recovers
@@ -3429,6 +3466,28 @@ class Drive:
             via2.tick(elapsed)
             if self.tracks:
                 self._disk_tick(elapsed)
+            if self.IDLE_LO <= cpu.pc <= self.IDLE_HI:
+                self._idle_streak += 1
+            else:
+                self._idle_streak = 0
+        # Publish an idle horizon: while provably idle (streak proven, motor
+        # off, nothing pending), the C64 side may skip calling us entirely
+        # until the next VIA event — bus hooks invalidate this instantly.
+        if (self._idle_streak >= 150
+                and not ((via1.ifr & via1.ier) or (via2.ifr & via2.ier))
+                and not (via2.orb & via2.ddrb & 0x04)):
+            horizon = 1 << 20
+            if via1.t1_running:
+                horizon = min(horizon, via1.t1_counter + 1)
+            if via2.t1_running:
+                horizon = min(horizon, via2.t1_counter + 1)
+            if via1.t2_running and not (via1.acr & 0x20):
+                horizon = min(horizon, via1.t2_counter + 1)
+            if via2.t2_running and not (via2.acr & 0x20):
+                horizon = min(horizon, via2.t2_counter + 1)
+            self.idle_until = (self._clock_base or 0) + cpu.cycles + horizon
+        else:
+            self.idle_until = 0
 
     def run(self, cycles):
         self._cycle_debt += cycles
@@ -3758,7 +3817,7 @@ class System:
             self.cpu.nmi_pending = True
         self.cpu._prev_nmi = cur_nmi
         self.cpu.irq_line = self.cia1.irq_line or self.vic.irq_line
-        if self.drive is not None:
+        if self.drive is not None and self.cpu.cycles >= self.drive.idle_until:
             self.drive.sync_to(self.cpu.cycles)
             self.iec.poll()
         ok = self.cpu.step()
@@ -3767,7 +3826,8 @@ class System:
             self.vic.tick(elapsed)
             self.cia1.tick(elapsed)
             self.cia2.tick(elapsed)
-            if self.drive is not None:
+            if (self.drive is not None
+                    and self.cpu.cycles >= self.drive.idle_until):
                 self.iec.poll()
         return ok
 
@@ -3821,10 +3881,12 @@ class System:
         # drive up to the present C64 cycle, so cycle-counted fastloader
         # protocols see each other's edges with instruction accuracy.
         def _sync_then_read():
+            self.drive.idle_until = 0
             self.drive.sync_to(self.cpu.cycles + 3)
             self.iec.poll()
             return self.iec.cia2_port_a_in()
         def _sync_before_write():
+            self.drive.idle_until = 0
             self.drive.sync_to(self.cpu.cycles + 3)
             self.iec.poll()
         self.cia2.port_a_in_fn = _sync_then_read
