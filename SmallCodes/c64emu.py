@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.16-drive-m4"
+__version__ = "2026.07.16-drive-m4c"
 
 
 # =============================================================================
@@ -5965,10 +5965,14 @@ class PygameFrontend:
                         # funktioniert).
                         if len(self.disk_list) > 1:
                             self._disk_idx = (self._disk_idx + 1) % len(self.disk_list)
+                            print(f"F6: Diskette {self._disk_idx + 1}/{len(self.disk_list)}")
                             self.system.swap_disk(self.disk_list[self._disk_idx])
                         elif self.disk_list:
-                            print("Nur eine Diskette angegeben — weitere per "
+                            print("F6: nur eine Diskette angegeben — weitere per "
                                   "Kommandozeile oder Drag&Drop aufs Fenster")
+                        else:
+                            print("F6: keine Disketten-Liste — D64s auf der "
+                                  "Kommandozeile angeben oder per Drag&Drop wechseln")
                         continue
                     if event.key == self.pygame.K_F8:
                         vic = self.system.vic
@@ -7380,7 +7384,7 @@ def main():
             if d64_file is None:
                 d64_file = a
             d64_list.append(a)
-            break
+            continue          # weitere D64s einsammeln (F6-Rotation)
         if a.lower().endswith(".t64") and os.path.exists(a):
             t64_file = a
             break
