@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiniCalc</title>
+<style>
+  :root{
+    --bar-bg:#2f4f4f;
+    --bar-bg2:#26403f;
+    --grid-line:#d7dde1;
+    --header-bg:#eef1f3;
+    --header-bg-active:#dbe6e6;
+    --sel-bg:rgba(47,79,79,0.10);
+    --sel-border:#2f4f4f;
+    --accent:#3d7a6e;
+    --text:#20282a;
+    --cell-h:24px;
+    --cell-w:88px;
+    --head-w:44px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    color:var(--text); background:#f6f7f8; display:flex; flex-direction:column; height:100vh; overflow:hidden;
+  }
+  /* ---- Toolbar ---- */
+  #toolbar{
+    background:var(--bar-bg); color:#fff; padding:6px 8px; display:flex; align-items:center;
+    gap:4px; flex-wrap:wrap; flex-shrink:0; box-shadow:0 1px 3px rgba(0,0,0,.15);
+  }
+  #toolbar .grp{ display:flex; align-items:center; gap:2px; padding:0 6px; border-right:1px solid rgba(255,255,255,.18); }
+  #toolbar .grp:last-child{ border-right:none; }
+  #toolbar button, #toolbar select, #toolbar label.filebtn{
+    background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); color:#fff;
+    border-radius:4px; padding:5px 9px; font-size:12.5px; cursor:pointer; line-height:1.2;
+    white-space:nowrap;
+  }
+  #toolbar button:hover, #toolbar label.filebtn:hover{ background:rgba(255,255,255,.2); }
+  #toolbar button.active{ background:var(--accent); border-color:var(--accent); }
+  #toolbar button.iconb{ font-weight:700; width:26px; text-align:center; padding:5px 0; }
+  #toolbar input[type=color]{ width:26px; height:26px; padding:0; border:none; border-radius:4px; cursor:pointer; background:none;}
+  #toolbar select{ padding:5px 4px; }
+  #toolbar .title{ font-weight:700; font-size:14px; letter-spacing:.3px; padding-right:10px;}
+  #toolbar .spacer{flex:1;}
+  #fileInput{ display:none; }
+
+  /* ---- Formula bar ---- */
+  #formulabar{
+    display:flex; align-items:center; gap:0; background:#fff; border-bottom:1px solid var(--grid-line);
+    flex-shrink:0;
+  }
+  #cellAddr{
+    width:78px; text-align:center; font-size:12.5px; font-weight:600; color:#4a5658; border-right:1px solid var(--grid-line);
+    padding:6px 4px; flex-shrink:0; background:#fbfbfb;
+  }
+  #fxLabel{ padding:6px 8px; color:#8b969a; font-style:italic; font-size:13px; border-right:1px solid var(--grid-line); }
+  #formulaInput{
+    flex:1; border:none; outline:none; padding:6px 10px; font-size:13px; font-family:inherit;
+  }
+
+  /* ---- Grid ---- */
+  #gridWrap{ flex:1; overflow:auto; position:relative; background:#fff; }
+  table#grid{ border-collapse:separate; border-spacing:0; table-layout:fixed; }
+  #grid th, #grid td{
+    border-right:1px solid var(--grid-line); border-bottom:1px solid var(--grid-line);
+    overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
+    padding:0 4px; font-size:12.5px;
+  }
+  #grid thead th{ height:var(--cell-h); }
+  #grid th{
+    background:var(--header-bg); color:#54636a; font-weight:600; text-align:center; position:sticky;
+    user-select:none; font-size:11.5px;
+  }
+  #grid thead th{ top:0; z-index:3; }
+  #grid td.rowhead, #grid th.rowhead{
+    position:sticky; left:0; z-index:2; background:var(--header-bg); text-align:center; font-weight:600; color:#54636a;
+  }
+  #grid thead th.corner{ z-index:4; left:0; }
+  #grid td{ background:#fff; cursor:cell; }
+  #grid td.sel{ box-shadow:inset 0 0 0 1000px var(--sel-bg); }
+  #grid td.active{ outline:2px solid var(--sel-border); outline-offset:-2px; z-index:1; position:relative; }
+  #grid td.editing{ outline:2px solid var(--accent); outline-offset:-2px; background:#fff; white-space:normal; overflow:visible; z-index:5; position:relative; cursor:text; }
+  #grid td[data-align="center"]{ text-align:center; }
+  #grid td[data-align="right"]{ text-align:right; }
+  #grid td.errorcell{ color:#c0392b; font-weight:600; }
+  #grid th.hActive{ background:var(--header-bg-active); }
+
+  /* ---- Status bar ---- */
+  #statusbar{
+    flex-shrink:0; background:#eef1f3; border-top:1px solid var(--grid-line); font-size:12px; color:#546166;
+    padding:5px 12px; display:flex; gap:18px;
+  }
+  #statusbar b{ color:#20282a; }
+
+  #clipProxy{ position:fixed; top:0; left:0; width:1px; height:1px; opacity:0; border:none; padding:0; resize:none; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <span class="title">📊 MiniCalc</span>
+
+  <div class="grp">
+    <button id="btnNew" title="Neue Tabelle">Neu</button>
+    <label class="filebtn" title="Datei öffnen (.ods, .csv, .minicalc.json)">Öffnen<input type="file" id="fileInput" accept=".ods,.csv,.json"></label>
+    <button id="btnSaveOds" title="Als .ods speichern – natives LibreOffice/OpenOffice-Format, inkl. Formeln UND Formatierung">💾 ods</button>
+    <button id="btnSaveCsv" title="Als .csv speichern (nur Werte, keine Formeln/Formatierung; öffnet in LibreOffice/Excel)">💾 csv</button>
+    <button id="btnSaveJson" title="Eigenes Format – speichert wirklich ALLES verlustfrei (Formeln + komplette Formatierung, nur mit MiniCalc lesbar)">💾 MiniCalc</button>
+  </div>
+
+  <div class="grp">
+    <button id="btnBold" class="iconb" title="Fett"><b>B</b></button>
+    <button id="btnItalic" class="iconb" title="Kursiv"><i>I</i></button>
+    <button id="btnUnderline" class="iconb" title="Unterstrichen"><u>U</u></button>
+  </div>
+
+  <div class="grp">
+    <button id="btnLeft" class="iconb" title="Links">⯇</button>
+    <button id="btnCenter" class="iconb" title="Zentriert">≡</button>
+    <button id="btnRight" class="iconb" title="Rechts">⯈</button>
+  </div>
+
+  <div class="grp">
+    <label style="font-size:11.5px; opacity:.85;">Text</label>
+    <input type="color" id="fontColor" value="#20282a" title="Textfarbe wählen">
+    <button id="fontColorApply" class="iconb" title="Textfarbe auf Auswahl anwenden (funktioniert auch erneut mit der gleichen Farbe)">✓</button>
+    <label style="font-size:11.5px; opacity:.85;">Füllung</label>
+    <input type="color" id="fillColor" value="#ffffff" title="Füllfarbe wählen">
+    <button id="fillColorApply" class="iconb" title="Füllfarbe auf Auswahl anwenden (funktioniert auch erneut mit der gleichen Farbe)">✓</button>
+    <button id="btnClearFmt" title="Formatierung löschen">⌫ Format</button>
+  </div>
+
+  <div class="grp">
+    <select id="numFmt" title="Zahlenformat">
+      <option value="general">Standard</option>
+      <option value="int">Ganzzahl</option>
+      <option value="num2">0,00</option>
+      <option value="percent">Prozent</option>
+      <option value="currency">Währung (€)</option>
+    </select>
+  </div>
+
+  <div class="grp">
+    <button id="btnAddRow" title="Zeile hinzufügen">+Zeile</button>
+    <button id="btnAddCol" title="Spalte hinzufügen">+Spalte</button>
+    <button id="btnDelRow" title="Aktive Zeile löschen">−Zeile</button>
+    <button id="btnDelCol" title="Aktive Spalte löschen">−Spalte</button>
+  </div>
+
+  <span class="spacer"></span>
+</div>
+
+<div id="formulabar">
+  <div id="cellAddr">A1</div>
+  <div id="fxLabel">fx</div>
+  <input id="formulaInput" type="text" placeholder="Wert oder Formel, z.B. =SUMME(A1:A3)  (engl.: =SUM(A1:A3))" autocomplete="off">
+</div>
+
+<div id="gridWrap">
+  <table id="grid">
+    <colgroup id="colgroup"></colgroup>
+    <thead><tr id="headRow"></tr></thead>
+    <tbody id="gridBody"></tbody>
+  </table>
+</div>
+
+<textarea id="clipProxy"></textarea>
+
+<div id="statusbar">
+  <span>Zellen: <b id="stCount">0</b></span>
+  <span>Summe: <b id="stSum">0</b></span>
+  <span>Mittelwert: <b id="stAvg">0</b></span>
+  <span style="flex:1"></span>
+  <span style="opacity:.7" title="ods: natives LibreOffice-Format, Formeln + Formatierung bleiben vollständig erhalten. csv: nur Werte. MiniCalc: eigenes Format, nur hier lesbar.">Doppelklick/F2 = bearbeiten · Strg+C/V = kopieren/einfügen · Entf = löschen</span>
+</div>
+
+<script>
+/* =========================================================================
+   MiniCalc – Formel-Engine
+   ========================================================================= */
+function colToIndex(letters){ let n=0; for(let i=0;i<letters.length;i++) n=n*26+(letters.charCodeAt(i)-64); return n-1; }
+function indexToCol(n){ n=n+1; let s=''; while(n>0){ const r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26);} return s; }
+function parseRef(ref){ const m=/^\$?([A-Z]+)\$?(\d+)$/.exec(ref); if(!m) return null; return {col:colToIndex(m[1]), row:parseInt(m[2],10)-1}; }
+
+class FormulaError extends Error{ constructor(code){ super(code); this.code=code; } }
+
+function tokenize(str){
+  const re=/\s*(<>|<=|>=|[=<>]|\^|\*|\/|\+|-|\(|\)|,|:|"[^"]*"|\$?[A-Z]+\$?\d+|\d+\.?\d*|[A-Za-z_][A-Za-z0-9_]*)\s*/y;
+  let pos=0, tokens=[];
+  while(pos<str.length){
+    re.lastIndex=pos;
+    const m=re.exec(str);
+    if(!m || m[0].length===0){
+      if(/\s/.test(str[pos])){ pos++; continue; }
+      throw new FormulaError('#ERROR!');
+    }
+    tokens.push(m[1]); pos=re.lastIndex;
+  }
+  return tokens;
+}
+
+const FUNCTIONS={
+  SUM:(v)=>v.reduce((a,b)=>a+(typeof b==='number'?b:0),0),
+  SUMME:(v)=>FUNCTIONS.SUM(v),
+  AVERAGE:(v)=>{ const n=v.filter(x=>typeof x==='number'); if(!n.length) throw new FormulaError('#DIV/0!'); return n.reduce((a,b)=>a+b,0)/n.length; },
+  MITTELWERT:(v)=>FUNCTIONS.AVERAGE(v),
+  MIN:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?Math.min(...n):0; },
+  MAX:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?Math.max(...n):0; },
+  COUNT:(v)=>v.filter(x=>typeof x==='number').length,
+  ANZAHL:(v)=>FUNCTIONS.COUNT(v),
+  COUNTA:(v)=>v.filter(x=>x!==''&&x!==null&&x!==undefined).length,
+  ROUND:(v)=>{ const [n,d]=v; const f=Math.pow(10,d||0); return Math.round(n*f)/f; },
+  RUNDEN:(v)=>FUNCTIONS.ROUND(v),
+  ABS:(v)=>Math.abs(v[0]),
+  SQRT:(v)=>Math.sqrt(v[0]),
+  WURZEL:(v)=>Math.sqrt(v[0]),
+  IF:(v)=>v[0]?v[1]:(v.length>2?v[2]:false),
+  WENN:(v)=>FUNCTIONS.IF(v),
+  CONCAT:(v)=>v.map(x=>x===undefined||x===null?'':String(x)).join(''),
+  CONCATENATE:(v)=>FUNCTIONS.CONCAT(v),
+  AND:(v)=>v.every(Boolean),
+  OR:(v)=>v.some(Boolean),
+  NOT:(v)=>!v[0],
+  MOD:(v)=>v[0]%v[1],
+  POW:(v)=>Math.pow(v[0],v[1]),
+  LEN:(v)=>String(v[0]).length,
+  UPPER:(v)=>String(v[0]).toUpperCase(),
+  LOWER:(v)=>String(v[0]).toLowerCase(),
+  TODAY:()=>new Date().toLocaleDateString('de-DE'),
+};
+
+class Parser{
+  constructor(tokens,ctx){ this.toks=tokens; this.i=0; this.ctx=ctx; }
+  peek(){ return this.toks[this.i]; }
+  next(){ return this.toks[this.i++]; }
+  expect(t){ if(this.next()!==t) throw new FormulaError('#ERROR!'); }
+  parse(){ const v=this.parseComparison(); if(this.i<this.toks.length) throw new FormulaError('#ERROR!'); return v; }
+  parseComparison(){
+    let left=this.parseAdd();
+    while(['=','<>','<','>','<=','>='].includes(this.peek())){
+      const op=this.next(); const right=this.parseAdd();
+      switch(op){
+        case '=': left=left===right; break;
+        case '<>': left=left!==right; break;
+        case '<': left=left<right; break;
+        case '>': left=left>right; break;
+        case '<=': left=left<=right; break;
+        case '>=': left=left>=right; break;
+      }
+    }
+    return left;
+  }
+  parseAdd(){
+    let left=this.parseMul();
+    while(this.peek()==='+'||this.peek()==='-'){
+      const op=this.next(); const right=this.parseMul();
+      this.numCheck(left); this.numCheck(right);
+      left = op==='+' ? left+right : left-right;
+    }
+    return left;
+  }
+  parseMul(){
+    let left=this.parsePow();
+    while(this.peek()==='*'||this.peek()==='/'){
+      const op=this.next(); const right=this.parsePow();
+      this.numCheck(left); this.numCheck(right);
+      if(op==='/'){ if(right===0) throw new FormulaError('#DIV/0!'); left=left/right; }
+      else left=left*right;
+    }
+    return left;
+  }
+  parsePow(){
+    let left=this.parseUnary();
+    while(this.peek()==='^'){ this.next(); const right=this.parseUnary(); left=Math.pow(left,right); }
+    return left;
+  }
+  parseUnary(){
+    if(this.peek()==='-'){ this.next(); return -this.parseUnary(); }
+    if(this.peek()==='+'){ this.next(); return this.parseUnary(); }
+    return this.parsePrimary();
+  }
+  numCheck(v){ if(typeof v!=='number') throw new FormulaError('#VALUE!'); }
+  isCellRef(tok){ return tok && /^\$?[A-Z]+\$?\d+$/.test(tok); }
+  parsePrimary(){
+    const tok=this.peek();
+    if(tok===undefined) throw new FormulaError('#ERROR!');
+    if(tok==='('){ this.next(); const v=this.parseComparison(); this.expect(')'); return v; }
+    if(/^\d+\.?\d*$/.test(tok)){ this.next(); return parseFloat(tok); }
+    if(tok.startsWith('"')){ this.next(); return tok.slice(1,-1); }
+    if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok) && this.toks[this.i+1]==='('){
+      const name=this.next().toUpperCase();
+      this.expect('(');
+      const args=this.parseArgs();
+      this.expect(')');
+      const fn=FUNCTIONS[name];
+      if(!fn) throw new FormulaError('#NAME?');
+      return fn(args);
+    }
+    if(this.isCellRef(tok)){
+      const first=this.next();
+      if(this.peek()===':'){ this.next(); const second=this.next(); return this.rangeAsList(first,second); }
+      return this.getCellValue(first);
+    }
+    if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok)){
+      if(tok.toUpperCase()==='TRUE'||tok.toUpperCase()==='WAHR'){ this.next(); return true; }
+      if(tok.toUpperCase()==='FALSE'||tok.toUpperCase()==='FALSCH'){ this.next(); return false; }
+      throw new FormulaError('#NAME?');
+    }
+    throw new FormulaError('#ERROR!');
+  }
+  parseArgs(){
+    const out=[];
+    if(this.peek()===')') return out;
+    while(true){
+      if(this.isCellRef(this.peek()) && this.toks[this.i+1]===':'){
+        const first=this.next(); this.next(); const second=this.next();
+        out.push(...this.rangeAsList(first,second));
+      } else {
+        out.push(this.parseComparison());
+      }
+      if(this.peek()===','){ this.next(); continue; }
+      break;
+    }
+    return out;
+  }
+  rangeAsList(a,b){
+    const ra=parseRef(a), rb=parseRef(b);
+    if(!ra||!rb) throw new FormulaError('#REF!');
+    const r1=Math.min(ra.row,rb.row), r2=Math.max(ra.row,rb.row);
+    const c1=Math.min(ra.col,rb.col), c2=Math.max(ra.col,rb.col);
+    const list=[];
+    for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) list.push(this.ctx.getCell(r,c));
+    return list;
+  }
+  getCellValue(ref){ const r=parseRef(ref); if(!r) throw new FormulaError('#REF!'); return this.ctx.getCell(r.row,r.col); }
+}
+function evalFormula(body,ctx){ const tokens=tokenize(body); return new Parser(tokens,ctx).parse(); }
+
+/* =========================================================================
+   Pure-JS DEFLATE-Dekompressor (RFC 1951) – zum Lesen von .ods-ZIPs,
+   die von LibreOffice/Excel standardmäßig komprimiert abgelegt werden.
+   ========================================================================= */
+class BitReader{
+  constructor(data){ this.data=data; this.pos=0; this.bitpos=0; }
+  getBit(){ if(this.pos>=this.data.length) return 0; const bit=(this.data[this.pos]>>this.bitpos)&1; this.bitpos++; if(this.bitpos===8){this.bitpos=0;this.pos++;} return bit; }
+  getBits(n){ let v=0; for(let i=0;i<n;i++) v|=this.getBit()<<i; return v; }
+  align(){ if(this.bitpos!==0){ this.bitpos=0; this.pos++; } }
+}
+function buildHuffman(lengths){
+  const MAXBITS=15;
+  const counts=new Array(MAXBITS+1).fill(0);
+  for(const l of lengths) counts[l]++;
+  counts[0]=0;
+  const offs=new Array(MAXBITS+1).fill(0);
+  for(let i=1;i<=MAXBITS;i++) offs[i]=offs[i-1]+counts[i-1];
+  const symbols=new Array(lengths.length).fill(0);
+  for(let i=0;i<lengths.length;i++) if(lengths[i]) symbols[offs[lengths[i]]++]=i;
+  return {counts,symbols};
+}
+function decodeSymbol(reader,huff){
+  let code=0,first=0,index=0;
+  for(let len=1;len<=15;len++){
+    code|=reader.getBit();
+    const count=huff.counts[len];
+    if(code-first<count) return huff.symbols[index+(code-first)];
+    index+=count; first+=count; first<<=1; code<<=1;
+  }
+  throw new Error('inflate: ungültiger Huffman-Code');
+}
+const LEN_BASE=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+const LEN_EXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+const DIST_BASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+const DIST_EXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+const CLC_ORDER=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+function inflateBlock(reader,output,litHuff,distHuff){
+  while(true){
+    const sym=decodeSymbol(reader,litHuff);
+    if(sym<256){ output.push(sym); }
+    else if(sym===256){ return; }
+    else{
+      const lenIdx=sym-257;
+      const len=LEN_BASE[lenIdx]+reader.getBits(LEN_EXTRA[lenIdx]);
+      const distSym=decodeSymbol(reader,distHuff);
+      const dist=DIST_BASE[distSym]+reader.getBits(DIST_EXTRA[distSym]);
+      let start=output.length-dist;
+      for(let i=0;i<len;i++) output.push(output[start+i]);
+    }
+  }
+}
+function inflateRaw(input){
+  const reader=new BitReader(input);
+  const output=[];
+  let final=0;
+  do{
+    final=reader.getBit();
+    const type=reader.getBits(2);
+    if(type===0){
+      reader.align();
+      const len=reader.data[reader.pos]|(reader.data[reader.pos+1]<<8);
+      reader.pos+=4;
+      for(let i=0;i<len;i++) output.push(reader.data[reader.pos++]);
+    } else if(type===1){
+      const litLengths=new Array(288);
+      for(let i=0;i<=143;i++) litLengths[i]=8;
+      for(let i=144;i<=255;i++) litLengths[i]=9;
+      for(let i=256;i<=279;i++) litLengths[i]=7;
+      for(let i=280;i<=287;i++) litLengths[i]=8;
+      const distLengths=new Array(30).fill(5);
+      inflateBlock(reader,output,buildHuffman(litLengths),buildHuffman(distLengths));
+    } else if(type===2){
+      const hlit=reader.getBits(5)+257;
+      const hdist=reader.getBits(5)+1;
+      const hclen=reader.getBits(4)+4;
+      const clLengths=new Array(19).fill(0);
+      for(let i=0;i<hclen;i++) clLengths[CLC_ORDER[i]]=reader.getBits(3);
+      const clHuff=buildHuffman(clLengths);
+      const lengths=[];
+      while(lengths.length<hlit+hdist){
+        const sym=decodeSymbol(reader,clHuff);
+        if(sym<16) lengths.push(sym);
+        else if(sym===16){ const rep=reader.getBits(2)+3; const prev=lengths[lengths.length-1]; for(let i=0;i<rep;i++) lengths.push(prev); }
+        else if(sym===17){ const rep=reader.getBits(3)+3; for(let i=0;i<rep;i++) lengths.push(0); }
+        else if(sym===18){ const rep=reader.getBits(7)+11; for(let i=0;i<rep;i++) lengths.push(0); }
+      }
+      const litHuff=buildHuffman(lengths.slice(0,hlit));
+      const distHuff=buildHuffman(lengths.slice(hlit,hlit+hdist));
+      inflateBlock(reader,output,litHuff,distHuff);
+    } else throw new Error('inflate: unbekannter Blocktyp');
+  } while(!final);
+  return new Uint8Array(output);
+}
+
+/* =========================================================================
+   Minimaler ZIP-Writer/-Reader in reinem JS (Container für .ods)
+   ========================================================================= */
+const CRC_TABLE=(()=>{ const t=new Uint32Array(256); for(let n=0;n<256;n++){ let c=n; for(let k=0;k<8;k++) c=(c&1)?(0xEDB88320^(c>>>1)):(c>>>1); t[n]=c>>>0; } return t; })();
+function crc32(bytes){ let c=0xFFFFFFFF; for(let i=0;i<bytes.length;i++) c=CRC_TABLE[(c^bytes[i])&0xFF]^(c>>>8); return (c^0xFFFFFFFF)>>>0; }
+function pushU16(arr,v){ arr.push(v&0xFF,(v>>>8)&0xFF); }
+function pushU32(arr,v){ arr.push(v&0xFF,(v>>>8)&0xFF,(v>>>16)&0xFF,(v>>>24)&0xFF); }
+function strToBytes(s){ return Array.from(new TextEncoder().encode(s)); }
+function buildZip(entries){
+  const out=[], central=[], offsets=[];
+  for(const entry of entries){
+    const nameBytes=strToBytes(entry.name), data=entry.data, crc=crc32(data);
+    offsets.push(out.length);
+    pushU32(out,0x04034b50); pushU16(out,20); pushU16(out,0x0800); pushU16(out,0);
+    pushU16(out,0); pushU16(out,0x21);
+    pushU32(out,crc); pushU32(out,data.length); pushU32(out,data.length);
+    pushU16(out,nameBytes.length); pushU16(out,0);
+    out.push(...nameBytes);
+    for(let i=0;i<data.length;i++) out.push(data[i]);
+  }
+  for(let i=0;i<entries.length;i++){
+    const entry=entries[i], nameBytes=strToBytes(entry.name), data=entry.data, crc=crc32(data);
+    pushU32(central,0x02014b50); pushU16(central,20); pushU16(central,20);
+    pushU16(central,0x0800); pushU16(central,0); pushU16(central,0); pushU16(central,0x21);
+    pushU32(central,crc); pushU32(central,data.length); pushU32(central,data.length);
+    pushU16(central,nameBytes.length); pushU16(central,0); pushU16(central,0);
+    pushU16(central,0); pushU16(central,0); pushU32(central,0); pushU32(central,offsets[i]);
+    central.push(...nameBytes);
+  }
+  const cdOffset=out.length;
+  const full=out.concat(central);
+  pushU32(full,0x06054b50); pushU16(full,0); pushU16(full,0);
+  pushU16(full,entries.length); pushU16(full,entries.length);
+  pushU32(full,central.length); pushU32(full,cdOffset); pushU16(full,0);
+  return new Uint8Array(full);
+}
+function readZip(bytes){
+  let eocd=-1;
+  for(let i=bytes.length-22;i>=0&&i>=bytes.length-22-65536;i--){
+    if(bytes[i]===0x50&&bytes[i+1]===0x4b&&bytes[i+2]===0x05&&bytes[i+3]===0x06){ eocd=i; break; }
+  }
+  if(eocd===-1) throw new Error('Keine gültige ZIP-Datei (EOCD nicht gefunden)');
+  const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  const total=dv.getUint16(eocd+10,true);
+  let cdOffset=dv.getUint32(eocd+16,true);
+  const result={};
+  for(let i=0;i<total;i++){
+    if(dv.getUint32(cdOffset,true)!==0x02014b50) throw new Error('Ungültiger Central-Directory-Eintrag');
+    const method=dv.getUint16(cdOffset+10,true);
+    const compSize=dv.getUint32(cdOffset+20,true);
+    const nameLen=dv.getUint16(cdOffset+28,true);
+    const extraLen=dv.getUint16(cdOffset+30,true);
+    const commentLen=dv.getUint16(cdOffset+32,true);
+    const localOffset=dv.getUint32(cdOffset+42,true);
+    const name=new TextDecoder('utf-8').decode(bytes.slice(cdOffset+46,cdOffset+46+nameLen));
+    const lNameLen=dv.getUint16(localOffset+26,true);
+    const lExtraLen=dv.getUint16(localOffset+28,true);
+    const dataStart=localOffset+30+lNameLen+lExtraLen;
+    const raw=bytes.slice(dataStart,dataStart+compSize);
+    let content;
+    if(method===0) content=raw;
+    else if(method===8) content=inflateRaw(raw);
+    else throw new Error('Nicht unterstützte ZIP-Kompression: '+method);
+    result[name]=content;
+    cdOffset+=46+nameLen+extraLen+commentLen;
+  }
+  return result;
+}
+
+/* =========================================================================
+   ODS (OpenDocument Spreadsheet) – Erzeugen & Einlesen von content.xml
+   ========================================================================= */
+function xmlEscape(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+const FN_TO_ODF={SUMME:'SUM',MITTELWERT:'AVERAGE',ANZAHL:'COUNT',RUNDEN:'ROUND',WURZEL:'SQRT',WENN:'IF'};
+function internalFormulaToOdf(raw){
+  const tokens=tokenize(raw.trim().slice(1));
+  let out='';
+  for(let i=0;i<tokens.length;i++){
+    const tok=tokens[i];
+    if(/^\$?[A-Z]+\$?\d+$/.test(tok)){
+      const clean=tok.replace(/\$/g,'');
+      if(tokens[i+1]===':' && /^\$?[A-Z]+\$?\d+$/.test(tokens[i+2])){ out+='[.'+clean+':.'+tokens[i+2].replace(/\$/g,'')+']'; i+=2; }
+      else out+='[.'+clean+']';
+    } else if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok) && tokens[i+1]==='('){ out+=FN_TO_ODF[tok.toUpperCase()]||tok.toUpperCase(); }
+    else out+=tok;
+  }
+  return 'of:='+out;
+}
+function odfFormulaToInternal(odf){
+  let body=odf.replace(/^of:=/,'').replace(/^=/,'');
+  body=body.replace(/\[\.([A-Z]+\d+):\.([A-Z]+\d+)\]/g,'$1:$2').replace(/\[\.([A-Z]+\d+)\]/g,'$1');
+  return '='+body;
+}
+function formatNumberPlain(v,fmt){
+  switch(fmt){
+    case 'num2': return v.toFixed(2);
+    case 'percent': return (v*100).toFixed(1)+'%';
+    case 'currency': return '€'+v.toFixed(2);
+    case 'int': return String(Math.round(v));
+    default: return Number.isInteger(v)?String(v):parseFloat(v.toPrecision(10)).toString();
+  }
+}
+const NUMBER_STYLE_DEFS=`
+<number:number-style style:name="Nnum2"><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:number-style>
+<number:percentage-style style:name="Npercent"><number:number number:decimal-places="1" number:min-integer-digits="1"/><number:text>%</number:text></number:percentage-style>
+<number:currency-style style:name="Ncurrency"><number:currency-symbol number:language="de" number:country="DE">€</number:currency-symbol><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:currency-style>
+<number:number-style style:name="Nint"><number:number number:decimal-places="0" number:min-integer-digits="1"/></number:number-style>`;
+const NUMFMT_TO_DATASTYLE={num2:'Nnum2',percent:'Npercent',currency:'Ncurrency',int:'Nint',general:null};
+function styleKey(s){ return [s.bold?1:0,s.italic?1:0,s.underline?1:0,s.align,s.color,s.bg,s.numFmt].join('|'); }
+function cellStyleXml(name,s){
+  const dataStyle=NUMFMT_TO_DATASTYLE[s.numFmt];
+  const attrs=`style:name="${name}" style:family="table-cell"`+(dataStyle?` style:data-style-name="${dataStyle}"`:'');
+  const cellProps=s.bg?`<style:table-cell-properties fo:background-color="${s.bg}"/>`:'';
+  let textProps='';
+  if(s.bold||s.italic||s.underline||s.color){
+    textProps='<style:text-properties'
+      +(s.bold?' fo:font-weight="bold"':'')+(s.italic?' fo:font-style="italic"':'')
+      +(s.underline?' style:text-underline-style="solid" style:text-underline-type="single"':'')
+      +(s.color?` fo:color="${s.color}"`:'')+'/>';
+  }
+  let paraProps='';
+  if(s.align && s.align!=='left'){
+    const align=s.align==='right'?'end':s.align==='center'?'center':'start';
+    paraProps=`<style:paragraph-properties fo:text-align="${align}"/>`;
+  }
+  return `<style:style ${attrs}>${cellProps}${textProps}${paraProps}</style:style>`;
+}
+function pxToCm(px){ return (px*2.54/96).toFixed(3)+'cm'; }
+function buildOdsContentXml(rows,cols,grid,colW,rowH){
+  const styleMap=new Map(); let styleCounter=1;
+  function nameFor(style){
+    const isDefault=!style.bold&&!style.italic&&!style.underline&&style.align==='left'&&!style.color&&!style.bg&&style.numFmt==='general';
+    if(isDefault) return null;
+    const key=styleKey(style);
+    if(styleMap.has(key)) return styleMap.get(key);
+    const name='ce'+(styleCounter++); styleMap.set(key,name); return name;
+  }
+  const rowsXml=[];
+  for(let r=0;r<rows;r++){
+    const cellsXml=[];
+    for(let c=0;c<cols;c++){
+      const cell=grid[r][c];
+      const styleName=nameFor(cell.style);
+      const styleAttr=styleName?` table:style-name="${styleName}"`:'';
+      const raw=(cell.raw||'').trim();
+      const comp=cell.computed;
+      if(raw===''){ cellsXml.push(styleAttr?`<table:table-cell${styleAttr}/>`:`<table:table-cell/>`); continue; }
+      if(raw.startsWith('=')){
+        const formulaAttr=` table:formula="${xmlEscape(internalFormulaToOdf(raw))}"`;
+        let vtAttr='',vAttr='',text='';
+        if(typeof comp==='number'){ vtAttr=' office:value-type="float"'; vAttr=` office:value="${comp}"`; text=formatNumberPlain(comp,cell.style.numFmt); }
+        else if(typeof comp==='boolean'){ vtAttr=' office:value-type="boolean"'; vAttr=` office:boolean-value="${comp}"`; text=comp?'WAHR':'FALSCH'; }
+        else if(comp && typeof comp==='object' && comp.__err){ vtAttr=' office:value-type="string"'; text=comp.__err; }
+        else { vtAttr=' office:value-type="string"'; text=comp==null?'':String(comp); }
+        cellsXml.push(`<table:table-cell${styleAttr}${formulaAttr}${vtAttr}${vAttr}>${text!==''?`<text:p>${xmlEscape(text)}</text:p>`:''}</table:table-cell>`);
+      } else {
+        const isNum=/^-?\d+(\.\d+)?$/.test(raw);
+        if(isNum){
+          const n=parseFloat(raw);
+          cellsXml.push(`<table:table-cell${styleAttr} office:value-type="float" office:value="${n}"><text:p>${xmlEscape(formatNumberPlain(n,cell.style.numFmt))}</text:p></table:table-cell>`);
+        } else {
+          cellsXml.push(`<table:table-cell${styleAttr} office:value-type="string"><text:p>${xmlEscape(raw)}</text:p></table:table-cell>`);
+        }
+      }
+    }
+    const rowStyleName = (rowH && rowH[r] && rowH[r]!==DEFAULT_ROW_H) ? 'ro'+(r+1) : null;
+    const rowAttr = rowStyleName ? ` table:style-name="${rowStyleName}"` : '';
+    rowsXml.push(`<table:table-row${rowAttr}>${cellsXml.join('')}</table:table-row>`);
+  }
+  const cellStylesXml=Array.from(styleMap.entries()).map(([key,name])=>{
+    const p=key.split('|');
+    return cellStyleXml(name,{bold:p[0]==='1',italic:p[1]==='1',underline:p[2]==='1',align:p[3],color:p[4],bg:p[5],numFmt:p[6]});
+  }).join('');
+  // Spalten-Styles (nur für abweichende Breiten) + <table:table-column> je Spalte
+  let columnsXml='';
+  const colStylesXml=[];
+  for(let c=0;c<cols;c++){
+    const w=colW && colW[c] ? colW[c] : DEFAULT_COL_W;
+    if(w!==DEFAULT_COL_W){
+      const name='co'+(c+1);
+      colStylesXml.push(`<style:style style:name="${name}" style:family="table-column"><style:table-column-properties style:column-width="${pxToCm(w)}"/></style:style>`);
+      columnsXml+=`<table:table-column table:style-name="${name}"/>`;
+    } else {
+      columnsXml+=`<table:table-column/>`;
+    }
+  }
+  // Zeilen-Styles (nur für abweichende Höhen)
+  const rowStylesXml=[];
+  for(let r=0;r<rows;r++){
+    const h=rowH && rowH[r] ? rowH[r] : DEFAULT_ROW_H;
+    if(h!==DEFAULT_ROW_H){
+      rowStylesXml.push(`<style:style style:name="ro${r+1}" style:family="table-row"><style:table-row-properties style:row-height="${pxToCm(h)}"/></style:style>`);
+    }
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:number="urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0" xmlns:of="urn:oasis:names:tc:opendocument:xmlns:of:1.2" office:version="1.2">
+<office:automatic-styles>${NUMBER_STYLE_DEFS}${cellStylesXml}${colStylesXml.join('')}${rowStylesXml.join('')}</office:automatic-styles>
+<office:body><office:spreadsheet><table:table table:name="Tabelle1">
+${columnsXml}
+${rowsXml.join('')}
+</table:table></office:spreadsheet></office:body>
+</office:document-content>`;
+}
+const ODS_STYLES_XML=`<?xml version="1.0" encoding="UTF-8"?>
+<office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" office:version="1.2">
+<office:styles/><office:automatic-styles/><office:master-styles/>
+</office:document-styles>`;
+const ODS_MANIFEST_XML=`<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">
+<manifest:file-entry manifest:full-path="/" manifest:version="1.2" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>
+<manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+<manifest:file-entry manifest:full-path="styles.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>`;
+function parseOdsContentXml(doc){
+  const ns={t:'urn:oasis:names:tc:opendocument:xmlns:table:1.0',s:'urn:oasis:names:tc:opendocument:xmlns:style:1.0',tx:'urn:oasis:names:tc:opendocument:xmlns:text:1.0',n:'urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0'};
+  function lengthToPx(str){
+    const m=/^([\d.]+)(cm|mm|in|px)$/.exec(str||'');
+    if(!m) return null;
+    const val=parseFloat(m[1]);
+    switch(m[2]){ case 'cm': return val*96/2.54; case 'mm': return val*96/25.4; case 'in': return val*96; case 'px': return val; }
+  }
+  const colStyleWidths={}, rowStyleHeights={};
+  for(const el of doc.getElementsByTagNameNS(ns.s,'style')){
+    const fam=el.getAttribute('style:family');
+    if(fam==='table-column'){
+      const cp=el.getElementsByTagNameNS(ns.s,'table-column-properties')[0];
+      const w=cp?lengthToPx(cp.getAttribute('style:column-width')):null;
+      if(w) colStyleWidths[el.getAttribute('style:name')]=Math.round(w);
+    } else if(fam==='table-row'){
+      const rp=el.getElementsByTagNameNS(ns.s,'table-row-properties')[0];
+      const h=rp?lengthToPx(rp.getAttribute('style:row-height')):null;
+      if(h) rowStyleHeights[el.getAttribute('style:name')]=Math.round(h);
+    }
+  }
+  const cellStyles={}, dataStyleNumFmt={};
+  for(const el of doc.getElementsByTagNameNS(ns.n,'percentage-style')) dataStyleNumFmt[el.getAttribute('style:name')]='percent';
+  for(const el of doc.getElementsByTagNameNS(ns.n,'currency-style')) dataStyleNumFmt[el.getAttribute('style:name')]='currency';
+  for(const el of doc.getElementsByTagNameNS(ns.n,'number-style')){
+    const dp=el.getElementsByTagNameNS(ns.n,'number')[0];
+    const decimals=dp?parseInt(dp.getAttribute('number:decimal-places')||'0',10):0;
+    dataStyleNumFmt[el.getAttribute('style:name')]=decimals>=2?'num2':(decimals===0?'int':'general');
+  }
+  for(const el of doc.getElementsByTagNameNS(ns.s,'style')){
+    if(el.getAttribute('style:family')!=='table-cell') continue;
+    const name=el.getAttribute('style:name');
+    const style={bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'};
+    const dsName=el.getAttribute('style:data-style-name');
+    if(dsName && dataStyleNumFmt[dsName]) style.numFmt=dataStyleNumFmt[dsName];
+    const tp=el.getElementsByTagNameNS(ns.s,'text-properties')[0];
+    if(tp){
+      if(tp.getAttribute('fo:font-weight')==='bold') style.bold=true;
+      if(tp.getAttribute('fo:font-style')==='italic') style.italic=true;
+      if(tp.getAttribute('style:text-underline-style') && tp.getAttribute('style:text-underline-style')!=='none') style.underline=true;
+      if(tp.getAttribute('fo:color')) style.color=tp.getAttribute('fo:color');
+    }
+    const cp=el.getElementsByTagNameNS(ns.s,'table-cell-properties')[0];
+    if(cp && cp.getAttribute('fo:background-color')) style.bg=cp.getAttribute('fo:background-color');
+    const pp=el.getElementsByTagNameNS(ns.s,'paragraph-properties')[0];
+    if(pp){ const al=pp.getAttribute('fo:text-align'); if(al==='end') style.align='right'; else if(al==='center') style.align='center'; else if(al==='start') style.align='left'; }
+    cellStyles[name]=style;
+  }
+  const table=doc.getElementsByTagNameNS(ns.t,'table')[0];
+  const colWidthsOut=[];
+  if(table){
+    for(const colEl of Array.from(table.children)){
+      if(colEl.localName!=='table-column') continue;
+      const repeat=parseInt(colEl.getAttribute('table:number-columns-repeated')||'1',10);
+      const sName=colEl.getAttribute('table:style-name');
+      const w=(sName && colStyleWidths[sName])?colStyleWidths[sName]:DEFAULT_COL_W;
+      for(let i=0;i<repeat;i++) colWidthsOut.push(w);
+    }
+  }
+  const rowEls=table?Array.from(table.getElementsByTagNameNS(ns.t,'table-row')):[];
+  const rowHeightsOut=[];
+  const grid=[]; let maxCols=1;
+  for(const rowEl of rowEls){
+    const rsName=rowEl.getAttribute('table:style-name');
+    const rowH=(rsName && rowStyleHeights[rsName])?rowStyleHeights[rsName]:DEFAULT_ROW_H;
+    const row=[];
+    for(const cellEl of Array.from(rowEl.children)){
+      if(cellEl.localName!=='table-cell' && cellEl.localName!=='covered-table-cell') continue;
+      const repeat=parseInt(cellEl.getAttribute('table:number-columns-repeated')||'1',10);
+      const styleName=cellEl.getAttribute('table:style-name');
+      const style=(styleName && cellStyles[styleName])?cellStyles[styleName]:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'};
+      const formula=cellEl.getAttribute('table:formula');
+      const valueType=cellEl.getAttribute('office:value-type');
+      let raw='';
+      if(formula) raw=odfFormulaToInternal(formula);
+      else if(valueType==='float') raw=cellEl.getAttribute('office:value')||'0';
+      else if(valueType==='boolean') raw=cellEl.getAttribute('office:boolean-value')==='true'?'TRUE':'FALSE';
+      else if(valueType==='string'){ const p=cellEl.getElementsByTagNameNS(ns.tx,'p')[0]; raw=p?p.textContent:''; }
+      for(let i=0;i<repeat;i++) row.push({raw,style:Object.assign({},style),computed:''});
+    }
+    // LibreOffice fasst mehrere gleichartige (meist leere) Zeilen mit table:number-rows-repeated zusammen -
+    // ohne Expansion würden sich alle nachfolgenden Zeilenindizes verschieben.
+    const rowRepeat=Math.min(parseInt(rowEl.getAttribute('table:number-rows-repeated')||'1',10), 1000);
+    for(let i=0;i<rowRepeat;i++){
+      rowHeightsOut.push(rowH);
+      grid.push(row.map(cell=>({raw:cell.raw, style:Object.assign({},cell.style), computed:''})));
+    }
+    if(row.length>maxCols) maxCols=row.length;
+  }
+  const newRows=Math.max(grid.length,1), newCols=Math.max(maxCols,1);
+  const outData=[];
+  for(let r=0;r<newRows;r++){
+    const row=[];
+    for(let c=0;c<newCols;c++) row.push((grid[r]&&grid[r][c])?grid[r][c]:{raw:'',style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'},computed:''});
+    outData.push(row);
+  }
+  while(colWidthsOut.length<newCols) colWidthsOut.push(DEFAULT_COL_W);
+  while(rowHeightsOut.length<newRows) rowHeightsOut.push(DEFAULT_ROW_H);
+  return {ROWS:newRows,COLS:newCols,data:outData,colWidths:colWidthsOut.slice(0,newCols),rowHeights:rowHeightsOut.slice(0,newRows)};
+}
+
+/* =========================================================================
+   MiniCalc – Anwendung
+   ========================================================================= */
+let ROWS=40, COLS=20;
+const DEFAULT_COL_W=88, DEFAULT_ROW_H=24;
+let colWidths=[], rowHeights=[]; // pro Spalte/Zeile individuell einstellbare Breite/Höhe (px)
+let data=[];          // data[r][c] = {raw, style:{bold,italic,underline,align,color,bg,numFmt}, computed}
+let domCells=[];       // domCells[r][c] = <td>
+let domRowHeads=[], domColHeads=[], domColEls=[];
+let active={r:0,c:0};
+let selRange={r1:0,c1:0,r2:0,c2:0};
+let editing=false;
+let isSelecting=false;
+let selAnchor={r:0,c:0};
+let isPointing=false;    // "Point-Mode": Zellbezüge per Klick in eine Formel einfügen
+let pointRef=null;       // {anchor:{r,c}, insertStart, insertLen, td}
+let pointingCells=[];    // aktuell farblich hervorgehobene Zellen während des Point-Mode
+
+const gridBody=document.getElementById('gridBody');
+const headRow=document.getElementById('headRow');
+const clipProxy=document.getElementById('clipProxy');
+const formulaInput=document.getElementById('formulaInput');
+const cellAddrEl=document.getElementById('cellAddr');
+
+function newCell(){ return {raw:'', style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'}, computed:''}; }
+
+function initData(rows,cols){
+  data=[];
+  for(let r=0;r<rows;r++){ const row=[]; for(let c=0;c<cols;c++) row.push(newCell()); data.push(row); }
+  ROWS=rows; COLS=cols;
+  colWidths=Array.from({length:cols},()=>DEFAULT_COL_W);
+  rowHeights=Array.from({length:rows},()=>DEFAULT_ROW_H);
+}
+
+function buildTable(){
+  // Spaltenbreiten über <colgroup>
+  const colgroup=document.getElementById('colgroup');
+  colgroup.innerHTML='';
+  const headCol=document.createElement('col'); headCol.style.width='var(--head-w)';
+  colgroup.appendChild(headCol);
+  domColEls=[];
+  for(let c=0;c<COLS;c++){
+    const col=document.createElement('col'); col.style.width=(colWidths[c]||DEFAULT_COL_W)+'px';
+    colgroup.appendChild(col);
+    domColEls.push(col);
+  }
+  // Kopfzeile
+  headRow.innerHTML='';
+  const corner=document.createElement('th'); corner.className='corner rowhead';
+  headRow.appendChild(corner);
+  domColHeads=[];
+  for(let c=0;c<COLS;c++){
+    const th=document.createElement('th');
+    th.textContent=indexToCol(c);
+    th.dataset.c=c;
+    th.addEventListener('mousedown', onColHeaderMouseDown);
+    th.addEventListener('mousemove', onColHeaderMouseMove);
+    headRow.appendChild(th);
+    domColHeads.push(th);
+  }
+  // Body
+  gridBody.innerHTML='';
+  domCells=[]; domRowHeads=[];
+  for(let r=0;r<ROWS;r++){
+    const tr=document.createElement('tr');
+    tr.style.height=(rowHeights[r]||DEFAULT_ROW_H)+'px';
+    const th=document.createElement('th');
+    th.className='rowhead'; th.textContent=(r+1); th.dataset.r=r;
+    th.addEventListener('mousedown', onRowHeaderMouseDown);
+    th.addEventListener('mousemove', onRowHeaderMouseMove);
+    tr.appendChild(th);
+    domRowHeads.push(th);
+    const rowCells=[];
+    for(let c=0;c<COLS;c++){
+      const td=document.createElement('td');
+      td.dataset.r=r; td.dataset.c=c;
+      td.addEventListener('mousedown', onCellMouseDown);
+      td.addEventListener('mouseover', onCellMouseOver);
+      td.addEventListener('dblclick', onCellDblClick);
+      tr.appendChild(td);
+      rowCells.push(td);
+    }
+    gridBody.appendChild(tr);
+    domCells.push(rowCells);
+  }
+  document.getElementById('gridWrap').addEventListener('keydown', onGridEditKeydown);
+}
+
+/* ---------- Recalc ---------- */
+function recalcAll(){
+  const memo=new Map();
+  const evaluating=new Set();
+  function getCell(r,c){
+    const key=r+','+c;
+    if(memo.has(key)){
+      const v=memo.get(key);
+      if(v && v.__err) throw new FormulaError(v.__err);
+      return v;
+    }
+    if(evaluating.has(key)) throw new FormulaError('#CIRC!');
+    if(r<0||c<0||r>=ROWS||c>=COLS){ memo.set(key,''); return ''; }
+    const raw=(data[r][c].raw||'').trim();
+    let result;
+    if(raw===''){ memo.set(key,''); return ''; }
+    if(raw.startsWith('=')){
+      evaluating.add(key);
+      try{ result=evalFormula(raw.slice(1),{getCell}); }
+      catch(e){ evaluating.delete(key); const code=e.code||'#ERROR!'; memo.set(key,{__err:code}); throw new FormulaError(code); }
+      evaluating.delete(key);
+    } else {
+      const n=parseFloat(raw);
+      const isNum = /^-?\d+(\.\d+)?$/.test(raw);
+      result = isNum ? n : raw;
+    }
+    memo.set(key,result);
+    return result;
+  }
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      try{ data[r][c].computed=getCell(r,c); }
+      catch(e){ data[r][c].computed={__err:e.code||'#ERROR!'}; }
+    }
+  }
+}
+
+function formatNumber(v,fmt){
+  switch(fmt){
+    case 'num2': return v.toFixed(2);
+    case 'percent': return (v*100).toFixed(1)+'%';
+    case 'currency': return '€'+v.toFixed(2);
+    case 'int': return String(Math.round(v));
+    default: {
+      if(Number.isInteger(v)) return String(v);
+      let s=v.toPrecision(10);
+      return parseFloat(s).toString();
+    }
+  }
+}
+
+function renderCell(r,c){
+  const td=domCells[r][c]; const cell=data[r][c];
+  const comp=cell.computed;
+  let text, isErr=false;
+  if(comp && typeof comp==='object' && comp.__err){ text=comp.__err; isErr=true; }
+  else if(typeof comp==='number') text=formatNumber(comp,cell.style.numFmt);
+  else if(typeof comp==='boolean') text = comp? 'WAHR':'FALSCH';
+  else text = (comp===undefined||comp===null) ? '' : comp;
+  if(!td.classList.contains('editing')) td.textContent=text;
+  td.classList.toggle('errorcell', isErr);
+  td.style.fontWeight = cell.style.bold ? '700':'400';
+  td.style.fontStyle = cell.style.italic ? 'italic':'normal';
+  td.style.textDecoration = cell.style.underline ? 'underline':'none';
+  td.style.color = cell.style.color || '';
+  td.style.background = cell.style.bg || '';
+  td.dataset.align = cell.style.align || 'left';
+}
+
+function renderAll(){
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) renderCell(r,c);
+  updateSelectionVisuals();
+  updateStatusBar();
+}
+
+function recalcAndRender(){ recalcAll(); renderAll(); }
+
+/* ---------- Selektion ---------- */
+function normRange(){
+  return {
+    r1:Math.min(selRange.r1,selRange.r2), r2:Math.max(selRange.r1,selRange.r2),
+    c1:Math.min(selRange.c1,selRange.c2), c2:Math.max(selRange.c1,selRange.c2)
+  };
+}
+function setSelection(a,b){
+  selRange={r1:a.r,c1:a.c,r2:b.r,c2:b.c};
+  active={r:a.r,c:a.c};
+  updateSelectionVisuals();
+  syncFormulaBar();
+  updateStatusBar();
+}
+function updateSelectionVisuals(){
+  const {r1,r2,c1,c2}=normRange();
+  for(let r=0;r<ROWS;r++){
+    for(let c=0;c<COLS;c++){
+      const td=domCells[r][c];
+      const inSel = r>=r1&&r<=r2&&c>=c1&&c<=c2;
+      td.classList.toggle('sel', inSel && !(r===active.r&&c===active.c));
+      td.classList.toggle('active', r===active.r&&c===active.c);
+    }
+  }
+  for(let c=0;c<COLS;c++) domColHeads[c].classList.toggle('hActive', c>=c1&&c<=c2);
+  for(let r=0;r<ROWS;r++) domRowHeads[r].classList.toggle('hActive', r>=r1&&r<=r2);
+}
+function syncFormulaBar(){
+  const {r1,r2,c1,c2}=normRange();
+  cellAddrEl.textContent = (r1===r2&&c1===c2) ? (indexToCol(c1)+(r1+1)) : (indexToCol(c1)+(r1+1)+':'+indexToCol(c2)+(r2+1));
+  formulaInput.value = data[active.r][active.c].raw;
+}
+function updateStatusBar(){
+  const {r1,r2,c1,c2}=normRange();
+  let count=0,sum=0,nums=0;
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++){
+    const v=data[r][c].computed;
+    if(v!=='' && v!==undefined) count++;
+    if(typeof v==='number'){ sum+=v; nums++; }
+  }
+  document.getElementById('stCount').textContent=count;
+  document.getElementById('stSum').textContent = nums? formatNumber(sum,'general'):'0';
+  document.getElementById('stAvg').textContent = nums? formatNumber(sum/nums,'general'):'0';
+}
+
+function focusProxy(){ if(!editing) clipProxy.focus({preventScroll:true}); }
+
+/* ---------- Cursor-Position in einer contentEditable-Zelle (einfacher Textknoten) ---------- */
+function getCaretOffset(el){
+  const sel=window.getSelection();
+  if(!sel.rangeCount) return el.textContent.length;
+  const range=sel.getRangeAt(0);
+  if(!el.contains(range.startContainer)) return el.textContent.length;
+  if(range.startContainer===el){
+    // Container ist das <td> selbst: startOffset ist ein Kindknoten-Index, kein Zeichen-Offset
+    let offset=0;
+    for(let i=0;i<range.startOffset && i<el.childNodes.length;i++) offset+=el.childNodes[i].textContent.length;
+    return offset;
+  }
+  if(el.firstChild && range.startContainer===el.firstChild) return range.startOffset;
+  return el.textContent.length;
+}
+function setCaretOffset(el,offset){
+  if(!el.firstChild || el.firstChild.nodeType!==3) el.textContent=el.textContent;
+  const node=el.firstChild || el.appendChild(document.createTextNode(''));
+  const off=Math.max(0,Math.min(node.textContent.length,offset));
+  const range=document.createRange();
+  range.setStart(node,off); range.collapse(true);
+  const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+  el.focus();
+}
+
+/* ---------- Maus-Interaktion ---------- */
+function clearPointingHighlight(){
+  for(const td of pointingCells) td.classList.remove('sel');
+  pointingCells=[];
+}
+function setPointingHighlight(r1,c1,r2,c2){
+  clearPointingHighlight();
+  const rr1=Math.min(r1,r2), rr2=Math.max(r1,r2), cc1=Math.min(c1,c2), cc2=Math.max(c1,c2);
+  for(let r=rr1;r<=rr2;r++) for(let c=cc1;c<=cc2;c++){
+    if(r===active.r && c===active.c) continue; // die bearbeitete Zelle selbst nicht überdecken
+    const td=domCells[r][c];
+    td.classList.add('sel');
+    pointingCells.push(td);
+  }
+}
+function onCellMouseDown(e){
+  const r=+e.currentTarget.dataset.r, c=+e.currentTarget.dataset.c;
+  if(editing){
+    const td=domCells[active.r][active.c];
+    const text=td.textContent;
+    const isFormula=text.trim().startsWith('=');
+    const isSameCell=(r===active.r && c===active.c);
+    if(isFormula && !isSameCell){
+      // "Point-Mode": Zellbezug an der Cursorposition in die Formel einfügen, Bearbeitung bleibt aktiv
+      e.preventDefault();
+      const offset=getCaretOffset(td);
+      const addr=indexToCol(c)+(r+1);
+      td.textContent=text.slice(0,offset)+addr+text.slice(offset);
+      setCaretOffset(td,offset+addr.length);
+      pointRef={anchor:{r,c}, insertStart:offset, insertLen:addr.length, td};
+      isPointing=true;
+      setPointingHighlight(r,c,r,c);
+      return;
+    }
+    // kein Formel-Kontext (oder Klick auf die eigene Zelle) -> Bearbeitung normal abschließen
+    commitEdit(null);
+  }
+  if(e.shiftKey){ setSelection(active,{r,c}); }
+  else { selAnchor={r,c}; setSelection({r,c},{r,c}); }
+  isSelecting=true;
+  e.preventDefault();
+}
+function onCellMouseOver(e){
+  const r=+e.currentTarget.dataset.r, c=+e.currentTarget.dataset.c;
+  if(isPointing && pointRef){
+    const td=pointRef.td;
+    const text=td.textContent;
+    const sameAsAnchor=(r===pointRef.anchor.r && c===pointRef.anchor.c);
+    const addr=sameAsAnchor
+      ? indexToCol(c)+(r+1)
+      : indexToCol(pointRef.anchor.c)+(pointRef.anchor.r+1)+':'+indexToCol(c)+(r+1);
+    td.textContent = text.slice(0,pointRef.insertStart)+addr+text.slice(pointRef.insertStart+pointRef.insertLen);
+    pointRef.insertLen=addr.length;
+    setCaretOffset(td,pointRef.insertStart+addr.length);
+    setPointingHighlight(pointRef.anchor.r,pointRef.anchor.c,r,c);
+    return;
+  }
+  if(!isSelecting || editing) return;
+  setSelection(selAnchor,{r,c});
+}
+window.addEventListener('mouseup', ()=>{
+  if(isPointing){ isPointing=false; pointRef=null; clearPointingHighlight(); return; }
+  if(isSelecting){ isSelecting=false; focusProxy(); }
+});
+
+function onCellDblClick(e){
+  if(editing) return; // während laufender Bearbeitung keinen neuen Edit über Doppelklick starten
+  const r=+e.currentTarget.dataset.r, c=+e.currentTarget.dataset.c;
+  startEdit(r,c,data[r][c].raw);
+}
+
+/* ---------- Spaltenbreite / Zeilenhöhe per Ziehen am Rand ---------- */
+const RESIZE_ZONE=6; // px Toleranz am Rand für den Ziehgriff
+function onColHeaderMouseMove(e){
+  if(isColResizing || isRowResizing) return;
+  const th=e.currentTarget; const rect=th.getBoundingClientRect();
+  th.style.cursor = (rect.right - e.clientX <= RESIZE_ZONE) ? 'col-resize' : 'default';
+}
+function onRowHeaderMouseMove(e){
+  if(isColResizing || isRowResizing) return;
+  const th=e.currentTarget; const rect=th.getBoundingClientRect();
+  th.style.cursor = (rect.bottom - e.clientY <= RESIZE_ZONE) ? 'row-resize' : 'default';
+}
+let isColResizing=false, isRowResizing=false;
+function onColHeaderMouseDown(e){
+  const th=e.currentTarget; const rect=th.getBoundingClientRect();
+  if(rect.right - e.clientX > RESIZE_ZONE) return; // kein Klick am Rand -> normales Verhalten
+  e.preventDefault();
+  const c=+th.dataset.c;
+  const startX=e.clientX, startW=colWidths[c]||DEFAULT_COL_W;
+  isColResizing=true;
+  function onMove(ev){
+    const w=Math.max(24, startW + (ev.clientX - startX));
+    colWidths[c]=w;
+    domColEls[c].style.width=w+'px';
+  }
+  function onUp(){
+    isColResizing=false;
+    window.removeEventListener('mousemove',onMove);
+    window.removeEventListener('mouseup',onUp);
+  }
+  window.addEventListener('mousemove',onMove);
+  window.addEventListener('mouseup',onUp);
+}
+function onRowHeaderMouseDown(e){
+  const th=e.currentTarget; const rect=th.getBoundingClientRect();
+  if(rect.bottom - e.clientY > RESIZE_ZONE) return;
+  e.preventDefault();
+  const r=+th.dataset.r;
+  const startY=e.clientY, startH=rowHeights[r]||DEFAULT_ROW_H;
+  isRowResizing=true;
+  function onMove(ev){
+    const h=Math.max(14, startH + (ev.clientY - startY));
+    rowHeights[r]=h;
+    domRowHeads[r].parentElement.style.height=h+'px';
+  }
+  function onUp(){
+    isRowResizing=false;
+    window.removeEventListener('mousemove',onMove);
+    window.removeEventListener('mouseup',onUp);
+  }
+  window.addEventListener('mousemove',onMove);
+  window.addEventListener('mouseup',onUp);
+}
+
+/* ---------- Bearbeiten ---------- */
+function startEdit(r,c,initialText){
+  active={r,c}; selRange={r1:r,c1:c,r2:r,c2:c};
+  editing=true;
+  const td=domCells[r][c];
+  td.classList.add('editing');
+  td.setAttribute('contenteditable','true');
+  td.textContent=initialText;
+  td.focus();
+  placeCursorAtEnd(td);
+  updateSelectionVisuals();
+  syncFormulaBar();
+}
+function placeCursorAtEnd(el){
+  const range=document.createRange(); range.selectNodeContents(el); range.collapse(false);
+  const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+}
+function commitEdit(moveDir){
+  const {r,c}=active;
+  const td=domCells[r][c];
+  const newRaw=td.textContent;
+  data[r][c].raw=newRaw;
+  td.removeAttribute('contenteditable');
+  td.classList.remove('editing');
+  editing=false;
+  recalcAndRender();
+  if(moveDir) moveActive(moveDir,false);
+  focusProxy();
+}
+function cancelEdit(){
+  const {r,c}=active;
+  const td=domCells[r][c];
+  td.removeAttribute('contenteditable');
+  td.classList.remove('editing');
+  editing=false;
+  renderCell(r,c);
+  focusProxy();
+}
+function onGridEditKeydown(e){
+  if(!editing) return;
+  if(e.key==='Enter'){ e.preventDefault(); commitEdit(e.shiftKey?'up':'down'); }
+  else if(e.key==='Tab'){ e.preventDefault(); commitEdit(e.shiftKey?'left':'right'); }
+  else if(e.key==='Escape'){ e.preventDefault(); cancelEdit(); }
+}
+
+/* ---------- Tastatur-Navigation (über clipProxy) ---------- */
+function clampRC(r,c){ return {r:Math.max(0,Math.min(ROWS-1,r)), c:Math.max(0,Math.min(COLS-1,c))}; }
+function moveActive(dir,extend){
+  let {r,c}=active;
+  if(dir==='down') r++; else if(dir==='up') r--; else if(dir==='left') c--; else if(dir==='right') c++;
+  const n=clampRC(r,c);
+  if(extend) setSelection(selAnchor,n); else { selAnchor=n; setSelection(n,n); }
+}
+clipProxy.addEventListener('keydown', (e)=>{
+  if(editing) return;
+  const key=e.key;
+  if(['ArrowDown','ArrowUp','ArrowLeft','ArrowRight'].includes(key)){
+    e.preventDefault();
+    const dir = key==='ArrowDown'?'down':key==='ArrowUp'?'up':key==='ArrowLeft'?'left':'right';
+    moveActive(dir, e.shiftKey);
+    return;
+  }
+  if(key==='Tab'){ e.preventDefault(); moveActive(e.shiftKey?'left':'right', false); return; }
+  if(key==='Enter'){ e.preventDefault(); startEdit(active.r,active.c,data[active.r][active.c].raw); return; }
+  if(key==='F2'){ e.preventDefault(); startEdit(active.r,active.c,data[active.r][active.c].raw); return; }
+  if(key==='Delete' || key==='Backspace'){
+    e.preventDefault();
+    const {r1,r2,c1,c2}=normRange();
+    for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) data[r][c].raw='';
+    recalcAndRender(); syncFormulaBar();
+    return;
+  }
+  if((e.ctrlKey||e.metaKey) && key.toLowerCase()==='a'){ e.preventDefault(); setSelection({r:0,c:0},{r:ROWS-1,c:COLS-1}); return; }
+  if(e.ctrlKey||e.metaKey||e.altKey) return; // Copy/Cut/Paste laufen über native Events unten
+  if(key.length===1){ e.preventDefault(); startEdit(active.r,active.c,key); return; }
+});
+
+/* ---------- Zwischenablage ---------- */
+function buildClipboardText(){
+  const {r1,r2,c1,c2}=normRange();
+  const rows=[];
+  for(let r=r1;r<=r2;r++){
+    const cols=[];
+    for(let c=c1;c<=c2;c++) cols.push(data[r][c].raw);
+    rows.push(cols.join('\t'));
+  }
+  return rows.join('\n');
+}
+function pasteText(text){
+  if(!text) return;
+  const rows=text.replace(/\r/g,'').split('\n');
+  // leere letzte Zeile durch abschließendes \n ignorieren
+  if(rows.length>1 && rows[rows.length-1]==='') rows.pop();
+  const startR=active.r, startC=active.c;
+  const neededRows=startR+rows.length;
+  const neededCols=startC+Math.max(...rows.map(l=>l.split('\t').length));
+  if(neededRows>ROWS || neededCols>COLS) growGrid(Math.max(ROWS,neededRows), Math.max(COLS,neededCols));
+  rows.forEach((line,i)=>{
+    const cols=line.split('\t');
+    cols.forEach((val,j)=>{
+      const r=startR+i, c=startC+j;
+      if(r<ROWS && c<COLS) data[r][c].raw=val;
+    });
+  });
+  const endR=Math.min(ROWS-1,startR+rows.length-1);
+  const endC=Math.min(COLS-1,startC+Math.max(...rows.map(l=>l.split('\t').length))-1);
+  setSelection({r:startR,c:startC},{r:endR,c:endC});
+  recalcAndRender();
+}
+clipProxy.addEventListener('copy',(e)=>{ if(editing) return; e.preventDefault(); e.clipboardData.setData('text/plain', buildClipboardText()); });
+clipProxy.addEventListener('cut',(e)=>{
+  if(editing) return; e.preventDefault();
+  e.clipboardData.setData('text/plain', buildClipboardText());
+  const {r1,r2,c1,c2}=normRange();
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) data[r][c].raw='';
+  recalcAndRender();
+});
+clipProxy.addEventListener('paste',(e)=>{
+  if(editing) return; e.preventDefault();
+  const text=(e.clipboardData||window.clipboardData).getData('text/plain');
+  pasteText(text);
+});
+
+/* ---------- Formelleiste ---------- */
+formulaInput.addEventListener('focus', ()=>{ /* Eingabe erlauben */ });
+formulaInput.addEventListener('keydown',(e)=>{
+  if(e.key==='Enter'){
+    e.preventDefault();
+    data[active.r][active.c].raw=formulaInput.value;
+    recalcAndRender();
+    focusProxy();
+  } else if(e.key==='Escape'){
+    formulaInput.value=data[active.r][active.c].raw;
+    focusProxy();
+  }
+});
+
+/* ---------- Formatierung ---------- */
+function applyToSelection(fn){
+  const {r1,r2,c1,c2}=normRange();
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) fn(data[r][c].style);
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) renderCell(r,c);
+  updateSelectionVisuals();
+  focusProxy();
+}
+document.getElementById('btnBold').onclick=()=>applyToSelection(s=>s.bold=!s.bold);
+document.getElementById('btnItalic').onclick=()=>applyToSelection(s=>s.italic=!s.italic);
+document.getElementById('btnUnderline').onclick=()=>applyToSelection(s=>s.underline=!s.underline);
+document.getElementById('btnLeft').onclick=()=>applyToSelection(s=>s.align='left');
+document.getElementById('btnCenter').onclick=()=>applyToSelection(s=>s.align='center');
+document.getElementById('btnRight').onclick=()=>applyToSelection(s=>s.align='right');
+document.getElementById('fontColor').oninput=(e)=>applyToSelection(s=>s.color=e.target.value);
+document.getElementById('fontColor').onchange=(e)=>applyToSelection(s=>s.color=e.target.value);
+document.getElementById('fontColorApply').onclick=()=>applyToSelection(s=>s.color=document.getElementById('fontColor').value);
+document.getElementById('fillColor').oninput=(e)=>applyToSelection(s=>s.bg=e.target.value);
+document.getElementById('fillColor').onchange=(e)=>applyToSelection(s=>s.bg=e.target.value);
+document.getElementById('fillColorApply').onclick=()=>applyToSelection(s=>s.bg=document.getElementById('fillColor').value);
+document.getElementById('btnClearFmt').onclick=()=>applyToSelection(s=>{ s.bold=false;s.italic=false;s.underline=false;s.align='left';s.color='';s.bg='';s.numFmt='general'; });
+document.getElementById('numFmt').onchange=(e)=>applyToSelection(s=>s.numFmt=e.target.value);
+
+/* ---------- Zeilen / Spalten ---------- */
+function growGrid(newRows,newCols){
+  for(let r=0;r<data.length;r++) while(data[r].length<newCols) data[r].push(newCell());
+  while(data.length<newRows){ const row=[]; for(let c=0;c<newCols;c++) row.push(newCell()); data.push(row); }
+  while(colWidths.length<newCols) colWidths.push(DEFAULT_COL_W);
+  while(rowHeights.length<newRows) rowHeights.push(DEFAULT_ROW_H);
+  ROWS=newRows; COLS=newCols;
+  buildTable(); recalcAndRender();
+}
+document.getElementById('btnAddRow').onclick=()=>{ growGrid(ROWS+1,COLS); setSelection(active,active); };
+document.getElementById('btnAddCol').onclick=()=>{ growGrid(ROWS,COLS+1); setSelection(active,active); };
+document.getElementById('btnDelRow').onclick=()=>{
+  if(ROWS<=1) return;
+  data.splice(active.r,1); rowHeights.splice(active.r,1); ROWS--;
+  active.r=Math.min(active.r,ROWS-1);
+  buildTable(); recalcAndRender(); setSelection(active,active);
+};
+document.getElementById('btnDelCol').onclick=()=>{
+  if(COLS<=1) return;
+  for(let r=0;r<ROWS;r++) data[r].splice(active.c,1); colWidths.splice(active.c,1); COLS--;
+  active.c=Math.min(active.c,COLS-1);
+  buildTable(); recalcAndRender(); setSelection(active,active);
+};
+
+/* ---------- Neu ---------- */
+document.getElementById('btnNew').onclick=()=>{
+  if(!confirm('Neue Tabelle erstellen? Nicht gespeicherte Änderungen gehen verloren.')) return;
+  initData(40,20); buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
+};
+
+/* ---------- Speichern: ODS ---------- */
+document.getElementById('btnSaveOds').onclick=()=>{
+  const contentXml=buildOdsContentXml(ROWS,COLS,data,colWidths,rowHeights);
+  const entries=[
+    {name:'mimetype', data:new TextEncoder().encode('application/vnd.oasis.opendocument.spreadsheet')},
+    {name:'META-INF/manifest.xml', data:new TextEncoder().encode(ODS_MANIFEST_XML)},
+    {name:'content.xml', data:new TextEncoder().encode(contentXml)},
+    {name:'styles.xml', data:new TextEncoder().encode(ODS_STYLES_XML)},
+  ];
+  const zipBytes=buildZip(entries);
+  const blob=new Blob([zipBytes],{type:'application/vnd.oasis.opendocument.spreadsheet'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='tabelle.ods'; a.click();
+};
+
+/* ---------- Speichern: CSV ---------- */
+function csvEscape(v){
+  v=String(v);
+  if(/[";\n]/.test(v)) return '"'+v.replace(/"/g,'""')+'"';
+  return v;
+}
+document.getElementById('btnSaveCsv').onclick=()=>{
+  const lines=[];
+  for(let r=0;r<ROWS;r++){
+    const cols=[];
+    for(let c=0;c<COLS;c++){
+      const val=data[r][c].computed;
+      const out = (val && typeof val==='object' && val.__err) ? val.__err : (val===undefined||val===null?'':val);
+      cols.push(csvEscape(out));
+    }
+    lines.push(cols.join(';'));
+  }
+  const blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='minicalc.csv'; a.click();
+};
+
+/* ---------- Speichern: eigenes Format (verlustfrei) ---------- */
+document.getElementById('btnSaveJson').onclick=()=>{
+  const payload={ROWS,COLS,colWidths,rowHeights,data:data.map(row=>row.map(cell=>({raw:cell.raw, style:cell.style})))};
+  const blob=new Blob([JSON.stringify(payload)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='tabelle.minicalc.json'; a.click();
+};
+function loadMinicalcJson(text){
+  const payload=JSON.parse(text);
+  ROWS=payload.ROWS; COLS=payload.COLS;
+  colWidths=payload.colWidths || Array.from({length:COLS},()=>DEFAULT_COL_W);
+  rowHeights=payload.rowHeights || Array.from({length:ROWS},()=>DEFAULT_ROW_H);
+  data=payload.data.map(row=>row.map(c=>({raw:c.raw||'', style:Object.assign(newCell().style, c.style||{}), computed:''})));
+  buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
+}
+
+/* ---------- Öffnen ---------- */
+function loadCsvText(text){
+  const lines=text.replace(/^\uFEFF/,'').replace(/\r/g,'').split('\n').filter((l,i,arr)=>!(i===arr.length-1 && l===''));
+  const sep = lines[0] && lines[0].includes(';') ? ';' : ',';
+  function parseCsvLine(line){
+    const out=[]; let cur=''; let inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(inQ){
+        if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
+        else cur+=ch;
+      } else {
+        if(ch==='"') inQ=true;
+        else if(ch===sep){ out.push(cur); cur=''; }
+        else cur+=ch;
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+  const rows=lines.map(parseCsvLine);
+  const newRows=Math.max(40, rows.length+3);
+  const newCols=Math.max(20, Math.max(...rows.map(r=>r.length))+3);
+  initData(newRows,newCols);
+  rows.forEach((cols,r)=>cols.forEach((val,c)=>{ data[r][c].raw=val; }));
+  buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
+}
+function loadOdsFile(arrayBuffer){
+  const files=readZip(new Uint8Array(arrayBuffer));
+  const contentBytes=files['content.xml'];
+  if(!contentBytes) throw new Error('content.xml fehlt in der ODS-Datei');
+  const xmlText=new TextDecoder('utf-8').decode(contentBytes);
+  const doc=new DOMParser().parseFromString(xmlText,'application/xml');
+  if(doc.getElementsByTagName('parsererror').length) throw new Error('content.xml ist kein gültiges XML');
+  const parsed=parseOdsContentXml(doc);
+  ROWS=Math.max(40,parsed.ROWS+3); COLS=Math.max(20,parsed.COLS+3);
+  data=[];
+  for(let r=0;r<ROWS;r++){
+    const row=[];
+    for(let c=0;c<COLS;c++) row.push((parsed.data[r]&&parsed.data[r][c])?parsed.data[r][c]:newCell());
+    data.push(row);
+  }
+  colWidths=Array.from({length:COLS},(_,c)=>(parsed.colWidths&&parsed.colWidths[c])?parsed.colWidths[c]:DEFAULT_COL_W);
+  rowHeights=Array.from({length:ROWS},(_,r)=>(parsed.rowHeights&&parsed.rowHeights[r])?parsed.rowHeights[r]:DEFAULT_ROW_H);
+  buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
+}
+document.getElementById('fileInput').addEventListener('change',(e)=>{
+  const file=e.target.files[0];
+  if(!file) return;
+  const isJson=/\.json$/i.test(file.name);
+  const isOds=/\.ods$/i.test(file.name);
+  const reader=new FileReader();
+  reader.onload=(ev)=>{
+    try{
+      if(isJson) loadMinicalcJson(ev.target.result);
+      else if(isOds) loadOdsFile(ev.target.result);
+      else loadCsvText(ev.target.result);
+    } catch(err){
+      alert('Datei konnte nicht gelesen werden: '+err.message);
+    }
+  };
+  if(isOds) reader.readAsArrayBuffer(file); else reader.readAsText(file,'utf-8');
+  e.target.value='';
+});
+
+/* ---------- Start ---------- */
+initData(ROWS,COLS);
+buildTable();
+recalcAndRender();
+setSelection({r:0,c:0},{r:0,c:0});
+focusProxy();
+</script>
+</body>
+</html>
