@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.16-drive-m4c"
+__version__ = "2026.07.18-sid-filter"
 
 
 # =============================================================================
@@ -977,8 +977,14 @@ class SidVoice:
         self.sustain_release = 0
         # Internal state
         self.phase = 0           # 24-bit accumulator (treated as float for vectorisation)
-        self.envelope = 0.0      # 0.0..1.0
-        self.env_state = 0       # 0=release, 1=attack, 2=decay, 3=sustain
+        # Hardware envelope model: 8-bit counter, 15-bit LFSR-style rate
+        # counter with EXACT-match semantics (the famous ADSR delay bug
+        # emerges from this naturally), exponential-divider for decay and
+        # release. env_state: 1=attack, 2=decay/sustain, 0=release.
+        self.env = 0             # 8-bit envelope counter
+        self.env_state = 0
+        self.rate_cnt = 0        # 15-bit rate counter (0..0x7FFF)
+        self.exp_cnt = 0         # exponential divider counter
         # Noise: 23-bit LFSR clocked from the oscillator (bit 19), so the noise
         # has a frequency-dependent character just like the real SID. noise_acc
         # accumulates oscillator advance toward the next LFSR shift.
@@ -995,7 +1001,7 @@ class SidVoice:
             old_gate = self.control & 0x01
             new_gate = val & 0x01
             if new_gate and not old_gate:
-                self.env_state = 1    # attack triggered
+                self.env_state = 1    # attack triggered (env laeuft weiter)
             elif not new_gate and old_gate:
                 self.env_state = 0    # release triggered
             if val & 0x08:            # TEST bit resets phase
@@ -1017,9 +1023,12 @@ class Sid:
     SAMPLE_RATE = 44100
 
     # Approximate ADSR times in seconds for rate values 0..15 (from SID datasheet)
-    ATTACK_TIMES = (0.002, 0.008, 0.016, 0.024, 0.038, 0.056, 0.068, 0.080,
-                    0.100, 0.250, 0.500, 0.800, 1.000, 3.000, 5.000, 8.000)
-    DECAY_TIMES  = tuple(t * 3.0 for t in ATTACK_TIMES)   # decay/release ~3x
+    # Envelope rate-counter periods (in CPU cycles) per ADSR nibble — the
+    # 15-bit rate counter must hit these values EXACTLY; a just-missed match
+    # forces a full 32768-cycle wrap (~33 ms): the ADSR delay bug that
+    # hard-restart players deliberately manage.
+    RATE_PERIODS = (9, 32, 63, 95, 149, 220, 267, 313,
+                    392, 977, 1954, 3126, 3907, 11720, 19532, 31251)
 
     irq_line = False
 
@@ -1045,13 +1054,48 @@ class Sid:
         # which must move the output momentarily but not sit on it.
         self._dcb_x = 0.0
         self._dcb_y = 0.0
+        # SID model: "6581" (classic, default) or "8580". Selects the cutoff
+        # curve, resonance range, filter saturation and volume-DAC DC level.
+        self.model = "6581"
+        self._fc_table = None            # built lazily per model
+        self._digi_dc = 0.9
+
+    def set_model(self, model):
+        model = str(model)
+        if "8580" in model:
+            self.model = "8580"
+            self._digi_dc = 0.15         # 8580: kaum Volume-DC -> leise Digis
+        else:
+            self.model = "6581"
+            self._digi_dc = 0.9
+        self._fc_table = None
+        print(f"SID-Modell: {self.model}")
+
+    # 6581 cutoff anchors (register -> Hz): the famous S-curve — the bottom
+    # third barely moves off ~220 Hz, the musically usable action sits in
+    # the upper-middle register range, the top saturates around 12 kHz.
+    _FC_6581 = ((0, 220), (384, 240), (640, 300), (768, 380), (896, 600),
+                (1024, 1100), (1152, 2100), (1280, 3500), (1408, 5300),
+                (1536, 7000), (1664, 8800), (1792, 10300), (1920, 11400),
+                (2047, 12000))
+
+    def _build_fc_table(self, np):
+        if self.model == "8580":
+            # essentially linear: ~30 Hz .. ~12.2 kHz
+            self._fc_table = (30.0 + np.arange(2048) * (12200.0 - 30.0) / 2047.0
+                              ).astype(np.float32)
+        else:
+            xs = np.array([p[0] for p in self._FC_6581], dtype=np.float64)
+            ys = np.array([p[1] for p in self._FC_6581], dtype=np.float64)
+            self._fc_table = np.interp(np.arange(2048), xs, ys
+                                       ).astype(np.float32)
 
     def read(self, offset):
         offset &= 0x1F
         if offset == 0x1B:                # OSC3 readout
             return (int(self.voices[2].phase) >> 16) & 0xFF
         if offset == 0x1C:                # ENV3 readout
-            return int(self.voices[2].envelope * 255) & 0xFF
+            return self.voices[2].env & 0xFF
         return 0                          # writeable regs read as 0
 
     def write(self, offset, val):
@@ -1200,7 +1244,7 @@ class Sid:
         # baseline even with all voices silent — the mechanism 4-bit sample
         # playback ("volume digis") is built on. The DC itself is removed by
         # the output AC coupling; only the CHANGES remain audible.
-        out = direct + filtered + np.float32(0.9)
+        out = direct + filtered + np.float32(self._digi_dc)
         out *= self.master_vol / 15.0 / 3.0
         return out
 
@@ -1297,10 +1341,11 @@ class Sid:
             # which is what this returns (direct path is summed separately).
             return np.zeros(n_samples, dtype=np.float32)
 
-        # Cutoff mapping: 11-bit 0..2047 → ~30 Hz .. ~12 kHz, exponential-ish.
-        # This approximates the 6581's documented curve well enough for music.
-        fc_norm = self.filter_cutoff / 2047.0
-        fc_hz   = 30.0 * (12000.0 / 30.0) ** fc_norm
+        # Cutoff via the per-model curve table: 6581 = measured-shape S-curve
+        # (flat bottom, steep middle, saturating top), 8580 = linear.
+        if self._fc_table is None:
+            self._build_fc_table(np)
+        fc_hz = float(self._fc_table[self.filter_cutoff & 0x7FF])
         # SVF coefficient (Chamberlin form). The two-integrator loop is only
         # stable while fc stays below ~fs/6, i.e. f <= 1.0 — beyond that the
         # state diverges to +/-inf and then NaN, which silences ALL later audio
@@ -1308,9 +1353,19 @@ class Sid:
         # Clamp to 1.0; the low-pass pass-band gain at f<=1 is still ~1.0 so
         # nothing gets quieter. Damping floored at 0.1 keeps high-resonance
         # tunes bounded too (poles stay inside the unit circle for all f<=1).
-        f = min(2.0 * np.sin(np.pi * fc_hz / self.SAMPLE_RATE), 1.0)
-        # Damping: high resonance ⇒ low damping. Range from 1.4 (Q≈0.7) to 0.1 (Q≈10).
-        damping = max(1.4 - (self.filter_resonance / 15.0) * 1.3, 0.1)
+        # f capped at 0.9 (~7.5 kHz at 44.1 kHz) and damping floored by an
+        # f-dependent bound: the Chamberlin loop is only stable when damping
+        # stays above ~f²/2; without this, high cutoff + high resonance
+        # diverges. The real 6581 is mushy up top anyway.
+        f = min(2.0 * np.sin(np.pi * fc_hz / self.SAMPLE_RATE), 0.9)
+        # Resonance per model: the 6581's Q is famously weak (~0.7..1.7),
+        # the 8580 resonates properly (~0.7..2.6) — SID resonance colours,
+        # it never screams like a synth's Q=10.
+        res = self.filter_resonance / 15.0
+        if self.model == "8580":
+            damping = max(1.414 - res * 1.03, 0.38, 0.62 * f)
+        else:
+            damping = max(1.414 - res * 0.83, 0.59, 0.62 * f)
 
         low  = self._flt_low
         band = self._flt_band
@@ -1327,9 +1382,20 @@ class Sid:
         hp = np.empty(n_samples, dtype=np.float32) if want_hp else None
 
         # Per-sample SVF recursion. Sequential by nature — can't fully vectorise.
+        sat = self.model == "6581"
         for i in range(n_samples):
             high = input_arr[i] - low - damping * band
             band += f * high
+            if sat:
+                # 6581 integrator saturation: EXACTLY transparent up to
+                # |band|=0.9, soft-compressing beyond — the growl appears
+                # only when the filter is driven hot. (A curve applied to
+                # every sample would act as cumulative damping inside the
+                # feedback loop and crush the whole mix.)
+                if band > 0.9:
+                    band = 0.9 + (band - 0.9) / (1.0 + band - 0.9)
+                elif band < -0.9:
+                    band = -0.9 + (band + 0.9) / (1.0 - band - 0.9)
             low  += f * band
             if want_lp: lp[i] = low
             if want_bp: bp[i] = band
@@ -1344,36 +1410,76 @@ class Sid:
         if hp is not None: result += hp
         return result
 
+    @staticmethod
+    def _exp_period(e):
+        """Exponential-divider period by envelope value (decay/release)."""
+        if e >= 0x5D: return 1
+        if e >= 0x36: return 2
+        if e >= 0x1A: return 4
+        if e >= 0x0E: return 8
+        if e >= 0x06: return 16
+        if e >= 0x01: return 30
+        return 1
+
     def _envelope_chunk(self, v, n_samples, np):
-        """Update voice v's envelope across n_samples, return array of values."""
-        env = np.empty(n_samples, dtype=np.float32)
-        e, state = v.envelope, v.env_state
-        sustain = ((v.sustain_release >> 4) & 0x0F) / 15.0
-        sr = self.SAMPLE_RATE
-        a_rate = 1.0 / (self.ATTACK_TIMES[(v.attack_decay >> 4) & 0x0F] * sr)
-        d_rate = ((1.0 - sustain) /
-                  (self.DECAY_TIMES[v.attack_decay & 0x0F] * sr)
-                  if sustain < 1.0 else 0.0)
-        r_rate = 1.0 / (self.DECAY_TIMES[v.sustain_release & 0x0F] * sr)
-
+        """Cycle-driven hardware envelope: linear attack, piecewise-
+        exponential decay/release via the divider thresholds, sustain as an
+        EQUALITY comparison (raising sustain mid-decay lets the counter fall
+        through — real chip quirk), counter frozen at zero, and the ADSR
+        delay bug from exact-match rate counting."""
+        out = np.empty(n_samples, dtype=np.float32)
+        env = v.env
+        state = v.env_state
+        rate_cnt = v.rate_cnt
+        exp_cnt = v.exp_cnt
+        cps = self.CPU_CLOCK / self.SAMPLE_RATE
+        acc = 0.0
+        ad, sr_reg = v.attack_decay, v.sustain_release
+        sustain = ((sr_reg >> 4) & 0x0F) * 0x11
+        if state == 1:
+            target = self.RATE_PERIODS[(ad >> 4) & 0x0F]
+        elif state == 2:
+            target = self.RATE_PERIODS[ad & 0x0F]
+        else:
+            target = self.RATE_PERIODS[sr_reg & 0x0F]
+        scale = np.float32(1.0 / 255.0)
         for i in range(n_samples):
-            if   state == 1:              # attack
-                e += a_rate
-                if e >= 1.0: e = 1.0; state = 2
-            elif state == 2:              # decay
-                if e > sustain:
-                    e -= d_rate
-                    if e <= sustain: e = sustain; state = 3
-            elif state == 3:              # sustain
-                e = sustain
-            elif state == 0:              # release
-                if e > 0:
-                    e -= r_rate
-                    if e < 0: e = 0
-            env[i] = e
-
-        v.envelope, v.env_state = float(e), state
-        return env
+            acc += cps
+            k = int(acc)
+            acc -= k
+            while k > 0:
+                ctp = (target - rate_cnt) & 0x7FFF
+                if ctp == 0:
+                    ctp = 0x8000
+                if k < ctp:
+                    rate_cnt = (rate_cnt + k) & 0x7FFF
+                    break
+                k -= ctp
+                rate_cnt = 0
+                # --- rate pulse ---
+                if state == 1:                        # attack: linear up
+                    exp_cnt = 0
+                    if env < 0xFF:
+                        env += 1
+                    if env == 0xFF:
+                        state = 2
+                        target = self.RATE_PERIODS[ad & 0x0F]
+                else:
+                    exp_cnt += 1
+                    if exp_cnt >= self._exp_period(env):
+                        exp_cnt = 0
+                        if state == 2:                # decay to sustain
+                            if env != sustain and env > 0:
+                                env -= 1
+                        else:                          # release to zero
+                            if env > 0:
+                                env -= 1
+            out[i] = env * scale
+        v.env = env
+        v.env_state = state
+        v.rate_cnt = rate_cnt
+        v.exp_cnt = exp_cnt
+        return out
 
 
 # =============================================================================
@@ -3266,6 +3372,9 @@ class Drive:
         self._clock_base = None
         self._idle_streak = 0
         self.idle_until = 0          # c64-cycle horizon while provably idle
+        self._d64 = None
+        self._dirty = set()
+        self._motor_prev = False
         self.blocks_read = 0
         self.tracks = []
 
@@ -3311,6 +3420,9 @@ class Drive:
         what the DOS expects to see passing under the read head."""
         bam = d64.read_sector(18, 0)
         id1, id2 = bam[0xA2], bam[0xA3]
+        self._d64 = d64                  # for writing changes back
+        self._dirty = set()              # tracks written since last flush
+        self._motor_prev = False
         self.tracks = []
         for track in range(1, 36):
             zone = self._zone(track)
@@ -3342,11 +3454,12 @@ class Drive:
             pad = self.ZONE_TRACK_LEN[zone] - len(buf)
             if pad > 0:
                 emit(b"\x55" * pad)
-            self.tracks.append((bytes(buf), bytes(sync)))
+            self.tracks.append((buf, sync))
         # Disk-change: the write-protect photo sensor goes dark while the
         # disk is out of the slot — loaders watch VIA2 PB4 for exactly this
         # flicker to detect a swap. Simulate ~0.6s of "no disk in slot".
         self._wp_flicker_until = self.cpu.cycles + 600_000
+        self.blocks_read = 0             # Zaehler startet pro Diskette bei 0
         self.halftrack = 36              # head parked over track 18
         self.disk_pos = 0
         self._byte_frac = 0.0
@@ -3379,7 +3492,11 @@ class Drive:
             elif d == 3 and self.halftrack > 2:
                 self.halftrack -= 1
             self._prev_step_phase = phase
-        if not (self.via2.orb & self.via2.ddrb & 0x04):
+        motor = bool(self.via2.orb & self.via2.ddrb & 0x04)
+        if self._motor_prev and not motor:
+            self.flush_writes()           # job done: persist written tracks
+        self._motor_prev = motor
+        if not motor:
             return                        # motor off: disk not spinning
         track = self.halftrack >> 1
         if track < 1 or track > 35 or not self.tracks:
@@ -3393,6 +3510,27 @@ class Drive:
         self._byte_frac -= n
         pos = self.disk_pos
         tl = len(data)
+        if (self.via2.pcr & 0xE0) == 0xC0:
+            # WRITE mode: CB2 (R/W head control) driven low — every byte
+            # slot takes the VIA2 port A output register onto the track.
+            # Sync marks: only runs of >=2 written $FF bytes count (legal
+            # GCR data can contain a single $FF = 8 one-bits, but never the
+            # 10+ one-bits of a true sync).
+            val = self.via2.ora
+            for _ in range(min(n, 4)):
+                pos = (pos + 1) % tl
+                data[pos] = val
+                if val == 0xFF and data[pos - 1] == 0xFF:
+                    sync[pos] = 1
+                    sync[pos - 1] = 1
+                else:
+                    sync[pos] = 0
+                self.cpu.set_flag(self.cpu.FV, True)
+                self.via2._set_flag(0x02)
+            self._dirty.add(track)
+            self._head_sync = False
+            self.disk_pos = pos
+            return
         # deliver at most a few byte events; skipping is harmless in gaps
         for _ in range(min(n, 4)):
             pos = (pos + 1) % tl
@@ -3419,6 +3557,81 @@ class Drive:
     # still executes exactly like before. Any bus activity (ATN edge -> CA1
     # flag -> pending IRQ) wakes it instantly.
     IDLE_LO, IDLE_HI = 0xEBFF, 0xEC9F
+
+    _GCR_DEC = None
+
+    @classmethod
+    def _gcr_decode_group(cls, g):
+        """Decode 5 GCR bytes back into 4 data bytes (None if invalid)."""
+        if cls._GCR_DEC is None:
+            cls._GCR_DEC = {v: i for i, v in enumerate(cls.GCR_TAB)}
+        bits = int.from_bytes(g, 'big')
+        out = bytearray()
+        try:
+            for k in range(7, -1, -2):
+                hi = cls._GCR_DEC[(bits >> (5 * (k))) & 0x1F]
+                lo = cls._GCR_DEC[(bits >> (5 * (k - 1))) & 0x1F]
+                out.append((hi << 4) | lo)
+        except KeyError:
+            return None
+        return bytes(out)
+
+    def _decode_gcr_at(self, data, pos, count):
+        """Decode `count` data bytes starting at track position pos."""
+        tl = len(data)
+        need = (count + 3) // 4 * 5
+        raw = bytes(data[(pos + i) % tl] for i in range(need))
+        out = bytearray()
+        for i in range(0, need, 5):
+            grp = self._gcr_decode_group(raw[i:i + 5])
+            if grp is None:
+                return None
+            out += grp
+        return bytes(out[:count])
+
+    def flush_writes(self):
+        """Decode all written (dirty) GCR tracks back into sectors and save
+        the D64 file — savegames become real. Called on motor stop, disk
+        swap and emulator exit."""
+        if not self._dirty or self._d64 is None:
+            return
+        written = 0
+        for tno in sorted(self._dirty):
+            data, sync = self.tracks[tno - 1]
+            tl = len(data)
+            # find sync starts (position after a sync run)
+            i = 0
+            last_hdr = None
+            starts = [p for p in range(tl)
+                      if sync[p] and not sync[(p + 1) % tl]]
+            for p in starts:
+                blk = self._decode_gcr_at(data, (p + 1) % tl, 4)
+                if blk is None:
+                    continue
+                if blk[0] == 0x08:                     # header block
+                    hdr = self._decode_gcr_at(data, (p + 1) % tl, 8)
+                    if hdr is not None:
+                        last_hdr = (hdr[3], hdr[2])    # track, sector
+                elif blk[0] == 0x07 and last_hdr:      # data block
+                    full = self._decode_gcr_at(data, (p + 1) % tl, 260)
+                    if full is None:
+                        continue
+                    payload = full[1:257]
+                    cks = 0
+                    for b in payload:
+                        cks ^= b
+                    if cks == full[257]:
+                        t, sct = last_hdr
+                        if (1 <= t <= 35
+                                and sct < self._d64.SECTORS_PER_TRACK[t - 1]):
+                            self._d64.write_sector(t, sct, payload)
+                            written += 1
+                    last_hdr = None
+        self._dirty.clear()
+        if written:
+            self._d64.save()
+            print(f"1541: {written} Sektoren nach "
+                  f"{getattr(self._d64, 'path', '?')} geschrieben")
 
     def sync_to(self, cpu_cycles):
         """Catch the drive up to the C64 clock (M3 fastloader timing).
@@ -3536,8 +3749,18 @@ class D64Image:
             raise ValueError(
                 f"Not a standard 35-track D64: {len(data)} bytes "
                 f"(expected 174848 or 175531)")
-        self.data = data
+        self.data = bytearray(data)
         self.path = path
+
+    def write_sector(self, track, sector, payload):
+        """Overwrite one 256-byte sector in the image (write support)."""
+        off = self.sector_offset(track, sector)
+        self.data[off:off + 256] = payload
+
+    def save(self):
+        """Persist the (possibly modified) image back to its file."""
+        with open(self.path, "wb") as f:
+            f.write(bytes(self.data))
 
     def sector_offset(self, track, sector):
         if not 1 <= track <= 35:
@@ -3851,11 +4074,14 @@ class System:
         cycle with F6). Re-mounts for the trap loader and — with --drive —
         re-encodes the GCR image and flickers the write-protect sensor so
         loaders detect the change like on real hardware."""
+        if self.drive is not None:
+            self.drive.flush_writes()    # Aenderungen der alten Disk sichern
         try:
             self.mount_d64(path)
         except Exception as e:
             print(f"Diskwechsel fehlgeschlagen: {e}")
             return
+        self.disk_blocks = 0             # FD-Zaehler pro Diskette
         name = self._d64.disk_name().decode("ascii", "replace")
         src_note = " (Laufwerk)" if self.drive is not None else " (Traps)"
         print(f"Diskette gewechselt: {path}  [{name}]{src_note}")
@@ -4012,6 +4238,13 @@ class System:
         name     = data[22:54].split(b"\x00", 1)[0].decode("ascii", "replace")
         author   = data[54:86].split(b"\x00", 1)[0].decode("ascii", "replace")
         released = data[86:118].split(b"\x00", 1)[0].decode("ascii", "replace")
+        if version >= 2 and len(data) >= 0x78:
+            flags = struct.unpack(">H", data[0x76:0x78])[0]
+            sid_model_bits = (flags >> 4) & 0x03
+            if sid_model_bits == 0x02:
+                self.sid.set_model("8580")
+            elif sid_model_bits == 0x01:
+                self.sid.set_model("6581")
         payload = data[data_off:]
         if load_addr == 0:
             load_addr = payload[0] | (payload[1] << 8)
@@ -6019,6 +6252,8 @@ class PygameFrontend:
                 # (heard as intermittent music dropouts that "warp mode fixes").
                 # The busy-wait costs a little CPU but paces frames precisely.
                 clock.tick_busy_loop(self.target_hz)
+        if self.system.drive is not None:
+            self.system.drive.flush_writes()
         self.pygame.quit()
 
 
@@ -7242,7 +7477,7 @@ GENERAL OPTIONS
   -h, --help            show this help and exit
   --scale N             window scale factor (default 2)
   --no-run              load FILE but do not auto-RUN / auto-SYS
-  --cycle               run FILE on the cycle-accurate core (badline BA-stall\n  --drive              echte 1541-Emulation aktivieren (M0; braucht roms/dos1541.bin)\n  F6 / Drag&Drop       Diskette wechseln (mehrere .d64 auf Kommandozeile = F6-Rotation)
+  --cycle               run FILE on the cycle-accurate core (badline BA-stall\n  --drive              echte 1541-Emulation aktivieren (M0; braucht roms/dos1541.bin)\n  F6 / Drag&Drop       Diskette wechseln (mehrere .d64 auf Kommandozeile = F6-Rotation)\n  --sid8580            8580-Filtermodell statt 6581 (linearere Cutoff-Kurve, mehr Resonanz)
                         + per-cycle CIA; slower than real time, but accurate
                         raster/badline timing). Works for .prg/.d64/.t64 and
                         with --headless too.
@@ -7395,6 +7630,8 @@ def main():
         sysm = System(cycle_accurate=("--cycle" in args))
         if "--drive" in args:
             sysm.enable_drive()
+        if "--sid8580" in args:
+            sysm.sid.set_model("8580")
         if prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
             print("Running PRG for 1,500,000 extra cycles...")
@@ -7416,6 +7653,8 @@ def main():
     sysm = System(cycle_accurate=("--cycle" in args))
     if "--drive" in args:
         sysm.enable_drive()
+    if "--sid8580" in args:
+        sysm.sid.set_model("8580")
     if "--cycle" in args:
         print("Cycle-accurate mode: badline BA-stall + per-cycle CIA. "
               "Runs slower than real time in pure Python.")
