@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Token → Vektor — BPE, Embeddings & Positional Encoding</title>
+<style>
+  @font-face { font-family: 'system-mono'; src: local('JetBrains Mono'), local('Menlo'), local('Consolas'); }
+
+  :root{
+    --bg: #0f1115;
+    --bg-panel: #161923;
+    --bg-panel-2: #1b1f2c;
+    --line: #2a2f3d;
+    --text: #dfe3ec;
+    --text-dim: #8890a4;
+    --amber: #e8a84c;    /* tokens */
+    --cyan: #4fd1c5;     /* embeddings/vectors */
+    --magenta: #d67ad2;  /* positions */
+    --green: #7fd88f;    /* success/merge */
+    --red: #e0687a;
+    --mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, Menlo, monospace;
+    --sans: 'Sora', 'Inter', -apple-system, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html,body{
+    margin:0; padding:0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body{
+    background-image:
+      radial-gradient(circle at 15% 0%, rgba(79,209,197,0.06), transparent 40%),
+      radial-gradient(circle at 85% 10%, rgba(214,122,210,0.05), transparent 40%);
+  }
+
+  .wrap{ max-width: 1040px; margin: 0 auto; padding: 48px 24px 120px; }
+
+  /* ---------- Header ---------- */
+  header{ margin-bottom: 56px; }
+  .eyebrow{
+    font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
+    color: var(--text-dim); text-transform: uppercase; margin-bottom: 14px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .eyebrow .dot{ width:6px; height:6px; border-radius:50%; background: var(--green); box-shadow: 0 0 8px var(--green); }
+  h1{
+    font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 0 0 14px;
+    font-weight: 700; letter-spacing: -0.01em;
+  }
+  h1 span{ color: var(--cyan); }
+  .lede{ color: var(--text-dim); font-size: 16px; max-width: 640px; line-height: 1.6; }
+
+  /* signature: live pipeline rail */
+  .rail{
+    margin-top: 36px; display:flex; align-items:center; gap:0;
+    font-family: var(--mono); font-size: 13px; overflow-x:auto; padding-bottom: 8px;
+  }
+  .rail-node{
+    flex: 0 0 auto; padding: 10px 16px; border: 1px solid var(--line); border-radius: 8px;
+    background: var(--bg-panel); color: var(--text-dim); white-space:nowrap;
+    transition: border-color .3s, color .3s, background .3s;
+  }
+  .rail-node.active{ border-color: var(--cyan); color: var(--cyan); background: rgba(79,209,197,0.08); }
+  .rail-arrow{ flex: 0 0 auto; padding: 0 8px; color: var(--line); }
+  .rail-arrow.active{ color: var(--cyan); }
+
+  /* ---------- Sections ---------- */
+  section{ margin-bottom: 40px; }
+  .card{
+    background: var(--bg-panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 28px;
+  }
+  .step-label{
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+    letter-spacing: .08em; margin-bottom: 6px;
+  }
+  h2{ font-size: 20px; margin: 0 0 8px; font-weight: 650; }
+  .desc{ color: var(--text-dim); font-size: 14px; line-height: 1.55; margin-bottom: 20px; max-width: 680px; }
+
+  label{ display:block; font-size: 12px; color: var(--text-dim); margin-bottom: 6px; font-family: var(--mono); }
+  textarea, input[type=text]{
+    width: 100%; background: var(--bg-panel-2); border: 1px solid var(--line); color: var(--text);
+    font-family: var(--mono); font-size: 13px; border-radius: 8px; padding: 10px 12px;
+    resize: vertical; outline: none;
+  }
+  textarea:focus, input[type=text]:focus{ border-color: var(--cyan); }
+
+  .row{ display:flex; gap:16px; flex-wrap:wrap; margin-bottom: 16px; }
+  .col{ flex: 1 1 260px; }
+
+  .range-row{ display:flex; align-items:center; gap:12px; font-family: var(--mono); font-size: 13px; }
+  input[type=range]{ flex:1; accent-color: var(--cyan); }
+
+  button{
+    font-family: var(--mono); font-size: 13px; letter-spacing: .02em;
+    background: var(--cyan); color: #0b1216; border: none; border-radius: 8px;
+    padding: 10px 18px; cursor: pointer; font-weight: 600;
+    transition: transform .15s, box-shadow .15s;
+  }
+  button:hover{ transform: translateY(-1px); box-shadow: 0 6px 18px rgba(79,209,197,0.25); }
+  button:active{ transform: translateY(0); }
+  button.secondary{ background: transparent; color: var(--cyan); border: 1px solid var(--cyan); }
+
+  .log{
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    background: var(--bg-panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 14px 16px; max-height: 300px; overflow-y: auto; margin-top: 16px;
+    white-space: pre-wrap; color: var(--text-dim);
+  }
+  .log b{ color: var(--green); font-weight: 600; }
+
+  .token-chip{
+    display:inline-flex; align-items:center; font-family: var(--mono); font-size: 13px;
+    background: rgba(232,168,76,0.12); color: var(--amber); border: 1px solid rgba(232,168,76,0.35);
+    border-radius: 6px; padding: 4px 9px; margin: 3px 4px 3px 0;
+  }
+  .token-chip .id{ color: var(--text-dim); margin-left: 6px; font-size: 11px; }
+
+  .vec-row{ display:flex; align-items:center; gap:10px; margin: 8px 0; font-family: var(--mono); font-size: 12px; }
+  .vec-label{ width: 90px; flex: 0 0 auto; color: var(--text-dim); }
+  .vec-bars{ display:flex; gap:2px; flex:1; height: 20px; }
+  .vec-bar{ flex:1; background: var(--bg-panel-2); position: relative; border-radius: 2px; overflow: hidden; }
+  .vec-bar span{ position:absolute; left:0; right:0; background: var(--cyan); }
+  .vec-bar.neg span{ background: var(--red); }
+
+  table{ width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12.5px; }
+  th, td{ text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+  th{ color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  td.num{ color: var(--text-dim); }
+
+  .badge{ display:inline-block; font-family: var(--mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; }
+  .badge.merge{ background: rgba(127,216,143,0.12); color: var(--green); border: 1px solid rgba(127,216,143,0.35); }
+
+  .heatmap{ display: grid; gap: 2px; }
+  .heat-cell{ aspect-ratio: 1; border-radius: 2px; }
+
+  .mask-grid{ display: inline-grid; gap: 2px; }
+  .mask-cell{
+    width: 26px; height: 26px; display:flex; align-items:center; justify-content:center;
+    font-family: var(--mono); font-size: 11px; border-radius: 3px;
+  }
+  .mask-cell.on{ background: rgba(79,209,197,0.22); color: var(--cyan); }
+  .mask-cell.off{ background: var(--bg-panel-2); color: #3a3f4d; }
+
+  .sim-result{
+    font-family: var(--mono); font-size: 14px; margin-top: 12px; padding: 12px 16px;
+    background: var(--bg-panel-2); border-radius: 8px; border-left: 3px solid var(--magenta);
+  }
+  .sim-result .val{ color: var(--magenta); font-weight: 700; }
+
+  footer{ text-align:center; color: var(--text-dim); font-size: 12px; font-family: var(--mono); margin-top: 60px; }
+  a{ color: var(--cyan); }
+
+  ::-webkit-scrollbar{ height: 8px; width: 8px; }
+  ::-webkit-scrollbar-thumb{ background: var(--line); border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow"><span class="dot"></span> Interaktive Demo — reines JS, keine Abhängigkeiten</div>
+    <h1>Von Zeichen zu <span>Vektoren</span><br>Eine LLM-Vorverarbeitungs-Pipeline</h1>
+    <p class="lede">Portierung der Python-Referenzimplementierung (BPE-Tokenizer, Embedding-Layer, Positional Encoding, Causal Mask) nach JavaScript. Jeder Schritt läuft live im Browser — trainiere den Tokenizer auf eigenem Text und verfolge, wie daraus Vektoren werden.</p>
+
+    <div class="rail" id="rail">
+      <div class="rail-node" data-step="0">01 Rohtext</div><div class="rail-arrow">→</div>
+      <div class="rail-node" data-step="1">02 BPE-Training</div><div class="rail-arrow">→</div>
+      <div class="rail-node" data-step="2">03 Tokenisierung</div><div class="rail-arrow">→</div>
+      <div class="rail-node" data-step="3">04 Embedding</div><div class="rail-arrow">→</div>
+      <div class="rail-node" data-step="4">05 Positional Encoding</div><div class="rail-arrow">→</div>
+      <div class="rail-node" data-step="5">06 Causal Mask</div>
+    </div>
+  </header>
+
+  <!-- STEP 1: BPE Training -->
+  <section>
+    <div class="card">
+      <div class="step-label">SCHRITT 01–02</div>
+      <h2>Trainingskorpus → BPE-Merges</h2>
+      <p class="desc">Byte-Pair-Encoding startet auf Zeichen-Ebene und verschmilzt iterativ das häufigste benachbarte Paar zu einem neuen Subword-Token. Basis-Vokabular: a–z, Ziffern, Satzzeichen, je mit optionalem <code>&lt;/w&gt;</code>-Wortende-Marker.</p>
+
+      <label for="corpus">Trainingstexte (eine Zeile = ein Text)</label>
+      <textarea id="corpus" rows="4">hallo welt
+hallo nochmal
+welt der wunder
+test test test</textarea>
+
+      <div class="row" style="margin-top:16px;">
+        <div class="col">
+          <div class="range-row">
+            <span>Merges</span>
+            <input type="range" id="numMerges" min="1" max="30" value="15">
+            <span id="numMergesVal" style="color:var(--amber);">15</span>
+          </div>
+        </div>
+      </div>
+
+      <button id="btnTrain">BPE trainieren</button>
+      <button class="secondary" id="btnReset" style="margin-left:8px;">Zurücksetzen</button>
+
+      <div class="log" id="trainLog">Noch nicht trainiert — Vokabular enthält nur Basis-Zeichen.</div>
+    </div>
+  </section>
+
+  <!-- STEP 3: Tokenize -->
+  <section>
+    <div class="card">
+      <div class="step-label">SCHRITT 03</div>
+      <h2>Text tokenisieren</h2>
+      <p class="desc">Der trainierte Merge-Regelsatz wird greedy auf neuen Text angewendet — auch auf Wörter, die im Training nicht vorkamen, sie zerfallen dann in bekannte Subwords oder Einzelzeichen.</p>
+
+      <label for="testText">Test-Text</label>
+      <input type="text" id="testText" value="hallo super">
+      <button id="btnTokenize" style="margin-top:14px;">Tokenisieren</button>
+
+      <div id="tokenOutput" style="margin-top:18px;"></div>
+    </div>
+  </section>
+
+  <!-- STEP 4: Embedding -->
+  <section>
+    <div class="card">
+      <div class="step-label">SCHRITT 04</div>
+      <h2>Embedding-Layer</h2>
+      <p class="desc">Jede Token-ID erhält einen zufällig initialisierten Vektor fester Dimension (hier 8, statt der 64 im Original — besser visualisierbar). Diese Vektoren wären in einem echten Modell gelernte Parameter.</p>
+      <div id="embedOutput"></div>
+
+      <div class="row" style="margin-top:20px;">
+        <div class="col">
+          <label>Token A</label>
+          <input type="text" id="tokA" value="hallo">
+        </div>
+        <div class="col">
+          <label>Token B</label>
+          <input type="text" id="tokB" value="welt">
+        </div>
+      </div>
+      <button id="btnSim">Kosinus-Ähnlichkeit berechnen</button>
+      <div class="sim-result" id="simResult" style="display:none;"></div>
+    </div>
+  </section>
+
+  <!-- STEP 5: Positional Encoding -->
+  <section>
+    <div class="card">
+      <div class="step-label">SCHRITT 05</div>
+      <h2>Positional Encoding</h2>
+      <p class="desc">Sinus/Kosinus-Wellen unterschiedlicher Frequenz kodieren die Position im Text (Formel aus <em>„Attention Is All You Need"</em>). Addiert man sie zu den Embeddings, weiß das Modell, wo im Satz ein Token steht — ohne Positionsinfo wäre Attention permutationsinvariant.</p>
+      <div id="posOutput"></div>
+    </div>
+  </section>
+
+  <!-- STEP 6: Causal Mask -->
+  <section>
+    <div class="card">
+      <div class="step-label">SCHRITT 06</div>
+      <h2>Causal Attention Mask</h2>
+      <p class="desc">Damit ein autoregressives Modell nicht in die Zukunft schauen kann, wird die Attention-Matrix unterhalb der Diagonalen maskiert: Position <code>i</code> sieht nur sich selbst und alles davor.</p>
+      <div id="maskOutput"></div>
+    </div>
+  </section>
+
+  <footer>
+    Portiert aus der Python-Referenz <code>SubwordTokenizer / EmbeddingLayer / PositionalEncoding</code> — reines Vanilla-JS, ein einzelnes HTML-File.
+  </footer>
+
+</div>
+
+<script>
+(function(){
+
+/* ================= BPE TOKENIZER ================= */
+class SubwordTokenizer {
+  constructor(){
+    this.vocab = {};
+    this.idToToken = {};
+    this.tokenCounts = {};
+    this.merges = [];
+    this.nextId = 0;
+    ['<PAD>','<UNK>','<BOS>','<EOS>'].forEach(t => this._addToken(t));
+    for (const c of 'abcdefghijklmnopqrstuvwxyz'){ this._addToken(c,0); this._addToken(c+'</w>',0); }
+    for (const p of ".,!?;:-'\""){ this._addToken(p,0); this._addToken(p+'</w>',0); }
+    for (const d of '0123456789'){ this._addToken(d,0); this._addToken(d+'</w>',0); }
+  }
+  _addToken(token, count=1){
+    if (!(token in this.vocab)){
+      this.vocab[token] = this.nextId;
+      this.idToToken[this.nextId] = token;
+      this.tokenCounts[token] = count;
+      this.nextId++;
+    } else {
+      this.tokenCounts[token] += count;
+    }
+  }
+  _splitIntoWords(text){
+    const words = []; let cur = '';
+    for (const ch of text.toLowerCase()){
+      if (/[a-z0-9]/.test(ch)){ cur += ch; }
+      else {
+        if (cur){ words.push(cur); cur=''; }
+        if (!/\s/.test(ch)) words.push(ch);
+      }
+    }
+    if (cur) words.push(cur);
+    return words;
+  }
+  _isWordChar(token){ return !!token && /[a-z0-9]/.test(token[0]); }
+  _getWordChars(word){
+    const chars = word.split('');
+    chars[chars.length-1] = chars[chars.length-1] + '</w>';
+    return chars;
+  }
+  _getPairs(chars){
+    const pairs = new Set();
+    for (let i=0;i<chars.length-1;i++) pairs.add(chars[i]+'\u0001'+chars[i+1]);
+    return pairs;
+  }
+  trainBPE(texts, numMerges, log){
+    const wordFreqs = {};
+    for (const text of texts){
+      for (const w of this._splitIntoWords(text)) wordFreqs[w] = (wordFreqs[w]||0)+1;
+    }
+    log(`Gefundene einzigartige Wörter: <b>${Object.keys(wordFreqs).length}</b>  ${JSON.stringify(wordFreqs)}`);
+
+    let vocab = {};
+    for (const [word, freq] of Object.entries(wordFreqs)){
+      vocab[this._getWordChars(word).join(' ')] = freq;
+    }
+
+    for (let step=0; step<numMerges; step++){
+      const pairsCount = {};
+      for (const [word, freq] of Object.entries(vocab)){
+        const chars = word.split(' ');
+        for (const pk of this._getPairs(chars)){
+          pairsCount[pk] = (pairsCount[pk]||0) + freq;
+        }
+      }
+      const keys = Object.keys(pairsCount);
+      if (keys.length === 0){ log('Keine weiteren Paare zum Mergen gefunden.'); break; }
+
+      let bestKey = keys[0];
+      for (const k of keys) if (pairsCount[k] > pairsCount[bestKey]) bestKey = k;
+      const [a,b] = bestKey.split('\u0001');
+
+      log(`Merge ${step+1}: <b>'${a}' + '${b}' → '${a}${b}'</b>  (Häufigkeit: ${pairsCount[bestKey]})`);
+      this.merges.push([a,b]);
+
+      const replacement = a+b;
+      const searchPattern = a+' '+b;
+      const newVocab = {};
+      for (const [word, freq] of Object.entries(vocab)){
+        newVocab[word.split(searchPattern).join(replacement)] = freq;
+      }
+      vocab = newVocab;
+      this._addToken(replacement, 0);
+    }
+    log(`\nTraining abgeschlossen. Finale Vokabulargröße: <b>${Object.keys(this.vocab).length}</b>`);
+  }
+  _applyBPE(word){
+    let chars = this._getWordChars(word);
+    for (const [a,b] of this.merges){
+      let i = 0;
+      while (i < chars.length-1){
+        if (chars[i]===a && chars[i+1]===b){ chars[i] = chars[i]+chars[i+1]; chars.splice(i+1,1); }
+        else i++;
+      }
+    }
+    return chars;
+  }
+  tokenize(text){
+    const words = this._splitIntoWords(text);
+    const allTokens = [];
+    const breakdown = [];
+    for (const word of words){
+      const subwords = this._applyBPE(word);
+      breakdown.push({word, subwords});
+      allTokens.push(...subwords);
+    }
+    const tokenIds = allTokens.map(t => (t in this.vocab) ? this.vocab[t] : this.vocab['<UNK>']);
+    return {tokens: allTokens, tokenIds, breakdown};
+  }
+  getVocabSize(){ return Object.keys(this.vocab).length; }
+}
+
+/* ================= EMBEDDING LAYER ================= */
+class EmbeddingLayer {
+  constructor(vocabSize, embeddingDim=8){
+    this.vocabSize = vocabSize;
+    this.embeddingDim = embeddingDim;
+    this.embeddings = [];
+    for (let t=0;t<vocabSize;t++){
+      const vec = [];
+      for (let d=0; d<embeddingDim; d++) vec.push((Math.random()-0.5)*0.2);
+      this.embeddings.push(vec);
+    }
+  }
+  embed(tokenId){
+    if (tokenId<0 || tokenId>=this.vocabSize) return new Array(this.embeddingDim).fill(0);
+    return this.embeddings[tokenId];
+  }
+  embedSequence(tokenIds){ return tokenIds.map(id => this.embed(id)); }
+  cosineSimilarity(v1, v2){
+    let dot=0, m1=0, m2=0;
+    for (let i=0;i<v1.length;i++){ dot += v1[i]*v2[i]; m1 += v1[i]**2; m2 += v2[i]**2; }
+    m1 = Math.sqrt(m1); m2 = Math.sqrt(m2);
+    if (m1===0 || m2===0) return 0;
+    return dot/(m1*m2);
+  }
+}
+
+/* ================= POSITIONAL ENCODING ================= */
+class PositionalEncoding {
+  constructor(embeddingDim, maxLen=100){
+    this.embeddingDim = embeddingDim;
+    this.maxLen = maxLen;
+    this.table = [];
+    for (let pos=0; pos<maxLen; pos++){
+      const enc = [];
+      for (let i=0;i<embeddingDim;i++){
+        const freq = 1/(10000 ** (2*Math.floor(i/2)/embeddingDim));
+        enc.push(i%2===0 ? Math.sin(pos*freq) : Math.cos(pos*freq));
+      }
+      this.table.push(enc);
+    }
+  }
+  addTo(embeddedSeq){
+    return embeddedSeq.map((vec,pos) => vec.map((v,i) => v + this.table[pos][i]));
+  }
+}
+
+function createCausalMask(n){
+  const mask = [];
+  for (let i=0;i<n;i++){
+    const row = [];
+    for (let j=0;j<n;j++) row.push(j<=i ? 1 : 0);
+    mask.push(row);
+  }
+  return mask;
+}
+
+/* ================= UI WIRING ================= */
+let tokenizer = new SubwordTokenizer();
+let embeddingLayer = null;
+let posEncoding = null;
+let lastEmbeddedSeq = null;
+const EMBED_DIM = 8;
+
+const rail = document.getElementById('rail');
+function setActiveStep(idx){
+  const nodes = rail.querySelectorAll('.rail-node');
+  const arrows = rail.querySelectorAll('.rail-arrow');
+  nodes.forEach((n,i) => n.classList.toggle('active', i<=idx));
+  arrows.forEach((a,i) => a.classList.toggle('active', i<idx));
+}
+setActiveStep(0);
+
+const numMergesEl = document.getElementById('numMerges');
+const numMergesVal = document.getElementById('numMergesVal');
+numMergesEl.addEventListener('input', () => numMergesVal.textContent = numMergesEl.value);
+
+const trainLog = document.getElementById('trainLog');
+function logLine(msg){ trainLog.innerHTML += (trainLog.innerHTML ? '\n' : '') + msg; trainLog.scrollTop = trainLog.scrollHeight; }
+
+document.getElementById('btnTrain').addEventListener('click', () => {
+  tokenizer = new SubwordTokenizer();
+  trainLog.innerHTML = '';
+  const texts = document.getElementById('corpus').value.split('\n').map(t=>t.trim()).filter(Boolean);
+  const n = parseInt(numMergesEl.value, 10);
+  tokenizer.trainBPE(texts, n, logLine);
+  setActiveStep(1);
+  document.getElementById('tokenOutput').innerHTML = '';
+  document.getElementById('embedOutput').innerHTML = '';
+  document.getElementById('posOutput').innerHTML = '';
+  document.getElementById('maskOutput').innerHTML = '';
+});
+
+document.getElementById('btnReset').addEventListener('click', () => {
+  tokenizer = new SubwordTokenizer();
+  trainLog.innerHTML = 'Zurückgesetzt — nur Basis-Vokabular vorhanden.';
+  setActiveStep(0);
+});
+
+function renderTokens(result){
+  const el = document.getElementById('tokenOutput');
+  let html = '<label>Subword-Zerlegung</label><div style="margin-bottom:14px;">';
+  for (const {word, subwords} of result.breakdown){
+    html += `<div style="font-family:var(--mono);font-size:12.5px;color:var(--text-dim);margin-bottom:4px;">'${word}' → ${subwords.map(s=>`<span style="color:var(--amber);">${s}</span>`).join(' · ')}</div>`;
+  }
+  html += '</div><label>Token-IDs</label><div>';
+  result.tokens.forEach((t,i) => {
+    html += `<span class="token-chip">${t}<span class="id">#${result.tokenIds[i]}</span></span>`;
+  });
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+document.getElementById('btnTokenize').addEventListener('click', () => {
+  const text = document.getElementById('testText').value;
+  if (!text.trim()) return;
+  const result = tokenizer.tokenize(text);
+  renderTokens(result);
+  setActiveStep(2);
+
+  // Build embedding + positional encoding immediately after tokenizing
+  embeddingLayer = new EmbeddingLayer(tokenizer.getVocabSize(), EMBED_DIM);
+  posEncoding = new PositionalEncoding(EMBED_DIM, 100);
+  lastEmbeddedSeq = embeddingLayer.embedSequence(result.tokenIds);
+  renderEmbeddings(result, lastEmbeddedSeq);
+  renderPositional(lastEmbeddedSeq);
+  renderMask(result.tokenIds.length);
+});
+
+function vecBarsHTML(vec, maxAbs){
+  let html = '<div class="vec-bars">';
+  for (const v of vec){
+    const pct = Math.min(100, Math.abs(v)/maxAbs*100);
+    const cls = v < 0 ? 'neg' : '';
+    const alignStyle = v < 0 ? `right:50%; width:${pct/2}%;` : `left:50%; width:${pct/2}%;`;
+    html += `<div class="vec-bar ${cls}"><span style="${alignStyle}"></span></div>`;
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderEmbeddings(result, embeddedSeq){
+  const el = document.getElementById('embedOutput');
+  let maxAbs = 0.0001;
+  embeddedSeq.forEach(v => v.forEach(x => maxAbs = Math.max(maxAbs, Math.abs(x))));
+  let html = `<div class="desc" style="margin-bottom:10px;">${result.tokens.length} Tokens × ${EMBED_DIM} Dimensionen. Balken zeigen Wert relativ zu Null (rot = negativ, türkis = positiv).</div>`;
+  result.tokens.forEach((t,i) => {
+    html += `<div class="vec-row"><div class="vec-label">${t}</div>${vecBarsHTML(embeddedSeq[i], maxAbs)}</div>`;
+  });
+  el.innerHTML = html;
+  setActiveStep(3);
+}
+
+function renderPositional(embeddedSeq){
+  const el = document.getElementById('posOutput');
+  const withPos = posEncoding.addTo(embeddedSeq);
+  const cellSize = Math.max(18, Math.min(34, Math.floor(560/EMBED_DIM)));
+
+  let html = '<label>Positional-Encoding-Heatmap (erste ' + embeddedSeq.length + ' Positionen × ' + EMBED_DIM + ' Dimensionen)</label>';
+  html += `<div class="heatmap" style="grid-template-columns:repeat(${EMBED_DIM}, ${cellSize}px); margin-bottom:22px;">`;
+  for (let pos=0; pos<embeddedSeq.length; pos++){
+    for (let d=0; d<EMBED_DIM; d++){
+      const v = posEncoding.table[pos][d]; // -1..1
+      const hue = v >= 0 ? 174 : 330; // cyan vs magenta
+      const light = 18 + Math.abs(v)*32;
+      html += `<div class="heat-cell" style="height:${cellSize}px; background:hsl(${hue},55%,${light}%);" title="pos ${pos}, dim ${d}: ${v.toFixed(3)}"></div>`;
+    }
+  }
+  html += '</div>';
+
+  html += '<label>Embedding + Positional Encoding (Vorschau, erste Werte)</label><table><thead><tr><th>Position</th>';
+  for (let d=0; d<Math.min(EMBED_DIM,8); d++) html += `<th>d${d}</th>`;
+  html += '</tr></thead><tbody>';
+  withPos.forEach((vec,i) => {
+    html += `<tr><td>${i}</td>`;
+    vec.slice(0,8).forEach(v => html += `<td class="num">${v.toFixed(3)}</td>`);
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+  setActiveStep(4);
+}
+
+function renderMask(n){
+  const el = document.getElementById('maskOutput');
+  const mask = createCausalMask(n);
+  let html = `<div class="mask-grid" style="grid-template-columns:repeat(${n+1}, 26px);">`;
+  html += `<div class="mask-cell"></div>`;
+  for (let j=0;j<n;j++) html += `<div class="mask-cell" style="color:var(--text-dim);">T${j}</div>`;
+  for (let i=0;i<n;i++){
+    html += `<div class="mask-cell" style="color:var(--text-dim);">T${i}</div>`;
+    for (let j=0;j<n;j++){
+      html += `<div class="mask-cell ${mask[i][j] ? 'on':'off'}">${mask[i][j]}</div>`;
+    }
+  }
+  html += '</div>';
+  el.innerHTML = html;
+  setActiveStep(5);
+}
+
+document.getElementById('btnSim').addEventListener('click', () => {
+  if (!embeddingLayer){
+    embeddingLayer = new EmbeddingLayer(tokenizer.getVocabSize(), EMBED_DIM);
+  }
+  const wA = document.getElementById('tokA').value.trim().toLowerCase();
+  const wB = document.getElementById('tokB').value.trim().toLowerCase();
+  const resA = tokenizer.tokenize(wA);
+  const resB = tokenizer.tokenize(wB);
+  const vecA = embeddingLayer.embed(resA.tokenIds[0] ?? 1);
+  const vecB = embeddingLayer.embed(resB.tokenIds[0] ?? 1);
+  const sim = embeddingLayer.cosineSimilarity(vecA, vecB);
+  const box = document.getElementById('simResult');
+  box.style.display = 'block';
+  box.innerHTML = `'${wA}' (erstes Subword: <b style="color:var(--amber)">${resA.tokens[0]}</b>) ↔ '${wB}' (erstes Subword: <b style="color:var(--amber)">${resB.tokens[0]}</b>) &nbsp;→&nbsp; Kosinus-Ähnlichkeit: <span class="val">${sim.toFixed(4)}</span>
+  <div style="color:var(--text-dim); margin-top:6px; font-size:12px;">Hinweis: Da die Embeddings hier zufällig initialisiert (nicht trainiert) sind, ist die Ähnlichkeit rein durch Zufall bestimmt — semantische Nähe entsteht erst durch Training.</div>`;
+});
+
+// Initial render with defaults
+document.getElementById('btnTrain').click();
+setTimeout(() => document.getElementById('btnTokenize').click(), 50);
+
+})();
+</script>
+</body>
+</html>
