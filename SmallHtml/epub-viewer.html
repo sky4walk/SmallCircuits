@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EPUB Viewer</title>
+<style>
+  /* ---- Chrome (Instrument-Panel-Look: Ink-Slate + Messing-Akzent) ---- */
+  :root{
+    --ink:#22282e; --ink-2:#2b333b; --line:#3a444d;
+    --fg:#e8e6e1; --fg-dim:#9aa4ad;
+    --brass:#c99a4b; --brass-dim:#8a6d38;
+    --ui: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --rail:3px;
+  }
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; margin:0; }
+  body{
+    font-family:var(--ui); background:var(--ink); color:var(--fg);
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+
+  /* progress rail */
+  #rail{ height:var(--rail); background:var(--line); flex:0 0 auto; }
+  #rail>span{ display:block; height:100%; width:0%;
+    background:linear-gradient(90deg,var(--brass-dim),var(--brass));
+    transition:width .25s ease; }
+
+  /* toolbar */
+  #bar{
+    flex:0 0 auto; display:flex; align-items:center; gap:.75rem;
+    padding:.55rem .8rem; background:var(--ink); border-bottom:1px solid var(--line);
+    font-size:12px; user-select:none;
+  }
+  #bar .grow{ flex:1 1 auto; min-width:0; }
+  #title{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    color:var(--fg); font-size:12px; letter-spacing:.02em; }
+  #author{ color:var(--fg-dim); }
+  .btn{
+    font-family:var(--ui); font-size:12px; color:var(--fg);
+    background:var(--ink-2); border:1px solid var(--line); border-radius:4px;
+    padding:.35rem .6rem; cursor:pointer; white-space:nowrap; line-height:1;
+  }
+  .btn:hover{ border-color:var(--brass-dim); color:#fff; }
+  .btn:disabled{ opacity:.35; cursor:default; border-color:var(--line); }
+  .btn.icon{ padding:.35rem .5rem; }
+  .seg{ display:inline-flex; border:1px solid var(--line); border-radius:4px; overflow:hidden; }
+  .seg .btn{ border:0; border-radius:0; }
+  .seg .btn+.btn{ border-left:1px solid var(--line); }
+  .seg .btn.active{ background:var(--brass-dim); color:#fff; }
+  #pos{ color:var(--fg-dim); min-width:5.5ch; text-align:right; }
+  label.file{ cursor:pointer; }
+  label.file input{ display:none; }
+
+  /* layout below toolbar */
+  #stage{ flex:1 1 auto; display:flex; min-height:0; position:relative; }
+
+  /* TOC drawer */
+  #toc{
+    flex:0 0 auto; width:280px; max-width:80vw; background:var(--ink);
+    border-right:1px solid var(--line); overflow:auto; padding:.4rem 0;
+    transition:margin-left .2s ease;
+  }
+  #toc.hidden{ margin-left:-282px; }
+  #toc h2{ font-size:11px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--fg-dim); margin:.6rem .9rem .3rem; }
+  #toc a{ display:block; padding:.32rem .9rem; color:var(--fg); text-decoration:none;
+    font-size:12.5px; line-height:1.35; border-left:2px solid transparent; }
+  #toc a:hover{ background:var(--ink-2); }
+  #toc a.active{ border-left-color:var(--brass); color:var(--brass); background:var(--ink-2); }
+  #toc .empty{ color:var(--fg-dim); font-size:12px; padding:.5rem .9rem; }
+
+  /* reading area */
+  #reader{ flex:1 1 auto; min-width:0; position:relative; background:#faf9f6; }
+  #frame{ position:absolute; inset:0; width:100%; height:100%; border:0;
+    background:transparent; opacity:1; transition:opacity .15s ease; }
+  #frame.fade{ opacity:0; }
+
+  /* edge tap zones for prev/next on large screens */
+  .edge{ position:absolute; top:0; bottom:0; width:64px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; opacity:0;
+    transition:opacity .15s ease; z-index:2; color:#333; font-size:26px; user-select:none;
+    background:linear-gradient(var(--dir), rgba(0,0,0,.06), transparent); }
+  #reader:hover .edge{ opacity:.5; }
+  .edge:hover{ opacity:1 !important; }
+  .edge.prev{ left:0; --dir:to right; }
+  .edge.next{ right:0; --dir:to left; }
+
+  /* empty / drop state */
+  #drop{ position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:1.1rem; text-align:center;
+    color:var(--ink); padding:2rem; z-index:5; }
+  #drop.gone{ display:none; }
+  #drop .mark{ font-size:44px; letter-spacing:.3em; color:var(--brass-dim); }
+  #drop h1{ font-family:Georgia, serif; font-weight:600; font-size:1.5rem; margin:0; color:#2a2f34; }
+  #drop p{ margin:0; color:#5b636a; font-size:13px; max-width:34ch; line-height:1.6; }
+  #drop .open{ background:var(--ink); color:var(--fg); border:0; padding:.7rem 1.2rem;
+    border-radius:5px; font-size:13px; }
+  #drop .open:hover{ background:var(--ink-2); }
+  #drop code{ background:#eae7df; padding:.05rem .35rem; border-radius:3px; font-size:12px; }
+
+  body.dragging #drop{ display:flex; }
+  body.dragging #reader{ outline:2px dashed var(--brass); outline-offset:-8px; }
+
+  #err{ position:absolute; left:50%; bottom:1rem; transform:translateX(-50%);
+    background:#7a2b2b; color:#fff; padding:.5rem .8rem; border-radius:5px;
+    font-size:12px; max-width:80%; z-index:10; display:none; }
+
+  @media (max-width:640px){
+    #toc{ position:absolute; z-index:6; top:0; bottom:0; left:0; box-shadow:0 0 30px rgba(0,0,0,.4); }
+    #author{ display:none; }
+    .edge{ display:none; }
+  }
+</style>
+</head>
+<body>
+  <div id="rail"><span id="railfill"></span></div>
+
+  <div id="bar">
+    <button class="btn icon" id="btnToc" title="Inhalt (t)">☰</button>
+    <label class="btn file" title="EPUB öffnen">
+      Öffnen<input type="file" id="file" accept=".epub,application/epub+zip">
+    </label>
+    <span class="grow" style="display:flex; flex-direction:column; overflow:hidden;">
+      <span id="title">Kein Buch geladen</span>
+      <span id="author"></span>
+    </span>
+    <div class="seg" title="Schriftgröße">
+      <button class="btn" id="fsMinus">A−</button>
+      <button class="btn" id="fsPlus">A+</button>
+    </div>
+    <div class="seg" title="Lesethema">
+      <button class="btn theme active" data-theme="paper">Papier</button>
+      <button class="btn theme" data-theme="sepia">Sepia</button>
+      <button class="btn theme" data-theme="night">Nacht</button>
+    </div>
+    <span class="seg">
+      <button class="btn" id="prev" title="Zurück (←)">‹</button>
+      <button class="btn" id="next" title="Weiter (→)">›</button>
+    </span>
+    <span id="pos">–/–</span>
+  </div>
+
+  <div id="stage">
+    <nav id="toc" class="hidden"><div class="empty">Kein Inhaltsverzeichnis.</div></nav>
+    <div id="reader">
+      <div class="edge prev" id="edgePrev">‹</div>
+      <div class="edge next" id="edgeNext">›</div>
+      <iframe id="frame" sandbox="allow-same-origin" title="Buchinhalt"></iframe>
+      <div id="drop">
+        <div class="mark">◫</div>
+        <h1>EPUB Viewer</h1>
+        <p>Eine <code>.epub</code>-Datei hierher ziehen oder öffnen.
+           Läuft komplett offline &amp; ohne externe Bibliotheken.</p>
+        <label class="file"><button class="open" type="button"
+          onclick="this.parentNode.querySelector('input').click()">Datei wählen</button>
+          <input type="file" accept=".epub,application/epub+zip" onchange="window.__openFile(this.files[0])"></label>
+      </div>
+    </div>
+  </div>
+  <div id="err"></div>
+
+<script>
+"use strict";
+
+/* ========================================================================
+   Hilfsfunktionen
+   ==================================================================== */
+const $ = (s) => document.querySelector(s);
+const utf8 = (b) => new TextDecoder("utf-8").decode(b);
+const dirname = (p) => { const i = p.lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); };
+const normHref = (h) => decodeURIComponent(String(h).split("#")[0].split("?")[0]);
+
+function resolvePath(base, rel){
+  if (rel.startsWith("/")) rel = rel.slice(1);
+  const stack = base ? base.split("/") : [];
+  for (const part of rel.split("/")){
+    if (part === "" || part === ".") continue;
+    if (part === "..") stack.pop();
+    else stack.push(part);
+  }
+  return stack.join("/");
+}
+
+function guessMime(path){
+  const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+  return ({
+    png:"image/png", jpg:"image/jpeg", jpeg:"image/jpeg", gif:"image/gif",
+    svg:"image/svg+xml", webp:"image/webp", bmp:"image/bmp",
+    css:"text/css", xhtml:"application/xhtml+xml", html:"text/html",
+    ttf:"font/ttf", otf:"font/otf", woff:"font/woff", woff2:"font/woff2",
+    js:"text/javascript", json:"application/json",
+    ncx:"application/x-dtbncx+xml", opf:"application/oebps-package+xml"
+  })[ext] || "application/octet-stream";
+}
+
+function showError(msg){
+  const el = $("#err"); el.textContent = msg; el.style.display = "block";
+  clearTimeout(showError._t);
+  showError._t = setTimeout(() => (el.style.display = "none"), 6000);
+  console.error(msg);
+}
+
+/* ========================================================================
+   ZIP: EOCD -> Central Directory -> Local Header -> deflate-raw
+   ==================================================================== */
+async function inflateRaw(bytes){
+  const ds = new DecompressionStream("deflate-raw");
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function parseZip(buf){
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  const EOCD = 0x06054b50, CDH = 0x02014b50, LFH = 0x04034b50;
+
+  // End-of-Central-Directory rückwärts suchen (Kommentar bis 65535 Byte möglich)
+  let eocd = -1;
+  const back = Math.min(buf.byteLength, 22 + 65535);
+  for (let i = buf.byteLength - 22; i >= buf.byteLength - back && i >= 0; i--){
+    if (dv.getUint32(i, true) === EOCD){ eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("Kein ZIP-Ende gefunden – ist das eine gültige EPUB?");
+
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);          // Offset Central Directory
+  if (p === 0xffffffff) throw new Error("ZIP64 wird (noch) nicht unterstützt.");
+
+  const entries = new Map();
+  for (let n = 0; n < count; n++){
+    if (dv.getUint32(p, true) !== CDH) throw new Error("Beschädigtes Central-Directory.");
+    const method   = dv.getUint16(p + 10, true);
+    const compSize = dv.getUint32(p + 20, true);
+    const nameLen  = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const cmntLen  = dv.getUint16(p + 32, true);
+    const localOff = dv.getUint32(p + 42, true);
+    const name = utf8(u8.subarray(p + 46, p + 46 + nameLen));
+    entries.set(name, { method, compSize, localOff });
+    p += 46 + nameLen + extraLen + cmntLen;
+  }
+
+  const cache = new Map();
+  async function getBytes(name){
+    if (cache.has(name)) return cache.get(name);
+    const e = entries.get(name);
+    if (!e) throw new Error("Datei fehlt im EPUB: " + name);
+    if (dv.getUint32(e.localOff, true) !== LFH) throw new Error("Beschädigter Local-Header: " + name);
+    // Namens-/Extra-Länge aus dem LOKALEN Header lesen (kann von der CD abweichen)
+    const lNameLen  = dv.getUint16(e.localOff + 26, true);
+    const lExtraLen = dv.getUint16(e.localOff + 28, true);
+    const start = e.localOff + 30 + lNameLen + lExtraLen;
+    const comp = u8.subarray(start, start + e.compSize);
+    let out;
+    if (e.method === 0) out = comp.slice();        // stored
+    else if (e.method === 8) out = await inflateRaw(comp);   // deflate
+    else throw new Error("Unbekannte Kompression " + e.method + " bei " + name);
+    cache.set(name, out);
+    return out;
+  }
+  return { entries, getBytes };
+}
+
+/* ========================================================================
+   Buchmodell + Ressourcen-Inlining
+   ==================================================================== */
+let book = null;   // { zip, opfDir, spine[], toc[], title, author }
+let cur = 0;
+let dataCache, cssCache;
+
+function xml(text, type){
+  const doc = new DOMParser().parseFromString(text, type || "application/xml");
+  return doc.querySelector("parsererror") ? null : doc;
+}
+function firstTag(doc, local){
+  const els = doc.getElementsByTagNameNS("*", local);
+  return els.length ? els[0].textContent.trim() : "";
+}
+
+async function dataURLFor(path){
+  if (dataCache.has(path)) return dataCache.get(path);
+  const bytes = await book.zip.getBytes(path);
+  let bin = ""; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk)
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  const url = `data:${guessMime(path)};base64,${btoa(bin)}`;
+  dataCache.set(path, url);
+  return url;
+}
+
+async function inlineCss(path, seen){
+  seen = seen || new Set();
+  if (seen.has(path)) return "";
+  seen.add(path);
+  let css = utf8(await book.zip.getBytes(path));
+  const base = dirname(path);
+
+  // @import (url() oder "…") rekursiv einbetten
+  for (const m of [...css.matchAll(/@import\s+(?:url\(\s*)?(['"]?)([^'")]+)\1\s*\)?\s*;/g)]){
+    const raw = m[2].trim();
+    if (/^(data:|https?:)/i.test(raw)) continue;
+    const t = resolvePath(base, normHref(raw));
+    css = css.replace(m[0], book.zip.entries.has(t) ? await inlineCss(t, seen) : "");
+  }
+  // url(...) -> data:
+  const reps = [];
+  for (const m of [...css.matchAll(/url\(\s*(['"]?)([^'")]+)\1\s*\)/g)]){
+    const raw = m[2].trim();
+    if (/^(data:|https?:)/i.test(raw)) continue;
+    const t = resolvePath(base, normHref(raw));
+    if (book.zip.entries.has(t)) reps.push([m[0], `url("${await dataURLFor(t)}")`]);
+  }
+  for (const [f, to] of reps) css = css.split(f).join(to);
+  return css;
+}
+
+const READER_BASE = `
+  html{ -webkit-text-size-adjust:100%; }
+  body{ margin:0 auto !important; max-width:40rem;
+        padding:2.2rem 1.5rem 30vh !important;
+        line-height:1.65; font-size:var(--rfs,18px);
+        font-family:Georgia,"Iowan Old Style",serif; }
+  img,svg,image{ max-width:100% !important; height:auto; }
+  pre,code{ white-space:pre-wrap; word-break:break-word; }
+`;
+const THEMES = {
+  paper: `html,body{ background:#faf9f6; color:#1c1c1c; } a{ color:#5a3e8f; }`,
+  sepia: `html,body{ background:#f4ecd8 !important; color:#463f31 !important; } a{ color:#7a5a2a !important; }`,
+  night: `html,body{ background:#000 !important; color:#fff !important; }
+          body *{ color:#fff !important; background-color:transparent !important; border-color:#444 !important; }
+          body a, body a *{ color:#8ab4f8 !important; }
+          img,svg,image{ filter:brightness(.85) contrast(1.02); }`
+};
+const READER_BG = { paper:"#faf9f6", sepia:"#f4ecd8", night:"#000" };
+
+async function buildChapterHTML(path){
+  const raw = utf8(await book.zip.getBytes(path));
+  let d = xml(raw, "application/xhtml+xml") || xml(raw, "text/html")
+        || new DOMParser().parseFromString(raw, "text/html");
+  const base = dirname(path);
+
+  // <img src>
+  for (const img of d.querySelectorAll("img[src]")){
+    const t = resolvePath(base, normHref(img.getAttribute("src")));
+    if (book.zip.entries.has(t)) img.setAttribute("src", await dataURLFor(t));
+  }
+  // SVG <image href / xlink:href>
+  for (const im of d.querySelectorAll("image")){
+    const href = im.getAttribute("href") || im.getAttribute("xlink:href");
+    if (!href) continue;
+    const t = resolvePath(base, normHref(href));
+    if (book.zip.entries.has(t)){
+      const u = await dataURLFor(t);
+      im.setAttribute("href", u); im.setAttribute("xlink:href", u);
+    }
+  }
+  // <link stylesheet> -> inline <style>
+  for (const link of [...d.querySelectorAll('link[rel~="stylesheet"], link[href$=".css"]')]){
+    const href = link.getAttribute("href"); if (!href){ link.remove(); continue; }
+    const t = resolvePath(base, normHref(href));
+    if (!book.zip.entries.has(t)){ link.remove(); continue; }
+    const style = d.createElement("style");
+    style.textContent = await inlineCss(t);
+    link.replaceWith(style);
+  }
+
+  // Reader-Basis-Stil ganz vorne (damit Buch-CSS gewinnt), Thema ganz hinten
+  let head = d.querySelector("head");
+  if (!head){ head = d.createElement("head"); d.documentElement.prepend(head); }
+  const base0 = d.createElement("style"); base0.textContent = READER_BASE;
+  head.prepend(base0);
+  const themeEl = d.createElement("style"); themeEl.id = "__theme";
+  themeEl.textContent = THEMES[state.theme]; head.appendChild(themeEl);
+
+  return "<!DOCTYPE html>" + d.documentElement.outerHTML;
+}
+
+/* ========================================================================
+   OPF / Container / TOC
+   ==================================================================== */
+async function loadBook(zip){
+  const container = xml(utf8(await zip.getBytes("META-INF/container.xml")), "application/xml");
+  if (!container) throw new Error("META-INF/container.xml unlesbar.");
+  const rootfile = container.getElementsByTagNameNS("*", "rootfile")[0];
+  const opfPath = normHref(rootfile.getAttribute("full-path"));
+  const opfDir = dirname(opfPath);
+
+  const opf = xml(utf8(await zip.getBytes(opfPath)), "application/xml");
+  if (!opf) throw new Error("OPF-Paketdatei unlesbar.");
+
+  const manifest = new Map();
+  for (const it of opf.getElementsByTagNameNS("*", "item")){
+    const id = it.getAttribute("id");
+    const full = resolvePath(opfDir, normHref(it.getAttribute("href")));
+    manifest.set(id, { path:full, mime:it.getAttribute("media-type"),
+                       props:(it.getAttribute("properties") || "") });
+  }
+  const spine = [];
+  const spineEl = opf.getElementsByTagNameNS("*", "spine")[0];
+  for (const ir of spineEl.getElementsByTagNameNS("*", "itemref")){
+    const m = manifest.get(ir.getAttribute("idref"));
+    if (m && (ir.getAttribute("linear") !== "no" || spine.length === 0 || true)) spine.push(m);
+  }
+  if (!spine.length) throw new Error("Leerer Spine – nichts zum Anzeigen.");
+
+  const title = firstTag(opf, "title") || "EPUB";
+  const author = firstTag(opf, "creator") || "";
+
+  book = { zip, opfDir, spine, toc:[], title, author };
+
+  // TOC: EPUB3 nav bevorzugt, sonst NCX
+  const nav = [...manifest.values()].find(m => m.props.split(/\s+/).includes("nav"));
+  if (nav)      book.toc = await parseNav(nav.path);
+  else {
+    let ncxPath = null;
+    const tocAttr = spineEl.getAttribute("toc");
+    if (tocAttr && manifest.get(tocAttr)) ncxPath = manifest.get(tocAttr).path;
+    else { const n = [...manifest.values()].find(m => m.mime === "application/x-dtbncx+xml"); if (n) ncxPath = n.path; }
+    if (ncxPath) book.toc = await parseNcx(ncxPath);
+  }
+}
+
+async function parseNav(path){
+  const x = xml(utf8(await book.zip.getBytes(path)), "application/xhtml+xml");
+  if (!x) return [];
+  const base = dirname(path), navs = [...x.getElementsByTagName("nav")];
+  const nav = navs.find(n => (n.getAttributeNS("http://www.idpf.org/2007/ops","type")
+                            || n.getAttribute("epub:type")) === "toc") || navs[0];
+  if (!nav) return [];
+  const out = [];
+  for (const a of nav.querySelectorAll("a[href]")){
+    const href = a.getAttribute("href");
+    let depth = 0, q = a.parentNode;
+    while (q && q !== nav){ if (q.localName === "ol") depth++; q = q.parentNode; }
+    out.push({ label:a.textContent.replace(/\s+/g," ").trim(),
+               path:resolvePath(base, normHref(href)),
+               frag:href.includes("#") ? href.split("#")[1] : null,
+               depth:Math.max(0, depth - 1) });
+  }
+  return out;
+}
+
+async function parseNcx(path){
+  const x = xml(utf8(await book.zip.getBytes(path)), "application/xml");
+  if (!x) return [];
+  const base = dirname(path), out = [];
+  for (const p of x.getElementsByTagName("navPoint")){
+    let label = "";
+    const nl = [...p.children].find(c => c.localName === "navLabel");
+    if (nl){ const t = [...nl.getElementsByTagName("*")].find(e => e.localName === "text"); label = t ? t.textContent.trim() : ""; }
+    const content = [...p.children].find(c => c.localName === "content");
+    const src = content ? content.getAttribute("src") : "";
+    if (!src) continue;
+    let depth = 0, q = p.parentNode;
+    while (q){ if (q.localName === "navPoint") depth++; q = q.parentNode; }
+    out.push({ label, path:resolvePath(base, normHref(src)),
+               frag:src.includes("#") ? src.split("#")[1] : null, depth });
+  }
+  return out;
+}
+
+/* ========================================================================
+   Rendering & Navigation
+   ==================================================================== */
+const state = { theme:"paper", fontPx:18 };
+const frame = $("#frame");
+
+function spineIndexForPath(path){
+  return book ? book.spine.findIndex(s => s.path === path) : -1;
+}
+
+async function goTo(index, frag){
+  if (!book) return;
+  index = Math.max(0, Math.min(book.spine.length - 1, index));
+  cur = index;
+  frame.classList.add("fade");
+  let html;
+  try { html = await buildChapterHTML(book.spine[index].path); }
+  catch (e){ showError("Kapitel konnte nicht geladen werden: " + e.message); frame.classList.remove("fade"); return; }
+
+  frame.onload = () => {
+    frame.classList.remove("fade");
+    const idoc = frame.contentDocument;
+    if (!idoc) return;
+    idoc.documentElement.style.setProperty("--rfs", state.fontPx + "px");
+    // Sprungmarke
+    if (frag){ try { idoc.getElementById(frag)?.scrollIntoView(); } catch(_){} }
+    else { try { idoc.documentElement.scrollTop = 0; idoc.body && (idoc.body.scrollTop = 0); } catch(_){} }
+    wireIframe(idoc);
+  };
+  frame.srcdoc = html;
+
+  $("#reader").style.background = READER_BG[state.theme];
+  updateChrome();
+}
+
+function wireIframe(idoc){
+  // interne Links abfangen
+  idoc.addEventListener("click", (e) => {
+    const a = e.target.closest && e.target.closest("a[href]");
+    if (!a) return;
+    const href = a.getAttribute("href");
+    if (/^(https?:|mailto:|tel:)/i.test(href)){ e.preventDefault(); window.open(href, "_blank", "noopener"); return; }
+    e.preventDefault();
+    const frag = href.includes("#") ? href.split("#")[1] : null;
+    const target = resolvePath(dirname(book.spine[cur].path), normHref(href));
+    const idx = spineIndexForPath(target);
+    if (idx >= 0) goTo(idx, frag);
+    else if (frag){ try { idoc.getElementById(frag)?.scrollIntoView(); } catch(_){} }
+  });
+  // Pfeiltasten auch bei Fokus im iframe
+  idoc.addEventListener("keydown", onKey);
+}
+
+function updateChrome(){
+  $("#title").textContent = book.title;
+  $("#author").textContent = book.author;
+  $("#pos").textContent = (cur + 1) + "/" + book.spine.length;
+  $("#prev").disabled = cur <= 0;
+  $("#next").disabled = cur >= book.spine.length - 1;
+  $("#railfill").style.width = ((cur + 1) / book.spine.length * 100) + "%";
+  // aktives TOC-Element markieren (nächstliegendes zur aktuellen Spine-Seite)
+  const path = book.spine[cur].path;
+  document.querySelectorAll("#toc a").forEach(a => {
+    a.classList.toggle("active", a.dataset.path === path);
+  });
+}
+
+function renderToc(){
+  const el = $("#toc");
+  el.innerHTML = "<h2>Inhalt</h2>";
+  if (!book.toc.length){ el.innerHTML += '<div class="empty">Kein Inhaltsverzeichnis vorhanden.</div>'; return; }
+  for (const t of book.toc){
+    const a = document.createElement("a");
+    a.textContent = t.label || "(ohne Titel)";
+    a.style.paddingLeft = (0.9 + t.depth * 0.85) + "rem";
+    a.dataset.path = t.path;
+    a.href = "#";
+    a.onclick = (e) => {
+      e.preventDefault();
+      const idx = spineIndexForPath(t.path);
+      if (idx >= 0) goTo(idx, t.frag);
+      if (window.matchMedia("(max-width:640px)").matches) el.classList.add("hidden");
+    };
+    el.appendChild(a);
+  }
+}
+
+/* ========================================================================
+   Datei laden
+   ==================================================================== */
+async function openFile(fileOrBuffer){
+  try {
+    if (!("DecompressionStream" in window))
+      throw new Error("Browser ohne DecompressionStream – bitte aktuellen Chrome/Firefox/Safari verwenden.");
+    const buf = fileOrBuffer instanceof ArrayBuffer ? fileOrBuffer : await fileOrBuffer.arrayBuffer();
+    dataCache = new Map(); cssCache = new Map();
+    const zip = parseZip(buf);
+    // mimetype-Sanitycheck (optional, nicht fatal)
+    if (zip.entries.has("mimetype")){
+      const mt = utf8(await zip.getBytes("mimetype")).trim();
+      if (mt && mt !== "application/epub+zip")
+        console.warn("Unerwarteter mimetype:", mt);
+    }
+    await loadBook(zip);
+    renderToc();
+    $("#drop").classList.add("gone");
+    document.title = book.title + " · EPUB Viewer";
+    await goTo(0);
+  } catch (e){
+    showError(e.message || String(e));
+  }
+}
+window.__openFile = openFile;
+
+/* ========================================================================
+   Steuerung / Events
+   ==================================================================== */
+function onKey(e){
+  if (e.key === "ArrowLeft"){ if (cur > 0) goTo(cur - 1); }
+  else if (e.key === "ArrowRight"){ if (book && cur < book.spine.length - 1) goTo(cur + 1); }
+  else if (e.key.toLowerCase() === "t"){ $("#toc").classList.toggle("hidden"); }
+}
+document.addEventListener("keydown", onKey);
+
+$("#prev").onclick = () => cur > 0 && goTo(cur - 1);
+$("#next").onclick = () => book && cur < book.spine.length - 1 && goTo(cur + 1);
+$("#edgePrev").onclick = () => cur > 0 && goTo(cur - 1);
+$("#edgeNext").onclick = () => book && cur < book.spine.length - 1 && goTo(cur + 1);
+$("#btnToc").onclick = () => $("#toc").classList.toggle("hidden");
+
+$("#fsPlus").onclick = () => setFont(state.fontPx + 1);
+$("#fsMinus").onclick = () => setFont(state.fontPx - 1);
+function setFont(px){
+  state.fontPx = Math.max(12, Math.min(30, px));
+  const idoc = frame.contentDocument;
+  if (idoc) idoc.documentElement.style.setProperty("--rfs", state.fontPx + "px");
+}
+
+document.querySelectorAll(".btn.theme").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll(".btn.theme").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    state.theme = b.dataset.theme;
+    $("#reader").style.background = READER_BG[state.theme];
+    const idoc = frame.contentDocument;
+    if (idoc){ const s = idoc.getElementById("__theme"); if (s) s.textContent = THEMES[state.theme]; }
+  };
+});
+
+$("#file").onchange = (e) => e.target.files[0] && openFile(e.target.files[0]);
+
+// Drag & Drop
+["dragenter","dragover"].forEach(ev => document.addEventListener(ev, (e) => {
+  e.preventDefault(); document.body.classList.add("dragging");
+}));
+["dragleave","drop"].forEach(ev => document.addEventListener(ev, (e) => {
+  e.preventDefault();
+  if (ev === "dragleave" && e.relatedTarget) return;
+  document.body.classList.remove("dragging");
+}));
+document.addEventListener("drop", (e) => {
+  const f = e.dataTransfer?.files?.[0];
+  if (f) openFile(f);
+});
+</script>
+</body>
+</html>
