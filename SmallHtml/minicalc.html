@@ -95,6 +95,26 @@
   #statusbar b{ color:#20282a; }
 
   #clipProxy{ position:fixed; top:0; left:0; width:1px; height:1px; opacity:0; border:none; padding:0; resize:none; }
+
+  /* ---- CSV-Dialog ---- */
+  #csvOverlay{ position:fixed; inset:0; background:rgba(20,28,30,.45); display:flex; align-items:center; justify-content:center; z-index:1000; }
+  #csvOverlay[hidden]{ display:none; }
+  #csvOverlay .dlg{ background:#fff; border-radius:8px; box-shadow:0 10px 40px rgba(0,0,0,.3); width:min(560px,92vw); max-height:88vh; overflow:auto; padding:18px 20px; }
+  #csvOverlay h3{ margin:0 0 4px; font-size:16px; color:var(--text); }
+  #csvOverlay .hint{ margin:0 0 12px; font-size:12.5px; color:#6b767a; }
+  #csvOverlay .csvopts{ display:flex; flex-wrap:wrap; gap:8px 18px; margin-bottom:14px; }
+  #csvOverlay .csvopts label{ display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer; }
+  #csvOverlay .csvopts code{ background:#eef1f3; border-radius:3px; padding:0 5px; font-size:12px; }
+  #csvOverlay .customrow input[type=text]{ width:46px; padding:3px 6px; border:1px solid var(--grid-line); border-radius:4px; font-size:13px; }
+  #csvOverlay .csvPreviewWrap{ border:1px solid var(--grid-line); border-radius:5px; overflow:auto; max-height:220px; background:#fbfcfc; }
+  #csvPreview{ border-collapse:collapse; font-size:12px; width:100%; }
+  #csvPreview td{ border:1px solid var(--grid-line); padding:2px 7px; white-space:nowrap; max-width:180px; overflow:hidden; text-overflow:ellipsis; color:#2a3335; }
+  #csvPreview tr:first-child td{ background:var(--header-bg); font-weight:600; }
+  #csvOverlay .dlgBtns{ display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
+  #csvOverlay .dlgBtns button{ border:1px solid var(--grid-line); background:#f2f4f5; color:var(--text); border-radius:5px; padding:7px 16px; font-size:13px; cursor:pointer; }
+  #csvOverlay .dlgBtns button:hover{ background:#e7ebec; }
+  #csvOverlay .dlgBtns button.primary{ background:var(--accent); border-color:var(--accent); color:#fff; }
+  #csvOverlay .dlgBtns button.primary:hover{ background:#356a60; }
 </style>
 </head>
 <body>
@@ -104,10 +124,9 @@
 
   <div class="grp">
     <button id="btnNew" title="Neue Tabelle">Neu</button>
-    <label class="filebtn" title="Datei öffnen (.ods, .csv, .minicalc.json)">Öffnen<input type="file" id="fileInput" accept=".ods,.csv,.json"></label>
+    <label class="filebtn" title="Datei öffnen (.ods, .csv)">Öffnen<input type="file" id="fileInput" accept=".ods,.csv"></label>
     <button id="btnSaveOds" title="Als .ods speichern – natives LibreOffice/OpenOffice-Format, inkl. Formeln UND Formatierung">💾 ods</button>
     <button id="btnSaveCsv" title="Als .csv speichern (nur Werte, keine Formeln/Formatierung; öffnet in LibreOffice/Excel)">💾 csv</button>
-    <button id="btnSaveJson" title="Eigenes Format – speichert wirklich ALLES verlustfrei (Formeln + komplette Formatierung, nur mit MiniCalc lesbar)">💾 MiniCalc</button>
   </div>
 
   <div class="grp">
@@ -175,6 +194,25 @@
 </div>
 
 <textarea id="clipProxy"></textarea>
+
+<div id="csvOverlay" hidden>
+  <div class="dlg">
+    <h3>CSV öffnen – Spaltentrennung</h3>
+    <p class="hint">Wähle das Zeichen, das die Spalten trennt. Die Vorschau zeigt das Ergebnis.</p>
+    <div class="csvopts">
+      <label><input type="radio" name="csvsep" value=";"> Semikolon <code>;</code></label>
+      <label><input type="radio" name="csvsep" value=","> Komma <code>,</code></label>
+      <label><input type="radio" name="csvsep" value="tab"> Tabulator <code>⇥</code></label>
+      <label><input type="radio" name="csvsep" value="|"> Pipe <code>|</code></label>
+      <label class="customrow"><input type="radio" name="csvsep" value="custom"> Anderes: <input type="text" id="csvCustomSep" maxlength="1" placeholder="z.B. :"></label>
+    </div>
+    <div class="csvPreviewWrap"><table id="csvPreview"></table></div>
+    <div class="dlgBtns">
+      <button id="csvCancel">Abbrechen</button>
+      <button id="csvConfirm" class="primary">Öffnen</button>
+    </div>
+  </div>
+</div>
 
 <div id="statusbar">
   <span>Zellen: <b id="stCount">0</b></span>
@@ -1449,12 +1487,7 @@ document.getElementById('btnSaveCsv').onclick=()=>{
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='minicalc.csv'; a.click();
 };
 
-/* ---------- Speichern: eigenes Format (verlustfrei) ---------- */
-document.getElementById('btnSaveJson').onclick=()=>{
-  const payload={ROWS,COLS,colWidths,rowHeights,data:data.map(row=>row.map(cell=>({raw:cell.raw, style:cell.style})))};
-  const blob=new Blob([JSON.stringify(payload)],{type:'application/json'});
-  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='tabelle.minicalc.json'; a.click();
-};
+/* ---------- Öffnen eines alten MiniCalc-Formats (Speichern-Button entfernt) ---------- */
 function loadMinicalcJson(text){
   const payload=JSON.parse(text);
   ROWS=payload.ROWS; COLS=payload.COLS;
@@ -1465,28 +1498,46 @@ function loadMinicalcJson(text){
 }
 
 /* ---------- Öffnen ---------- */
-function loadCsvText(text){
-  const lines=text.replace(/^\uFEFF/,'').replace(/\r/g,'').split('\n').filter((l,i,arr)=>!(i===arr.length-1 && l===''));
-  const sep = lines[0] && lines[0].includes(';') ? ';' : ',';
-  function parseCsvLine(line){
-    const out=[]; let cur=''; let inQ=false;
+function splitCsvLines(text){
+  return text.replace(/^\uFEFF/,'').replace(/\r/g,'').split('\n').filter((l,i,arr)=>!(i===arr.length-1 && l===''));
+}
+function parseCsvLine(line, sep){
+  const out=[]; let cur=''; let inQ=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(inQ){
+      if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
+      else cur+=ch;
+    } else {
+      if(ch==='"') inQ=true;
+      else if(ch===sep){ out.push(cur); cur=''; }
+      else cur+=ch;
+    }
+  }
+  out.push(cur);
+  return out;
+}
+// Zählt Trennzeichen NUR außerhalb von Anführungszeichen und rät das häufigste.
+function detectCsvSep(lines){
+  const counts={';':0,',':0,'\t':0};
+  for(const line of lines.slice(0,10)){
+    let inQ=false;
     for(let i=0;i<line.length;i++){
       const ch=line[i];
-      if(inQ){
-        if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
-        else cur+=ch;
-      } else {
-        if(ch==='"') inQ=true;
-        else if(ch===sep){ out.push(cur); cur=''; }
-        else cur+=ch;
-      }
+      if(ch==='"'){ if(inQ && line[i+1]==='"'){ i++; } else inQ=!inQ; }
+      else if(!inQ && (ch===';'||ch===','||ch==='\t')) counts[ch]++;
     }
-    out.push(cur);
-    return out;
   }
-  const rows=lines.map(parseCsvLine);
+  let best=',', bestN=-1;
+  for(const s of [';','\t',',']) if(counts[s]>bestN){ bestN=counts[s]; best=s; }
+  return bestN>0?best:',';
+}
+function loadCsvText(text, sep){
+  const lines=splitCsvLines(text);
+  if(!sep) sep = detectCsvSep(lines);
+  const rows=lines.map(l=>parseCsvLine(l, sep));
   const newRows=Math.max(40, rows.length+3);
-  const newCols=Math.max(20, Math.max(...rows.map(r=>r.length))+3);
+  const newCols=Math.max(20, Math.max(1,...rows.map(r=>r.length))+3);
   initData(newRows,newCols);
   rows.forEach((cols,r)=>cols.forEach((val,c)=>{ data[r][c].raw=val; }));
   buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
@@ -1520,13 +1571,63 @@ document.getElementById('fileInput').addEventListener('change',(e)=>{
     try{
       if(isJson) loadMinicalcJson(ev.target.result);
       else if(isOds) loadOdsFile(ev.target.result);
-      else loadCsvText(ev.target.result);
+      else openCsvDialog(ev.target.result);   // CSV: erst Trennzeichen-Dialog
     } catch(err){
       alert('Datei konnte nicht gelesen werden: '+err.message);
     }
   };
   if(isOds) reader.readAsArrayBuffer(file); else reader.readAsText(file,'utf-8');
   e.target.value='';
+});
+
+/* ---------- CSV-Trennzeichen-Dialog ---------- */
+let csvPendingText='';
+function currentCsvSep(){
+  const v=(document.querySelector('input[name="csvsep"]:checked')||{}).value;
+  if(v==='tab') return '\t';
+  if(v==='custom') return document.getElementById('csvCustomSep').value || ',';
+  return v || ',';
+}
+function renderCsvPreview(){
+  const sep=currentCsvSep();
+  const rows=splitCsvLines(csvPendingText).slice(0,6).map(l=>parseCsvLine(l, sep));
+  const maxc=Math.min(10, Math.max(1, ...rows.map(r=>r.length)));
+  let html='';
+  for(const r of rows){
+    html+='<tr>';
+    for(let c=0;c<maxc;c++){ const v=r[c]==null?'':r[c]; html+='<td>'+(v===''?'&nbsp;':htmlEscape(v))+'</td>'; }
+    html+='</tr>';
+  }
+  document.getElementById('csvPreview').innerHTML = html || '<tr><td>(leer)</td></tr>';
+}
+function openCsvDialog(text){
+  csvPendingText=text;
+  const guess=detectCsvSep(splitCsvLines(text));
+  const valMap={';':';',',':',','\t':'tab'};
+  const val=valMap[guess]||',';
+  const radio=document.querySelector('input[name="csvsep"][value="'+val+'"]');
+  if(radio) radio.checked=true;
+  document.getElementById('csvCustomSep').value='';
+  renderCsvPreview();
+  document.getElementById('csvOverlay').hidden=false;
+  document.getElementById('csvConfirm').focus();
+}
+document.querySelectorAll('input[name="csvsep"]').forEach(el=>el.addEventListener('change', renderCsvPreview));
+document.getElementById('csvCustomSep').addEventListener('input',()=>{
+  const c=document.querySelector('input[name="csvsep"][value="custom"]'); if(c) c.checked=true;
+  renderCsvPreview();
+});
+function closeCsvDialog(){ document.getElementById('csvOverlay').hidden=true; csvPendingText=''; focusProxy(); }
+document.getElementById('csvCancel').onclick=closeCsvDialog;
+document.getElementById('csvConfirm').onclick=()=>{
+  const sep=currentCsvSep(); const text=csvPendingText;
+  document.getElementById('csvOverlay').hidden=true; csvPendingText='';
+  try{ loadCsvText(text, sep); } catch(err){ alert('Datei konnte nicht gelesen werden: '+err.message); }
+  focusProxy();
+};
+document.getElementById('csvOverlay').addEventListener('keydown',(e)=>{
+  if(e.key==='Enter'){ e.preventDefault(); document.getElementById('csvConfirm').click(); }
+  else if(e.key==='Escape'){ e.preventDefault(); closeCsvDialog(); }
 });
 
 /* ---------- Start ---------- */
