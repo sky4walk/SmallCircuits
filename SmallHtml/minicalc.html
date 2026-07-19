@@ -133,6 +133,14 @@
   </div>
 
   <div class="grp">
+    <label style="font-size:11.5px; opacity:.85;">Rahmen</label>
+    <button id="btnBorderAll" title="Alle Rahmen – jede ausgewählte Zelle bekommt einen kompletten Rahmen">▦ Alle</button>
+    <button id="btnBorderOutline" title="Außenrahmen – nur um die gesamte Auswahl herum">▢ Außen</button>
+    <button id="btnBorderNone" title="Rahmen entfernen">▧ Kein</button>
+    <input type="color" id="borderColor" value="#333333" title="Rahmenfarbe wählen">
+  </div>
+
+  <div class="grp">
     <select id="numFmt" title="Zahlenformat">
       <option value="general">Standard</option>
       <option value="int">Ganzzahl</option>
@@ -540,11 +548,22 @@ const NUMBER_STYLE_DEFS=`
 <number:currency-style style:name="Ncurrency"><number:currency-symbol number:language="de" number:country="DE">€</number:currency-symbol><number:number number:decimal-places="2" number:min-integer-digits="1"/></number:currency-style>
 <number:number-style style:name="Nint"><number:number number:decimal-places="0" number:min-integer-digits="1"/></number:number-style>`;
 const NUMFMT_TO_DATASTYLE={num2:'Nnum2',percent:'Npercent',currency:'Ncurrency',int:'Nint',general:null};
-function styleKey(s){ return [s.bold?1:0,s.italic?1:0,s.underline?1:0,s.align,s.color,s.bg,s.numFmt].join('|'); }
+function styleKey(s){ return [s.bold?1:0,s.italic?1:0,s.underline?1:0,s.align,s.color,s.bg,s.numFmt,s.borderSides||'0000',s.borderColor||''].join('|'); }
 function cellStyleXml(name,s){
   const dataStyle=NUMFMT_TO_DATASTYLE[s.numFmt];
   const attrs=`style:name="${name}" style:family="table-cell"`+(dataStyle?` style:data-style-name="${dataStyle}"`:'');
-  const cellProps=s.bg?`<style:table-cell-properties fo:background-color="${s.bg}"/>`:'';
+  const sides=s.borderSides||'0000';
+  const bcol=s.borderColor||'#333333';
+  let borderAttrs='';
+  if(sides!=='0000'){
+    const bv=`0.5pt solid ${bcol}`;
+    if(sides[0]==='1') borderAttrs+=` fo:border-top="${bv}"`;
+    if(sides[1]==='1') borderAttrs+=` fo:border-right="${bv}"`;
+    if(sides[2]==='1') borderAttrs+=` fo:border-bottom="${bv}"`;
+    if(sides[3]==='1') borderAttrs+=` fo:border-left="${bv}"`;
+  }
+  const cellPropsInner=(s.bg?` fo:background-color="${s.bg}"`:'')+borderAttrs;
+  const cellProps=cellPropsInner?`<style:table-cell-properties${cellPropsInner}/>`:'';
   let textProps='';
   if(s.bold||s.italic||s.underline||s.color){
     textProps='<style:text-properties'
@@ -563,7 +582,8 @@ function pxToCm(px){ return (px*2.54/96).toFixed(3)+'cm'; }
 function buildOdsContentXml(rows,cols,grid,colW,rowH){
   const styleMap=new Map(); let styleCounter=1;
   function nameFor(style){
-    const isDefault=!style.bold&&!style.italic&&!style.underline&&style.align==='left'&&!style.color&&!style.bg&&style.numFmt==='general';
+    const noBorder=!style.borderSides||style.borderSides==='0000';
+    const isDefault=!style.bold&&!style.italic&&!style.underline&&style.align==='left'&&!style.color&&!style.bg&&style.numFmt==='general'&&noBorder;
     if(isDefault) return null;
     const key=styleKey(style);
     if(styleMap.has(key)) return styleMap.get(key);
@@ -603,7 +623,7 @@ function buildOdsContentXml(rows,cols,grid,colW,rowH){
   }
   const cellStylesXml=Array.from(styleMap.entries()).map(([key,name])=>{
     const p=key.split('|');
-    return cellStyleXml(name,{bold:p[0]==='1',italic:p[1]==='1',underline:p[2]==='1',align:p[3],color:p[4],bg:p[5],numFmt:p[6]});
+    return cellStyleXml(name,{bold:p[0]==='1',italic:p[1]==='1',underline:p[2]==='1',align:p[3],color:p[4],bg:p[5],numFmt:p[6],borderSides:p[7]||'0000',borderColor:p[8]||''});
   }).join('');
   // Spalten-Styles (nur für abweichende Breiten) + <table:table-column> je Spalte
   let columnsXml='';
@@ -677,7 +697,7 @@ function parseOdsContentXml(doc){
   for(const el of doc.getElementsByTagNameNS(ns.s,'style')){
     if(el.getAttribute('style:family')!=='table-cell') continue;
     const name=el.getAttribute('style:name');
-    const style={bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'};
+    const style={bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''};
     const dsName=el.getAttribute('style:data-style-name');
     if(dsName && dataStyleNumFmt[dsName]) style.numFmt=dataStyleNumFmt[dsName];
     const tp=el.getElementsByTagNameNS(ns.s,'text-properties')[0];
@@ -689,6 +709,21 @@ function parseOdsContentXml(doc){
     }
     const cp=el.getElementsByTagNameNS(ns.s,'table-cell-properties')[0];
     if(cp && cp.getAttribute('fo:background-color')) style.bg=cp.getAttribute('fo:background-color');
+    if(cp){
+      // fo:border (alle Seiten) oder einzelne fo:border-top/right/bottom/left
+      const all=cp.getAttribute('fo:border');
+      const bt=cp.getAttribute('fo:border-top')||all;
+      const br=cp.getAttribute('fo:border-right')||all;
+      const bb=cp.getAttribute('fo:border-bottom')||all;
+      const bl=cp.getAttribute('fo:border-left')||all;
+      const on=v=>v&&!/\bnone\b/.test(v)?'1':'0';
+      const sides=on(bt)+on(br)+on(bb)+on(bl);
+      if(sides!=='0000'){
+        style.borderSides=sides;
+        const m=(bt||br||bb||bl||'').match(/#[0-9a-fA-F]{6}/);
+        style.borderColor=m?m[0]:'#333333';
+      }
+    }
     const pp=el.getElementsByTagNameNS(ns.s,'paragraph-properties')[0];
     if(pp){ const al=pp.getAttribute('fo:text-align'); if(al==='end') style.align='right'; else if(al==='center') style.align='center'; else if(al==='start') style.align='left'; }
     cellStyles[name]=style;
@@ -715,7 +750,7 @@ function parseOdsContentXml(doc){
       if(cellEl.localName!=='table-cell' && cellEl.localName!=='covered-table-cell') continue;
       const repeat=parseInt(cellEl.getAttribute('table:number-columns-repeated')||'1',10);
       const styleName=cellEl.getAttribute('table:style-name');
-      const style=(styleName && cellStyles[styleName])?cellStyles[styleName]:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'};
+      const style=(styleName && cellStyles[styleName])?cellStyles[styleName]:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''};
       const formula=cellEl.getAttribute('table:formula');
       const valueType=cellEl.getAttribute('office:value-type');
       let raw='';
@@ -738,7 +773,7 @@ function parseOdsContentXml(doc){
   const outData=[];
   for(let r=0;r<newRows;r++){
     const row=[];
-    for(let c=0;c<newCols;c++) row.push((grid[r]&&grid[r][c])?grid[r][c]:{raw:'',style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'},computed:''});
+    for(let c=0;c<newCols;c++) row.push((grid[r]&&grid[r][c])?grid[r][c]:{raw:'',style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''},computed:''});
     outData.push(row);
   }
   while(colWidthsOut.length<newCols) colWidthsOut.push(DEFAULT_COL_W);
@@ -770,7 +805,7 @@ const clipProxy=document.getElementById('clipProxy');
 const formulaInput=document.getElementById('formulaInput');
 const cellAddrEl=document.getElementById('cellAddr');
 
-function newCell(){ return {raw:'', style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general'}, computed:''}; }
+function newCell(){ return {raw:'', style:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''}, computed:''}; }
 
 function initData(rows,cols){
   data=[];
@@ -901,6 +936,13 @@ function renderCell(r,c){
   td.style.color = cell.style.color || '';
   td.style.background = cell.style.bg || '';
   td.dataset.align = cell.style.align || 'left';
+  // Benutzer-Rahmen (überschreibt pro Seite die dünne Gitterlinie); '' => Gitterlinie zurück
+  const sides=cell.style.borderSides||'0000';
+  const bc=cell.style.borderColor||'#333333';
+  td.style.borderTop    = sides[0]==='1' ? '1px solid '+bc : '';
+  td.style.borderRight  = sides[1]==='1' ? '1px solid '+bc : '';
+  td.style.borderBottom = sides[2]==='1' ? '1px solid '+bc : '';
+  td.style.borderLeft   = sides[3]==='1' ? '1px solid '+bc : '';
 }
 
 function renderAll(){
@@ -1196,6 +1238,52 @@ function buildClipboardText(){
   }
   return rows.join('\n');
 }
+function cellDisplayText(cell){
+  const comp=cell.computed;
+  if(comp && typeof comp==='object' && comp.__err) return comp.__err;
+  if(typeof comp==='number') return formatNumber(comp,cell.style.numFmt);
+  if(typeof comp==='boolean') return comp? 'WAHR':'FALSCH';
+  return (comp===undefined||comp===null) ? '' : String(comp);
+}
+function htmlEscape(s){
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+// Baut eine echte <table> mit den ANGEZEIGTEN Werten (nicht Formeln) inkl.
+// Formatierung. WordPress/Gutenberg, LibreOffice, Google Docs, E-Mail erkennen
+// dadurch beim Einfügen eine Tabelle.
+function buildClipboardHtml(){
+  const {r1,r2,c1,c2}=normRange();
+  // Hat die Auswahl eigene Rahmen? Dann keine Standard-border="1" (sonst doppelt),
+  // sonst behalten wir die dünne Standard-Tabellenlinie fürs Ziel bei.
+  let anyBorder=false;
+  for(let r=r1;r<=r2&&!anyBorder;r++) for(let c=c1;c<=c2;c++){ const sd=data[r][c].style.borderSides; if(sd&&sd!=='0000'){anyBorder=true;break;} }
+  let html='<table '+(anyBorder?'':'border="1" ')+'cellspacing="0" cellpadding="4" style="border-collapse:collapse;">';
+  for(let r=r1;r<=r2;r++){
+    html+='<tr>';
+    for(let c=c1;c<=c2;c++){
+      const cell=data[r][c], s=cell.style, css=[];
+      if(s.bold) css.push('font-weight:700');
+      if(s.italic) css.push('font-style:italic');
+      if(s.underline) css.push('text-decoration:underline');
+      if(s.align && s.align!=='left') css.push('text-align:'+s.align);
+      if(s.color) css.push('color:'+s.color);
+      if(s.bg) css.push('background-color:'+s.bg);
+      const sides=s.borderSides||'0000', bc=s.borderColor||'#333333';
+      if(sides!=='0000'){
+        const bv='1px solid '+bc;
+        if(sides[0]==='1') css.push('border-top:'+bv);
+        if(sides[1]==='1') css.push('border-right:'+bv);
+        if(sides[2]==='1') css.push('border-bottom:'+bv);
+        if(sides[3]==='1') css.push('border-left:'+bv);
+      }
+      const styleAttr = css.length ? ' style="'+css.join(';')+'"' : '';
+      const txt=htmlEscape(cellDisplayText(cell));
+      html+='<td'+styleAttr+'>'+(txt===''?'&nbsp;':txt)+'</td>';
+    }
+    html+='</tr>';
+  }
+  return html+'</table>';
+}
 function pasteText(text){
   if(!text) return;
   const rows=text.replace(/\r/g,'').split('\n');
@@ -1217,10 +1305,15 @@ function pasteText(text){
   setSelection({r:startR,c:startC},{r:endR,c:endC});
   recalcAndRender();
 }
-clipProxy.addEventListener('copy',(e)=>{ if(editing) return; e.preventDefault(); e.clipboardData.setData('text/plain', buildClipboardText()); });
+clipProxy.addEventListener('copy',(e)=>{
+  if(editing) return; e.preventDefault();
+  e.clipboardData.setData('text/plain', buildClipboardText());
+  e.clipboardData.setData('text/html', buildClipboardHtml());
+});
 clipProxy.addEventListener('cut',(e)=>{
   if(editing) return; e.preventDefault();
   e.clipboardData.setData('text/plain', buildClipboardText());
+  e.clipboardData.setData('text/html', buildClipboardHtml());
   const {r1,r2,c1,c2}=normRange();
   for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) data[r][c].raw='';
   recalcAndRender();
@@ -1265,7 +1358,30 @@ document.getElementById('fontColorApply').onclick=()=>applyToSelection(s=>s.colo
 document.getElementById('fillColor').oninput=(e)=>applyToSelection(s=>s.bg=e.target.value);
 document.getElementById('fillColor').onchange=(e)=>applyToSelection(s=>s.bg=e.target.value);
 document.getElementById('fillColorApply').onclick=()=>applyToSelection(s=>s.bg=document.getElementById('fillColor').value);
-document.getElementById('btnClearFmt').onclick=()=>applyToSelection(s=>{ s.bold=false;s.italic=false;s.underline=false;s.align='left';s.color='';s.bg='';s.numFmt='general'; });
+document.getElementById('btnClearFmt').onclick=()=>applyToSelection(s=>{ s.bold=false;s.italic=false;s.underline=false;s.align='left';s.color='';s.bg='';s.numFmt='general';s.borderSides='0000';s.borderColor=''; });
+
+/* ---------- Rahmen ---------- */
+// mode: 'all' (jede Zelle voll), 'outline' (nur Außenkante der Auswahl), 'none'
+function applyBorder(mode){
+  const {r1,r2,c1,c2}=normRange();
+  const col=document.getElementById('borderColor').value;
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++){
+    const s=data[r][c].style;
+    if(mode==='all'){ s.borderSides='1111'; s.borderColor=col; }
+    else if(mode==='none'){ s.borderSides='0000'; s.borderColor=''; }
+    else if(mode==='outline'){
+      const t=r===r1?'1':'0', ri=c===c2?'1':'0', b=r===r2?'1':'0', l=c===c1?'1':'0';
+      s.borderSides=t+ri+b+l;               // Reihenfolge: oben,rechts,unten,links
+      if(s.borderSides!=='0000') s.borderColor=col;
+    }
+  }
+  for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) renderCell(r,c);
+  updateSelectionVisuals();
+  focusProxy();
+}
+document.getElementById('btnBorderAll').onclick=()=>applyBorder('all');
+document.getElementById('btnBorderOutline').onclick=()=>applyBorder('outline');
+document.getElementById('btnBorderNone').onclick=()=>applyBorder('none');
 document.getElementById('numFmt').onchange=(e)=>applyToSelection(s=>s.numFmt=e.target.value);
 
 /* ---------- Zeilen / Spalten ---------- */
