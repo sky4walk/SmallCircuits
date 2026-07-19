@@ -300,7 +300,7 @@ select{cursor:pointer}textarea{resize:vertical;min-height:70px}
     <div class="card-title">Parameter</div>
     <div class="row">
       <div class="field" style="max-width:160px"><label>Bitlaenge n</label>
-        <select id="rk-bits"><option value="16">16 Bit (Demo)</option><option value="32">32 Bit</option><option value="64" selected>64 Bit</option><option value="128">128 Bit</option></select>
+        <select id="rk-bits"><option value="16">16 Bit (Demo)</option><option value="32">32 Bit</option><option value="64" selected>64 Bit</option><option value="128">128 Bit</option><option value="256">256 Bit</option><option value="512">512 Bit</option><option value="1024">1024 Bit (langsam)</option><option value="2048">2048 Bit (sehr langsam)</option></select>
       </div>
       <div class="field" style="max-width:150px"><label>e (oeff. Exponent)</label><input type="text" id="rk-e" value="65537"></div>
       <button class="btn primary" id="btn-rk" style="align-self:flex-end">Schluessel erzeugen</button>
@@ -700,7 +700,25 @@ function isPrime(n) {
     if (witnesses[w] >= n) continue;
     if (!millerRabinTest(n, witnesses[w])) return false;
   }
+  // Feste Zeugen sind nur bis ~3.3e24 (~81 Bit) beweisbar deterministisch.
+  // Darueber: zusaetzliche Runden mit Zufallsbasen (Fehlerwahrscheinlichkeit <= 4^-rounds).
+  if (n > (1n << 81n)) {
+    for (var t = 0; t < 8; t++) {
+      var a = randomBigIntBelow(n);
+      if (!millerRabinTest(n, a)) return false;
+    }
+  }
   return true;
+}
+
+function randomBigIntBelow(n) {
+  var words = Math.ceil(n.toString(2).length / 32), r;
+  do {
+    r = 0n;
+    for (var i = 0; i < words; i++) r = (r << 32n) | BigInt(Math.floor(Math.random() * 0x100000000));
+    r %= n;
+  } while (r < 2n);
+  return r; // 2 <= r < n
 }
 
 function randomPrime(bits) {
@@ -872,16 +890,23 @@ function intToText(n) {
 el('btn-txt').addEventListener('click', function() {
   try {
     var k = rcKey(), txt = el('rc-txt').value;
-    var m = textToInt(txt);
-    if (m >= k.n) throw new Error('Text zu gross fuer n (' + m + ' >= ' + k.n + ')');
-    var c = modpow(m, k.e, k.n);
-    var m2 = modpow(c, k.d, k.n);
-    var back = intToText(m2);
+    if (k.n <= 255n) throw new Error('n muss > 255 sein, um Bytes einzeln zu verschluesseln (n=' + k.n + ')');
+    var bytes = new TextEncoder().encode(txt);   // UTF-8, jedes Byte 0..255 < n
+    if (bytes.length === 0) throw new Error('Kein Text eingegeben');
+    // Blockweise: jedes Byte ist ein eigener Block m_i < n
+    var cs = [];
+    for (var i = 0; i < bytes.length; i++) cs.push(modpow(BigInt(bytes[i]), k.e, k.n));
+    // Zur Kontrolle wieder entschluesseln
+    var out = new Uint8Array(cs.length);
+    for (var j = 0; j < cs.length; j++) out[j] = Number(modpow(cs[j], k.d, k.n));
+    var back = new TextDecoder().decode(out);
+    var mInts = Array.from(bytes).join(', ');
+    var cInts = cs.map(function(x){ return String(x); }).join(', ');
     var e = el('rc-txt-res');
     e.className = 'result-box ok';
     e.innerHTML =
-      '<span class="lbl">Text -> Int<\/span><span class="val">' + esc(String(m)) + '<\/span><br>' +
-      '<span class="lbl">Verschluesselt c<\/span><span class="val">' + esc(String(c)) + '<\/span><br>' +
+      '<span class="lbl">Text -> Bytes (m_i)<\/span><span class="val">' + esc(mInts) + '<\/span><br>' +
+      '<span class="lbl">Verschluesselt (c_i = m_i^e mod n)<\/span><span class="val">' + esc(cInts) + '<\/span><br>' +
       '<span class="lbl">Entschluesselt -> Text<\/span><span class="val">' + esc(back) + (back === txt ? ' \u2713' : ' \u2717') + '<\/span>';
   } catch (err) { setErr('rc-txt-res', err.message); }
 });
