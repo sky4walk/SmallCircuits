@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.18-sid-filter"
+__version__ = "2026.07.20-pitstop-irqwrite"
 
 
 # =============================================================================
@@ -344,6 +344,16 @@ class Vic:
         self._rc = 0
         self._disp_row = 0
         self._vcbase_row = 0
+        self._bl_estab = 0
+        self._bl_cond = False
+        self._bl_since = 0
+        self._bl_line = -1
+        self._bl_fetch_pend = None
+        self._bl_rc_pend = False
+        self._bl_cond13 = None
+        self._bl_cond12 = None
+        self._bl_w11 = False
+        self._bl_eol_pend = False
         # Per-character-row snapshot of the 40 screen codes and 40 colour-RAM
         # nibbles as they were when the VIC fetched that row (its badline).
         # Reading the whole screen once at frame end tears when a game rewrites
@@ -358,6 +368,7 @@ class Vic:
         self._line_cycles = 0
         self.ba = True             # bus available to CPU (low on badlines)
         self._badline = False
+        self.ba_debt = 0        # batch: cycles the CPU owes for badline DMA
         self.raster_compare = 0
         self.irq_status = 0
         self._raster_irq_pending = False
@@ -425,6 +436,147 @@ class Vic:
     VSP_BASE = 15          # cycle whose mid-line badline gives VC offset 0
     VSP_WINDOW_END = 48    # last stamp that still starts this line's fetch
 
+    def _line_display_bookkeeping(self, r, d011, defer_eol=False):
+        self.line_idle[r] = 0
+        self.line_text_row[r] = self._disp_row
+        self.line_rc[r] = self._rc
+        if self._rc == 4:
+            # Mid-row refinement: raster splits that change mode/bases
+            # inside a row keep the old "sampled at row centre"
+            # semantics for that row's rendering and collision.
+            self.row_mode_d011[self._disp_row] = d011
+            self.row_mode_d016[self._disp_row] = self.regs[0x16]
+            self.row_mode_d018[self._disp_row] = self.regs[0x18]
+        if defer_eol:
+            # cycle mode: the RC==7 / advance decision belongs to cycle 58
+            # (Bauer), where the LIVE badline condition decides whether the
+            # display stays on and RC wraps — see _bl_resolve_eol.
+            self._bl_eol_pend = True
+            return
+        if self._rc == 7:
+            self._vcbase_row = self._disp_row + 1
+            self._display_state = False
+        else:
+            self._rc += 1
+
+    def _bl_resolve_eol(self):
+        """Cycle 58, Bauer verbatim: if RC==7 the video logic goes idle
+        and VCBASE advances; a badline condition present NOW forces the
+        display state back on (the next line continues as display, no
+        second ghost advance); in display state RC increments (7 wraps
+        to 0)."""
+        self._bl_eol_pend = False
+        if self._rc == 7:
+            self._vcbase_row = self._disp_row + 1
+            self._display_state = False
+        d011 = self.regs[0x11]
+        r = self.raster
+        cond = (self._den_frame and 0x30 <= r <= 0xF7
+                and (r & 7) == (d011 & 7)
+                and self._vcbase_row < 25)
+        if cond:
+            self._display_state = True
+            self._disp_row = self._vcbase_row
+        if self._display_state:
+            self._rc = (self._rc + 1) & 7
+
+    def _bl_resolve_rc(self):
+        """Cycle 14: the RC reset happens only if the badline condition
+        still holds NOW; then this line's display bookkeeping runs."""
+        self._bl_rc_pend = False
+        c13 = (self._bl_cond13 if self._bl_cond13 is not None
+               else self._bl_cond)
+        c12 = self._bl_cond12 if self._bl_cond12 is not None else c13
+        if self._bl_w11:
+            reset = c13
+        else:
+            reset = c12 or c13
+        if reset:
+            self._rc = 0
+        if self._display_state:
+            self._line_display_bookkeeping(
+                self._bl_line, self.regs[0x11],
+                defer_eol=getattr(self, "_bl_defer", False))
+        else:
+            r = self._bl_line
+            self.line_idle[r] = 1
+            self.line_text_row[r] = 0xFF
+            self.line_rc[r] = 0
+
+    def _bl_check(self, C, from_write=False):
+        """Commit the badline for the current line if the condition holds
+        and a qualifying cycle (>=12) has been reached. Establishes coming
+        from mid-line $D011 WRITES only apply to lines that are still idle
+        (matching the VIC's observable behaviour and our row bookkeeping);
+        the line-start path decides fresh lines without that guard."""
+        if self._bl_estab is not None or not self._bl_cond:
+            return
+        if from_write and not self.line_idle[self._bl_line]:
+            return
+        # Qualification floor: the condition counts from cycle 0 — the
+        # dmadelay references prove a condition true only during the first
+        # cycles of the line still commits the badline (ref03 vs ref04).
+        T = self._bl_since
+        if T > 54 or T > C:
+            return
+        self._bl_estab = T
+        r = self._bl_line
+        if T <= 14:
+            if T == 14 and getattr(self, "_bl_defer", False):
+                # a condition arising only in cycle 14 misses the first
+                # c-access of the fetch window (cycle 15): the row fetch
+                # starts one character late and the VC deficit of 1 char
+                # persists — ref18 vs ref04 measure exactly -8 px.
+                self._vc_offset += -1
+            d011 = self.regs[0x11]
+            self._display_state = True
+            if getattr(self, "_bl_defer", False):
+                # cycle mode: the RC decision ALWAYS goes through the
+                # cond12/cond13 rule — establishes from a cycle-14 write
+                # come too late for the reset (the create@14 dmadelay
+                # variants); resolve fires on the next tick with the
+                # already-frozen snapshots.
+                self._bl_rc_pend = True
+            else:
+                # batch: always immediate (pre-timeline semantics; chunk-
+                # boundary jitter must never defer bookkeeping = flicker).
+                self._rc = 0
+            self._disp_row = row = self._vcbase_row
+            self.row_mode_d011[row] = d011
+            self.row_mode_d016[row] = self.regs[0x16]
+            self.row_mode_d018[row] = self.regs[0x18]
+            self.line_idle[r] = 0
+            self.line_text_row[r] = row
+            self.line_rc[r] = 0
+            if not getattr(self, "_bl_defer", False):
+                # batch: charge the CPU the badline DMA steal (~40 cycles).
+                # Without this the CPU runs ~5% fast and raster-IRQ frame
+                # governors (Pitstop II) mis-measure their deadlines.
+                self.ba_debt += 40
+            # The c-accesses only run if the condition still holds when the
+            # fetch window opens (cycle 15). A badline whose condition dies
+            # before that keeps the STALE matrix latches — the row repeats
+            # old content (dmadelay class B). Decide now if we're already
+            # past 15, else defer to the tick.
+            if C >= 15 or not getattr(self, "_bl_defer", False):
+                self._fetch_row(row)
+            else:
+                self._bl_fetch_pend = row
+        else:
+            if getattr(self, "_bl_defer", False):
+                self._vc_offset += -(T - self.VSP_BASE)
+            else:
+                self.ba_debt += max(55 - T, 0)
+                # batch scheduler: pre-timeline semantics — ASSIGN the
+                # offset (never accumulate; instruction-level write jitter
+                # would otherwise make it wander frame to frame = flicker,
+                # Pitstop II) and keep the old window cut at cycle 48.
+                if T > self.VSP_WINDOW_END:
+                    self._bl_estab = None
+                    return
+                self._vc_offset = -(T - self.VSP_BASE)
+            self._trigger_badline_now(r, self.regs[0x11])
+
     def _trigger_badline_now(self, r, val):
         """Establish a badline for the CURRENT line retroactively (the
         condition was made true by a mid-line YSCROLL/DEN write). Fetches the
@@ -468,12 +620,46 @@ class Vic:
                 self.line_color[row * 40 + k:row * 40 + 40] = \
                     self.color_ram.ram[0:40 - k]
 
+        # mirror of the VIC's internal 40x12-bit matrix latches: the last
+        # row actually c-fetched. A suppressed badline fetch displays THIS.
+        self._latch_screen = bytes(self.line_screen[row * 40:row * 40 + 40])
+        self._latch_color = bytes(self.line_color[row * 40:row * 40 + 40])
 
     def write(self, offset, val):
         offset &= 0x3F
         val &= 0xFF
+        if offset in (0x18, 0x16) and not getattr(self, "_bl_defer", False):
+            # Late split writes (batch mode): the real chip's c/g-accesses
+            # for a row run in cycles 15-54, so a $D018/$D016 write landing
+            # in cycles 0-14 of the row's badline still applies to THIS
+            # row. Our batch line-start fetch has already run by then —
+            # refresh the row records and re-fetch so IRQ jitter around the
+            # line boundary can't alternate the fetched screen (Pitstop II
+            # split flicker: the D018 write wanders r66/c60 <-> r67/c2).
+            r = self.raster
+            if (self._line_cycles < 15 and not self.line_idle[r]
+                    and self.line_rc[r] == 0):
+                row = self.line_text_row[r]
+                if row < 25:
+                    self.regs[offset] = val
+                    if offset == 0x18:
+                        self.row_mode_d018[row] = val
+                        self.line_d018[r] = val
+                        self._fetch_row(row)
+                    else:
+                        self.row_mode_d016[row] = val
+                        self.line_d016[r] = val
         if offset == self.REG_RASTER_LINE:
+            prev_match = (self.raster == self.raster_compare)
             self.raster_compare = (self.raster_compare & 0x100) | val
+            if not prev_match and self.raster == self.raster_compare:
+                # The raster-IRQ comparison is continuous on the real chip:
+                # a WRITE that makes compare == current line transitions the
+                # comparison false->true and triggers the IRQ immediately —
+                # Pitstop II arms its next ladder rung on the target line's
+                # first cycles and relies on exactly this (without it the
+                # whole IRQ chain sleeps a frame: the split-view garble).
+                self._raster_irq_pending = True
         elif offset == self.REG_CTRL1:
             self.regs[offset] = val
             self.raster_compare = (self.raster_compare & 0xFF) | ((val & 0x80) << 1)
@@ -511,23 +697,22 @@ class Vic:
             # leaves the line as it was. Our tick sampled the condition at
             # line start; honour early mid-line writes retroactively.
             r = self.raster
-            if (self._den_frame and 0x30 <= r <= 0xF7
-                    and (r & 7) == (val & 7)
-                    and self.line_idle[r]
-                    and self._vcbase_row < 25):
-                cyc = self._line_cycles
-                if cyc <= 14:
-                    self._trigger_badline_now(r, val)
-                elif cyc <= self.VSP_WINDOW_END:
-                    # DMA DELAY / VSP: the badline condition arises while the
-                    # row's c-accesses should already be running — the fetch
-                    # starts late and the video counter falls short by one
-                    # character per cycle of delay. The deficit persists in
-                    # VC/VCBASE for the rest of the frame, shifting every
-                    # following row's matrix read: the classic full-screen
-                    # horizontal scroll trick (Mayhem in Monsterland).
-                    self._vc_offset = -(cyc - self.VSP_BASE)
-                    self._trigger_badline_now(r, val)
+            cyc = self._line_cycles
+            if cyc == 11:
+                self._bl_w11 = True
+            if getattr(self, "_bl_line", None) == r:
+                # timeline update: condition held with the OLD value up to
+                # this cycle — commit if it qualified; then track the new
+                # condition state from here.
+                self._bl_check(min(cyc, 54), from_write=True)
+                new_cond = (self._den_frame and 0x30 <= r <= 0xF7
+                            and (r & 7) == (val & 7)
+                            and self._vcbase_row < 25)
+                if new_cond != self._bl_cond:
+                    self._bl_cond = new_cond
+                    self._bl_since = cyc
+                if new_cond and cyc <= 54:
+                    self._bl_check(min(max(cyc, 12), 54), from_write=True)
         elif offset == self.REG_IRQ_STATUS:
             self.irq_status &= ~(val & 0x0F)
         elif offset == self.REG_IRQ_ENABLE:
@@ -577,6 +762,29 @@ class Vic:
 
     def tick(self, cycles):
         self._line_cycles += cycles
+        if self._bl_estab is None and self._bl_cond:
+            self._bl_check(self._line_cycles if self._line_cycles < 54 else 54)
+        if self._bl_cond12 is None and self._line_cycles >= 12:
+            self._bl_cond12 = self._bl_cond
+        if self._bl_cond13 is None and self._line_cycles >= 13:
+            # RC-reset decision (empirically pinned by the dmadelay
+            # boundary pairs): the condition counts if it was true at ANY
+            # point during cycle 12 — i.e. at the start of 12 OR the start
+            # of 13. Exception: a $D011 write in cycle 11 (the RMW dummy
+            # write pattern) makes only the post-cycle-12 state count.
+            self._bl_cond13 = self._bl_cond
+        if self._bl_rc_pend and self._line_cycles >= 14:
+            self._bl_resolve_rc()
+        if self._bl_eol_pend and self._line_cycles >= 58:
+            self._bl_resolve_eol()
+        if self._bl_fetch_pend is not None and self._line_cycles >= 15:
+            row = self._bl_fetch_pend
+            if self._bl_cond:
+                self._fetch_row(row)
+            elif getattr(self, "_latch_screen", None) is not None:
+                self.line_screen[row * 40:row * 40 + 40] = self._latch_screen
+                self.line_color[row * 40:row * 40 + 40] = self._latch_color
+            self._bl_fetch_pend = None
         if self._raster_irq_pending and self._line_cycles >= 2:
             self._raster_irq_pending = False
             self.irq_status |= 0x01
@@ -621,32 +829,38 @@ class Vic:
             elif r == (51 if rsel else 55) and (d011 & 0x10):
                 self._vborder = False
             self.line_vborder[r] = 1 if self._vborder else 0
-            if (self._den_frame and 0x30 <= r <= 0xF7
-                    and (r & 7) == (d011 & 7) and self._vcbase_row < 25):
-                # Badline: fetch this row's matrix data and start displaying.
-                self._display_state = True
-                self._rc = 0
-                self._disp_row = row = self._vcbase_row
-                self.row_mode_d011[row] = d011
-                self.row_mode_d016[row] = self.regs[0x16]
-                self.row_mode_d018[row] = self.regs[0x18]
-                self._fetch_row(row)
-            if self._display_state:
-                self.line_idle[r] = 0
-                self.line_text_row[r] = self._disp_row
-                self.line_rc[r] = self._rc
-                if self._rc == 4:
-                    # Mid-row refinement: raster splits that change mode/bases
-                    # inside a row keep the old "sampled at row centre"
-                    # semantics for that row's rendering and collision.
-                    self.row_mode_d011[self._disp_row] = d011
-                    self.row_mode_d016[self._disp_row] = self.regs[0x16]
-                    self.row_mode_d018[self._disp_row] = self.regs[0x18]
-                if self._rc == 7:
-                    self._vcbase_row = self._disp_row + 1
-                    self._display_state = False
-                else:
-                    self._rc += 1
+            # Badline condition timeline: the VIC evaluates the condition
+            # per cycle; it qualifies from cycle 12 and latches. We commit at
+            # the earliest qualifying cycle T (via _bl_check), so writes that
+            # kill the condition before cycle 12 correctly PREVENT the
+            # badline, and writes creating it mid-fetch give the DMA-delay
+            # offset — both probed cycle-exactly by the dmadelay tests.
+            self._bl_estab = None
+            self._bl_cond = (self._den_frame and 0x30 <= r <= 0xF7
+                             and (r & 7) == (d011 & 7)
+                             and self._vcbase_row < 25)
+            self._bl_since = 0
+            self._bl_line = r
+            self._bl_fetch_pend = None
+            self._bl_rc_pend = False
+            self._bl_cond13 = None
+            self._bl_cond12 = None
+            self._bl_w11 = False
+            self._bl_eol_pend = False
+            # commit at line start when the condition holds (cycle-0
+            # qualification); mid-line establishes come via tick/write.
+            self._bl_check(self._line_cycles)
+            if self._bl_rc_pend:
+                # RC reset (and with it this line's display bookkeeping)
+                # depends on the badline condition AT CYCLE 14 — deferred
+                # to _bl_resolve_rc. A condition that dies before cycle 14
+                # leaves RC untouched: with RC=7 the line still advances
+                # VCBASE at its end, shifting every following row (the
+                # dmadelay class-B band shift).
+                pass
+            elif self._display_state:
+                self._line_display_bookkeeping(
+                    r, d011, defer_eol=getattr(self, "_bl_defer", False))
             else:
                 self.line_idle[r] = 1
                 self.line_text_row[r] = 0xFF
@@ -681,6 +895,7 @@ class Vic:
                     srow = self._spr_row
                     sff = self._spr_ff
                     d017 = regs[0x17]
+                    _spr_dma_n = 0
                     for i in range(8):
                         if not disp[i]:
                             if (en >> i) & 1 and regs[i * 2 + 1] == r8:
@@ -695,6 +910,7 @@ class Vic:
                             self.line_spr_row[ras8 + i] = 0xFF
                             continue
                         self.line_spr_row[ras8 + i] = srow[i]
+                        _spr_dma_n += 1
                         if (d017 >> i) & 1:
                             if sff[i]:
                                 srow[i] += 1
@@ -715,6 +931,13 @@ class Vic:
                                 srow[i] = 0
                                 sff[i] = False
                                 self._spr_disp_mask |= (1 << i)
+                    if _spr_dma_n and not getattr(self, "_bl_defer", False):
+                        # batch: sprite DMA steals ~2 cycles per active
+                        # sprite per line plus ~3 cycles BA lead — the
+                        # second big timing term after badlines. Without it
+                        # the CPU still runs fast and frame governors
+                        # (Pitstop II) drift against their real deadlines.
+                        self.ba_debt += 2 * _spr_dma_n + 3
                 else:
                     self.line_spr_row[ras8:ras8 + 8] = b"\xFF" * 8
             if self.raster == self.raster_compare:
@@ -4034,6 +4257,18 @@ class System:
         self._iec_channels = {}          # channel -> {'data': bytes, 'pos': int}
 
     def step(self):
+        if self.vic.ba_debt:
+            # burn badline/sprite-stolen cycles: time passes, CPU frozen.
+            # Sliced to <=16 cycles per step so a raster busy-wait
+            # (CMP $D012/BNE — Pitstop II's colour ladder) can never leap
+            # over its target line between two reads.
+            d = min(self.vic.ba_debt, 16)
+            self.vic.ba_debt -= d
+            self.cpu.cycles += d
+            self.vic.tick(d)
+            self.cia1.tick(d)
+            self.cia2.tick(d)
+            return True
         before = self.cpu.cycles
         cur_nmi = self.cia2.irq_line
         if cur_nmi and not self.cpu._prev_nmi:
@@ -4132,6 +4367,7 @@ class System:
 
     def run(self, n_cycles):
         if self.cycle_accurate:
+            self.vic._bl_defer = True
             for _ in range(n_cycles):
                 self.clock()
             return True
@@ -4235,6 +4471,7 @@ class System:
         load_addr, init_addr, play_addr = struct.unpack(">HHH", data[8:14])
         songs, start_song = struct.unpack(">HH", data[14:18])
         speed = struct.unpack(">L", data[18:22])[0]
+        self._sid_speed_mask = speed
         name     = data[22:54].split(b"\x00", 1)[0].decode("ascii", "replace")
         author   = data[54:86].split(b"\x00", 1)[0].decode("ascii", "replace")
         released = data[86:118].split(b"\x00", 1)[0].decode("ascii", "replace")
@@ -4267,6 +4504,13 @@ class System:
         # Call init with A = song index (0-based), interrupts disabled
         if song_num is None:
             song_num = start_song - 1
+        # Multispeed: speed bit for this song = CIA-timer driven play calls
+        # (rate = CIA1 timer A latch, programmed by the tune's init). Only
+        # meaningful for PSID; RSIDs run their own interrupt environment.
+        bit = min(song_num, 31)
+        self._sid_cia = (data[:4] == b"PSID"
+                         and bool((self._sid_speed_mask >> bit) & 1))
+        self._sid_play_countdown = 0
         self.cpu.a = song_num & 0xFF
         self.cpu.x = 0
         self.cpu.y = 0
@@ -4301,12 +4545,42 @@ class System:
                 "name": name, "author": author, "released": released}
 
     def sid_play_tick(self):
-        """If a SID tune is active, call its Play routine once (one frame)."""
+        """If a SID tune is active, call its Play routine once (one frame).
+        No-op for CIA-driven multispeed tunes: sid_run() schedules those."""
         addr = getattr(self, "_sid_play_addr", 0)
-        if addr:
+        if addr and not getattr(self, "_sid_cia", False):
             self.call_routine(addr)
             if self._sid_idle_addr:
                 self.cpu.pc = self._sid_idle_addr    # back to the idle loop
+
+    def sid_run(self, n_cycles):
+        """Run n_cycles; for CIA-timer (multispeed) PSIDs, interleave play
+        calls at the rate given by the CIA1 timer A latch — read live, so
+        tunes may retune their speed mid-song. The play routine's own cycles
+        count against the budget (at 4x+ they matter). Thanks to the SID's
+        timestamped write queue, each call's register writes land sample-
+        accurately inside the frame."""
+        if (not getattr(self, "_sid_cia", False)
+                or not getattr(self, "_sid_play_addr", 0)):
+            return self.run(n_cycles)
+        budget = n_cycles
+        while budget > 0:
+            if self._sid_play_countdown <= 0:
+                c0 = self.cpu.cycles
+                self.call_routine(self._sid_play_addr)
+                if self._sid_idle_addr:
+                    self.cpu.pc = self._sid_idle_addr
+                used = self.cpu.cycles - c0
+                per = self.cia1.timer_a_latch
+                if not (500 <= per <= 30000):
+                    per = 16421              # KERNAL default: ~60 Hz
+                self._sid_play_countdown = max(per - used, 1)
+                budget -= used
+                continue
+            step = min(budget, self._sid_play_countdown)
+            self.run(step)
+            self._sid_play_countdown -= step
+            budget -= step
 
     # ---------- D64 disk image + KERNAL LOAD trap ----------
 
@@ -5584,11 +5858,11 @@ class PygameFrontend:
         if lines1 == 0:
             lines1 = vic.LINES_PER_FRAME
         cyc1 = lines1 * vic.CYCLES_PER_LINE
-        self.system.run(cyc1)
+        self.system.sid_run(cyc1)
         if self.audio_enabled:
             self._push_audio()
         self.render_frame()
-        self.system.run(self.CYCLES_PER_FRAME - cyc1)
+        self.system.sid_run(self.CYCLES_PER_FRAME - cyc1)
 
     def _compose_pixels(self):
         """Build the 200x320x3 inner display as a numpy array (no pygame) and
@@ -6077,6 +6351,61 @@ class PygameFrontend:
                           f"{bin(got ^ want).count('1')} px differ")
         return (bad_lines, bad_pixels)
 
+    def _flicker_diag(self):
+        """F10 flicker diagnosis: capture the next 6 rendered frames as
+        PNGs plus a per-frame census of all VIC register writes (register,
+        raster, cycle, value) into pit_diag_*.png / pit_diag_census.txt in
+        the current directory — made for hunting frame-alternating
+        artefacts while playing."""
+        import numpy as np
+        vic = self.system.vic
+        frames = []
+        census = []
+        # align to a frame boundary first so EVERY captured frame carries a
+        # complete census (a mid-frame start truncates frame 0's data).
+        while vic.raster != 0:
+            self.system.sid_run(vic.CYCLES_PER_LINE)
+        orig = vic.write
+        def hook(off, val):
+            o = off & 0x3F
+            if o <= 0x2E:
+                census.append((len(frames), o, vic.raster,
+                               vic._line_cycles, val))
+            return orig(off, val)
+        vic.write = hook
+        try:
+            for f in range(12):
+                lines1 = ((self.RENDER_RASTER - vic.raster)
+                          % vic.LINES_PER_FRAME or vic.LINES_PER_FRAME)
+                self.system.sid_run(lines1 * vic.CYCLES_PER_LINE)
+                frames.append(np.array(self.render_to_array(), copy=True))
+                self.system.sid_run(self.CYCLES_PER_FRAME
+                                    - lines1 * vic.CYCLES_PER_LINE)
+        finally:
+            vic.write = orig
+        import os, sys
+        base = os.path.dirname(os.path.abspath(sys.argv[0])) or "."
+        try:
+            from PIL import Image
+            for i, fr in enumerate(frames):
+                Image.fromarray(fr).save(
+                    os.path.join(base, f"pit_diag_{i}.png"))
+        except Exception:
+            for i, fr in enumerate(frames):
+                np.save(os.path.join(base, f"pit_diag_{i}.npy"), fr)
+        with open(os.path.join(base, "pit_diag_census.txt"), "w") as f:
+            f.write("frame reg raster cyc val\n")
+            for e in census:
+                f.write(f"{e[0]} D0{e[1]:02X} {e[2]} {e[3]} ${e[4]:02X}\n")
+            for i in range(1, len(frames)):
+                d = (frames[i] != frames[i-1]).any(axis=2)
+                rows = np.where(d.any(axis=1))[0]
+                f.write(f"# diff F{i-1}->F{i}: {d.mean()*100:.2f}% "
+                        f"Zeilen {rows.min() if len(rows) else '-'}"
+                        f"..{rows.max() if len(rows) else '-'}\n")
+        print(f"Flicker-Diagnose geschrieben nach: {base}"
+              f"{os.sep}pit_diag_0..11.png + pit_diag_census.txt")
+
     def _sprite_diag_dump(self):
         """F10: print a full sprite + collision snapshot to the console.
 
@@ -6218,6 +6547,7 @@ class PygameFrontend:
                         continue
                     if event.key == self.pygame.K_F10:
                         self._sprite_diag_dump()
+                        self._flicker_diag()
                         continue
                     if event.key in (self.pygame.K_KP0, self.pygame.K_F9):
                         # Cycle the keypad joystick: Port 2 → Port 1 → Both.
@@ -7329,7 +7659,7 @@ def _run_lorenz_suite(directory="lorenz", budget=120_000_000, max_tests=0,
 
 
 def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
-                  save_only=False, align=3, fgcheck=False):
+                  save_only=False, align=3, fgcheck=False, cycle=False):
     """Run one VIC-II test PRG (or every *.prg under a directory), render a
     frame, save it, and compare against references/<name>.png if present.
     Returns True if nothing scored below the threshold."""
@@ -7380,7 +7710,12 @@ def _run_vic_test(path, frames=20, out_dir="victest_out", threshold=95.0,
     for prg in prgs:
         name = os.path.basename(prg)
         sysm = System(verbose=False)
-        sysm.run(3_000_000)                     # boot to READY
+        sysm.run(3_000_000)                     # boot to READY (batch: fast)
+        if cycle:
+            # switch to the per-PHI2 clock for the measured frames only —
+            # boot in batch mode keeps the suite affordable.
+            sysm.cycle_accurate = True
+            sysm.vic._bl_defer = True
         try:
             load_addr, _len, is_basic = sysm.load_prg(prg)
         except Exception as ex:
@@ -7594,6 +7929,7 @@ def main():
             save_only=("--save-only" in args),
             fgcheck=("--fgcheck" in args),
             align=_vopt("--align", 3, int),
+            cycle=("--cycle" in args),
         )
         sys.exit(0 if ok else 1)
 
