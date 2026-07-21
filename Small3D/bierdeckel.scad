@@ -7,7 +7,7 @@
 
 /* [Grundmasse] */
 coaster_d      = 100;   // Aussendurchmesser (mm)
-coaster_h      = 3;     // Dicke (mm)
+coaster_h      = 4;     // Dicke (mm)
 border         = 6;     // Rand Kunst..Kante (mm)
 
 /* [Kanten] */

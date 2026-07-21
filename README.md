@@ -1,2 +1,4 @@
 # SmallCircuits
-Small Cicruits zwieselbrau.de ITZwieseltal.de
+Small Cicruits
+http://zwieselbrau.de
+https://itzwieseltal.wordpress.com/
