@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmallGPT — Transformer-Engine im Browser</title>
+<style>
+  :root{
+    --bg:#0a0f0d;
+    --panel:#0e1512;
+    --panel-alt:#0b100e;
+    --border:#1e2f27;
+    --text:#c9f2da;
+    --muted:#5d7c6b;
+    --accent:#3ee08a;
+    --accent-dim:#1f6b46;
+    --amber:#ffb454;
+    --red:#ff6b6b;
+    --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, "Courier New", monospace;
+  }
+
+  *{ box-sizing:border-box; }
+
+  html,body{
+    margin:0; padding:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--mono);
+    font-size:14px;
+    line-height:1.5;
+  }
+
+  .scanlines{
+    position:fixed; inset:0; pointer-events:none; z-index:50;
+    background:repeating-linear-gradient(
+      to bottom,
+      rgba(255,255,255,0.018) 0px,
+      rgba(255,255,255,0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    );
+    mix-blend-mode:overlay;
+  }
+  @media (prefers-reduced-motion: reduce){
+    .scanlines{ display:none; }
+  }
+
+  header{
+    border-bottom:1px solid var(--border);
+    padding:18px 24px;
+    display:flex; flex-direction:column; gap:4px;
+  }
+  header h1{
+    margin:0; font-size:18px; font-weight:600; letter-spacing:0.02em;
+    color:var(--accent);
+  }
+  header h1 .cursor{
+    display:inline-block; width:8px; height:16px; background:var(--accent);
+    margin-left:6px; vertical-align:-2px;
+    animation:blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink{ 50%{ opacity:0; } }
+  @media (prefers-reduced-motion: reduce){
+    header h1 .cursor{ animation:none; }
+  }
+  header p{
+    margin:0; color:var(--muted); font-size:12px;
+  }
+
+  .layout{
+    display:grid;
+    grid-template-columns: 320px 1fr 360px;
+    gap:1px;
+    background:var(--border);
+  }
+  @media (max-width:1100px){
+    .layout{ grid-template-columns: 1fr; }
+  }
+
+  .panel{
+    background:var(--panel);
+    padding:16px 18px;
+  }
+  .panel h2{
+    margin:0 0 12px 0;
+    font-size:11px;
+    letter-spacing:0.12em;
+    text-transform:uppercase;
+    color:var(--muted);
+    border-bottom:1px dashed var(--border);
+    padding-bottom:8px;
+  }
+
+  .reg-row{
+    display:flex; justify-content:space-between;
+    padding:3px 0; font-size:12.5px;
+    border-bottom:1px solid var(--panel-alt);
+  }
+  .reg-row span:first-child{ color:var(--muted); }
+  .reg-row span:last-child{ color:var(--accent); }
+
+  button{
+    font-family:var(--mono);
+    background:var(--panel-alt);
+    color:var(--text);
+    border:1px solid var(--border);
+    padding:8px 12px;
+    font-size:12.5px;
+    cursor:pointer;
+    letter-spacing:0.02em;
+  }
+  button:hover{ border-color:var(--accent-dim); color:var(--accent); }
+  button:active{ transform:translateY(1px); }
+  button:disabled{ opacity:0.4; cursor:not-allowed; }
+  button.primary{ border-color:var(--accent-dim); color:var(--accent); }
+
+  textarea, input[type=number]{
+    font-family:var(--mono);
+    background:var(--panel-alt);
+    color:var(--text);
+    border:1px solid var(--border);
+    padding:8px;
+    width:100%;
+  }
+  textarea{ resize:vertical; min-height:64px; font-size:13px; }
+  input[type=range]{ width:100%; accent-color:var(--accent); }
+  select{
+    font-family:var(--mono);
+    background:var(--panel-alt);
+    color:var(--text);
+    border:1px solid var(--border);
+    padding:4px 6px;
+  }
+
+  .controls{ display:flex; flex-direction:column; gap:10px; margin:12px 0; }
+  .controls label{ display:flex; flex-direction:column; gap:4px; font-size:11.5px; color:var(--muted); }
+  .controls label.inline{ flex-direction:row; align-items:center; gap:6px; }
+
+  .buttons{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+
+  .terminal-output{
+    background:var(--panel-alt);
+    border:1px solid var(--border);
+    padding:10px;
+    min-height:140px;
+    max-height:280px;
+    overflow-y:auto;
+    font-size:13px;
+    white-space:pre-wrap;
+    word-break:break-word;
+  }
+  .terminal-output .prompt-part{ color:var(--muted); }
+  .terminal-output .gen-part{ color:var(--accent); }
+  .terminal-output .turn-sep{ color:var(--border); display:block; margin:6px 0; }
+
+  #log{
+    margin:0;
+    font-size:11.5px;
+    line-height:1.55;
+    max-height:520px;
+    overflow-y:auto;
+    white-space:pre-wrap;
+    word-break:break-word;
+    color:var(--text);
+  }
+  #log .step{ color:var(--amber); }
+  #log .mut{ color:var(--muted); }
+
+  .attn-controls{ display:flex; gap:14px; margin-bottom:10px; }
+  .attn-controls label{ display:flex; gap:6px; align-items:center; font-size:11.5px; color:var(--muted); }
+
+  .attn-grid{
+    display:grid;
+    gap:2px;
+    border:1px solid var(--border);
+    padding:2px;
+    background:var(--panel-alt);
+  }
+  .attn-cell{
+    aspect-ratio:1/1;
+    background:#0a0f0d;
+  }
+  .attn-axis{
+    display:flex; justify-content:space-between;
+    font-size:9.5px; color:var(--muted); margin-top:4px;
+  }
+
+  footer{
+    border-top:1px solid var(--border);
+    padding:14px 24px;
+    color:var(--muted);
+    font-size:11px;
+  }
+  footer strong{ color:var(--amber); font-weight:600; }
+
+  .explainer{
+    border-bottom:1px solid var(--border);
+    padding:16px 24px 20px;
+    background:var(--panel-alt);
+  }
+  .explainer p{ margin:0 0 10px; color:var(--text); font-size:12.5px; max-width:900px; }
+  .explainer p:last-child{ margin-bottom:0; }
+  .pipeline{
+    display:flex; flex-wrap:wrap; gap:0; align-items:stretch;
+    margin:14px 0 6px;
+  }
+  .pipeline .step-box{
+    border:1px solid var(--border);
+    padding:8px 12px;
+    font-size:11.5px;
+    min-width:110px;
+    display:flex; flex-direction:column; gap:3px;
+  }
+  .pipeline .step-box b{ color:var(--accent); font-size:12px; }
+  .pipeline .step-box span{ color:var(--muted); }
+  .pipeline .arrow{
+    display:flex; align-items:center; justify-content:center;
+    color:var(--muted); padding:0 8px; font-size:14px;
+  }
+  @media (max-width:900px){
+    .pipeline{ flex-direction:column; }
+    .pipeline .arrow{ transform:rotate(90deg); padding:2px 0; }
+  }
+
+  .caption{
+    font-size:11px; color:var(--muted); margin:-6px 0 12px; line-height:1.5;
+  }
+</style>
+</head>
+<body>
+
+<div class="scanlines"></div>
+
+<header>
+  <h1>SmallGPT<span class="cursor"></span></h1>
+  <p>Ein Transformer, Schritt für Schritt — reines JavaScript, keine Bibliotheken, ein einziges HTML-File.</p>
+</header>
+
+<div class="explainer">
+  <p>
+    Ein GPT ist im Kern eine Kette aus Rechenschritten, die aus Text Zahlen macht, diese Zahlen
+    mehrfach durchmischt und am Ende wieder in Wahrscheinlichkeiten für das nächste Zeichen
+    zurückverwandelt. Kein Zauber, nur Matrizen-Multiplikationen. Der Ablauf unten zeigt die
+    Stationen, die jeder eingegebene Text hier durchläuft:
+  </p>
+  <div class="pipeline">
+    <div class="step-box"><b>1. Tokenize</b><span>Text → Zahlen-IDs (ein Zeichen = eine Zahl)</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>2. Embedding</b><span>Jede ID → Vektor mit 48 Zahlen, + Positions-Info</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>3. Attention</b><span>Jedes Zeichen schaut auf frühere Zeichen: "was ist wichtig?"</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>4. Feed-Forward</b><span>Verarbeitet, was Attention gesammelt hat</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>5. Wiederholen</b><span>Schritt 3+4 laufen 3x hintereinander (3 Layer)</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>6. Logits</b><span>Vektor → Wahrscheinlichkeit für jedes mögliche Zeichen</span></div>
+    <div class="arrow">→</div>
+    <div class="step-box"><b>7. Sampling</b><span>Ein Zeichen wird gewürfelt, angehängt, alles wiederholt</span></div>
+  </div>
+  <p>
+    Wichtig: Die Gewichte (also alle Zahlen, die diese Schritte steuern) sind hier
+    <strong style="color:var(--amber);">zufällig</strong> gewürfelt, nicht trainiert. Die Architektur
+    ist identisch zu einem echten GPT — nur hat dieses Modell noch nichts gelernt, deshalb kommt
+    bei "Generieren" Buchstabensalat heraus. Zum Nachvollziehen, was intern passiert: rechts unten
+    "Forward-Pass analysieren" klicken, dann Schritt für Schritt im Log mitlesen.
+  </p>
+</div>
+
+<div class="layout">
+
+  <!-- KONFIGURATION -->
+  <section class="panel">
+    <h2>Modell-Register</h2>
+    <p class="caption">Die "Stellschrauben" des Modells — wie groß die Vektoren sind, wie viele
+    Attention-Köpfe und Layer es gibt. Das bestimmt, wie fein das Modell rechnen kann (mehr Layer/Dim
+    = mehr Rechenkapazität, aber auch mehr Zufallsgewichte).</p>
+    <div id="configDump"></div>
+    <div class="buttons" style="margin-top:14px;">
+      <button id="reinitBtn">Gewichte neu würfeln</button>
+    </div>
+    <h2 style="margin-top:18px;">Hinweis</h2>
+    <p style="font-size:11.5px; color:var(--muted); margin:0;">
+      Es werden <strong style="color:var(--amber);">zufällig initialisierte</strong> Gewichte verwendet —
+      echte GPT-2-Gewichte von Hugging Face laden lässt sich in einer einzelnen HTML-Datei ohne
+      PyTorch-Backend nicht seriös nachbilden. Architektur und Rechenweg sind aber 1:1 identisch
+      zum Python-Original: Embeddings, Multi-Head-Attention, Feed-Forward, Layer-Norm, Softmax.
+      Ergebnis: sinnvolle Berechnungen, aber (noch) kein trainiertes Sprachverständnis.
+    </p>
+  </section>
+
+  <!-- CHAT / GENERIERUNG -->
+  <section class="panel">
+    <h2>Eingabe &amp; Generierung</h2>
+    <p class="caption"><b style="color:var(--amber);">Generieren</b>: Modell hängt Zeichen für
+    Zeichen an deinen Text an (autoregressiv, wie ein sehr ungeduldiges Textvorschlags-Feature).
+    <b style="color:var(--amber);">Forward-Pass analysieren</b>: berechnet nur <em>einmal</em>
+    die Wahrscheinlichkeiten für das nächste Zeichen, zeigt dabei aber jeden Zwischenschritt im Log.
+    Temperatur steuert, wie "mutig" gewürfelt wird — niedrig = eher das wahrscheinlichste Zeichen,
+    hoch = mehr Zufall/Chaos.</p>
+    <textarea id="promptInput" placeholder="Text eingeben, z.B. &quot;Hallo Welt&quot;…">Der C64 rechnet</textarea>
+
+    <div class="controls">
+      <label>Temperatur: <span id="tempVal">0.9</span>
+        <input type="range" id="tempSlider" min="0.1" max="2.0" step="0.1" value="0.9">
+      </label>
+      <label>Neue Tokens
+        <input type="number" id="maxTokens" min="1" max="120" value="40">
+      </label>
+      <label class="inline"><input type="checkbox" id="verboseGen"> Verbose bei Generierung (jeden Schritt loggen)</label>
+    </div>
+
+    <div class="buttons">
+      <button class="primary" id="genBtn">▶ Generieren</button>
+      <button id="analyseBtn">Forward-Pass analysieren</button>
+      <button id="clearBtn">Ausgabe löschen</button>
+    </div>
+
+    <div id="output" class="terminal-output"></div>
+  </section>
+
+  <!-- LOG + ATTENTION -->
+  <section class="panel">
+    <h2>Berechnungs-Log</h2>
+    <p class="caption">Protokoll der einzelnen Rechenschritte aus dem letzten Durchlauf — Formeln
+    wie im Original (softmax, gelu, layer_norm, Attention) mit den tatsächlichen Matrix-Formen
+    und Mittelwerten, die dabei entstehen.</p>
+    <pre id="log">(noch keine Berechnung durchgeführt)</pre>
+
+    <h2 style="margin-top:16px;">Attention-Matrix</h2>
+    <p class="caption">Jede Zelle zeigt, wie stark ein Zeichen (Zeile) beim Rechnen auf ein
+    früheres Zeichen (Spalte) "schaut" — je heller Grün, desto mehr Gewicht. Da noch nicht trainiert
+    wurde, sind diese Muster zufällig; bei einem echten GPT erkennt man hier oft sinnvolle Bezüge,
+    z.B. ein Wort das auf das vorherige Substantiv achtet. Layer/Head oben umschalten zum Vergleichen.</p>
+    <div class="attn-controls">
+      <label>Layer <select id="layerSel"></select></label>
+      <label>Head <select id="headSel"></select></label>
+    </div>
+    <div id="attnGrid" class="attn-grid"></div>
+    <div class="attn-axis"><span>Query-Position →</span><span>Key-Position</span></div>
+  </section>
+
+</div>
+
+<footer>
+  Nachgebaut nach <strong>SmallGPT</strong> (NumPy-Original) — Architektur, Formeln und Reihenfolge
+  der Berechnungsschritte sind bewusst identisch gehalten, damit sich Python- und JS-Version
+  Zeile für Zeile vergleichen lassen.
+</footer>
+
+<script>
+"use strict";
+
+// =============================================================================
+// KONFIGURATION
+// =============================================================================
+const CONFIG = {
+  embDim: 48,
+  numHeads: 4,
+  numLayers: 3,
+  maxSeqLen: 128,
+};
+CONFIG.headDim = CONFIG.embDim / CONFIG.numHeads;
+CONFIG.hiddenDim = 4 * CONFIG.embDim;
+
+// =============================================================================
+// TOKENIZER (zeichenbasiert — GPT-2 nutzt eigentlich Byte-Pair-Encoding,
+// das lässt sich ohne die HF-Tokenizer-Bibliothek nicht sauber nachbauen.
+// Für die Demo reicht ein einfacher Zeichen-Tokenizer völlig aus.)
+// =============================================================================
+const CHARSET = " \n\t!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyzäöüÄÖÜß{|}~";
+const CHAR_LIST = Array.from(CHARSET);
+const VOCAB_SIZE = CHAR_LIST.length + 1; // +1 für EOS
+const EOS_ID = CHAR_LIST.length;
+CONFIG.vocabSize = VOCAB_SIZE;
+
+const CHAR_TO_ID = new Map();
+CHAR_LIST.forEach((c, i) => CHAR_TO_ID.set(c, i));
+
+function encode(text) {
+  const ids = [];
+  for (const ch of Array.from(text)) {
+    ids.push(CHAR_TO_ID.has(ch) ? CHAR_TO_ID.get(ch) : CHAR_TO_ID.get(" "));
+  }
+  return ids;
+}
+function decode(ids) {
+  return ids
+    .filter((id) => id !== EOS_ID)
+    .map((id) => (id < CHAR_LIST.length ? CHAR_LIST[id] : ""))
+    .join("");
+}
+
+// =============================================================================
+// PRNG (mulberry32) — reproduzierbare Zufallsgewichte statt Math.random()
+// =============================================================================
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function randn(rng) {
+  // Box-Muller
+  let u = 0, v = 0;
+  while (u === 0) u = rng();
+  while (v === 0) v = rng();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+// =============================================================================
+// MATRIX-HILFSFUNKTIONEN
+// Für batch_size=1 reicht ein 2D-Array [seq_len, dim] statt echter Tensoren.
+// =============================================================================
+function zerosVec(n) { return new Array(n).fill(0); }
+function onesVec(n) { return new Array(n).fill(1); }
+
+function initMatrix(rows, cols, std, rng) {
+  const m = [];
+  for (let i = 0; i < rows; i++) {
+    const row = new Array(cols);
+    for (let j = 0; j < cols; j++) row[j] = randn(rng) * std;
+    m.push(row);
+  }
+  return m;
+}
+
+function transpose(A) {
+  const rows = A.length, cols = A[0].length;
+  const T = [];
+  for (let j = 0; j < cols; j++) {
+    const row = new Array(rows);
+    for (let i = 0; i < rows; i++) row[i] = A[i][j];
+    T.push(row);
+  }
+  return T;
+}
+
+function matmul(A, B) {
+  const r = A.length, k = A[0].length, c = B[0].length;
+  const out = [];
+  for (let i = 0; i < r; i++) {
+    const row = new Array(c).fill(0);
+    const Ai = A[i];
+    for (let p = 0; p < k; p++) {
+      const a = Ai[p];
+      if (a === 0) continue;
+      const Bp = B[p];
+      for (let j = 0; j < c; j++) row[j] += a * Bp[j];
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+function addBias(A, bias) {
+  return A.map((row) => row.map((v, j) => v + bias[j]));
+}
+function addMatrices(A, B) {
+  return A.map((row, i) => row.map((v, j) => v + B[i][j]));
+}
+function scaleMatrix(A, s) {
+  return A.map((row) => row.map((v) => v * s));
+}
+function meanOf(A) {
+  let s = 0, n = 0;
+  for (const row of A) for (const v of row) { s += v; n++; }
+  return n ? s / n : 0;
+}
+
+// =============================================================================
+// HILFSFUNKTIONEN (analog softmax / gelu / layer_norm / linear aus dem Original)
+// =============================================================================
+function softmaxRows(A, log) {
+  if (log) log.write(`    softmax: Input-Form [${A.length}x${A[0].length}]`, "mut");
+  const out = A.map((row) => {
+    const max = Math.max(...row);
+    const exps = row.map((v) => Math.exp(v - max));
+    const sum = exps.reduce((a, b) => a + b, 0);
+    return exps.map((v) => v / sum);
+  });
+  if (log) log.write(`    softmax: Wahrscheinlichkeiten summieren zu ~1.0000`, "mut");
+  return out;
+}
+
+function gelu(A, log) {
+  if (log) log.write(`    gelu: Input-Form [${A.length}x${A[0].length}], Mittelwert ${meanOf(A).toFixed(4)}`, "mut");
+  const out = A.map((row) =>
+    row.map((x) => 0.5 * x * (1 + Math.tanh(Math.sqrt(2 / Math.PI) * (x + 0.044715 * x ** 3))))
+  );
+  if (log) log.write(`    gelu: Output-Mittelwert ${meanOf(out).toFixed(4)}`, "mut");
+  return out;
+}
+
+function layerNorm(x, gamma, beta, log) {
+  if (log) log.write(`    layer_norm: Input-Form [${x.length}x${x[0].length}]`, "mut");
+  const out = x.map((row) => {
+    const mean = row.reduce((a, b) => a + b, 0) / row.length;
+    const variance = row.reduce((a, b) => a + (b - mean) ** 2, 0) / row.length;
+    const norm = row.map((v) => (v - mean) / Math.sqrt(variance + 1e-5));
+    return norm.map((v, j) => v * gamma[j] + beta[j]);
+  });
+  if (log) log.write(`    layer_norm: Mittelwert nach Norm ${meanOf(out).toFixed(4)}`, "mut");
+  return out;
+}
+
+function linear(x, W, b, log) {
+  const Wt = transpose(W);
+  if (log) log.write(`    linear: [${x.length}x${x[0].length}] @ [${Wt.length}x${Wt[0].length}] = [${x.length}x${Wt[0].length}]`, "mut");
+  let out = matmul(x, Wt);
+  if (b) out = addBias(out, b);
+  return out;
+}
+
+// =============================================================================
+// MULTI-HEAD ATTENTION
+// Attention(Q,K,V) = softmax(Q·K^T / sqrt(d_k))·V
+//   Q (Query): "Wonach suche ich?"   K (Key): "Was biete ich an?"   V (Value): "Was ist mein Inhalt?"
+// =============================================================================
+class MultiHeadAttention {
+  constructor(embDim, numHeads) {
+    this.embDim = embDim;
+    this.numHeads = numHeads;
+    this.headDim = embDim / numHeads;
+  }
+
+  splitHeads(x) {
+    const heads = [];
+    for (let h = 0; h < this.numHeads; h++) {
+      heads.push(x.map((row) => row.slice(h * this.headDim, (h + 1) * this.headDim)));
+    }
+    return heads;
+  }
+
+  mergeHeads(heads) {
+    const seqLen = heads[0].length;
+    const out = [];
+    for (let i = 0; i < seqLen; i++) {
+      let row = [];
+      for (const h of heads) row = row.concat(h[i]);
+      out.push(row);
+    }
+    return out;
+  }
+
+  forward(x, p, causalMask, log) {
+    if (log) log.write(`  MultiHeadAttention: Input [${x.length}x${x[0].length}]`, "step");
+
+    const q = linear(x, p.wq, p.bq, log);
+    const k = linear(x, p.wk, p.bk, log);
+    const v = linear(x, p.wv, p.bv, log);
+
+    const qHeads = this.splitHeads(q);
+    const kHeads = this.splitHeads(k);
+    const vHeads = this.splitHeads(v);
+
+    const attnWeightsPerHead = [];
+    const outHeads = [];
+    for (let h = 0; h < this.numHeads; h++) {
+      let scores = matmul(qHeads[h], transpose(kHeads[h]));
+      scores = scaleMatrix(scores, 1 / Math.sqrt(this.headDim));
+      scores = addMatrices(scores, causalMask);
+      const weights = softmaxRows(scores);
+      attnWeightsPerHead.push(weights);
+      outHeads.push(matmul(weights, vHeads[h]));
+    }
+
+    if (log) log.write(`  Attention Weights berechnet (${this.numHeads} Heads, causal maskiert)`, "mut");
+
+    const merged = this.mergeHeads(outHeads);
+    const output = linear(merged, p.wo, p.bo, log);
+
+    if (log) log.write(`  MultiHeadAttention Output: [${output.length}x${output[0].length}]`, "step");
+    return { output, attnWeightsPerHead };
+  }
+}
+
+// =============================================================================
+// FEED-FORWARD NETZWERK
+// Wenn Attention bestimmt *welche* Tokens relevant sind, verarbeitet
+// FeedForward *was* damit zu tun ist — hier steckt das "Wissen".
+// =============================================================================
+class FeedForward {
+  forward(x, p, log) {
+    if (log) log.write(`  FeedForward: Input [${x.length}x${x[0].length}]`, "step");
+    let hidden = linear(x, p.w1, p.b1, log);
+    hidden = gelu(hidden, log);
+    const out = linear(hidden, p.w2, p.b2, log);
+    if (log) log.write(`  FeedForward Output: [${out.length}x${out[0].length}]`, "step");
+    return out;
+  }
+}
+
+// =============================================================================
+// TRANSFORMER BLOCK
+// Schritt 1: layer_norm  Schritt 2: Attention (+Residual)
+// Schritt 3: layer_norm  Schritt 4: FeedForward (+Residual)
+// =============================================================================
+class TransformerBlock {
+  constructor(embDim, numHeads) {
+    this.attention = new MultiHeadAttention(embDim, numHeads);
+    this.ffn = new FeedForward();
+  }
+
+  forward(x, p, causalMask, log) {
+    if (log) log.write(` Schritt 1: layer_norm()`, "step");
+    const normed = layerNorm(x, p.ln1g, p.ln1b, log);
+
+    if (log) log.write(` Schritt 2: MultiHeadAttention()`, "step");
+    const { output: attnOut, attnWeightsPerHead } = this.attention.forward(normed, p, causalMask, log);
+    x = addMatrices(x, attnOut);
+    if (log) log.write(` Residual: x = x + attention_out -> [${x.length}x${x[0].length}]`, "mut");
+
+    if (log) log.write(` Schritt 3: layer_norm()`, "step");
+    const normed2 = layerNorm(x, p.ln2g, p.ln2b, log);
+
+    if (log) log.write(` Schritt 4: FeedForward()`, "step");
+    const ffnOut = this.ffn.forward(normed2, p, log);
+    x = addMatrices(x, ffnOut);
+    if (log) log.write(` Residual: x = x + ffn_out -> [${x.length}x${x[0].length}]`, "mut");
+
+    return { x, attnWeightsPerHead };
+  }
+}
+
+// =============================================================================
+// SMALLGPT MODELL
+// =============================================================================
+class SmallGPT {
+  constructor(cfg, seed) {
+    this.cfg = cfg;
+    this.blocks = [];
+    for (let l = 0; l < cfg.numLayers; l++) this.blocks.push(new TransformerBlock(cfg.embDim, cfg.numHeads));
+    this.initParams(seed);
+  }
+
+  initParams(seed) {
+    const rng = mulberry32(seed);
+    const { embDim: d, vocabSize: v, hiddenDim: hd, maxSeqLen: ml, numLayers } = this.cfg;
+
+    this.params = {
+      tokenEmb: initMatrix(v, d, 0.02, rng),
+      posEmb: initMatrix(ml, d, 0.02, rng),
+      lnFinalGamma: onesVec(d),
+      lnFinalBeta: zerosVec(d),
+      outputB: zerosVec(v),
+      layers: [],
+    };
+    for (let l = 0; l < numLayers; l++) {
+      this.params.layers.push({
+        ln1g: onesVec(d), ln1b: zerosVec(d),
+        ln2g: onesVec(d), ln2b: zerosVec(d),
+        wq: initMatrix(d, d, 0.02, rng), bq: zerosVec(d),
+        wk: initMatrix(d, d, 0.02, rng), bk: zerosVec(d),
+        wv: initMatrix(d, d, 0.02, rng), bv: zerosVec(d),
+        wo: initMatrix(d, d, 0.02, rng), bo: zerosVec(d),
+        w1: initMatrix(hd, d, 0.02, rng), b1: zerosVec(hd),
+        w2: initMatrix(d, hd, 0.02, rng), b2: zerosVec(d),
+      });
+    }
+    // Weight Tying: Output-Projektion teilt sich die Matrix mit token_emb
+    this.params.outputW = this.params.tokenEmb;
+  }
+
+  createCausalMask(seqLen, log) {
+    const mask = [];
+    let blocked = 0;
+    for (let i = 0; i < seqLen; i++) {
+      const row = new Array(seqLen);
+      for (let j = 0; j < seqLen; j++) {
+        row[j] = j > i ? -1e9 : 0;
+        if (j > i) blocked++;
+      }
+      mask.push(row);
+    }
+    if (log) log.write(` Causal Mask erstellt: [${seqLen}x${seqLen}], ${blocked} von ${seqLen * seqLen} Positionen blockiert`, "mut");
+    return mask;
+  }
+
+  forward(tokenIds, log) {
+    const seqLen = tokenIds.length;
+    if (log) {
+      log.write(`==============================`, "step");
+      log.write(`FORWARD PASS (${seqLen} Tokens)`, "step");
+      log.write(`==============================`, "step");
+    }
+
+    // [1] Token Embeddings
+    let x = tokenIds.map((id) => this.params.tokenEmb[id].slice());
+    if (log) {
+      log.write(`[1] Token Embeddings: IDs -> Vektoren [${x.length}x${x[0].length}]`, "step");
+      log.write(`    (jedes Zeichen wird zu einem Vektor mit ${x[0].length} Zahlen — eine Art "Bedeutungs-Fingerabdruck")`, "mut");
+    }
+
+    // [2] Positional Embeddings
+    x = x.map((row, i) => row.map((val, j) => val + this.params.posEmb[i][j]));
+    if (log) {
+      log.write(`[2] Positional Embeddings addiert — Form unverändert [${x.length}x${x[0].length}]`, "step");
+      log.write(`    (ohne das wüsste das Modell nicht, in welcher Reihenfolge die Zeichen stehen)`, "mut");
+    }
+
+    // [3] Causal Mask
+    if (log) log.write(`[3] Causal Mask (verhindert Blick in die Zukunft — Zeichen Nr. i darf nur Nr. 0..i sehen):`, "step");
+    const causalMask = this.createCausalMask(seqLen, log);
+
+    // [4] Transformer-Blöcke
+    const allAttnWeights = [];
+    for (let l = 0; l < this.blocks.length; l++) {
+      if (log) log.write(`[4.${l + 1}] Transformer Block ${l + 1}/${this.blocks.length}:`, "step");
+      const res = this.blocks[l].forward(x, this.params.layers[l], causalMask, log);
+      x = res.x;
+      allAttnWeights.push(res.attnWeightsPerHead);
+    }
+
+    // [5] Finale Layer Norm
+    if (log) log.write(`[5] Finale Layer Norm (skaliert die Werte noch einmal auf ein einheitliches Maß):`, "step");
+    x = layerNorm(x, this.params.lnFinalGamma, this.params.lnFinalBeta, log);
+
+    // [6] Output-Projektion
+    const logits = linear(x, this.params.outputW, this.params.outputB, log);
+    if (log) {
+      log.write(`[6] Output-Projektion: [${x.length}x${x[0].length}] -> Logits [${logits.length}x${logits[0].length}]`, "step");
+      log.write(`    (pro Zeichen-Position ${logits[0].length} rohe Werte — je einer pro möglichem nächsten Zeichen; Softmax macht daraus Wahrscheinlichkeiten)`, "mut");
+    }
+
+    return { logits, allAttnWeights };
+  }
+
+  generate(startTokens, maxNewTokens, temperature, rngFn, log) {
+    let tokens = startTokens.slice();
+    let lastAttn = null;
+
+    for (let step = 0; step < maxNewTokens; step++) {
+      if (tokens.length >= this.cfg.maxSeqLen) {
+        if (log) log.write(`(Kontextfenster erreicht — Generierung gestoppt)`, "mut");
+        break;
+      }
+      if (log) log.write(`--- Generierungs-Schritt ${step + 1} (Kontext: ${tokens.length} Tokens) ---`, "step");
+
+      const { logits, allAttnWeights } = this.forward(tokens, log);
+      lastAttn = allAttnWeights;
+
+      const lastLogits = logits[logits.length - 1].map((v) => v / temperature);
+      const probs = softmaxRows([lastLogits])[0];
+
+      const nextId = sampleFromDist(probs, rngFn);
+      if (log) {
+        const ch = nextId < CHAR_LIST.length ? CHAR_LIST[nextId] : "<EOS>";
+        log.write(`Gewähltes Token: '${ch === "\n" ? "\\n" : ch}' (p=${probs[nextId].toFixed(4)})`, "mut");
+      }
+
+      tokens.push(nextId);
+      if (nextId === EOS_ID) break;
+    }
+    return { tokens, lastAttn };
+  }
+}
+
+function sampleFromDist(probs, rngFn) {
+  const r = rngFn();
+  let cum = 0;
+  for (let i = 0; i < probs.length; i++) {
+    cum += probs[i];
+    if (r <= cum) return i;
+  }
+  return probs.length - 1;
+}
+
+// =============================================================================
+// LOGGER (schreibt ins UI-Panel statt in die Konsole)
+// =============================================================================
+class Logger {
+  constructor(el) {
+    this.el = el;
+    this.buffer = [];
+  }
+  clear() {
+    this.buffer = [];
+    this.el.textContent = "";
+  }
+  write(line, cls) {
+    const span = document.createElement("span");
+    span.className = cls || "";
+    span.textContent = line + "\n";
+    this.el.appendChild(span);
+  }
+  scrollToEnd() {
+    this.el.scrollTop = this.el.scrollHeight;
+  }
+}
+
+// =============================================================================
+// APP-LOGIK / UI-VERDRAHTUNG
+// =============================================================================
+let model = null;
+const logEl = document.getElementById("log");
+const logger = new Logger(logEl);
+
+function renderConfig() {
+  const rows = [
+    ["Vokabulargröße", CONFIG.vocabSize],
+    ["Embedding-Dim", CONFIG.embDim],
+    ["Anzahl Heads", CONFIG.numHeads],
+    ["Head-Dim", CONFIG.headDim],
+    ["Anzahl Layer", CONFIG.numLayers],
+    ["Hidden-Dim (FFN)", CONFIG.hiddenDim],
+    ["Max. Sequenzlänge", CONFIG.maxSeqLen],
+  ];
+  const dump = document.getElementById("configDump");
+  dump.innerHTML = rows
+    .map(([k, v]) => `<div class="reg-row"><span>${k}</span><span>${v}</span></div>`)
+    .join("");
+}
+
+function initModel(seed) {
+  model = new SmallGPT(CONFIG, seed);
+  populateLayerHeadSelectors();
+}
+
+function populateLayerHeadSelectors() {
+  const layerSel = document.getElementById("layerSel");
+  const headSel = document.getElementById("headSel");
+  layerSel.innerHTML = "";
+  headSel.innerHTML = "";
+  for (let l = 0; l < CONFIG.numLayers; l++) {
+    const opt = document.createElement("option");
+    opt.value = l; opt.textContent = `Layer ${l + 1}`;
+    layerSel.appendChild(opt);
+  }
+  for (let h = 0; h < CONFIG.numHeads; h++) {
+    const opt = document.createElement("option");
+    opt.value = h; opt.textContent = `Head ${h + 1}`;
+    headSel.appendChild(opt);
+  }
+}
+
+let lastAttnWeights = null; // [layer][head] -> [seq x seq]
+
+function renderAttentionGrid() {
+  const grid = document.getElementById("attnGrid");
+  grid.innerHTML = "";
+  if (!lastAttnWeights) return;
+
+  const l = parseInt(document.getElementById("layerSel").value || "0", 10);
+  const h = parseInt(document.getElementById("headSel").value || "0", 10);
+  const matrix = lastAttnWeights[l] && lastAttnWeights[l][h];
+  if (!matrix) return;
+
+  const n = matrix.length;
+  grid.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+  const maxCellPx = 240;
+  const cellPx = Math.max(4, Math.min(24, Math.floor(maxCellPx / n)));
+  grid.style.maxWidth = `${cellPx * n}px`;
+
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const w = matrix[i][j];
+      const cell = document.createElement("div");
+      cell.className = "attn-cell";
+      cell.title = `q=${i} k=${j} · ${w.toFixed(3)}`;
+      const alpha = Math.min(1, w * 1.4);
+      cell.style.background = `rgba(62,224,138,${alpha.toFixed(3)})`;
+      grid.appendChild(cell);
+    }
+  }
+}
+
+document.getElementById("layerSel").addEventListener("change", renderAttentionGrid);
+document.getElementById("headSel").addEventListener("change", renderAttentionGrid);
+
+document.getElementById("tempSlider").addEventListener("input", (e) => {
+  document.getElementById("tempVal").textContent = parseFloat(e.target.value).toFixed(1);
+});
+
+document.getElementById("reinitBtn").addEventListener("click", () => {
+  initModel(Date.now() >>> 0);
+  document.getElementById("output").innerHTML = "";
+  logger.clear();
+  logger.write("(Gewichte neu initialisiert — noch keine Berechnung durchgeführt)", "mut");
+  lastAttnWeights = null;
+  renderAttentionGrid();
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  document.getElementById("output").innerHTML = "";
+});
+
+document.getElementById("genBtn").addEventListener("click", () => {
+  const promptText = document.getElementById("promptInput").value;
+  const temperature = parseFloat(document.getElementById("tempSlider").value);
+  const maxNewTokens = Math.max(1, parseInt(document.getElementById("maxTokens").value || "20", 10));
+  const verbose = document.getElementById("verboseGen").checked;
+
+  const startIds = encode(promptText.length ? promptText : " ");
+  logger.clear();
+  if (!verbose) logger.write("(Verbose deaktiviert — nur der Generierungs-Log unten wird geschrieben. Für den vollen Berechnungsweg 'Forward-Pass analysieren' nutzen.)", "mut");
+
+  const rngFn = Math.random;
+  const { tokens, lastAttn } = model.generate(
+    startIds, maxNewTokens, Math.max(0.01, temperature), rngFn,
+    verbose ? logger : { write: () => {} }
+  );
+  logger.scrollToEnd();
+
+  lastAttnWeights = lastAttn;
+  renderAttentionGrid();
+
+  const generatedIds = tokens.slice(startIds.length);
+  const out = document.getElementById("output");
+  const sep = document.createElement("span");
+  sep.className = "turn-sep";
+  sep.textContent = "────────────────────────────";
+  out.appendChild(sep);
+
+  const promptSpan = document.createElement("span");
+  promptSpan.className = "prompt-part";
+  promptSpan.textContent = decode(startIds);
+  out.appendChild(promptSpan);
+
+  const genSpan = document.createElement("span");
+  genSpan.className = "gen-part";
+  genSpan.textContent = decode(generatedIds);
+  out.appendChild(genSpan);
+
+  out.scrollTop = out.scrollHeight;
+});
+
+document.getElementById("analyseBtn").addEventListener("click", () => {
+  const promptText = document.getElementById("promptInput").value;
+  if (!promptText.length) {
+    alert("Bitte zuerst Text eingeben.");
+    return;
+  }
+  let ids = encode(promptText);
+  if (ids.length > CONFIG.maxSeqLen) {
+    ids = ids.slice(0, CONFIG.maxSeqLen);
+  }
+
+  logger.clear();
+  const { logits, allAttnWeights } = model.forward(ids, logger);
+
+  const lastLogits = logits[logits.length - 1];
+  const probs = softmaxRows([lastLogits])[0];
+  const indexed = probs.map((p, i) => [p, i]).sort((a, b) => b[0] - a[0]).slice(0, 5);
+
+  logger.write(``, "mut");
+  logger.write(`Top-5 Vorhersagen für das nächste Zeichen:`, "step");
+  for (const [p, id] of indexed) {
+    const ch = id < CHAR_LIST.length ? CHAR_LIST[id] : "<EOS>";
+    logger.write(`  '${ch === "\n" ? "\\n" : ch}'  p=${p.toFixed(4)}`, "mut");
+  }
+  logger.scrollToEnd();
+
+  lastAttnWeights = allAttnWeights;
+  renderAttentionGrid();
+});
+
+// =============================================================================
+// START
+// =============================================================================
+renderConfig();
+initModel(42);
+logger.write("Bereit. 'Forward-Pass analysieren' zeigt den vollständigen Rechenweg für einen Durchlauf; 'Generieren' erzeugt Zeichen für Zeichen (autoregressiv, Zufallsgewichte).", "mut");
+</script>
+</body>
+</html>

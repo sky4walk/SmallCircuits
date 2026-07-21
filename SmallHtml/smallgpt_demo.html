@@ -1,0 +1,842 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SmallGPT Signalpfad — Transformer, Zyklus für Zyklus</title>
+<style>
+  :root{
+    --bg:#0b0d09;
+    --panel:#12150f;
+    --panel2:#171b12;
+    --line:#2a2f22;
+    --grid:rgba(255,179,0,0.06);
+    --amber:#ffb300;
+    --amber-bright:#ffd166;
+    --amber-dim:#8a6a2a;
+    --amber-dark:#5c4712;
+    --cyan:#4fd6c4;
+    --text:#e9e2cf;
+    --text-dim:#96907d;
+    --danger:#ff6b5e;
+    --mono: ui-monospace, "SFMono-Regular", "Cascadia Code", "Consolas", "Liberation Mono", monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      linear-gradient(var(--grid) 1px, transparent 1px) 0 0/100% 24px,
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0/24px 100%,
+      var(--bg);
+    color:var(--text);
+    font-family:var(--mono);
+    font-size:14px;
+    line-height:1.5;
+    min-height:100vh;
+    padding-bottom:60px;
+  }
+  ::selection{background:var(--amber-dim); color:#000;}
+  a{color:var(--cyan);}
+
+  .scanlines{
+    pointer-events:none; position:fixed; inset:0; z-index:50;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,0.12) 0px, rgba(0,0,0,0.12) 1px, transparent 2px, transparent 3px);
+    mix-blend-mode:overlay; opacity:0.35;
+  }
+
+  header{
+    padding:28px 28px 18px;
+    border-bottom:1px solid var(--line);
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .eyebrow{
+    color:var(--amber-dim); text-transform:uppercase; letter-spacing:0.18em; font-size:11px;
+  }
+  h1{
+    margin:0; font-size:22px; font-weight:700; letter-spacing:0.02em;
+    color:var(--amber-bright); text-shadow:0 0 12px rgba(255,179,0,0.25);
+  }
+  .sub{color:var(--text-dim); font-size:12.5px; max-width:820px;}
+  .sub code{color:var(--amber);}
+
+  main{padding:22px 28px; display:flex; flex-direction:column; gap:22px;}
+
+  .panel{
+    background:var(--panel); border:1px solid var(--line); border-radius:3px;
+    padding:16px 18px;
+  }
+  .panel-title{
+    font-size:11px; text-transform:uppercase; letter-spacing:0.14em; color:var(--amber-dim);
+    margin:0 0 10px; display:flex; justify-content:space-between; align-items:center; gap:10px;
+  }
+
+  /* --- Steuerung --- */
+  .controls{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end;}
+  .field{display:flex; flex-direction:column; gap:5px;}
+  .field label{font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.08em;}
+  input[type="text"], select{
+    background:#0e100b; border:1px solid var(--line); color:var(--amber-bright);
+    font-family:var(--mono); font-size:13px; padding:8px 10px; border-radius:2px; min-width:340px;
+  }
+  input[type="text"]:focus, select:focus{outline:1px solid var(--amber); border-color:var(--amber);}
+  input[type="range"]{accent-color:var(--amber);}
+  button{
+    background:#191c12; border:1px solid var(--amber-dim); color:var(--amber-bright);
+    font-family:var(--mono); font-size:12.5px; padding:9px 14px; border-radius:2px; cursor:pointer;
+    text-transform:uppercase; letter-spacing:0.06em; transition:background .15s, border-color .15s;
+  }
+  button:hover{background:#232717; border-color:var(--amber);}
+  button:active{background:var(--amber-dim); color:#0b0d09;}
+  button:disabled{opacity:0.4; cursor:not-allowed;}
+  button.primary{border-color:var(--amber); background:rgba(255,179,0,0.08);}
+  button:focus-visible{outline:2px solid var(--amber-bright); outline-offset:2px;}
+
+  .slider-val{color:var(--amber); font-variant-numeric:tabular-nums;}
+
+  /* --- Pipeline / Chips --- */
+  .pipeline{
+    display:flex; align-items:stretch; gap:0; overflow-x:auto; padding:18px 4px 22px;
+  }
+  .chip{
+    position:relative; flex:0 0 auto; min-width:118px; text-align:center;
+    background:#141810; border:1px solid var(--line); border-radius:4px;
+    padding:12px 10px; cursor:pointer; user-select:none;
+  }
+  .chip .label{font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.05em;}
+  .chip .sub2{font-size:10px; color:var(--amber-dim); margin-top:3px;}
+  .chip.active{border-color:var(--amber); background:rgba(255,179,0,0.10); box-shadow:0 0 14px rgba(255,179,0,0.18);}
+  .chip.active .label{color:var(--amber-bright);}
+  .chip.done::after{content:""; position:absolute; top:5px; right:6px; width:6px; height:6px; border-radius:50%; background:var(--cyan); box-shadow:0 0 6px var(--cyan);}
+  .trace{
+    flex:0 0 26px; align-self:center; height:2px; background:var(--line); position:relative; min-width:26px;
+  }
+  .trace.active{background:var(--amber);}
+  .trace .via{position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); width:5px; height:5px; border-radius:50%; background:var(--line);}
+  .trace.active .via{background:var(--amber-bright); box-shadow:0 0 6px var(--amber);}
+
+  /* --- Detail-Grid --- */
+  .grid2{display:grid; grid-template-columns:1.3fr 1fr; gap:18px;}
+  @media (max-width:980px){.grid2{grid-template-columns:1fr;}}
+
+  .detail-body{color:var(--text); font-size:13px;}
+  .detail-body p{margin:6px 0;}
+  .stat{color:var(--amber);}
+  .muted{color:var(--text-dim);}
+
+  canvas{display:block; width:100%; background:#0e1109; border:1px solid var(--line); border-radius:2px;}
+
+  .console{
+    background:#0a0c07; border:1px solid var(--line); border-radius:2px;
+    height:300px; overflow-y:auto; padding:10px 12px; font-size:12px; color:var(--amber);
+  }
+  .console .l{white-space:pre-wrap; margin:0 0 2px;}
+  .console .l.dim{color:var(--text-dim);}
+  .console .l.hi{color:var(--amber-bright);}
+  .console .l.tag{color:var(--cyan);}
+
+  .heat-wrap{display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;}
+  .heat-controls{display:flex; gap:10px; margin-bottom:8px;}
+  .axis-labels{font-size:9px; color:var(--text-dim); display:flex; gap:2px; flex-wrap:wrap; max-width:340px; margin-top:6px;}
+
+  .bars{display:flex; flex-direction:column; gap:6px; margin-top:8px;}
+  .bar-row{display:grid; grid-template-columns:90px 1fr 54px; gap:8px; align-items:center; font-size:12px;}
+  .bar-track{background:#0e1109; border:1px solid var(--line); height:14px; border-radius:2px; overflow:hidden;}
+  .bar-fill{height:100%; background:linear-gradient(90deg, var(--amber-dark), var(--amber));}
+
+  .gen-output{
+    font-size:15px; color:var(--amber-bright); min-height:26px; padding:10px 12px;
+    background:#0e1109; border:1px solid var(--line); border-radius:2px; word-break:break-word;
+  }
+  .gen-output .new{color:var(--cyan);}
+
+  .legend{display:flex; gap:16px; flex-wrap:wrap; font-size:11px; color:var(--text-dim); margin-top:8px;}
+  .legend .sw{display:inline-block; width:10px; height:10px; margin-right:5px; vertical-align:middle; border-radius:1px;}
+
+  footer{
+    padding:18px 28px; border-top:1px solid var(--line); color:var(--text-dim); font-size:11.5px;
+    display:flex; flex-direction:column; gap:6px;
+  }
+  .kbd{border:1px solid var(--line); border-bottom-width:2px; padding:1px 6px; border-radius:3px; color:var(--text-dim); font-size:11px;}
+
+  @media (prefers-reduced-motion: reduce){ *{transition:none !important; animation:none !important;} }
+</style>
+</head>
+<body>
+<div class="scanlines"></div>
+
+<header>
+  <div class="eyebrow">Numpy → JS · nachgebaute Mechanik, keine trainierten Gewichte</div>
+  <h1>SmallGPT Signalpfad</h1>
+  <div class="sub">
+    Interaktiver Nachbau der Rechenschritte aus <code>SmallGPT</code> (softmax → gelu → layer_norm → attention →
+    feed_forward) — Zyklus für Zyklus wie ein Logic-Analyzer, statt eines fertigen Antwort-Textfelds.
+    Die Gewichte hier sind <strong>zufällig initialisiert</strong> (kein Hugging-Face-Download im Browser möglich) —
+    es geht um die Mechanik, nicht um sprachliche Qualität. Für echte GPT-2-Gewichte: das angehängte Python-Skript
+    mit <code>numpy</code> + <code>transformers</code>.
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ STEUERUNG ============ -->
+  <section class="panel">
+    <p class="panel-title">Eingabe &amp; Modell</p>
+    <div class="controls">
+      <div class="field">
+        <label for="txtIn">Text (nur Vokabular-Wörter werden erkannt, Rest → &lt;unk&gt;)</label>
+        <input type="text" id="txtIn" value="der transformer verarbeitet jedes token mit attention">
+      </div>
+      <div class="field">
+        <label for="seedSel">Gewichte-Seed</label>
+        <select id="seedSel">
+          <option value="7">Seed 7</option>
+          <option value="42" selected>Seed 42</option>
+          <option value="1000">Seed 1000 (HP-1000 Grüße)</option>
+          <option value="64">Seed 64 (C64)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="tempRange">Temperatur <span class="slider-val" id="tempVal">0.80</span></label>
+        <input type="range" id="tempRange" min="0.1" max="1.6" step="0.05" value="0.8" style="min-width:160px;">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <div style="display:flex; gap:8px;">
+          <button id="btnForward" class="primary">Forward Pass</button>
+          <button id="btnStep">Schritt für Schritt</button>
+          <button id="btnGen">Autoregressiv generieren (+12)</button>
+          <button id="btnStop" disabled>Stop</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PIPELINE ============ -->
+  <section class="panel">
+    <p class="panel-title">Signalpfad <span class="muted" id="modelDims"></span></p>
+    <div class="pipeline" id="pipeline"><!-- JS füllt dies --></div>
+  </section>
+
+  <!-- ============ DETAIL + CONSOLE ============ -->
+  <section class="grid2">
+    <div class="panel">
+      <p class="panel-title" id="detailTitle">Detail — Stufe auswählen</p>
+      <div class="detail-body" id="detailBody">
+        <p class="muted">Klicke eine Stufe im Signalpfad an, oder starte einen Forward Pass.</p>
+      </div>
+
+      <div id="attnBlock" style="display:none; margin-top:14px;">
+        <div class="heat-controls">
+          <div class="field" style="gap:3px;">
+            <label>Layer</label>
+            <select id="layerSel"></select>
+          </div>
+          <div class="field" style="gap:3px;">
+            <label>Head</label>
+            <select id="headSel"></select>
+          </div>
+        </div>
+        <canvas id="heatCanvas" width="360" height="360"></canvas>
+        <div class="axis-labels" id="heatLabels"></div>
+        <div class="legend">
+          <span><span class="sw" style="background:var(--amber-dark);"></span>schwach</span>
+          <span><span class="sw" style="background:var(--amber);"></span>stark</span>
+          <span class="muted">Zeile = Query-Token · Spalte = Key-Token · kausal maskiert (obere Dreieckshälfte = 0)</span>
+        </div>
+      </div>
+
+      <div id="embedBlock" style="display:none; margin-top:14px;">
+        <canvas id="scopeCanvas" width="600" height="140"></canvas>
+        <div class="legend">
+          <span><span class="sw" style="background:var(--amber);"></span>Token-Embedding (letzte Position)</span>
+          <span><span class="sw" style="background:var(--cyan);"></span>+ Positions-Embedding</span>
+        </div>
+      </div>
+
+      <div id="topkBlock" style="display:none; margin-top:14px;">
+        <div class="bars" id="topkBars"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <p class="panel-title">Verbose-Konsole <span class="muted" style="font-weight:400;">wie <code style="color:var(--text-dim);">verbose=True</code> in Python</span></p>
+      <div class="console" id="console"></div>
+    </div>
+  </section>
+
+  <!-- ============ GENERATION ============ -->
+  <section class="panel">
+    <p class="panel-title">Autoregressive Generierung</p>
+    <div class="gen-output" id="genOutput">—</div>
+    <div class="legend"><span class="muted">Blau = neu generierte Tokens. Bei zufälligen Gewichten erwartungsgemäß ohne semantischen Zusammenhang — die Sampling-Mechanik ist der Punkt, nicht die Sprachqualität.</span></div>
+  </section>
+
+</main>
+
+<footer>
+  <div>Signalpfad-Ansicht zu <code>SmallGPT</code> (softmax, gelu, layer_norm, linear, MultiHeadAttention, FeedForward, TransformerBlock, generate) — Blogpost: „Small Pretrained Transformer in NumPy“.</div>
+  <div>Alles läuft lokal im Browser, keine Server-Anfragen, keine echten GPT-2-Gewichte geladen. Bedienung auch per <span class="kbd">Tab</span> + <span class="kbd">Enter</span>.</div>
+</footer>
+
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   1) KERN-MATHEMATIK  (numpy-Äquivalente, getestet in core_test.js)
+   ============================================================ */
+function mulberry32(seed){
+  return function(){
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+function randn(rng){
+  let u=0,v=0; while(u===0) u=rng(); while(v===0) v=rng();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
+}
+function zeros(r,c){ return Array.from({length:r},()=>new Array(c).fill(0)); }
+function matRandn(r,c,rng,scale){ return Array.from({length:r},()=>Array.from({length:c},()=>randn(rng)*scale)); }
+function matmul(A,B){
+  const n=A.length,k=A[0].length,m=B[0].length; const out=zeros(n,m);
+  for(let i=0;i<n;i++){ for(let p=0;p<k;p++){ const a=A[i][p]; if(a===0) continue; const Brow=B[p];
+    for(let j=0;j<m;j++) out[i][j]+=a*Brow[j]; } }
+  return out;
+}
+function transpose(A){ const n=A.length,m=A[0].length; const out=zeros(m,n);
+  for(let i=0;i<n;i++) for(let j=0;j<m;j++) out[j][i]=A[i][j]; return out; }
+function addRows(A,B){ return A.map((row,i)=>row.map((v,j)=>v+B[i][j])); }
+function addBiasRow(A,bias){ return A.map(row=>row.map((v,j)=>v+bias[j])); }
+function linear(x,W,b){ let out=matmul(x,transpose(W)); if(b) out=addBiasRow(out,b); return out; }
+function layerNorm(x,gamma,beta,eps){
+  eps = eps===undefined?1e-5:eps;
+  return x.map(row=>{
+    const d=row.length; const mean=row.reduce((a,v)=>a+v,0)/d;
+    const varr=row.reduce((a,v)=>a+(v-mean)**2,0)/d; const inv=1/Math.sqrt(varr+eps);
+    return row.map((v,j)=>gamma[j]*(v-mean)*inv+beta[j]);
+  });
+}
+function statsOf(x){
+  const flat=x.flat(); const n=flat.length;
+  const mean=flat.reduce((a,v)=>a+v,0)/n;
+  const varr=flat.reduce((a,v)=>a+(v-mean)**2,0)/n;
+  return {mean, varr, std:Math.sqrt(varr)};
+}
+function gelu(x){ return x.map(row=>row.map(v=>0.5*v*(1+Math.tanh(Math.sqrt(2/Math.PI)*(v+0.044715*v**3))))); }
+function softmaxRow(row){
+  const max=Math.max(...row); const exps=row.map(v=>Math.exp(v-max));
+  const sum=exps.reduce((a,v)=>a+v,0); return exps.map(v=>v/sum);
+}
+function softmaxMat(x){ return x.map(softmaxRow); }
+function buildCausalMask(n){
+  const m=zeros(n,n); for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) m[i][j]=-1e9; return m;
+}
+function addMask(scores,mask){ return scores.map((row,i)=>row.map((v,j)=>v+mask[i][j])); }
+
+function attentionForward(x,p,numHeads,causalMask){
+  const n=x.length, D=x[0].length, hd=D/numHeads;
+  const q=linear(x,p.wq,p.bq), k=linear(x,p.wk,p.bk), v=linear(x,p.wv,p.bv);
+  const headOuts=[], headWeights=[];
+  for(let h=0; h<numHeads; h++){
+    const sl=(M)=>M.map(row=>row.slice(h*hd,(h+1)*hd));
+    const qh=sl(q), kh=sl(k), vh=sl(v);
+    let scores=matmul(qh,transpose(kh)).map(row=>row.map(v2=>v2/Math.sqrt(hd)));
+    scores=addMask(scores,causalMask);
+    const weights=softmaxMat(scores);
+    const out=matmul(weights,vh);
+    headOuts.push(out); headWeights.push(weights);
+  }
+  const merged=zeros(n,D);
+  for(let i=0;i<n;i++) for(let h=0;h<numHeads;h++) for(let j=0;j<hd;j++) merged[i][h*hd+j]=headOuts[h][i][j];
+  const output=linear(merged,p.wo,p.bo);
+  return {output, headWeights};
+}
+function feedForward(x,p){
+  const hidden=gelu(linear(x,p.w1,p.b1));
+  const out=linear(hidden,p.w2,p.b2);
+  return {hidden, out};
+}
+
+/* ============================================================
+   2) VOKABULAR + MODELL-INITIALISIERUNG
+   ============================================================ */
+const VOCAB = ["<unk>","<bos>",".",",","!","?",
+  "der","die","das","ein","eine","und","ist","war","wird","kann","nicht","sehr","auch","noch","immer","man","wir","es",
+  "transformer","attention","embedding","token","matrix","vektor","numpy","modell","gewicht","gewichte","schicht","layer",
+  "norm","softmax","gelu","block","kopf","heads","maske","kausal","zukunft","vergangenheit",
+  "chip","prozessor","cpu","speicher","emulator","c64","vic","sid","raster","zyklus","schaltung","platine","strom","signal",
+  "daten","code","python","javascript","html","browser","funktion","variable","array","zahl","wort","satz","text","sprache",
+  "netzwerk","neuron","gewichtung","training","inferenz","wahrscheinlichkeit","zufall","temperatur","sampling",
+  "kontext","fenster","sequenz","position","query","key","value","projektion","residual","verbindung",
+  "normalisierung","aktivierung","ausgabe","eingabe","schritt","ergebnis","hardware","software","werkstatt","labor",
+  "experiment","idee","konzept","struktur","architektur","gedanke","erklärung","beispiel","demonstrator","seite","blog",
+  "artikel","verarbeitet","jedes","mit","zeigt","berechnet","erzeugt","liest","schreibt","versteht","lernt","denkt"];
+const tok2id = {}; VOCAB.forEach((w,i)=>tok2id[w]=i);
+const V = VOCAB.length;
+
+const D = 24, NUM_HEADS = 3, NUM_LAYERS = 2, HIDDEN = 4*D, MAX_LEN = 48;
+document.getElementById('modelDims').textContent =
+  `D=${D} · Heads=${NUM_HEADS} · Layer=${NUM_LAYERS} · Hidden=${HIDDEN} · Vokabular=${V}`;
+
+function initModel(seed){
+  const rng = mulberry32(seed);
+  const p = {};
+  p.tokenEmb = matRandn(V, D, rng, 0.08);
+  p.posEmb   = matRandn(MAX_LEN, D, rng, 0.08);
+  p.lnF = { gamma:new Array(D).fill(1), beta:new Array(D).fill(0) };
+  p.layers = [];
+  for(let l=0; l<NUM_LAYERS; l++){
+    p.layers.push({
+      ln1:{gamma:new Array(D).fill(1), beta:new Array(D).fill(0)},
+      ln2:{gamma:new Array(D).fill(1), beta:new Array(D).fill(0)},
+      attn:{
+        wq:matRandn(D,D,rng,0.12), bq:new Array(D).fill(0),
+        wk:matRandn(D,D,rng,0.12), bk:new Array(D).fill(0),
+        wv:matRandn(D,D,rng,0.12), bv:new Array(D).fill(0),
+        wo:matRandn(D,D,rng,0.12), bo:new Array(D).fill(0),
+      },
+      ffn:{
+        w1:matRandn(HIDDEN,D,rng,0.08), b1:new Array(HIDDEN).fill(0),
+        w2:matRandn(D,HIDDEN,rng,0.08), b2:new Array(D).fill(0),
+      }
+    });
+  }
+  // Output-Projektion teilt sich die Matrix mit token_emb (weight tying, wie im Python-Original)
+  p.outputW = p.tokenEmb;
+  p.outputB = new Array(V).fill(0);
+  return p;
+}
+
+let model = initModel(42);
+
+/* ============================================================
+   3) TOKENIZER + FORWARD PASS MIT TRACE
+   ============================================================ */
+function tokenize(text){
+  const words = text.toLowerCase().replace(/([.,!?])/g," $1 ").trim().split(/\s+/).filter(Boolean);
+  return words.map(w => (tok2id[w]!==undefined ? w : "<unk>"));
+}
+
+function forwardWithTrace(tokens){
+  const ids = tokens.map(t=>tok2id[t]);
+  const n = ids.length;
+  const trace = { tokens, n, layers: [] };
+
+  let x = ids.map(id => model.tokenEmb[id].slice());
+  trace.afterTokEmb = x.map(r=>r.slice());
+  trace.afterTokEmbStats = statsOf(x);
+
+  x = addRows(x, model.posEmb.slice(0,n));
+  trace.afterPosEmb = x.map(r=>r.slice());
+  trace.afterPosEmbStats = statsOf(x);
+
+  const mask = buildCausalMask(n);
+  trace.maskBlocked = n*(n-1)/2;
+  trace.maskTotal = n*n;
+
+  for(let l=0; l<NUM_LAYERS; l++){
+    const lp = model.layers[l];
+    const normed1 = layerNorm(x, lp.ln1.gamma, lp.ln1.beta);
+    const ln1Stats = statsOf(normed1);
+    const {output:attnOut, headWeights} = attentionForward(normed1, lp.attn, NUM_HEADS, mask);
+    x = addRows(x, attnOut);
+    const afterRes1Stats = statsOf(x);
+
+    const normed2 = layerNorm(x, lp.ln2.gamma, lp.ln2.beta);
+    const ln2Stats = statsOf(normed2);
+    const {hidden, out:ffnOut} = feedForward(normed2, lp.ffn);
+    const hiddenStats = statsOf(hidden);
+    x = addRows(x, ffnOut);
+    const afterRes2Stats = statsOf(x);
+
+    trace.layers.push({ln1Stats, headWeights, afterRes1Stats, ln2Stats, hiddenStats, afterRes2Stats});
+  }
+
+  const finalNormed = layerNorm(x, model.lnF.gamma, model.lnF.beta);
+  trace.finalStats = statsOf(finalNormed);
+  const logits = linear(finalNormed, model.outputW, model.outputB);
+  trace.lastLogits = logits[n-1];
+  const probs = softmaxRow(trace.lastLogits);
+  trace.probs = probs;
+  const idxSorted = probs.map((p,i)=>[p,i]).sort((a,b)=>b[0]-a[0]).slice(0,5);
+  trace.top5 = idxSorted.map(([p,i])=>({token:VOCAB[i], prob:p}));
+
+  return trace;
+}
+
+/* ============================================================
+   4) PIPELINE-UI
+   ============================================================ */
+const STAGES = [
+  {id:"tok",  label:"Tokenize"},
+  {id:"emb",  label:"Token-Emb"},
+  {id:"pos",  label:"+ Position"},
+  {id:"l0",   label:"Block 1"},
+  {id:"l1",   label:"Block 2"},
+  {id:"lnf",  label:"Finale Norm"},
+  {id:"proj", label:"Output-Proj."},
+  {id:"soft", label:"Softmax"},
+  {id:"samp", label:"Sampling"},
+];
+
+const pipelineEl = document.getElementById('pipeline');
+function buildPipeline(){
+  pipelineEl.innerHTML = "";
+  STAGES.forEach((s, idx)=>{
+    const chip = document.createElement('div');
+    chip.className = 'chip'; chip.id = 'chip-'+s.id; chip.tabIndex = 0;
+    chip.innerHTML = `<div class="label">${s.label}</div><div class="sub2">${idx+1}</div>`;
+    chip.addEventListener('click', ()=>selectStage(s.id));
+    chip.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' ') selectStage(s.id); });
+    pipelineEl.appendChild(chip);
+    if(idx < STAGES.length-1){
+      const trace = document.createElement('div');
+      trace.className = 'trace'; trace.id = 'trace-'+idx;
+      trace.innerHTML = '<span class="via"></span>';
+      pipelineEl.appendChild(trace);
+    }
+  });
+}
+buildPipeline();
+
+function setActiveChip(stageId){
+  STAGES.forEach((s,idx)=>{
+    const chip = document.getElementById('chip-'+s.id);
+    chip.classList.toggle('active', s.id===stageId);
+    if(idx>0){
+      document.getElementById('trace-'+(idx-1)).classList.toggle('active-hint', false);
+    }
+  });
+  const activeIdx = STAGES.findIndex(s=>s.id===stageId);
+  STAGES.forEach((s,idx)=>{
+    if(idx < STAGES.length-1){
+      document.getElementById('trace-'+idx).classList.toggle('active', idx < activeIdx);
+    }
+    document.getElementById('chip-'+s.id).classList.toggle('done', idx < activeIdx);
+  });
+}
+
+/* ============================================================
+   5) KONSOLEN-LOG
+   ============================================================ */
+const consoleEl = document.getElementById('console');
+function log(text, cls){
+  const div = document.createElement('div');
+  div.className = 'l' + (cls ? ' '+cls : '');
+  div.textContent = text;
+  consoleEl.appendChild(div);
+  consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+function clearLog(){ consoleEl.innerHTML = ""; }
+
+/* ============================================================
+   6) DETAIL-PANEL PRO STUFE
+   ============================================================ */
+const detailTitle = document.getElementById('detailTitle');
+const detailBody = document.getElementById('detailBody');
+const attnBlock = document.getElementById('attnBlock');
+const embedBlock = document.getElementById('embedBlock');
+const topkBlock = document.getElementById('topkBlock');
+const layerSel = document.getElementById('layerSel');
+const headSel = document.getElementById('headSel');
+
+for(let l=0;l<NUM_LAYERS;l++){ const o=document.createElement('option'); o.value=l; o.textContent='Layer '+(l+1); layerSel.appendChild(o); }
+for(let h=0;h<NUM_HEADS;h++){ const o=document.createElement('option'); o.value=h; o.textContent='Head '+(h+1); headSel.appendChild(o); }
+
+let lastTrace = null;
+
+function showStage(stageId){
+  setActiveChip(stageId);
+  attnBlock.style.display = 'none';
+  embedBlock.style.display = 'none';
+  topkBlock.style.display = 'none';
+  if(!lastTrace){
+    detailTitle.textContent = 'Detail — '+labelFor(stageId);
+    detailBody.innerHTML = '<p class="muted">Noch kein Forward Pass berechnet. Klicke oben auf „Forward Pass“.</p>';
+    return;
+  }
+  const t = lastTrace;
+  detailTitle.textContent = 'Detail — '+labelFor(stageId);
+
+  if(stageId==='tok'){
+    detailBody.innerHTML = `<p>Eingabe in <span class="stat">${t.n}</span> Tokens zerlegt (unbekannte Wörter → <code>&lt;unk&gt;</code>):</p>
+      <p>${t.tokens.map(w=>`<code style="color:var(--amber-bright)">${escapeHtml(w)}</code>`).join(' ')}</p>`;
+  } else if(stageId==='emb'){
+    detailBody.innerHTML = `<p>Jede Token-ID wird zum <span class="stat">${D}</span>-dimensionalen Vektor.
+      Shape: (${t.n}, ${D}). Mittelwert <span class="stat">${t.afterTokEmbStats.mean.toFixed(4)}</span>,
+      Varianz <span class="stat">${t.afterTokEmbStats.varr.toFixed(4)}</span>.</p>`;
+    embedBlock.style.display='block'; drawScope(t, false);
+  } else if(stageId==='pos'){
+    detailBody.innerHTML = `<p>Positions-Embedding pro Index addiert — Shape bleibt (${t.n}, ${D}).
+      Mittelwert danach: <span class="stat">${t.afterPosEmbStats.mean.toFixed(4)}</span>,
+      Varianz: <span class="stat">${t.afterPosEmbStats.varr.toFixed(4)}</span>.
+      Causal Mask: <span class="stat">${t.maskBlocked}</span> von ${t.maskTotal} Positionen blockiert (kein Blick in die Zukunft).</p>`;
+    embedBlock.style.display='block'; drawScope(t, true);
+  } else if(stageId==='l0' || stageId==='l1'){
+    const li = stageId==='l0' ? 0 : 1;
+    if(li >= NUM_LAYERS){ detailBody.innerHTML = '<p class="muted">Dieses Modell hat nur '+NUM_LAYERS+' Layer.</p>'; return; }
+    const L = t.layers[li];
+    detailBody.innerHTML = `
+      <p><strong>Schritt 1 — LayerNorm:</strong> Mittelwert <span class="stat">${L.ln1Stats.mean.toFixed(4)}</span>, Varianz <span class="stat">${L.ln1Stats.varr.toFixed(4)}</span></p>
+      <p><strong>Schritt 2 — Multi-Head-Attention:</strong> ${NUM_HEADS} Heads × ${D/NUM_HEADS} Dim. Stärkstes Gewicht je Head siehe Heatmap rechts unten.</p>
+      <p><strong>Residual:</strong> x = x + attention_out → Mittelwert <span class="stat">${L.afterRes1Stats.mean.toFixed(4)}</span></p>
+      <p><strong>Schritt 3 — LayerNorm:</strong> Mittelwert <span class="stat">${L.ln2Stats.mean.toFixed(4)}</span></p>
+      <p><strong>Schritt 4 — FeedForward:</strong> ${D} → ${HIDDEN} (GELU, Mittelwert <span class="stat">${L.hiddenStats.mean.toFixed(4)}</span>) → ${D}</p>
+      <p><strong>Residual:</strong> x = x + ffn_out → Mittelwert <span class="stat">${L.afterRes2Stats.mean.toFixed(4)}</span></p>`;
+    attnBlock.style.display = 'block';
+    layerSel.value = li;
+    drawHeatmap(t, li, parseInt(headSel.value));
+    updateHeatLabels(t);
+  } else if(stageId==='lnf'){
+    detailBody.innerHTML = `<p>Finale LayerNorm über alle ${t.n} Positionen. Mittelwert <span class="stat">${t.finalStats.mean.toFixed(4)}</span>,
+      Varianz <span class="stat">${t.finalStats.varr.toFixed(4)}</span>. Stabilisiert die Werte vor der Output-Projektion.</p>`;
+  } else if(stageId==='proj'){
+    const top3 = t.lastLogits.map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]).slice(0,3);
+    detailBody.innerHTML = `<p>Output-Projektion (Gewicht geteilt mit Token-Embedding, wie im Python-Original).
+      Logits-Shape: (${t.n}, ${V}). Rohe Top-3-Logits der letzten Position:
+      ${top3.map(([v,i])=>`<code style="color:var(--amber)">${VOCAB[i]}=${v.toFixed(3)}</code>`).join(', ')}</p>`;
+  } else if(stageId==='soft'){
+    detailBody.innerHTML = `<p>Softmax über ${V} Vokabeln — Summe der Wahrscheinlichkeiten:
+      <span class="stat">${t.probs.reduce((a,v)=>a+v,0).toFixed(6)}</span>. Top-5 unten.</p>`;
+    topkBlock.style.display='block'; drawTopK(t, null);
+  } else if(stageId==='samp'){
+    detailBody.innerHTML = `<p>Ziehe ein Token gemäß der (temperaturskalierten) Verteilung — nicht zwingend das
+      wahrscheinlichste. Temperatur aktuell: <span class="stat">${document.getElementById('tempRange').value}</span>.
+      Bei Autoregressiv-Generierung wird dieses Token angehängt und der Forward Pass wiederholt.</p>`;
+    topkBlock.style.display='block'; drawTopK(t, null);
+  }
+}
+function labelFor(id){ return (STAGES.find(s=>s.id===id)||{}).label || id; }
+function escapeHtml(s){ return s.replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function selectStage(id){ showStage(id); }
+
+layerSel.addEventListener('change', ()=>{ if(lastTrace){ drawHeatmap(lastTrace, parseInt(layerSel.value), parseInt(headSel.value)); } });
+headSel.addEventListener('change', ()=>{ if(lastTrace){ drawHeatmap(lastTrace, parseInt(layerSel.value), parseInt(headSel.value)); } });
+
+/* ============================================================
+   7) CANVAS-VISUALISIERUNGEN
+   ============================================================ */
+function drawHeatmap(t, layerIdx, headIdx){
+  const canvas = document.getElementById('heatCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.clientWidth || 360;
+  const Hh = canvas.height = W; // quadratisch
+  ctx.fillStyle = '#0e1109'; ctx.fillRect(0,0,W,Hh);
+  const weights = t.layers[layerIdx].headWeights[headIdx];
+  const n = weights.length;
+  const cell = W / n;
+  for(let i=0;i<n;i++){
+    for(let j=0;j<n;j++){
+      const v = weights[i][j];
+      const amt = Math.min(1, v*1.05);
+      const r = Math.round(90 + amt*(255-90));
+      const g = Math.round(70 + amt*(179-70));
+      const b = Math.round(10 + amt*(0));
+      ctx.fillStyle = v<=0.0005 ? '#0e1109' : `rgb(${r},${g},${b})`;
+      ctx.fillRect(j*cell, i*cell, Math.ceil(cell), Math.ceil(cell));
+    }
+  }
+  ctx.strokeStyle = 'rgba(255,179,0,0.15)';
+  for(let i=1;i<n;i++){
+    ctx.beginPath(); ctx.moveTo(i*cell,0); ctx.lineTo(i*cell,Hh); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,i*cell); ctx.lineTo(W,i*cell); ctx.stroke();
+  }
+}
+function updateHeatLabels(t){
+  const el = document.getElementById('heatLabels');
+  el.innerHTML = t.tokens.map((w,i)=>`<span>${i}:${escapeHtml(w)}</span>`).join(' ');
+}
+
+function drawScope(t, showPos){
+  const canvas = document.getElementById('scopeCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.clientWidth || 600;
+  const Hh = canvas.height = 140;
+  ctx.fillStyle = '#0e1109'; ctx.fillRect(0,0,W,Hh);
+  ctx.strokeStyle = 'rgba(255,179,0,0.08)';
+  for(let x=0;x<W;x+=W/D){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,Hh); ctx.stroke(); }
+  ctx.beginPath(); ctx.moveTo(0,Hh/2); ctx.lineTo(W,Hh/2); ctx.strokeStyle='rgba(255,179,0,0.15)'; ctx.stroke();
+
+  const lastPos = t.n - 1;
+  const vecTok = t.afterTokEmb[lastPos];
+  const vecPos = t.afterPosEmb[lastPos];
+  const scale = 55;
+  const drawLine = (vec, color)=>{
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.6;
+    vec.forEach((v,i)=>{
+      const x = (i/(D-1))*W; const y = Hh/2 - v*scale;
+      if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.stroke();
+  };
+  drawLine(vecTok, '#ffb300');
+  if(showPos) drawLine(vecPos, '#4fd6c4');
+}
+
+function drawTopK(t){
+  const wrap = document.getElementById('topkBars');
+  wrap.innerHTML = '';
+  const maxP = t.top5[0].prob || 1;
+  t.top5.forEach(({token, prob})=>{
+    const row = document.createElement('div'); row.className = 'bar-row';
+    const label = document.createElement('div'); label.textContent = token; label.style.color='var(--amber-bright)';
+    const track = document.createElement('div'); track.className = 'bar-track';
+    const fill = document.createElement('div'); fill.className = 'bar-fill'; fill.style.width = (prob/maxP*100).toFixed(1)+'%';
+    track.appendChild(fill);
+    const val = document.createElement('div'); val.textContent = (prob*100).toFixed(1)+'%'; val.style.color='var(--text-dim)';
+    row.appendChild(label); row.appendChild(track); row.appendChild(val);
+    wrap.appendChild(row);
+  });
+}
+
+/* ============================================================
+   8) FORWARD PASS AUSLÖSEN + LOG SCHREIBEN
+   ============================================================ */
+function runForward(logIt){
+  const text = document.getElementById('txtIn').value;
+  let tokens = tokenize(text);
+  tokens = tokens.slice(0, MAX_LEN);
+  if(tokens.length===0) tokens = ["<unk>"];
+  const t = forwardWithTrace(tokens);
+  lastTrace = t;
+
+  if(logIt){
+    clearLog();
+    log(`[1] Tokenize: "${text}" → ${t.n} Tokens`, 'tag');
+    log(`    ${t.tokens.join(' ')}`, 'dim');
+    log(`[2] Token-Embeddings: IDs (1,${t.n}) → Vektoren (${t.n},${D})`);
+    log(`    Mittelwert ${t.afterTokEmbStats.mean.toFixed(4)}, Varianz ${t.afterTokEmbStats.varr.toFixed(4)}`, 'dim');
+    log(`[3] Positions-Embeddings addiert — Shape bleibt (${t.n},${D})`);
+    log(`    Mittelwert ${t.afterPosEmbStats.mean.toFixed(4)}, Varianz ${t.afterPosEmbStats.varr.toFixed(4)}`, 'dim');
+    log(`[4] Causal Mask: ${t.maskBlocked} von ${t.maskTotal} Positionen blockiert`, 'dim');
+    t.layers.forEach((L, i)=>{
+      log(`[5.${i+1}] Block ${i+1}: LayerNorm → Mittelwert ${L.ln1Stats.mean.toFixed(4)}`, 'hi');
+      const maxW = Math.max(...L.headWeights.flat(2));
+      log(`      MultiHeadAttention: stärkstes Gewicht ${maxW.toFixed(4)} über ${NUM_HEADS} Heads`, 'dim');
+      log(`      Residual: x = x + attention_out → Mittelwert ${L.afterRes1Stats.mean.toFixed(4)}`, 'dim');
+      log(`      LayerNorm → Mittelwert ${L.ln2Stats.mean.toFixed(4)}`, 'dim');
+      log(`      FeedForward: ${D} → ${HIDDEN} (GELU) → ${D}, Hidden-Mittelwert ${L.hiddenStats.mean.toFixed(4)}`, 'dim');
+      log(`      Residual: x = x + ffn_out → Mittelwert ${L.afterRes2Stats.mean.toFixed(4)}`, 'dim');
+    });
+    log(`[6] Finale LayerNorm → Mittelwert ${t.finalStats.mean.toFixed(4)}`);
+    log(`[7] Output-Projektion: Logits-Shape (${t.n},${V})`);
+    log(`[8] Softmax über ${V} Tokens — Summe: ${t.probs.reduce((a,v)=>a+v,0).toFixed(6)}`);
+    log(`[9] Top-5: ${t.top5.map(x=>x.token+'='+(x.prob*100).toFixed(1)+'%').join(', ')}`, 'hi');
+  }
+  return t;
+}
+
+/* ============================================================
+   9) BUTTON-HANDLER
+   ============================================================ */
+document.getElementById('seedSel').addEventListener('change', (e)=>{
+  model = initModel(parseInt(e.target.value));
+  lastTrace = null;
+  clearLog();
+  log('Modell neu initialisiert mit Seed '+e.target.value+' (untrainiert — nur Architektur ändert Verhalten nicht, Zufallszahlen schon).', 'dim');
+  STAGES.forEach((s,idx)=>document.getElementById('chip-'+s.id).classList.remove('done','active'));
+});
+document.getElementById('tempRange').addEventListener('input', (e)=>{
+  document.getElementById('tempVal').textContent = parseFloat(e.target.value).toFixed(2);
+});
+
+document.getElementById('btnForward').addEventListener('click', ()=>{
+  runForward(true);
+  showStage('samp');
+});
+
+let stepTimer = null, stopFlag = false;
+
+document.getElementById('btnStep').addEventListener('click', async ()=>{
+  toggleButtons(true);
+  const t = runForward(false);
+  clearLog();
+  const order = ['tok','emb','pos','l0','l1','lnf','proj','soft','samp'].filter(id => id!=='l1' || NUM_LAYERS>1);
+  for(const id of order){
+    if(stopFlag) break;
+    showStage(id);
+    logForStage(id, t);
+    await sleep(650);
+  }
+  toggleButtons(false);
+});
+
+document.getElementById('btnStop').addEventListener('click', ()=>{ stopFlag = true; });
+
+document.getElementById('btnGen').addEventListener('click', async ()=>{
+  toggleButtons(true);
+  const genOut = document.getElementById('genOutput');
+  let text = document.getElementById('txtIn').value.trim();
+  genOut.innerHTML = escapeHtml(text) + ' ';
+  clearLog();
+  log('Autoregressive Generierung gestartet.', 'tag');
+
+  for(let step=0; step<12; step++){
+    if(stopFlag) break;
+    let tokens = tokenize(text).slice(-MAX_LEN);
+    const t = forwardWithTrace(tokens);
+    lastTrace = t;
+    showStage('samp');
+    drawTopK(t);
+
+    const temp = parseFloat(document.getElementById('tempRange').value);
+    const scaled = t.lastLogits.map(v=>v/temp);
+    const probs = softmaxRow(scaled);
+    const rngGen = mulberry32((Date.now() + step*7919) & 0xffffffff);
+    let r = rngGen(), acc = 0, chosen = probs.length-1;
+    for(let i=0;i<probs.length;i++){ acc += probs[i]; if(r <= acc){ chosen = i; break; } }
+    const chosenTok = VOCAB[chosen];
+    const chosenProb = probs[chosen];
+
+    log(`Schritt ${step+1}: Top-5 [${t.top5.map(x=>x.token+':'+(x.prob*100).toFixed(0)+'%').join(', ')}] → gewählt "${chosenTok}" (p=${(chosenProb*100).toFixed(1)}%, T=${temp})`, 'hi');
+
+    if(chosenTok !== '<unk>' && chosenTok !== '<bos>'){
+      text = (text + ' ' + chosenTok).trim();
+    } else {
+      text = (text + ' ' + chosenTok).trim();
+    }
+    const span = document.createElement('span');
+    span.className = 'new'; span.textContent = chosenTok + ' ';
+    genOut.appendChild(span);
+
+    await sleep(500);
+  }
+  log('Generierung beendet.', 'tag');
+  toggleButtons(false);
+});
+
+function logForStage(id, t){
+  if(id==='tok') log(`[1] Tokenize → ${t.n} Tokens: ${t.tokens.join(' ')}`, 'tag');
+  else if(id==='emb') log(`[2] Token-Embeddings: (${t.n},${D}), Mittelwert ${t.afterTokEmbStats.mean.toFixed(4)}`);
+  else if(id==='pos') log(`[3] + Positions-Embeddings, Causal Mask: ${t.maskBlocked}/${t.maskTotal} blockiert`);
+  else if(id==='l0' || id==='l1'){
+    const li = id==='l0'?0:1; if(li>=NUM_LAYERS) return;
+    const L = t.layers[li];
+    log(`[Block ${li+1}] LN→Attn→Residual→LN→FFN→Residual — Mittelwert danach: ${L.afterRes2Stats.mean.toFixed(4)}`, 'hi');
+  }
+  else if(id==='lnf') log(`[Finale Norm] Mittelwert ${t.finalStats.mean.toFixed(4)}`);
+  else if(id==='proj') log(`[Output-Proj.] Logits-Shape (${t.n},${V})`);
+  else if(id==='soft') log(`[Softmax] Summe ${t.probs.reduce((a,v)=>a+v,0).toFixed(6)}`);
+  else if(id==='samp') log(`[Sampling] Top-5: ${t.top5.map(x=>x.token+'='+(x.prob*100).toFixed(1)+'%').join(', ')}`, 'hi');
+}
+
+function toggleButtons(running){
+  stopFlag = false;
+  document.getElementById('btnForward').disabled = running;
+  document.getElementById('btnStep').disabled = running;
+  document.getElementById('btnGen').disabled = running;
+  document.getElementById('btnStop').disabled = !running;
+}
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+/* ============================================================
+   10) INIT
+   ============================================================ */
+log('Bereit. Wähle Text + Seed, dann "Forward Pass" oder "Schritt für Schritt".', 'dim');
+})();
+</script>
+</body>
+</html>
