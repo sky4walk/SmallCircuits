@@ -62,7 +62,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.20-pitstop-irqwrite"
+__version__ = "2026.07.20-input-recorder"
 
 
 # =============================================================================
@@ -293,6 +293,10 @@ class Vic:
         # at its own horizontal position), so X must be replayed per line too.
         self.line_spr_x = bytearray(self.LINES_PER_FRAME * 8)
         self.line_spr_msb = bytearray(self.LINES_PER_FRAME)
+        # VIC bank active when the sprite pointers were fetched on each raster,
+        # so sprite DATA is read from the bank live at display time (see
+        # read_vic_bytes_bank) even across a mid-frame $DD00 bank switch.
+        self.line_spr_bank = bytearray(self.LINES_PER_FRAME)
         # --- Canonical per-line sprite display state ---
         # line_spr_row[r*8+i] is the sprite row (0..20) sprite i DISPLAYS on
         # raster r, or 0xFF when it isn't displaying there. It is produced by a
@@ -338,6 +342,11 @@ class Vic:
         self.row_mode_d011 = bytearray(25)
         self.row_mode_d016 = bytearray(25)
         self.row_mode_d018 = bytearray(25)
+        # VIC bank ($DD00) active when each row was fetched. The font base is
+        # bank*0x4000 + char_base; games that switch $DD00 mid-frame (e.g. Pole
+        # Position II: bank 2 status line over a bank 3 road) need the font
+        # read from the row's OWN bank, not the render-time bank.
+        self.row_mode_bank = bytearray([0xFF] * 25)   # 0xFF = not yet captured
         self._den_frame = True
         self._vborder = True
         self._display_state = False
@@ -372,6 +381,9 @@ class Vic:
         self.raster_compare = 0
         self.irq_status = 0
         self._raster_irq_pending = False
+        self._raster_irq_fired_line = -1   # edge guard: fire once per entry
+                                           # into the compare line, not while
+                                           # raster==compare holds
         self._d021_splits = {}
         self._vc_offset = 0
         self.irq_enable = 0
@@ -447,6 +459,8 @@ class Vic:
             self.row_mode_d011[self._disp_row] = d011
             self.row_mode_d016[self._disp_row] = self.regs[0x16]
             self.row_mode_d018[self._disp_row] = self.regs[0x18]
+            if self.mem is not None:
+                self.row_mode_bank[self._disp_row] = self.mem.vic_bank()
         if defer_eol:
             # cycle mode: the RC==7 / advance decision belongs to cycle 58
             # (Bauer), where the LIVE badline condition decides whether the
@@ -599,7 +613,10 @@ class Vic:
         (wrapped inside the 1 KB video matrix, as the 10-bit VC does)."""
         if self.mem is None:
             return
-        base = (self.mem.vic_bank() * 0x4000
+        _bank = self.mem.vic_bank()
+        if row < 25:
+            self.row_mode_bank[row] = _bank      # font must use THIS bank too
+        base = (_bank * 0x4000
                 + ((self.regs[0x18] >> 4) & 0x0F) * 0x400)
         vc = (row * 40 + self._vc_offset) % 1024
         if vc + 40 <= 1024:
@@ -628,6 +645,19 @@ class Vic:
     def write(self, offset, val):
         offset &= 0x3F
         val &= 0xFF
+        if (offset in (0x22, 0x23)
+                and not getattr(self, "_bl_defer", False)
+                and self._line_cycles < 16):
+            # Colour-ladder writes land in cycles ~6-16 of their target line
+            # (raster busy-wait + 2 STAs); the visible pixels only start at
+            # ~cycle 16, so on hardware the WHOLE line shows the new colour.
+            # Our snapshot is taken at line start — apply the write
+            # retroactively or IRQ jitter wobbles each stripe by one line
+            # (Pitstop II horizon).
+            if offset == 0x22:
+                self.line_d022[self.raster] = val
+            else:
+                self.line_d023[self.raster] = val
         if offset in (0x18, 0x16) and not getattr(self, "_bl_defer", False):
             # Late split writes (batch mode): the real chip's c/g-accesses
             # for a row run in cycles 15-54, so a $D018/$D016 write landing
@@ -645,7 +675,7 @@ class Vic:
                     if offset == 0x18:
                         self.row_mode_d018[row] = val
                         self.line_d018[r] = val
-                        self._fetch_row(row)
+                        self._fetch_row(row)   # also refreshes row_mode_bank
                     else:
                         self.row_mode_d016[row] = val
                         self.line_d016[r] = val
@@ -659,7 +689,11 @@ class Vic:
                 # Pitstop II arms its next ladder rung on the target line's
                 # first cycles and relies on exactly this (without it the
                 # whole IRQ chain sleeps a frame: the split-view garble).
-                self._raster_irq_pending = True
+                # Honour the same per-entry edge guard so a write inside the
+                # compare line can't double-fire (Pole Position II timer).
+                if self._raster_irq_fired_line != self.raster:
+                    self._raster_irq_pending = True
+                    self._raster_irq_fired_line = self.raster
         elif offset == self.REG_CTRL1:
             self.regs[offset] = val
             self.raster_compare = (self.raster_compare & 0xFF) | ((val & 0x80) << 1)
@@ -877,7 +911,9 @@ class Vic:
                 self.line_d01d[self.raster] = regs[0x1D]
                 self.line_d025[self.raster] = regs[0x25]
                 self.line_d026[self.raster] = regs[0x26]
-                pbase = (mem.vic_bank() * 0x4000
+                _sbank = mem.vic_bank()
+                self.line_spr_bank[self.raster] = _sbank
+                pbase = (_sbank * 0x4000
                          + ((regs[0x18] >> 4) & 0x0F) * 0x400 + 0x3F8)
                 self.line_spr_ptr[ras8:ras8 + 8] = mem.ram[pbase:pbase + 8]
                 # --- Sprite display sequencer (line-level VIC model) ---
@@ -949,7 +985,18 @@ class Vic:
                 # (double-IRQ + `inc $d012`) budget exactly for this margin:
                 # without it, the re-read of $D012 lands one line early and
                 # the routine's anchor drifts one line per frame (dentest).
-                self._raster_irq_pending = True
+                # Edge guard: the compare raises the IRQ ONCE per entry into
+                # the line. A handler that dwells in the compare line (Pole
+                # Position II's banner IRQ at raster 254) must not re-trigger
+                # — otherwise the frame-timer at $7C09 decrements twice and
+                # the whole pre-race animation runs at double speed.
+                if self._raster_irq_fired_line != self.raster:
+                    self._raster_irq_pending = True
+                    self._raster_irq_fired_line = self.raster
+            else:
+                if self._raster_irq_fired_line == self.raster_compare:
+                    # left the compare line: re-arm for its next entry
+                    self._raster_irq_fired_line = -1
             if self.raster == self.SAMPLE_LINE:
                 # Latch the registers active during the visible playfield so the
                 # per-frame renderer is immune to mid-frame raster splits.
@@ -1979,6 +2026,23 @@ class Memory:
     def read_vic_bytes(self, addr, n):
         """Read n bytes via VIC view as a Python bytes object."""
         return bytes(self.read_vic(addr + i) for i in range(n))
+
+    def read_vic_bytes_bank(self, addr, n, bank):
+        """Read n bytes via the VIC view of a SPECIFIC bank (0..3). Used for
+        sprite data, whose pointer is recorded per raster: a game that switches
+        $DD00 mid-frame (e.g. Pole Position II, bank 2 status band over a bank 3
+        road) must fetch each sprite's shape from the bank live when that sprite
+        displayed, not the render-time bank."""
+        base = bank * 0x4000
+        shadow = bank in (0, 2)
+        out = bytearray(n)
+        for i in range(n):
+            a = (addr + i) & 0x3FFF
+            if shadow and 0x1000 <= a < 0x2000:
+                out[i] = self.rom[0xD000 + (a & 0x0FFF)]
+            else:
+                out[i] = self.ram[base + a]
+        return bytes(out)
 
     def read_vic_block(self, addr, n):
         """Read n bytes via the VIC view as one fast RAM slice, with the
@@ -5670,15 +5734,22 @@ class PygameFrontend:
         """
         np = self.np
         vic = self.system.vic
-        bank = self.system.mem.vic_bank()
+        render_bank = self.system.mem.vic_bank()
         cache = {}
         masks = np.empty((25, 40, 8, 8), dtype=np.uint8)
         for r in range(25):
+            # Font base = row's OWN bank (captured when the row was fetched) +
+            # its char base. Honors mid-frame $DD00 bank switches so a status
+            # line in one bank over a playfield in another gets the right font.
+            bank = vic.row_mode_bank[r]
+            if bank == 0xFF:            # row never fetched -> render-time bank
+                bank = render_bank
             cb_sel = (vic.row_mode_d018[r] >> 1) & 0x07
-            cg = cache.get(cb_sel)
+            key = (bank, cb_sel)
+            cg = cache.get(key)
             if cg is None:
                 cg = self._chargen_for(bank, cb_sel)
-                cache[cb_sel] = cg
+                cache[key] = cg
             masks[r] = cg[codes[r]]
         return masks
 
@@ -6018,6 +6089,7 @@ class PygameFrontend:
         l1b = vic.line_d01b
         l25 = vic.line_d025
         l26 = vic.line_d026
+        lbank = vic.line_spr_bank
         decode_cache = {}
         for s in range(7, -1, -1):
             sy = 0
@@ -6033,7 +6105,8 @@ class PygameFrontend:
                       (l1d[r] >> s) & 1,
                       (l1b[r] >> s) & 1,
                       l25[r] & 0x0F,
-                      l26[r] & 0x0F)
+                      l26[r] & 0x0F,
+                      lbank[r])
                 rows = [lrow[r * 8 + s]]
                 end = sy + 1
                 while end < 200:
@@ -6047,7 +6120,8 @@ class PygameFrontend:
                           (l1d[rr] >> s) & 1,
                           (l1b[rr] >> s) & 1,
                           l25[rr] & 0x0F,
-                          l26[rr] & 0x0F)
+                          l26[rr] & 0x0F,
+                          lbank[rr])
                     if an != a0:
                         break
                     rows.append(lrow[rr * 8 + s])
@@ -6166,6 +6240,7 @@ class PygameFrontend:
         l1b = vic.line_d01b
         l25 = vic.line_d025
         l26 = vic.line_d026
+        lbank = vic.line_spr_bank
         occ = np.zeros((r1 - r0, 320), np.uint8)
         cache = {}
 
@@ -6177,7 +6252,8 @@ class PygameFrontend:
                     (l1d[rr] >> s) & 1,
                     (l1b[rr] >> s) & 1,
                     l25[rr] & 0x0F,
-                    l26[rr] & 0x0F)
+                    l26[rr] & 0x0F,
+                    lbank[rr])
 
         for s in range(7, -1, -1):
             r = r0
@@ -6247,11 +6323,12 @@ class PygameFrontend:
         """
         np = self.np
         mem = self.system.mem
-        spr_x, pointer, sprite_color, multicolor, x_expand, prio, mc0, mc1 = attrs
+        (spr_x, pointer, sprite_color, multicolor, x_expand, prio,
+         mc0, mc1, bank) = attrs
 
-        grid = decode_cache.get((pointer, multicolor))
+        grid = decode_cache.get((pointer, multicolor, bank))
         if grid is None:
-            sd = mem.read_vic_bytes(pointer * 64, 63)
+            sd = mem.read_vic_bytes_bank(pointer * 64, 63, bank)
             if multicolor:
                 # (21,12) 2-bit values 0..3, each MC pixel two wide -> (21,24)
                 raw = np.frombuffer(sd, dtype=np.uint8).reshape(21, 3)
@@ -6262,7 +6339,7 @@ class PygameFrontend:
             else:
                 bits_flat = np.unpackbits(np.frombuffer(sd, dtype=np.uint8))
                 grid = bits_flat[:21 * 24].reshape(21, 24)
-            decode_cache[(pointer, multicolor)] = grid
+            decode_cache[(pointer, multicolor, bank)] = grid
 
         block = grid[np.asarray(rows, dtype=np.intp)]        # (n, 24)
         if x_expand:
@@ -6350,6 +6427,59 @@ class PygameFrontend:
                     print(f"  fg mismatch at line {sy}: "
                           f"{bin(got ^ want).count('1')} px differ")
         return (bad_lines, bad_pixels)
+
+    def _log_joystick_state(self, frame):
+        """Called once per frame while recording: append a joystick event
+        whenever the active port's state changed since the last frame, so the
+        transcript captures stick/fire the same way it captures keys."""
+        js = self.system.cia1.joystick_state
+        cur = (js[0], js[1])
+        prev = getattr(self, "_input_log_joy_prev", (0, 0))
+        if cur != prev:
+            self._input_log.append((frame, "joy", cur[0], cur[1]))
+            self._input_log_joy_prev = cur
+
+    def _dump_input_log(self):
+        """Print the recorded input transcript. Two views: a human-readable
+        timeline and a compact Python list a headless run can replay."""
+        log = self._input_log or []
+        pg = self.pygame
+        keyname = {
+            getattr(pg, n): n[2:] for n in dir(pg)
+            if n.startswith("K_")
+        }
+        # Joystick bit names (C64 pin mapping used by joystick_state).
+        JOY = [(0x01, "hoch"), (0x02, "runter"), (0x04, "links"),
+               (0x08, "rechts"), (0x10, "Feuer")]
+
+        def joy_desc(v):
+            if v == 0:
+                return "—"
+            return "+".join(n for b, n in JOY if v & b)
+
+        print("\n=== F7 Eingabe-Protokoll "
+              f"({len(log)} Ereignisse, Frame 0 = Aufnahmestart) ===")
+        print("50 Frames = 1 Sekunde (PAL).\n")
+        for frame, kind, a, b in log:
+            sec = frame / 50.0
+            if kind == "keydown":
+                nm = keyname.get(a, f"key{a}")
+                extra = f" '{b}'" if b and b.isprintable() else ""
+                print(f"  F{frame:5d} ({sec:6.2f}s)  Taste ↓ {nm}{extra}")
+            elif kind == "keyup":
+                nm = keyname.get(a, f"key{a}")
+                print(f"  F{frame:5d} ({sec:6.2f}s)  Taste ↑ {nm}")
+            elif kind == "joy":
+                p1, p2 = a, b
+                print(f"  F{frame:5d} ({sec:6.2f}s)  Joystick "
+                      f"P1={joy_desc(p1)} P2={joy_desc(p2)}")
+        # Compact replay form (frame, kind, a, b) for headless reproduction.
+        print("\n--- Kompaktform (für headless-Reproduktion) ---")
+        print("INPUT_LOG = [")
+        for e in log:
+            print(f"    {tuple(e)!r},")
+        print("]")
+        print("=== Ende Protokoll ===\n")
 
     def _flicker_diag(self):
         """F10 flicker diagnosis: capture the next 6 rendered frames as
@@ -6500,6 +6630,9 @@ class PygameFrontend:
         last = time.perf_counter()
         frames = 0
         running = True
+        self._input_log = None          # F7 input recorder: None = off,
+        self._input_log_frame0 = 0       # else a list of (frame, event) tuples
+        total_frames = 0                 # monotonic frame counter (timebase)
         while running:
             for event in self.pygame.event.get():
                 if event.type == self.pygame.QUIT:
@@ -6545,6 +6678,26 @@ class PygameFrontend:
                         print("Sprite collision: "
                               f"{'ON' if vic.collision_enabled else 'OFF'}")
                         continue
+                    if event.key in (self.pygame.K_PAUSE,
+                                     self.pygame.K_SCROLLLOCK):
+                        # Toggle the input recorder (Pause or ScrollLock —
+                        # neither exists on the C64 keyboard, so no clash).
+                        # While on, every key and joystick event is logged
+                        # with its frame number; on stop a replayable
+                        # transcript is printed to the console (frame-stamped,
+                        # so a headless run can reproduce the exact sequence).
+                        if self._input_log is None:
+                            self._input_log = []
+                            self._input_log_frame0 = total_frames
+                            self._input_log_joy_prev = (
+                                self.system.cia1.joystick_state[0],
+                                self.system.cia1.joystick_state[1])
+                            print("Eingabe-Aufnahme GESTARTET (Pause/ScrollLock "
+                                  "erneut = Stop + Protokoll)")
+                        else:
+                            self._dump_input_log()
+                            self._input_log = None
+                        continue
                     if event.key == self.pygame.K_F10:
                         self._sprite_diag_dump()
                         self._flicker_diag()
@@ -6562,13 +6715,24 @@ class PygameFrontend:
                         label = ("Port 1", "Port 2", "Both ports")[self._joy_port]
                         print(f"Keypad joystick → {label}")
                         continue
+                    if self._input_log is not None:
+                        rel = total_frames - self._input_log_frame0
+                        self._input_log.append(
+                            (rel, "keydown", event.key, event.unicode))
                     self._key_event(event.key, True, event.unicode)
                 elif event.type == self.pygame.KEYUP:
+                    if self._input_log is not None:
+                        rel = total_frames - self._input_log_frame0
+                        self._input_log.append(
+                            (rel, "keyup", event.key, ""))
                     self._key_event(event.key, False)
             # SID-file playback (no-op for PRG / native mode)
             self.system.sid_play_tick()
             self.step_frame()
             frames += 1
+            total_frames += 1
+            if self._input_log is not None:
+                self._log_joystick_state(total_frames - self._input_log_frame0)
             now = time.perf_counter()
             if now - last >= 1.0:
                 self.shown_fps = frames / (now - last)
