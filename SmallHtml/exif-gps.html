@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standort aus Bild — EXIF-GPS-Auslese</title>
+<style>
+  :root{
+    --paper:#E7E9E2;
+    --paper-2:#F2F3EE;
+    --ink:#17262A;
+    --ink-soft:#4A5C5E;
+    --rule:#BCC2B7;
+    --contour:#0F6B5C;
+    --marker:#B4451F;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper);
+    background-image:
+      repeating-linear-gradient(0deg, rgba(15,107,92,.055) 0 1px, transparent 1px 34px),
+      repeating-linear-gradient(90deg, rgba(15,107,92,.055) 0 1px, transparent 1px 34px);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:16px;
+    line-height:1.5;
+    padding:32px 20px 80px;
+  }
+  .wrap{max-width:860px;margin:0 auto}
+
+  /* ---- Kopf ---- */
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:11px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--ink-soft);
+    margin:0 0 10px;
+  }
+  h1{
+    font-family:var(--mono);
+    font-weight:600;
+    font-size:clamp(26px,4.5vw,38px);
+    letter-spacing:-.01em;
+    margin:0 0 10px;
+    line-height:1.1;
+  }
+  .lede{max-width:52ch;margin:0 0 28px;color:var(--ink-soft)}
+  .lede b{color:var(--ink);font-weight:600}
+
+  /* ---- Ablagefeld ---- */
+  .drop{
+    position:relative;
+    border:1.5px dashed var(--rule);
+    background:var(--paper-2);
+    padding:38px 24px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .drop:hover, .drop:focus-visible{border-color:var(--contour);outline:none}
+  .drop.hot{border-color:var(--marker);border-style:solid;background:#fff}
+  .drop .crosshair{
+    font-family:var(--mono);font-size:22px;color:var(--contour);
+    display:block;margin-bottom:10px;letter-spacing:.1em;
+  }
+  .drop strong{display:block;font-size:17px;margin-bottom:4px}
+  .drop span.hint{font-size:13px;color:var(--ink-soft);font-family:var(--mono)}
+  input[type=file]{display:none}
+
+  /* ---- Ergebniskarten ---- */
+  .cards{margin-top:28px;display:flex;flex-direction:column;gap:18px}
+  .card{
+    background:var(--paper-2);
+    border:1px solid var(--rule);
+    border-left:3px solid var(--contour);
+    padding:18px;
+  }
+  .card.nogps{border-left-color:var(--rule)}
+  .card.err{border-left-color:var(--marker)}
+  .head{display:flex;gap:14px;align-items:flex-start}
+  .thumb{
+    width:76px;height:76px;flex:0 0 76px;
+    object-fit:cover;border:1px solid var(--rule);background:#fff;
+  }
+  .meta{min-width:0;flex:1}
+  .fname{
+    font-family:var(--mono);font-size:14px;font-weight:600;
+    word-break:break-all;margin:0 0 3px;
+  }
+  .sub{font-family:var(--mono);font-size:12px;color:var(--ink-soft);margin:0}
+
+  .coords{
+    margin:16px 0 0;
+    border-top:1px solid var(--rule);
+    padding-top:14px;
+  }
+  .label{
+    font-family:var(--mono);font-size:10px;letter-spacing:.2em;
+    text-transform:uppercase;color:var(--ink-soft);margin:0 0 4px;
+  }
+  .decimal{
+    font-family:var(--mono);
+    font-size:clamp(19px,3.6vw,25px);
+    font-weight:600;
+    letter-spacing:-.01em;
+    margin:0;
+    word-break:break-all;
+  }
+  .dms{font-family:var(--mono);font-size:13px;color:var(--ink-soft);margin:6px 0 0}
+  .extra{font-family:var(--mono);font-size:12px;color:var(--ink-soft);margin:10px 0 0}
+
+  /* ---- Aktionen ---- */
+  .actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+  button, a.btn{
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.04em;
+    padding:9px 14px;border:1px solid var(--ink);
+    background:transparent;color:var(--ink);
+    cursor:pointer;text-decoration:none;display:inline-block;
+    transition:background .12s,color .12s;
+  }
+  button:hover, a.btn:hover{background:var(--ink);color:var(--paper-2)}
+  button:focus-visible, a.btn:focus-visible, .drop:focus-visible{
+    outline:2px solid var(--marker);outline-offset:2px;
+  }
+  a.btn.primary{background:var(--contour);border-color:var(--contour);color:#fff}
+  a.btn.primary:hover{background:var(--ink);border-color:var(--ink)}
+  button.done{background:var(--contour);border-color:var(--contour);color:#fff}
+
+  .note{font-size:13.5px;color:var(--ink-soft);margin:14px 0 0;max-width:56ch}
+  .note code{font-family:var(--mono);font-size:12.5px}
+
+  footer{
+    margin-top:44px;padding-top:16px;border-top:1px solid var(--rule);
+    font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);
+    letter-spacing:.03em;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none !important;transition:none !important}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <p class="eyebrow">EXIF &rarr; Koordinaten</p>
+  <h1>Standort aus Bild</h1>
+  <p class="lede">Bild ablegen, Position ablesen. Die Datei wird <b>ausschließlich lokal im Browser</b> gelesen — nichts wird hochgeladen.</p>
+
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="Bilder auswählen">
+    <span class="crosshair" aria-hidden="true">＋</span>
+    <strong>Bilder hierher ziehen oder klicken</strong>
+    <span class="hint">JPG / JPEG &middot; auch mehrere gleichzeitig</span>
+    <input type="file" id="file" accept="image/jpeg,image/jpg,image/tiff,.jpg,.jpeg" multiple>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <footer>Kein Upload · keine Bibliotheken · keine Netzwerkanfragen</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   EXIF-Parser (JPEG APP1 / TIFF-IFD) — ohne Abhängigkeiten
+   ============================================================ */
+
+const TYPE_SIZE = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8};
+
+function readValue(view, tiff, entry, little){
+  const type  = view.getUint16(entry+2, little);
+  const count = view.getUint32(entry+4, little);
+  const size  = TYPE_SIZE[type];
+  if(!size) return null;
+  const total = size * count;
+  const at = total <= 4 ? entry+8 : tiff + view.getUint32(entry+8, little);
+  if(at + total > view.byteLength) return null;
+
+  if(type === 2){                                   // ASCII
+    let s = "";
+    for(let i=0;i<count;i++){
+      const c = view.getUint8(at+i);
+      if(c === 0) break;
+      s += String.fromCharCode(c);
+    }
+    return s.trim();
+  }
+
+  const out = [];
+  for(let i=0;i<count;i++){
+    const p = at + i*size;
+    switch(type){
+      case 1: case 7: out.push(view.getUint8(p)); break;
+      case 3:  out.push(view.getUint16(p, little)); break;
+      case 4:  out.push(view.getUint32(p, little)); break;
+      case 6:  out.push(view.getInt8(p)); break;
+      case 8:  out.push(view.getInt16(p, little)); break;
+      case 9:  out.push(view.getInt32(p, little)); break;
+      case 5:  { const n=view.getUint32(p,little), d=view.getUint32(p+4,little); out.push(d?n/d:0); break; }
+      case 10: { const n=view.getInt32(p,little),  d=view.getInt32(p+4,little);  out.push(d?n/d:0); break; }
+      default: out.push(0);
+    }
+  }
+  return count === 1 ? out[0] : out;
+}
+
+function readIFD(view, tiff, dir, little){
+  const tags = {};
+  if(dir + 2 > view.byteLength) return tags;
+  const n = view.getUint16(dir, little);
+  for(let i=0;i<n;i++){
+    const entry = dir + 2 + i*12;
+    if(entry + 12 > view.byteLength) break;
+    tags[view.getUint16(entry, little)] = readValue(view, tiff, entry, little);
+  }
+  return tags;
+}
+
+function parseTiff(view, tiff){
+  const bo = view.getUint16(tiff);
+  if(bo !== 0x4949 && bo !== 0x4D4D) return null;
+  const little = bo === 0x4949;
+  if(view.getUint16(tiff+2, little) !== 0x002A) return null;
+
+  const ifd0 = readIFD(view, tiff, tiff + view.getUint32(tiff+4, little), little);
+  const res = { ifd0, exif:{}, gps:{} };
+  if(ifd0[0x8769]) res.exif = readIFD(view, tiff, tiff + ifd0[0x8769], little);
+  if(ifd0[0x8825]) res.gps  = readIFD(view, tiff, tiff + ifd0[0x8825], little);
+  return res;
+}
+
+function parseJpeg(buffer){
+  const view = new DataView(buffer);
+  if(view.byteLength < 4) throw new Error("Datei ist zu klein.");
+
+  // TIFF direkt (manche Kameras/Scans)
+  const head = view.getUint16(0);
+  if(head === 0x4949 || head === 0x4D4D) return parseTiff(view, 0);
+  if(head !== 0xFFD8) throw new Error("Das ist keine JPEG-Datei. HEIC und PNG enthalten kein JPEG-EXIF.");
+
+  let off = 2;
+  while(off < view.byteLength - 3){
+    if(view.getUint8(off) !== 0xFF){ off++; continue; }
+    const marker = view.getUint8(off+1);
+    if(marker === 0xFF){ off++; continue; }
+    if(marker === 0xD8 || marker === 0x01 || (marker >= 0xD0 && marker <= 0xD7)){ off += 2; continue; }
+    if(marker === 0xDA || marker === 0xD9) break;       // Bilddaten beginnen
+    const len = view.getUint16(off+2);
+    if(len < 2) break;
+    if(marker === 0xE1 && off+10 < view.byteLength &&
+       view.getUint32(off+4) === 0x45786966 && view.getUint16(off+8) === 0x0000){
+      return parseTiff(view, off+10);
+    }
+    off += 2 + len;
+  }
+  return null;
+}
+
+/* ============================================================
+   GPS-Auswertung
+   ============================================================ */
+
+function dmsToDecimal(dms, ref){
+  if(!Array.isArray(dms) || dms.length < 3) return null;
+  const [d,m,s] = dms;
+  let v = Math.abs(d) + m/60 + s/3600;
+  if(ref === "S" || ref === "W") v = -v;
+  return v;
+}
+
+function extractPosition(exif){
+  if(!exif) return null;
+  const g = exif.gps || {};
+  const lat = dmsToDecimal(g[2], g[1]);
+  const lon = dmsToDecimal(g[4], g[3]);
+  if(lat === null || lon === null) return null;
+  if(!isFinite(lat) || !isFinite(lon)) return null;
+  if(lat === 0 && lon === 0) return null;                 // Nullinsel = kein Fix
+  if(Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+
+  const pos = { lat, lon };
+
+  if(typeof g[6] === "number" && isFinite(g[6])){
+    pos.alt = (g[5] === 1 ? -g[6] : g[6]);
+  }
+  if(Array.isArray(g[7]) && g[29]){
+    const p = n => String(Math.round(n)).padStart(2,"0");
+    pos.utc = g[29].replace(/:/g,"-") + " " + p(g[7][0])+":"+p(g[7][1])+":"+p(g[7][2]) + " UTC";
+  }
+  return pos;
+}
+
+function fmtDMS(v, isLat){
+  const ref = isLat ? (v < 0 ? "S" : "N") : (v < 0 ? "W" : "E");
+  const a = Math.abs(v);
+  const d = Math.floor(a);
+  const mF = (a - d) * 60;
+  const m = Math.floor(mF);
+  const s = ((mF - m) * 60).toFixed(2);
+  return `${d}°${String(m).padStart(2,"0")}'${String(s).padStart(5,"0")}"${ref}`;
+}
+
+const dec = v => v.toFixed(6);
+
+/* ============================================================
+   Zwischenablage
+   ============================================================ */
+
+async function copyText(text, btn){
+  let ok = false;
+  try{
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  }catch(e){
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    try{ ok = document.execCommand("copy"); }catch(_){ ok = false; }
+    ta.remove();
+  }
+  const old = btn.dataset.label || btn.textContent;
+  btn.dataset.label = old;
+  btn.textContent = ok ? "Kopiert ✓" : "Kopieren fehlgeschlagen";
+  btn.classList.toggle("done", ok);
+  clearTimeout(btn._t);
+  btn._t = setTimeout(() => { btn.textContent = old; btn.classList.remove("done"); }, 1800);
+}
+
+/* ============================================================
+   Darstellung
+   ============================================================ */
+
+const cards = document.getElementById("cards");
+
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if(cls) n.className = cls;
+  if(text != null) n.textContent = text;
+  return n;
+}
+
+function makeButton(label, fn){
+  const b = el("button", null, label);
+  b.type = "button";
+  b.addEventListener("click", () => fn(b));
+  return b;
+}
+
+function kb(bytes){
+  return bytes > 1048576 ? (bytes/1048576).toFixed(1)+" MB" : Math.round(bytes/1024)+" kB";
+}
+
+function cameraLine(exif, file){
+  const bits = [];
+  const make  = exif && exif.ifd0 ? exif.ifd0[0x010F] : null;
+  const model = exif && exif.ifd0 ? exif.ifd0[0x0110] : null;
+  if(model) bits.push(make && !String(model).startsWith(make) ? make+" "+model : model);
+  const when = exif && exif.exif ? (exif.exif[0x9003] || exif.exif[0x9004]) : null;
+  if(when) bits.push(String(when).replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3"));
+  bits.push(kb(file.size));
+  return bits.join("  ·  ");
+}
+
+function renderCard(file, exif, pos, error){
+  const card = el("div", "card" + (error ? " err" : pos ? "" : " nogps"));
+
+  const head = el("div", "head");
+  const img = el("img", "thumb");
+  img.alt = "";
+  img.src = URL.createObjectURL(file);
+  img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once:true });
+  head.appendChild(img);
+
+  const meta = el("div", "meta");
+  meta.appendChild(el("p", "fname", file.name));
+  meta.appendChild(el("p", "sub", error ? "Nicht lesbar" : cameraLine(exif, file)));
+  head.appendChild(meta);
+  card.appendChild(head);
+
+  if(error){
+    card.appendChild(el("p", "note", error));
+    cards.prepend(card);
+    return;
+  }
+
+  if(!pos){
+    const n = el("p", "note");
+    n.innerHTML = "Keine GPS-Daten im Bild. Häufige Ursachen: Ortungsdienste waren in der Kamera-App aus, "
+                + "das Bild kam über einen Messenger (WhatsApp, Signal und Instagram entfernen Metadaten), "
+                + "oder es wurde durch eine Bildbearbeitung neu gespeichert.";
+    card.appendChild(n);
+    cards.prepend(card);
+    return;
+  }
+
+  const plain = dec(pos.lat) + ", " + dec(pos.lon);
+  const dmsTxt = fmtDMS(pos.lat, true) + " " + fmtDMS(pos.lon, false);
+
+  const box = el("div", "coords");
+  box.appendChild(el("p", "label", "Position (WGS 84)"));
+  box.appendChild(el("p", "decimal", plain));
+  box.appendChild(el("p", "dms", dmsTxt));
+
+  const extras = [];
+  if(pos.alt != null) extras.push("Höhe " + pos.alt.toFixed(0) + " m");
+  if(pos.utc) extras.push("GPS-Zeit " + pos.utc);
+  if(extras.length) box.appendChild(el("p", "extra", extras.join("  ·  ")));
+  card.appendChild(box);
+
+  // Aktionen
+  const acts = el("div", "actions");
+
+  const gmaps = el("a", "btn primary", "In Google Maps öffnen");
+  gmaps.href = "https://www.google.com/maps/search/?api=1&query=" + dec(pos.lat) + "," + dec(pos.lon);
+  gmaps.target = "_blank";
+  gmaps.rel = "noopener noreferrer";
+  acts.appendChild(gmaps);
+
+  acts.appendChild(makeButton("Koordinaten kopieren", b => copyText(plain, b)));
+  acts.appendChild(makeButton("Google-Maps-Link kopieren", b => copyText(gmaps.href, b)));
+  acts.appendChild(makeButton("Grad/Minuten kopieren", b => copyText(dmsTxt, b)));
+
+  const osm = el("a", "btn", "OpenStreetMap");
+  osm.href = "https://www.openstreetmap.org/?mlat=" + dec(pos.lat) + "&mlon=" + dec(pos.lon)
+           + "#map=16/" + dec(pos.lat) + "/" + dec(pos.lon);
+  osm.target = "_blank";
+  osm.rel = "noopener noreferrer";
+  acts.appendChild(osm);
+
+  card.appendChild(acts);
+  cards.prepend(card);
+}
+
+/* ============================================================
+   Dateiannahme
+   ============================================================ */
+
+function handleFiles(list){
+  [...list].forEach(file => {
+    if(!/^image\//.test(file.type) && !/\.(jpe?g|tiff?)$/i.test(file.name)){
+      renderCard(file, null, null, "Kein Bildformat — bitte eine JPG-Datei wählen.");
+      return;
+    }
+    const r = new FileReader();
+    r.onload = () => {
+      try{
+        const exif = parseJpeg(r.result);
+        renderCard(file, exif, extractPosition(exif), null);
+      }catch(e){
+        renderCard(file, null, null, e.message);
+      }
+    };
+    r.onerror = () => renderCard(file, null, null, "Die Datei konnte nicht gelesen werden.");
+    r.readAsArrayBuffer(file);
+  });
+}
+
+const drop = document.getElementById("drop");
+const input = document.getElementById("file");
+
+drop.addEventListener("click", e => { if(e.target !== input) input.click(); });
+input.addEventListener("click", e => e.stopPropagation());
+drop.addEventListener("keydown", e => {
+  if(e.key === "Enter" || e.key === " "){ e.preventDefault(); input.click(); }
+});
+input.addEventListener("change", () => { handleFiles(input.files); input.value = ""; });
+
+["dragenter","dragover"].forEach(t =>
+  drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("hot"); }));
+["dragleave","drop"].forEach(t =>
+  drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+drop.addEventListener("drop", e => {
+  e.stopPropagation();                       // sonst greift der window-Listener nochmal zu
+  if(e.dataTransfer) handleFiles(e.dataTransfer.files);
+});
+
+// Seitenweites Ablegen verhindert, dass der Browser das Bild einfach öffnet
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => {
+  e.preventDefault();
+  if(drop.contains(e.target)) return;        // Ablagefeld hat es bereits erledigt
+  if(e.dataTransfer) handleFiles(e.dataTransfer.files);
+});
+
+// Einfügen aus der Zwischenablage
+window.addEventListener("paste", e => {
+  if(e.clipboardData && e.clipboardData.files.length) handleFiles(e.clipboardData.files);
+});
+</script>
+</body>
+</html>
