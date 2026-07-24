@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ccview – ccrypt-Datei lesen</title>
+<style>
+:root{
+  --paper:#e9edf1; --card:#ffffff; --rule:#ccd5dd; --rule-soft:#e2e8ee;
+  --ink:#161d24; --dim:#66798a; --accent:#2d4a72; --accent-soft:#dde6f2;
+  --warn:#9c3d1e; --warn-soft:#f6e5df; --mark:#ffd75e; --mark-active:#ff9f2e;
+  --mono:ui-monospace,"SFMono-Regular","Cascadia Mono","Consolas","Liberation Mono",monospace;
+  --ui:ui-sans-serif,system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:var(--ui); font-size:15px; line-height:1.5;
+  display:flex; flex-direction:column;
+}
+.bar{
+  display:flex; align-items:baseline; gap:14px;
+  padding:14px 20px; border-bottom:1px solid var(--rule); background:var(--card);
+}
+.bar h1{
+  margin:0; font-family:var(--mono); font-size:15px; font-weight:700;
+  letter-spacing:.14em; text-transform:uppercase;
+}
+.bar .sub{color:var(--dim); font-size:13px}
+.bar .spacer{flex:1}
+.eyebrow{
+  font-family:var(--mono); font-size:11px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--dim); margin:0 0 8px;
+}
+main{flex:1; display:flex; flex-direction:column; min-height:0}
+.stage{padding:28px 20px; display:flex; justify-content:center}
+.panel{width:100%; max-width:760px}
+
+/* --- Ablage --- */
+.drop{
+  background:var(--card); border:1px dashed var(--rule); border-radius:3px;
+  padding:44px 24px; text-align:center; cursor:pointer; transition:border-color .15s,background .15s;
+}
+.drop:hover,.drop:focus-visible{border-color:var(--accent); outline:none}
+.drop.over{border-color:var(--accent); background:var(--accent-soft)}
+.drop strong{display:block; font-size:17px; margin-bottom:6px}
+.drop span{color:var(--dim); font-size:13px}
+
+/* --- Datei / Kopf --- */
+.card{background:var(--card); border:1px solid var(--rule); border-radius:3px; padding:20px}
+.meta{
+  font-family:var(--mono); font-size:13px; display:flex; flex-wrap:wrap;
+  gap:4px 18px; margin-bottom:18px; word-break:break-all;
+}
+.meta b{font-weight:700}
+.meta .sep{color:var(--rule)}
+.hex{
+  font-family:var(--mono); font-size:12.5px; line-height:1.7; color:var(--dim);
+  background:var(--paper); border:1px solid var(--rule-soft); border-radius:2px;
+  padding:10px 12px; white-space:pre; overflow-x:auto;
+}
+.pwrow{display:flex; gap:10px; margin-top:18px; align-items:stretch}
+input[type=password],input[type=text].pw{
+  flex:1; min-width:0; font-family:var(--mono); font-size:15px;
+  padding:10px 12px; border:1px solid var(--rule); border-radius:2px;
+  background:var(--card); color:var(--ink);
+}
+input:focus-visible{outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent)}
+button{
+  font-family:var(--ui); font-size:14px; padding:10px 18px; cursor:pointer;
+  border:1px solid var(--accent); background:var(--accent); color:#fff; border-radius:2px;
+}
+button:hover{filter:brightness(1.12)}
+button:focus-visible{outline:2px solid var(--ink); outline-offset:2px}
+button.ghost{background:transparent; color:var(--accent); border-color:var(--rule)}
+button.ghost:hover{border-color:var(--accent); filter:none; background:var(--accent-soft)}
+button[disabled]{opacity:.45; cursor:default; filter:none}
+.linkish{
+  background:none; border:none; color:var(--dim); padding:4px 2px;
+  font-size:13px; text-decoration:underline; text-underline-offset:3px;
+}
+.linkish:hover{color:var(--accent); filter:none}
+.note{margin-top:12px; font-size:13px; color:var(--dim)}
+.error{
+  margin-top:14px; padding:10px 12px; border-left:3px solid var(--warn);
+  background:var(--warn-soft); color:var(--warn); font-size:14px;
+}
+
+/* --- Leser --- */
+.toolbar{
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:10px 20px; background:var(--card); border-bottom:1px solid var(--rule);
+}
+.toolbar input[type=search]{
+  font-family:var(--mono); font-size:14px; padding:7px 10px; width:260px;
+  border:1px solid var(--rule); border-radius:2px; background:var(--card); color:var(--ink);
+}
+.count{font-family:var(--mono); font-size:13px; color:var(--dim); min-width:96px}
+.status{font-family:var(--mono); font-size:12px; color:var(--dim)}
+.nav{display:flex; gap:4px}
+.nav button{padding:6px 12px; font-family:var(--mono)}
+.toolbar .spacer{flex:1}
+.toggle{
+  font-family:var(--mono); font-size:13px; padding:7px 10px; border:1px solid var(--rule);
+  background:var(--card); color:var(--dim); border-radius:2px;
+}
+.toggle[aria-pressed=true]{background:var(--accent-soft); border-color:var(--accent); color:var(--accent)}
+
+.doc{flex:1; overflow:auto; background:var(--card); padding:8px 0 40vh}
+.row{display:flex; font-family:var(--mono); font-size:13.5px; line-height:1.62}
+.row:hover{background:var(--accent-soft)}
+.ln{
+  flex:0 0 auto; width:calc(var(--gw,3)*1ch + 34px); padding:0 14px 0 20px; text-align:right;
+  color:var(--rule); user-select:none; border-right:1px solid var(--rule-soft);
+}
+.tx{padding:0 20px 0 16px; white-space:pre-wrap; word-break:break-word; flex:1; min-width:0}
+mark{background:var(--mark); color:inherit; border-radius:1px}
+mark.on{background:var(--mark-active)}
+
+footer{
+  padding:12px 20px; border-top:1px solid var(--rule);
+  font-size:12px; color:var(--dim); background:var(--card);
+}
+footer code{font-family:var(--mono)}
+/* --- Bearbeiten --- */
+.findgrp{display:flex; align-items:center; gap:10px}
+.editwrap{flex:1; display:flex; min-height:0; background:var(--card)}
+.egut{
+  flex:0 0 auto; width:calc(var(--gw,3)*1ch + 34px); padding:8px 14px 0 20px;
+  font-family:var(--mono); font-size:13.5px; line-height:1.62; text-align:right;
+  color:var(--rule); border-right:1px solid var(--rule-soft);
+  overflow:hidden; white-space:pre; user-select:none;
+}
+#ed{
+  flex:1; min-width:0; border:0; outline:none; resize:none; tab-size:4;
+  font-family:var(--mono); font-size:13.5px; line-height:1.62;
+  padding:8px 20px 40vh 16px; background:var(--card); color:var(--ink);
+  white-space:pre; overflow:auto;
+}
+#ed:focus-visible{outline:none}
+.dot{
+  display:inline-block; width:7px; height:7px; border-radius:50%;
+  background:var(--warn); margin-right:6px; vertical-align:middle;
+}
+.dirty{font-family:var(--mono); font-size:12px; color:var(--warn)}
+
+/* --- Speichern --- */
+.ovl{
+  position:fixed; inset:0; z-index:10; padding:20px; background:rgba(22,29,36,.45);
+  display:flex; align-items:center; justify-content:center;
+}
+.dlg{
+  background:var(--card); border:1px solid var(--rule); border-radius:3px;
+  padding:22px; width:100%; max-width:470px;
+}
+.dlg h2{margin:0 0 6px; font-family:var(--mono); font-size:13px; letter-spacing:.14em; text-transform:uppercase}
+.dlg .hint{margin:0; font-size:13px; color:var(--dim)}
+.dlg label{display:block; font-size:13px; color:var(--dim); margin:14px 0 5px}
+.dlg input{
+  width:100%; font-family:var(--mono); font-size:15px; padding:10px 12px;
+  border:1px solid var(--rule); border-radius:2px; background:var(--card); color:var(--ink);
+}
+.dlg .actions{display:flex; gap:10px; margin-top:22px; align-items:center; flex-wrap:wrap}
+.dlg .actions .spacer{flex:1}
+.info{
+  margin-top:14px; padding:10px 12px; font-size:13px;
+  border-left:3px solid var(--accent); background:var(--accent-soft);
+}
+[hidden]{display:none !important}
+@media (prefers-reduced-motion:reduce){*{transition:none !important}}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <h1>ccview</h1>
+  <span class="sub">ccrypt-Datei lokal entschlüsseln und lesen</span>
+  <span class="spacer"></span>
+  <span class="status" id="topstatus">offline · nichts verlässt den Browser</span>
+</div>
+
+<main>
+  <!-- Stufe 1: Datei wählen -->
+  <section class="stage" id="s-pick">
+    <div class="panel">
+      <p class="eyebrow">Datei</p>
+      <div class="drop" id="drop" tabindex="0" role="button" aria-label="Datei wählen">
+        <strong>.cpt-Datei hierher ziehen</strong>
+        <span>oder klicken zum Auswählen</span>
+      </div>
+      <div class="error" id="err0" hidden></div>
+      <p class="note">Die Datei wird nur im Arbeitsspeicher dieses Tabs verarbeitet. Kein Upload, kein Netzwerkzugriff.</p>
+    </div>
+  </section>
+
+  <!-- Stufe 2: Kopf prüfen + Passwort -->
+  <section class="stage" id="s-unlock" hidden>
+    <div class="panel">
+      <p class="eyebrow">Dateikopf</p>
+      <div class="card">
+        <div class="meta" id="meta"></div>
+        <div class="hex" id="hex"></div>
+        <div class="pwrow">
+          <input type="password" id="pw" placeholder="Passwort" autocomplete="off" spellcheck="false" autofocus>
+          <button id="go">Entsperren</button>
+        </div>
+        <div style="display:flex;gap:16px;align-items:center">
+          <button class="linkish" id="showpw">Passwort anzeigen</button>
+          <button class="linkish" id="other">andere Datei</button>
+        </div>
+        <div class="error" id="err" hidden></div>
+      </div>
+      <p class="note">Die ersten 32 Byte sind der verschlüsselte Nonce. Ob das Passwort stimmt, zeigt sich erst beim Entsperren – dann muss darin die Kennung <code>c051</code> stehen.</p>
+    </div>
+  </section>
+
+  <!-- Stufe 3: Lesen -->
+  <section id="s-read" hidden style="display:flex;flex-direction:column;min-height:0;flex:1">
+    <div class="toolbar">
+      <span class="findgrp" id="findgrp">
+        <input type="search" id="q" placeholder="Suchen  (Strg+F)" autocomplete="off" spellcheck="false">
+        <span class="count" id="count"></span>
+        <div class="nav">
+          <button class="ghost" id="prev" title="vorheriger Treffer (Umschalt+Enter)">↑</button>
+          <button class="ghost" id="next" title="nächster Treffer (Enter)">↓</button>
+        </div>
+        <button class="toggle" id="case" aria-pressed="false" title="Groß-/Kleinschreibung beachten">Aa</button>
+      </span>
+      <button class="ghost" id="mode">Bearbeiten</button>
+      <button id="save" hidden>Speichern…</button>
+      <span class="spacer"></span>
+      <span class="dirty" id="dirty" hidden><span class="dot"></span>ungespeichert</span>
+      <span class="status" id="docstatus"></span>
+      <button class="ghost" id="close">Schließen &amp; leeren</button>
+    </div>
+    <div class="doc" id="doc"></div>
+    <div class="editwrap" id="editwrap" hidden>
+      <div class="egut" id="egut"></div>
+      <textarea id="ed" wrap="off" spellcheck="false" aria-label="Inhalt bearbeiten"></textarea>
+    </div>
+  </section>
+</main>
+
+<div class="ovl" id="ovl" hidden>
+  <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlgh">
+    <h2 id="dlgh">Verschlüsselt speichern</h2>
+    <p class="hint">Passwort zweimal eingeben. ccrypt kann eine mit falschem Passwort verschlüsselte Datei nicht erkennen – deshalb die Wiederholung.</p>
+    <label for="p1">Passwort</label>
+    <input type="password" id="p1" autocomplete="off" spellcheck="false">
+    <label for="p2">Passwort wiederholen</label>
+    <input type="password" id="p2" autocomplete="off" spellcheck="false">
+    <div class="info" id="dlginfo" hidden></div>
+    <div class="error" id="dlgerr" hidden></div>
+    <div class="actions">
+      <button class="ghost" id="cancel">Abbrechen</button>
+      <span class="spacer"></span>
+      <button class="ghost" id="ovwr" hidden>Original überschreiben</button>
+      <button id="dl">Herunterladen</button>
+    </div>
+  </div>
+</div>
+
+<footer>
+  Rijndael mit 256-Bit-Block in CFB, wie ccrypt 1.11 – reines JavaScript, keine externen Ressourcen.
+  Beim Speichern wird das Ergebnis sofort wieder entschlüsselt und Byte für Byte gegen den Editorinhalt geprüft; erst dann gibt es eine Datei.
+  <em>Original überschreiben</em> erscheint nur, wenn der Browser Schreibzugriff auf die geöffnete Datei geben kann – über <code>file://</code> ist das nie der Fall.
+  Passwort und Klartext liegen als JS-Objekte im Speicher; <em>Schließen &amp; leeren</em> überschreibt sie, garantiert löschen kann ein Browser sie nicht.
+</footer>
+
+<input type="file" id="file" hidden>
+
+<script>
+'use strict';
+/* ============================================================
+   Rijndael, 256-Bit-Block / 256-Bit-Schlüssel (ccrypt-Variante)
+   ============================================================ */
+const S = new Uint8Array(256), Si = new Uint8Array(256);
+const M0 = new Uint8Array(4096), M1 = new Uint8Array(4096);
+const RCON = new Uint8Array([0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36,
+  0x6c,0xd8,0xab,0x4d,0x9a,0x2f,0x5e,0xbc,0x63,0xc6,0x97,0x35,0x6a,0xd4,0xb3,
+  0x7d,0xfa,0xef,0xc5,0x91]);
+
+(function initTables(){
+  const gmul=(a,b)=>{let r=0;while(b){if(b&1)r^=a;a<<=1;b>>=1;if(a&0x100)a^=0x11b;}return r&0xff;};
+  const exp=new Uint8Array(256), log=new Uint8Array(256);
+  for(let i=0,p=1;i<256;i++){exp[i]=p;log[p]=i%255;p=gmul(3,p);}
+  log[0]=0;
+  for(let x=0;x<256;x++){
+    const inv=x?exp[255-log[x]]:0;
+    let a=inv; a^=(a<<1); a^=(a<<2); a<<=1; a^=inv;
+    S[x]=((a^(a>>8))^0x63)&0xff;
+  }
+  for(let x=0;x<256;x++) Si[S[x]]=x;
+  const MAT=[[2,3,1,1],[1,2,3,1],[1,1,2,3],[3,1,1,2]];
+  const IMAT=[[14,11,13,9],[9,14,11,13],[13,9,14,11],[11,13,9,14]];
+  for(let k=0;k<4;k++) for(let x=0;x<256;x++) for(let i=0;i<4;i++){
+    M0[(k*256+x)*4+i]=gmul(MAT[i][k],x);
+    M1[(k*256+x)*4+i]=gmul(IMAT[i][k],x);
+  }
+})();
+
+const ROUNDS=14, BC=8, KC=8, SHIFT_E=[0,1,3,4], SHIFT_D=[0,7,5,4];
+const _t=new Uint8Array(32);
+
+/* Achtung: verändert `key` in place – genau wie ccrypts xrijndaelKeySched.
+   hashstring() ist von diesem Seiteneffekt abhängig. */
+function keySched(key){
+  const total=(ROUNDS+1)*BC, rk=new Uint8Array(total*4);
+  let t=0;
+  for(let j=0;j<KC&&t<total;j++,t++) rk.set(key.subarray(4*j,4*j+4),t*4);
+  let rp=0;
+  while(t<total){
+    for(let i=0;i<4;i++) key[i]^=S[key[(KC-1)*4+((i+1)&3)]];
+    key[0]^=RCON[rp++];
+    for(let j=1;j<4;j++) for(let i=0;i<4;i++) key[4*j+i]^=key[4*(j-1)+i];
+    for(let i=0;i<4;i++) key[16+i]^=S[key[12+i]];
+    for(let j=5;j<8;j++) for(let i=0;i<4;i++) key[4*j+i]^=key[4*(j-1)+i];
+    for(let j=0;j<KC&&t<total;j++,t++) rk.set(key.subarray(4*j,4*j+4),t*4);
+  }
+  return rk;
+}
+function shiftSubst(res,a,shift,box){
+  for(let j=0;j<8;j++) res[4*j]=box[a[4*j]];
+  for(let i=1;i<4;i++){
+    const s=shift[i];
+    for(let j=0;j<8;j++) res[4*j+i]=box[a[4*((j+s)&7)+i]];
+  }
+}
+function encryptBlock(b,rk){
+  const t=_t; let rp=0;
+  for(let n=0;n<32;n++) b[n]^=rk[n];
+  rp=32;
+  for(let r=1;r<ROUNDS;r++){
+    shiftSubst(t,b,SHIFT_E,S);
+    for(let j=0;j<8;j++){
+      const o=4*j;
+      const p0=t[o]*4, p1=(256+t[o+1])*4, p2=(512+t[o+2])*4, p3=(768+t[o+3])*4;
+      for(let i=0;i<4;i++) b[o+i]=M0[p0+i]^M0[p1+i]^M0[p2+i]^M0[p3+i]^rk[rp+o+i];
+    }
+    rp+=32;
+  }
+  shiftSubst(t,b,SHIFT_E,S);
+  for(let n=0;n<32;n++) b[n]=t[n]^rk[rp+n];
+  return b;
+}
+function decryptBlock(b,rk){
+  const t=_t; let rp=ROUNDS*32;
+  for(let n=0;n<32;n++) t[n]=b[n]^rk[rp+n];
+  shiftSubst(b,t,SHIFT_D,Si);
+  rp-=32;
+  for(let r=ROUNDS-1;r>0;r--){
+    for(let n=0;n<32;n++) b[n]^=rk[rp+n];
+    for(let j=0;j<8;j++){
+      const o=4*j;
+      const p0=b[o]*4, p1=(256+b[o+1])*4, p2=(512+b[o+2])*4, p3=(768+b[o+3])*4;
+      for(let i=0;i<4;i++) t[o+i]=M1[p0+i]^M1[p1+i]^M1[p2+i]^M1[p3+i];
+    }
+    shiftSubst(b,t,SHIFT_D,Si);
+    rp-=32;
+  }
+  for(let n=0;n<32;n++) b[n]^=rk[rp+n];
+  return b;
+}
+/* ccrypts hashstring(): Passphrase-Bytes -> 256-Bit-Schlüsselblock */
+function hashstring(bytes){
+  const key=new Uint8Array(32), h=new Uint8Array(32);
+  let pos=0;
+  for(;;){
+    for(let i=0;i<32;i++) if(pos<bytes.length) key[i]^=bytes[pos++];
+    encryptBlock(h,keySched(key));
+    if(pos>=bytes.length) break;
+  }
+  return h;
+}
+function roundKeyFromPassword(pw){
+  const bytes=new TextEncoder().encode(pw);
+  const h=hashstring(bytes);
+  bytes.fill(0);
+  const rk=keySched(h);
+  h.fill(0);
+  return rk;
+}
+/* CFB-Entschlüsselung des Rumpfs (alles nach dem 32-Byte-Kopf) */
+function cfbDecrypt(data,rk){
+  const out=new Uint8Array(data.length-32);
+  const prev=data.slice(0,32), ks=new Uint8Array(32);
+  for(let pos=32;pos<data.length;pos+=32){
+    ks.set(prev); encryptBlock(ks,rk);
+    const n=Math.min(32,data.length-pos);
+    for(let i=0;i<n;i++) out[pos-32+i]=ks[i]^data[pos+i];
+    prev.set(data.subarray(pos,pos+n));
+  }
+  return out;
+}
+/* CFB-Verschlüsselung, Kopf = E(Nonce mit Kennung c051) */
+function cfbEncrypt(plain,rk,nonce){
+  const n=new Uint8Array(nonce);
+  n[0]=0x63; n[1]=0x30; n[2]=0x35; n[3]=0x31;
+  encryptBlock(n,rk);
+  const out=new Uint8Array(32+plain.length);
+  out.set(n,0);
+  const prev=n.slice(0);
+  for(let pos=0;pos<plain.length;pos+=32){
+    encryptBlock(prev,rk);
+    const len=Math.min(32,plain.length-pos);
+    for(let i=0;i<len;i++){ const c=prev[i]^plain[pos+i]; out[32+pos+i]=c; prev[i]=c; }
+  }
+  return out;
+}
+function magicOk(data,rk){
+  if(data.length<32) return false;
+  const b=data.slice(0,32);
+  decryptBlock(b,rk);
+  return b[0]===0x63&&b[1]===0x30&&b[2]===0x35&&b[3]===0x31; // "c051"
+}
+
+/* ============================================================
+   Oberfläche
+   ============================================================ */
+const $=id=>document.getElementById(id);
+const els={
+  pick:$('s-pick'), unlock:$('s-unlock'), read:$('s-read'),
+  drop:$('drop'), file:$('file'), meta:$('meta'), hex:$('hex'), err0:$('err0'),
+  pw:$('pw'), go:$('go'), err:$('err'), showpw:$('showpw'), other:$('other'),
+  q:$('q'), count:$('count'), prev:$('prev'), next:$('next'), caseBtn:$('case'),
+  doc:$('doc'), close:$('close'), docstatus:$('docstatus'), topstatus:$('topstatus'),
+  findgrp:$('findgrp'), mode:$('mode'), save:$('save'), dirtyTag:$('dirty'),
+  editwrap:$('editwrap'), egut:$('egut'), ed:$('ed'),
+  ovl:$('ovl'), p1:$('p1'), p2:$('p2'), dlginfo:$('dlginfo'), dlgerr:$('dlgerr'),
+  cancel:$('cancel'), ovwr:$('ovwr'), dl:$('dl')
+};
+let cipher=null, fileName='', lines=[], rows=[], matches=[], current=-1, marked=new Set();
+let rawText='', eol='\n', encName='UTF-8', dirty=false, mode='read';
+let fileHandle=null, forceUtf8=false;
+
+function fmtBytes(n){
+  if(n<1024) return n+' Byte';
+  if(n<1048576) return (n/1024).toFixed(1).replace('.',',')+' kB';
+  return (n/1048576).toFixed(2).replace('.',',')+' MB';
+}
+function showErr(msg){ els.err.textContent=msg; els.err.hidden=false; }
+function clearErr(){ els.err.hidden=true; els.err.textContent=''; }
+
+/* --- Datei annehmen --- */
+function loadFile(f){
+  const r=new FileReader();
+  r.onerror=()=>{ els.pick.hidden=false; els.unlock.hidden=true;
+    els.err0.textContent='Datei konnte nicht gelesen werden.'; els.err0.hidden=false; };
+  r.onload=()=>{
+    cipher=new Uint8Array(r.result);
+    fileName=f.name;
+    clearErr();
+    if(cipher.length<32){
+      els.pick.hidden=false; els.unlock.hidden=true;
+      els.err0.textContent='Zu klein für eine ccrypt-Datei: '+cipher.length+' Byte. Allein der Kopf braucht 32 Byte.';
+      els.err0.hidden=false; cipher=null; return;
+    }
+    els.err0.hidden=true;
+    renderHeader();
+    els.pick.hidden=true; els.unlock.hidden=false; els.read.hidden=true;
+    els.pw.value=''; els.pw.focus();
+  };
+  r.readAsArrayBuffer(f);
+}
+function renderHeader(){
+  const body=cipher.length-32;
+  const rest=body%32;
+  els.meta.innerHTML='';
+  const add=(k,v)=>{
+    const s=document.createElement('span');
+    s.innerHTML='<b>'+k+'</b> '+v;
+    els.meta.appendChild(s);
+  };
+  add('Datei', escapeHtml(fileName));
+  add('Größe', fmtBytes(cipher.length));
+  add('Nutzdaten', fmtBytes(body)+' = '+Math.floor(body/32)+' Blöcke'+(rest?' + '+rest+' Byte':''));
+
+  let out='';
+  for(let r=0;r<2;r++){
+    let hexs='', asc='';
+    for(let i=0;i<16;i++){
+      const b=cipher[r*16+i];
+      hexs+=b.toString(16).padStart(2,'0')+' ';
+      asc+=(b>=32&&b<127)?String.fromCharCode(b):'.';
+    }
+    out+=(r*16).toString(16).padStart(4,'0')+'  '+hexs+' |'+escapeHtml(asc)+'|'+(r?'':'\n');
+  }
+  els.hex.innerHTML=out;
+}
+function escapeHtml(s){
+  return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+/* --- Entsperren --- */
+async function unlock(){
+  if(!cipher) return;
+  clearErr();
+  els.go.disabled=true; els.go.textContent='Entschlüssele…';
+  await new Promise(r=>setTimeout(r,20));   // UI atmen lassen
+  try{
+    const rk=roundKeyFromPassword(els.pw.value);
+    if(!magicOk(cipher,rk)){
+      showErr('Passwort falsch – oder die Datei stammt nicht von ccrypt.');
+      return;
+    }
+    const plain=cfbDecrypt(cipher,rk);
+    rk.fill(0);
+    showText(plain);
+    plain.fill(0);
+  } finally {
+    els.go.disabled=false; els.go.textContent='Entsperren';
+  }
+}
+
+function decodeText(bytes){
+  try{
+    const s=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+    return {text:s, enc:'UTF-8'};
+  }catch(e){
+    return {text:new TextDecoder('windows-1252').decode(bytes), enc:'Windows-1252'};
+  }
+}
+
+function showText(bytes){
+  const {text,enc}=decodeText(bytes);
+  rawText=text.replace(/^\uFEFF/,'');
+  encName=enc; forceUtf8=false;
+  eol=/\r\n/.test(rawText)?'\r\n':'\n';
+  buildLines();
+  els.unlock.hidden=true; els.read.hidden=false;
+  mode='read'; setDirty(false); setMode('read');
+  els.topstatus.textContent='entsperrt · nur im Speicher';
+  els.q.value=''; setMatches([]);
+  els.q.focus();
+}
+function buildLines(){
+  lines=rawText.replace(/\r\n?/g,'\n').split('\n');
+  if(lines.length&&lines[lines.length-1]==='') lines.pop();
+}
+function updateStatus(){
+  els.docstatus.textContent=fileName+' · '+lines.length+' Zeilen · '+
+    (forceUtf8?'UTF-8':encName)+(eol==='\r\n'?' · CRLF':'');
+}
+function setDirty(v){
+  dirty=v;
+  els.dirtyTag.hidden=!v;
+  els.save.hidden=!v;
+}
+
+/* --- Lesen <-> Bearbeiten --- */
+function setMode(m){
+  if(mode==='edit') pullFromEditor();
+  mode=m;
+  const editing=(m==='edit');
+  els.doc.hidden=editing;
+  els.editwrap.hidden=!editing;
+  els.findgrp.hidden=editing;
+  els.mode.textContent=editing?'Lesen':'Bearbeiten';
+  if(editing){
+    els.ed.value=rawText.replace(/\r\n?/g,'\n');
+    syncGutter();
+    els.ed.focus();
+  } else {
+    buildLines(); renderDoc(); els.q.value=''; setMatches([]);
+  }
+  updateStatus();
+}
+function pullFromEditor(){
+  const t=els.ed.value.replace(/\n/g,eol);
+  if(t!==rawText){ rawText=t; setDirty(true); }
+}
+function syncGutter(){
+  const n=els.ed.value.split('\n').length;
+  els.editwrap.style.setProperty('--gw',Math.max(3,String(n).length));
+  let out='';
+  for(let i=1;i<=n;i++) out+=i+'\n';
+  els.egut.textContent=out;
+  els.egut.scrollTop=els.ed.scrollTop;
+}
+
+/* --- Kodierung beim Speichern --- */
+const CP1252={0x20AC:0x80,0x201A:0x82,0x0192:0x83,0x201E:0x84,0x2026:0x85,0x2020:0x86,
+  0x2021:0x87,0x02C6:0x88,0x2030:0x89,0x0160:0x8A,0x2039:0x8B,0x0152:0x8C,0x017D:0x8E,
+  0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,
+  0x02DC:0x98,0x2122:0x99,0x0161:0x9A,0x203A:0x9B,0x0153:0x9C,0x017E:0x9E,0x0178:0x9F};
+function encodeText(text,enc){
+  if(enc!=='Windows-1252') return {bytes:new TextEncoder().encode(text)};
+  const out=[];
+  for(const ch of text){
+    const c=ch.codePointAt(0);
+    if(c<=0xFF) out.push(c);
+    else if(CP1252[c]!==undefined) out.push(CP1252[c]);
+    else return {bad:ch};
+  }
+  return {bytes:new Uint8Array(out)};
+}
+
+/* --- Zeilen rendern (stückweise, damit große Dateien nicht blockieren) --- */
+function renderDoc(){
+  els.doc.innerHTML=''; rows=[]; marked.clear();
+  const width=Math.max(3,String(lines.length).length);
+  els.doc.style.setProperty('--gw',width);
+  let i=0;
+  const step=()=>{
+    const frag=document.createDocumentFragment();
+    const end=Math.min(i+1500,lines.length);
+    for(;i<end;i++){
+      const row=document.createElement('div'); row.className='row';
+      const ln=document.createElement('span'); ln.className='ln';
+      ln.textContent=String(i+1);
+      const tx=document.createElement('span'); tx.className='tx';
+      tx.textContent=lines[i].length?lines[i]:'\u200b';
+      row.appendChild(ln); row.appendChild(tx); frag.appendChild(row);
+      rows.push(tx);
+    }
+    els.doc.appendChild(frag);
+    if(i<lines.length) requestAnimationFrame(step);
+    else if(els.q.value) search();
+  };
+  step();
+}
+
+/* --- Suche --- */
+function search(){
+  const q=els.q.value;
+  if(!q){ setMatches([]); return; }
+  const cs=els.caseBtn.getAttribute('aria-pressed')==='true';
+  const needle=cs?q:q.toLowerCase();
+  const found=[];
+  for(let i=0;i<lines.length;i++){
+    const hay=cs?lines[i]:lines[i].toLowerCase();
+    let p=hay.indexOf(needle);
+    while(p!==-1){
+      found.push({line:i,start:p,end:p+q.length});
+      p=hay.indexOf(needle,p+Math.max(1,q.length));
+      if(found.length>20000) break;
+    }
+    if(found.length>20000) break;
+  }
+  setMatches(found);
+  if(found.length) goTo(0);
+}
+function setMatches(found){
+  for(const i of marked) if(rows[i]) rows[i].textContent=lines[i].length?lines[i]:'\u200b';
+  marked.clear();
+  matches=found; current=-1;
+  els.count.textContent=found.length?('0 / '+found.length):(els.q.value?'kein Treffer':'');
+  els.prev.disabled=els.next.disabled=!found.length;
+  if(!found.length) return;
+  const byLine=new Map();
+  found.forEach((m,idx)=>{
+    if(!byLine.has(m.line)) byLine.set(m.line,[]);
+    byLine.get(m.line).push({...m,idx});
+  });
+  for(const [ln,ms] of byLine){
+    if(!rows[ln]) continue;
+    let html='', pos=0;
+    for(const m of ms){
+      html+=escapeHtml(lines[ln].slice(pos,m.start));
+      html+='<mark data-m="'+m.idx+'">'+escapeHtml(lines[ln].slice(m.start,m.end))+'</mark>';
+      pos=m.end;
+    }
+    html+=escapeHtml(lines[ln].slice(pos));
+    rows[ln].innerHTML=html;
+    marked.add(ln);
+  }
+}
+function goTo(idx){
+  if(!matches.length) return;
+  const old=els.doc.querySelector('mark.on'); if(old) old.classList.remove('on');
+  current=(idx+matches.length)%matches.length;
+  els.count.textContent=(current+1)+' / '+matches.length;
+  const el=els.doc.querySelector('mark[data-m="'+current+'"]');
+  if(el){ el.classList.add('on'); if(el.scrollIntoView) el.scrollIntoView({block:'center',behavior:'auto'}); }
+}
+
+/* --- Speichern --- */
+function openSave(){
+  if(mode==='edit') pullFromEditor();
+  els.p1.value=''; els.p2.value='';
+  els.dlgerr.hidden=true; els.dlginfo.hidden=true;
+  els.ovwr.hidden=!(fileHandle && fileHandle.createWritable);
+  els.ovl.hidden=false;
+  els.p1.focus();
+}
+function closeSave(){
+  els.p1.value=''; els.p2.value='';
+  els.ovl.hidden=true;
+  (mode==='edit'?els.ed:els.q).focus();
+}
+function dlgErr(msg){ els.dlgerr.textContent=msg; els.dlgerr.hidden=false; els.dlginfo.hidden=true; }
+
+async function doSave(target){
+  els.dlgerr.hidden=true; els.dlginfo.hidden=true;
+  const pw=els.p1.value;
+  if(!pw){ dlgErr('Passwort eingeben.'); els.p1.focus(); return; }
+  if(pw!==els.p2.value){ dlgErr('Die beiden Eingaben stimmen nicht überein.'); els.p2.focus(); els.p2.select(); return; }
+
+  const e=encodeText(rawText, forceUtf8?'UTF-8':encName);
+  if(e.bad){
+    forceUtf8=true;
+    dlgErr('Das Zeichen „'+e.bad+'“ gibt es in Windows-1252 nicht. Beim nächsten Klick wird die Datei als UTF-8 gespeichert.');
+    return;
+  }
+
+  els.dl.disabled=els.ovwr.disabled=true;
+  const label=(target==='overwrite'?els.ovwr:els.dl).textContent;
+  (target==='overwrite'?els.ovwr:els.dl).textContent='Verschlüssele…';
+  await new Promise(r=>setTimeout(r,20));
+  try{
+    const rk=roundKeyFromPassword(pw);
+    const nonce=new Uint8Array(32);
+    crypto.getRandomValues(nonce);
+    const blob=cfbEncrypt(e.bytes,rk,nonce);
+
+    /* Selbsttest: sofort wieder entschlüsseln und Byte für Byte vergleichen */
+    if(!magicOk(blob,rk)) throw new Error('Selbsttest fehlgeschlagen: Kennung stimmt nicht.');
+    const back=cfbDecrypt(blob,rk);
+    if(back.length!==e.bytes.length) throw new Error('Selbsttest fehlgeschlagen: Länge weicht ab.');
+    for(let i=0;i<back.length;i++)
+      if(back[i]!==e.bytes[i]) throw new Error('Selbsttest fehlgeschlagen: Abweichung bei Byte '+i+'.');
+    rk.fill(0);
+
+    if(target==='overwrite'){
+      let perm=await fileHandle.queryPermission({mode:'readwrite'});
+      if(perm!=='granted') perm=await fileHandle.requestPermission({mode:'readwrite'});
+      if(perm!=='granted') throw new Error('Schreibrecht für die Datei wurde nicht erteilt.');
+      const w=await fileHandle.createWritable();
+      await w.write(blob); await w.close();
+      finishSave(fileName+' überschrieben · '+e.bytes.length+' Byte Klartext');
+    } else {
+      const url=URL.createObjectURL(new Blob([blob],{type:'application/octet-stream'}));
+      const a=document.createElement('a');
+      a.href=url; a.download=fileName||'inhalt.cpt';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      finishSave('heruntergeladen · Original auf der Platte unverändert');
+    }
+    blob.fill(0);
+  }catch(err){
+    dlgErr(err && err.name==='AbortError' ? 'Speichern abgebrochen.' : (err.message||String(err)));
+  }finally{
+    els.dl.disabled=els.ovwr.disabled=false;
+    (target==='overwrite'?els.ovwr:els.dl).textContent=label;
+  }
+}
+function finishSave(msg){
+  setDirty(false);
+  closeSave();
+  updateStatus();
+  els.topstatus.textContent='geprüft & '+msg;
+}
+
+/* --- Aufräumen --- */
+function wipe(){
+  if(dirty && !confirm('Es gibt ungespeicherte Änderungen. Trotzdem verwerfen?')) return false;
+  if(cipher) cipher.fill(0);
+  cipher=null;
+  rawText=''; eol='\n'; encName='UTF-8'; forceUtf8=false; fileHandle=null; mode='read';
+  els.ed.value=''; els.egut.textContent=''; els.editwrap.hidden=true; els.doc.hidden=false;
+  els.findgrp.hidden=false; els.mode.textContent='Bearbeiten';
+  els.ovl.hidden=true; els.p1.value=''; els.p2.value='';
+  setDirty(false);
+  lines=[]; rows=[]; matches=[]; marked.clear(); current=-1;
+  els.doc.innerHTML=''; els.q.value=''; els.count.textContent='';
+  els.pw.value=''; els.pw.type='password'; els.showpw.textContent='Passwort anzeigen';
+  els.file.value=''; fileName=''; els.err0.hidden=true;
+  els.read.hidden=true; els.unlock.hidden=true; els.pick.hidden=false;
+  els.topstatus.textContent='offline · nichts verlässt den Browser';
+  clearErr();
+  return true;
+}
+
+/* --- Ereignisse --- */
+async function pickFile(){
+  if(window.showOpenFilePicker){
+    try{
+      const [h]=await window.showOpenFilePicker({multiple:false});
+      const f=await h.getFile();
+      if(wipe()===false) return;
+      fileHandle=h; loadFile(f); return;
+    }catch(err){
+      if(err && err.name==='AbortError') return;   /* Nutzer hat abgebrochen */
+      /* sonst: Picker nicht erlaubt (z. B. file://) -> Fallback */
+    }
+  }
+  els.file.click();
+}
+els.drop.addEventListener('click',pickFile);
+els.drop.addEventListener('keydown',e=>{ if(e.key==='Enter'||e.key===' '){e.preventDefault();pickFile();} });
+els.file.addEventListener('change',e=>{
+  const f=e.target.files[0];
+  if(f){ if(wipe()===false) return; fileHandle=null; loadFile(f); }
+});
+['dragenter','dragover'].forEach(t=>document.addEventListener(t,e=>{
+  e.preventDefault(); if(!els.pick.hidden) els.drop.classList.add('over');
+}));
+['dragleave','drop'].forEach(t=>document.addEventListener(t,e=>{
+  e.preventDefault(); els.drop.classList.remove('over');
+}));
+document.addEventListener('drop',async e=>{
+  const dt=e.dataTransfer; if(!dt) return;
+  const fallback=dt.files&&dt.files[0];          /* synchron greifen, wird sonst geleert */
+  const item=dt.items&&dt.items[0];
+  let h=null,f=null;
+  if(item && item.kind==='file' && item.getAsFileSystemHandle){
+    try{
+      const got=await item.getAsFileSystemHandle();
+      if(got && got.kind==='file'){ h=got; f=await got.getFile(); }
+    }catch(_){}
+  }
+  if(!f) f=fallback;
+  if(!f) return;
+  if(wipe()===false) return;
+  fileHandle=h; loadFile(f);
+});
+els.go.addEventListener('click',unlock);
+els.pw.addEventListener('keydown',e=>{ if(e.key==='Enter'){e.preventDefault();unlock();} });
+els.showpw.addEventListener('click',()=>{
+  const show=els.pw.type==='password';
+  els.pw.type=show?'text':'password';
+  els.pw.className=show?'pw':'';
+  els.showpw.textContent=show?'Passwort verbergen':'Passwort anzeigen';
+  els.pw.focus();
+});
+els.other.addEventListener('click',wipe);
+els.close.addEventListener('click',wipe);
+
+let tmr=null;
+els.q.addEventListener('input',()=>{ clearTimeout(tmr); tmr=setTimeout(search,120); });
+els.q.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); if(matches.length) goTo(current+(e.shiftKey?-1:1)); else search(); }
+  else if(e.key==='Escape'){ els.q.value=''; setMatches([]); }
+});
+els.next.addEventListener('click',()=>goTo(current+1));
+els.prev.addEventListener('click',()=>goTo(current-1));
+els.caseBtn.addEventListener('click',()=>{
+  const on=els.caseBtn.getAttribute('aria-pressed')==='true';
+  els.caseBtn.setAttribute('aria-pressed',String(!on));
+  search();
+});
+els.mode.addEventListener('click',()=>setMode(mode==='read'?'edit':'read'));
+els.ed.addEventListener('input',()=>{ setDirty(true); syncGutter(); });
+els.ed.addEventListener('scroll',()=>{ els.egut.scrollTop=els.ed.scrollTop; });
+els.save.addEventListener('click',openSave);
+els.cancel.addEventListener('click',closeSave);
+els.dl.addEventListener('click',()=>doSave('download'));
+els.ovwr.addEventListener('click',()=>doSave('overwrite'));
+els.ovl.addEventListener('click',e=>{ if(e.target===els.ovl) closeSave(); });
+[els.p1,els.p2].forEach(inp=>inp.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); doSave('download'); }
+}));
+
+document.addEventListener('keydown',e=>{
+  if(!els.ovl.hidden){ if(e.key==='Escape'){ e.preventDefault(); closeSave(); } return; }
+  if((e.ctrlKey||e.metaKey)&&e.key==='s'&&!els.read.hidden&&dirty){
+    e.preventDefault(); openSave(); return;
+  }
+  if((e.ctrlKey||e.metaKey)&&e.key==='f'&&!els.read.hidden&&mode==='read'){
+    e.preventDefault(); els.q.focus(); els.q.select();
+  }
+  if(e.key==='F3'&&matches.length&&mode==='read'){ e.preventDefault(); goTo(current+(e.shiftKey?-1:1)); }
+});
+window.addEventListener('beforeunload',e=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+</script>
+</body>
+</html>
