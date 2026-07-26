@@ -38,8 +38,9 @@ Usage
 * `python3 c64emu.py game.prg --no-run`– load but don't auto-RUN
 * `python3 c64emu.py tune.sid`         – boot, load PSID, play 50 Hz
 * `python3 c64emu.py game.d64`         – mount disk, auto-load & start
-* In the window: F8 = sprite-collision on/off, F10 = sprite/collision dump,
-  F11 = warp speed toggle, F12 = soft reset.
+* In the window: F2/F4 = Snapshot speichern/laden (Shift+F2 = Slot 0..9,
+  Shift+F4 = Slots auflisten), F8 = sprite-collision on/off,
+  F10 = sprite/collision dump, F11 = warp speed toggle, F12 = soft reset.
 
 D64 disk images are served through KERNAL traps at two levels: the high-level
 LOAD / OPEN-CHRIN routines, and the low-level serial (IEC) primitives
@@ -55,14 +56,16 @@ those instead (they will take precedence).
 from __future__ import annotations
 
 import base64
+import io
 import os
+import pickle
 import sys
 import time
 import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.20-input-recorder"
+__version__ = "2026.07.26-snapshots"
 
 
 # =============================================================================
@@ -4155,6 +4158,7 @@ class T64Image:
     def __init__(self, path):
         with open(path, "rb") as f:
             self.data = f.read()
+        self.path = path
         d = self.data
         self._name = d[40:64] if len(d) >= 64 else b""
         maxent = (d[34] | (d[35] << 8)) if len(d) >= 36 else 0
@@ -4286,6 +4290,8 @@ class System:
         self.cpu = CPU(self.mem)
         self.sid._cpu = self.cpu          # cycle timestamps for write queue
         self._d64 = None
+        # Zuletzt geladenes Image/Programm — nur fuer Snapshot-Dateinamen.
+        self._last_image = None
         # --- 1541 drive emulation (M0: drive computer boots alongside) ---
         # Opt-in via --drive; the KERNAL trap loader stays the default path.
         self.drive = None
@@ -4453,6 +4459,7 @@ class System:
 
         Returns (load_addr, length, is_basic).
         """
+        self._last_image = path
         with open(path, "rb") as f:
             data = f.read()
         if len(data) < 3:
@@ -4523,6 +4530,7 @@ class System:
         Returns the parsed header dict.
         """
         import struct
+        self._last_image = path
         with open(path, "rb") as f:
             data = f.read()
         if data[:4] not in (b"PSID", b"RSID"):
@@ -4690,6 +4698,7 @@ class System:
                 self.cpu.traps.pop(addr, None)
             return None
         self._d64 = D64Image(path)
+        self._last_image = path
         self._open_files.clear()
         self._current_input_la = None
         self._current_output_la = None
@@ -4710,6 +4719,7 @@ class System:
         served from it. Reuses the same KERNAL LOAD path as disk images; the
         `_is_tape` flag makes the LOAD trap accept device 1."""
         self._d64 = T64Image(path)
+        self._last_image = path
         self._open_files.clear()
         self._current_input_la = None
         self._current_output_la = None
@@ -5333,6 +5343,275 @@ C64_PALETTE = [
 ]
 
 
+# =============================================================================
+# Snapshots (Speicherstände) — kompletter Emulatorzustand in eine Datei
+# =============================================================================
+#
+# Idee: NICHT das Objektgeflecht picklen (das steckt voller Lambdas, Closures,
+# Generatoren und Rückverdrahtungen — CPU-Dispatchtabelle, CIA-Port-Hooks,
+# IEC-Bus), sondern nur die reinen DATEN jeder Komponente einsammeln und beim
+# Laden wieder in die LEBENDEN Objekte zurückschreiben. Damit bleibt die
+# gesamte Verdrahtung unangetastet, und neu hinzukommende Attribute werden
+# automatisch mitgesichert — es gibt keine Liste, die man pflegen müsste.
+#
+# Gesichert wird alles, was aus einfachen Werten besteht (int/float/str/bytes/
+# bytearray/list/tuple/set/dict/numpy-Array). Alles andere (Objektreferenzen,
+# Funktionen, Generatoren) wird übersprungen: es ist entweder Verdrahtung oder
+# wird über die Komponentenliste separat erfasst.
+
+_SNAP_MAGIC = b"C64SNAP\x01"
+_SNAP_FORMAT = 1
+
+_SNAP_ND = "\x00nd"        # Marker: numpy-Array
+_SNAP_BA = "\x00ba"        # Marker: bytearray (damit es beim Laden wieder
+                           # mutable wird und nicht als bytes zurückkommt)
+_SNAP_PLAIN = (bool, int, float, str, bytes, type(None))
+
+
+class _SnapSkip(Exception):
+    """Wert gehört nicht zum Zustand (Objekt, Funktion, Generator, ...)."""
+
+
+class _SnapUnpickler(pickle.Unpickler):
+    """Snapshots enthalten ausschließlich Builtins. Alles andere lehnen wir ab,
+    damit eine fremde Datei keinen Code ausführen kann."""
+
+    def find_class(self, module, name):
+        raise pickle.UnpicklingError(
+            f"Snapshot enthält unerwartetes Objekt: {module}.{name}")
+
+
+def _snap_enc(v, depth=0):
+    """Wert -> serialisierbare Form, oder _SnapSkip wenn kein Zustand."""
+    if isinstance(v, _SNAP_PLAIN):
+        return v
+    if isinstance(v, bytearray):
+        return (_SNAP_BA, bytes(v))
+    if depth > 8:
+        raise _SnapSkip
+    if isinstance(v, list):
+        return [_snap_enc(x, depth + 1) for x in v]
+    if isinstance(v, tuple):
+        return tuple(_snap_enc(x, depth + 1) for x in v)
+    if isinstance(v, (set, frozenset)):
+        return {_snap_enc(x, depth + 1) for x in v}
+    if isinstance(v, dict):
+        return {_snap_enc(k, depth + 1): _snap_enc(x, depth + 1)
+                for k, x in v.items()}
+    if hasattr(v, "dtype") and hasattr(v, "tobytes") and hasattr(v, "shape"):
+        return (_SNAP_ND, str(v.dtype), tuple(v.shape), v.tobytes())
+    raise _SnapSkip
+
+
+def _snap_dec(v):
+    """Umkehrung von _snap_enc."""
+    if isinstance(v, tuple) and v:
+        if v[0] == _SNAP_BA:
+            return bytearray(v[1])
+        if v[0] == _SNAP_ND:
+            import numpy as np
+            return np.frombuffer(v[3], dtype=v[1]).reshape(v[2]).copy()
+        return tuple(_snap_dec(x) for x in v)
+    if isinstance(v, list):
+        return [_snap_dec(x) for x in v]
+    if isinstance(v, set):
+        return {_snap_dec(x) for x in v}
+    if isinstance(v, dict):
+        return {_snap_dec(k): _snap_dec(x) for k, x in v.items()}
+    return v
+
+
+def _snap_collect(obj, skip=()):
+    out = {}
+    for name, val in vars(obj).items():
+        if name in skip or callable(val):
+            continue
+        try:
+            out[name] = _snap_enc(val)
+        except _SnapSkip:
+            pass
+    return out
+
+
+def _snap_apply(obj, data):
+    for name, val in data.items():
+        cur = getattr(obj, name, None)
+        if callable(cur):
+            # Lebende Verdrahtung (z.B. cia2.port_a_in_fn, via1.port_b_in)
+            # niemals mit einem Datenwert überschreiben.
+            continue
+        val = _snap_dec(val)
+        # Container möglichst IN PLACE füllen: andere Objekte können denselben
+        # Puffer referenzieren, ein neues Objekt würde die Referenz abhängen.
+        if isinstance(cur, bytearray) and isinstance(val, (bytes, bytearray)):
+            if len(cur) == len(val):
+                cur[:] = val
+            else:
+                setattr(obj, name, bytearray(val))
+        elif isinstance(cur, list) and isinstance(val, list):
+            cur[:] = val
+        elif isinstance(cur, set) and isinstance(val, (set, frozenset, list)):
+            cur.clear(); cur.update(val)
+        elif isinstance(cur, dict) and isinstance(val, dict):
+            cur.clear(); cur.update(val)
+        else:
+            setattr(obj, name, val)
+
+
+def _snap_components(system):
+    """(Schlüssel, Objekt, nicht-zu-sichernde Attribute) für jeden Baustein.
+
+    Ausgelassen werden nur ROMs (konstant, blähen die Datei auf) und reine
+    Konfiguration, die zur Laufzeit per Kommandozeile bestimmt wird."""
+    comp = [
+        ("sys",  system,            {"chargen_rom", "_rom_dir", "rom_source",
+                                     "cycle_accurate", "_last_image"}),
+        ("cpu",  system.cpu,        {"trace"}),
+        ("mem",  system.mem,        {"rom"}),
+        ("pla",  system.mem.pla,    set()),
+        ("vic",  system.vic,        set()),
+        ("sid",  system.sid,        set()),
+        ("cram", system.color_ram,  set()),
+        ("cia1", system.cia1,       set()),
+        ("cia2", system.cia2,       set()),
+    ]
+    for i, v in enumerate(system.sid.voices):
+        comp.append((f"sidv{i}", v, set()))
+    drv = system.drive
+    if drv is not None:
+        comp += [
+            ("drv",     drv,       set()),
+            ("drvcpu",  drv.cpu,   {"trace"}),
+            ("drvmem",  drv.mem,   {"rom"}),
+            ("drvvia1", drv.via1,  set()),
+            ("drvvia2", drv.via2,  set()),
+        ]
+        iec = getattr(system, "iec", None)
+        if iec is not None:
+            comp.append(("iec", iec, set()))
+    return comp
+
+
+def _snap_settle(system):
+    """Falls der zyklusgenaue Kern mitten in einer Instruktion steht: zu Ende
+    takten. Ein Snapshot soll auf einer Instruktionsgrenze sitzen."""
+    n = 0
+    while getattr(system.cpu, "_micro", None) is not None and n < 64:
+        system.clock()
+        n += 1
+    return n
+
+
+def save_state(system, path):
+    """Kompletten Emulatorzustand nach `path` schreiben. Gibt die Dateigröße
+    in Bytes zurück."""
+    _snap_settle(system)
+    blob = {
+        "format": _SNAP_FORMAT,
+        "emu_version": __version__,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "image": getattr(system, "_last_image", None),
+        "cycle_accurate": bool(system.cycle_accurate),
+        "has_drive": system.drive is not None,
+        "cycles": system.cpu.cycles,
+        "pc": system.cpu.pc,
+        "parts": {key: _snap_collect(obj, skip)
+                  for key, obj, skip in _snap_components(system)},
+    }
+    d64 = getattr(system, "_d64", None)
+    if d64 is not None:
+        # Das Diskettenabbild gehört zum Zustand: ein Spiel kann Spielstände
+        # oder Level auf die Disk geschrieben haben.
+        blob["disk"] = {"kind": type(d64).__name__,
+                        "path": getattr(d64, "path", None),
+                        "data": bytes(d64.data)}
+    raw = _SNAP_MAGIC + zlib.compress(pickle.dumps(blob, 4), 6)
+    d = os.path.dirname(os.path.abspath(path))
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(raw)
+    os.replace(tmp, path)          # atomar: nie ein halber Snapshot
+    return len(raw)
+
+
+def peek_state(path):
+    """Kopfdaten eines Snapshots lesen (ohne ihn anzuwenden)."""
+    with open(path, "rb") as f:
+        head = f.read(len(_SNAP_MAGIC))
+        raw = f.read()
+    if head != _SNAP_MAGIC:
+        raise ValueError(f"Keine Snapshot-Datei: {path}")
+    blob = _SnapUnpickler(io.BytesIO(zlib.decompress(raw))).load()
+    if blob.get("format") != _SNAP_FORMAT:
+        raise ValueError(f"Snapshot-Format {blob.get('format')} "
+                         f"(erwartet {_SNAP_FORMAT}): {path}")
+    return blob
+
+
+def load_state(system, path, verbose=True):
+    """Zustand aus `path` in das laufende System zurückschreiben."""
+    blob = peek_state(path)
+    if verbose and blob.get("emu_version") != __version__:
+        print(f"Snapshot stammt aus Version {blob.get('emu_version')!r} "
+              f"(läuft: {__version__!r}) — Zustand kann abweichen")
+    if blob.get("cycle_accurate") != bool(system.cycle_accurate):
+        print("Achtung: Snapshot wurde im "
+              f"{'--cycle' if blob.get('cycle_accurate') else 'Batch'}-Modus "
+              "erstellt, läuft jetzt im anderen Modus")
+    # --- Diskette zuerst: ein evtl. nötiges Mounten würde sonst den gerade
+    #     zurückgeschriebenen Zustand wieder verändern.
+    disk = blob.get("disk")
+    if disk is not None:
+        cur = getattr(system, "_d64", None)
+        if cur is None and disk["path"] and os.path.exists(disk["path"]):
+            try:
+                if disk["kind"] == "T64Image":
+                    system.mount_t64(disk["path"])
+                else:
+                    system.mount_d64(disk["path"])
+                cur = system._d64
+            except Exception as e:
+                print(f"Snapshot: Diskette konnte nicht eingelegt werden: {e}")
+        if cur is None:
+            print("Snapshot: Diskettenabbild fehlt "
+                  f"({disk['path']!r}) — Zustand wird ohne Disk geladen")
+        else:
+            if getattr(cur, "path", None) != disk["path"]:
+                print(f"Snapshot: andere Diskette eingelegt "
+                      f"({os.path.basename(str(getattr(cur, 'path', '?')))}), "
+                      f"Abbild aus dem Snapshot wird verwendet")
+            if isinstance(cur.data, bytearray):
+                cur.data[:] = disk["data"]
+            else:
+                cur.data = disk["data"]
+            if system.drive is not None:
+                system.drive._d64 = cur
+    parts = blob.get("parts", {})
+    live = {key: (obj, skip) for key, obj, skip in _snap_components(system)}
+    missing = [k for k in parts if k not in live]
+    extra = [k for k in live if k not in parts]
+    for key, data in parts.items():
+        if key in live:
+            _snap_apply(live[key][0], data)
+    if missing:
+        print(f"Snapshot: Teile ohne Gegenstück ignoriert: {', '.join(missing)}"
+              " (Snapshot mit --drive erstellt?)")
+    if extra:
+        print(f"Snapshot: Teile ohne Daten unverändert: {', '.join(extra)}"
+              " (Snapshot ohne --drive erstellt?)")
+    # Der zyklusgenaue Kern hält den halb abgearbeiteten Befehl in einem
+    # Generator — der ist nicht sicherbar. Snapshots sitzen per _snap_settle()
+    # auf einer Instruktionsgrenze, also fangen wir sauber neu an.
+    system.cpu._micro = None
+    system.cpu._pending = None
+    if system.drive is not None:
+        system.drive.cpu._micro = None
+        system.drive.cpu._pending = None
+    return blob
+
+
 # ---------------------------------------------------------------------------
 # Minimal dependency-free PNG I/O (stdlib zlib + numpy only). Used by the VIC
 # screenshot test; the emulator's own frames are written as 8-bit truecolour
@@ -5577,6 +5856,13 @@ class PygameFrontend:
         self.shown_fps = 0.0
         self.warp = False    # True = run as fast as possible (no host frame cap)
 
+        # Snapshots: F2 speichern, F4 laden, Shift+F2 Slot wechseln,
+        # Shift+F4 Slots auflisten. 10 Slots pro Image, abgelegt in states/.
+        self.state_dir = "states"
+        self._state_slot = 0
+        self._osd_msg = ""       # kurze Rueckmeldung in der Fensterleiste
+        self._osd_frames = 0
+
         # Audio output — pygame.mixer streaming via Channel.queue()
         self.audio_enabled = False
         self.samples_per_frame = system.sid.SAMPLE_RATE // target_hz
@@ -5594,6 +5880,68 @@ class PygameFrontend:
                 self._silence_sound = self.pygame.sndarray.make_sound(z)
             except self.pygame.error as ex:
                 print(f"Audio disabled: {ex}")
+
+    # ---------- Snapshots (Speicherstände) ----------
+
+    def _osd(self, msg, seconds=2.0):
+        """Kurze Rückmeldung im Fenstertitel (und auf der Konsole)."""
+        print(msg)
+        self._osd_msg = msg
+        self._osd_frames = int(seconds * self.target_hz)
+
+    def _state_stem(self):
+        img = getattr(self.system, "_last_image", None)
+        if not img:
+            return "c64"
+        return os.path.splitext(os.path.basename(img))[0]
+
+    def _state_path(self, slot=None):
+        slot = self._state_slot if slot is None else slot
+        return os.path.join(self.state_dir, f"{self._state_stem()}_{slot}.c64s")
+
+    def _save_state_slot(self):
+        path = self._state_path()
+        try:
+            n = save_state(self.system, path)
+        except Exception as e:
+            self._osd(f"Snapshot {self._state_slot}: FEHLER — {e}")
+            return
+        self._osd(f"Snapshot {self._state_slot} gespeichert "
+                  f"({n / 1024:.0f} KB) → {path}")
+
+    def _load_state_slot(self):
+        path = self._state_path()
+        if not os.path.exists(path):
+            self._osd(f"Snapshot {self._state_slot}: nichts gespeichert "
+                      f"({path})")
+            return
+        try:
+            blob = load_state(self.system, path)
+        except Exception as e:
+            self._osd(f"Snapshot {self._state_slot}: FEHLER — {e}")
+            return
+        # Tastatur/Joystick aus dem HOST-Zustand neu aufbauen: was der Nutzer
+        # jetzt gerade gedrückt hält, gilt — sonst hängt eine im Snapshot
+        # gedrückte Taste für immer fest.
+        if self.pygame is not None:
+            self._rebuild_matrix()
+        self._osd(f"Snapshot {self._state_slot} geladen (vom {blob['time']})")
+
+    def _list_state_slots(self):
+        print(f"Snapshots für '{self._state_stem()}' in {self.state_dir}/:")
+        for slot in range(10):
+            path = self._state_path(slot)
+            mark = ">" if slot == self._state_slot else " "
+            if not os.path.exists(path):
+                print(f" {mark} {slot}  —")
+                continue
+            try:
+                b = peek_state(path)
+                info = (f"{b['time']}  PC=${b['pc']:04X}  "
+                        f"{os.path.getsize(path) / 1024:.0f} KB")
+            except Exception as e:
+                info = f"unlesbar ({e})"
+            print(f" {mark} {slot}  {info}")
 
     def _key_event(self, host_key, pressed, char=None):
         """
@@ -6302,10 +6650,14 @@ class PygameFrontend:
             scaled = self.pygame.transform.scale(self.frame_surf,
                                                  self.window.get_size())
             self.window.blit(scaled, (0, 0))
+        osd = ""
+        if self._osd_frames > 0:
+            self._osd_frames -= 1
+            osd = f"   {self._osd_msg}"
         self.pygame.display.set_caption(
             f"C64 — Python emulator   [{self.shown_fps:.1f} fps]"
             f"   [Joy: {('Port 1', 'Port 2', 'Both ports')[self._joy_port]}]"
-            + self._fd_status())
+            + self._fd_status() + osd)
         self.pygame.display.flip()
 
     def _render_sprite_run(self, idx, pixels, bg_mask, sprite_occupancy,
@@ -6652,6 +7004,24 @@ class PygameFrontend:
                     if event.key == self.pygame.K_F12:
                         print("Soft reset")
                         self.system.reset()
+                        continue
+                    if event.key in (self.pygame.K_F2, self.pygame.K_F4):
+                        # Snapshots. F2/F4 sind auf der C64-Tastatur nicht
+                        # direkt erreichbar (dort Shift+F1 / Shift+F3), also
+                        # als Host-Hotkeys frei.
+                        shift = (self.pygame.key.get_mods()
+                                 & self.pygame.KMOD_SHIFT)
+                        if event.key == self.pygame.K_F2:
+                            if shift:
+                                self._state_slot = (self._state_slot + 1) % 10
+                                self._osd(f"Snapshot-Slot {self._state_slot}")
+                            else:
+                                self._save_state_slot()
+                        else:
+                            if shift:
+                                self._list_state_slots()
+                            else:
+                                self._load_state_slot()
                         continue
                     if event.key == self.pygame.K_F6:
                         # Diskwechsel: durch die auf der Kommandozeile
@@ -8017,10 +8387,21 @@ TEST MODES
                           per-raster collision foreground (single-source check)
 
 IN-WINDOW KEYS
+  F2                    Snapshot in den aktuellen Slot speichern
+  F4                    Snapshot aus dem aktuellen Slot laden
+  Shift+F2              naechsten Snapshot-Slot waehlen (0..9)
+  Shift+F4              vorhandene Snapshots auflisten
   F11                   toggle warp (unthrottled) speed
   F12                   soft reset
   arrow keys            authentic C64 cursor keys
   numeric keypad        joystick; KP0 toggles between port 1 and port 2
+
+SNAPSHOTS
+  F2 sichert den kompletten Emulatorzustand (RAM, CPU, VIC, SID, CIAs,
+  Farb-RAM, Laufwerk samt Diskettenabbild) nach
+  states/<image>_<slot>.c64s; F4 stellt ihn wieder her. Damit laesst sich
+  in einem Spiel jederzeit weitermachen. Zusaetzlich:
+  --state DATEI         Snapshot beim Start laden (auch mit --headless)
 
 EXAMPLES
   python3 c64emu.py bruce_lee.d64
@@ -8029,6 +8410,7 @@ EXAMPLES
   python3 c64emu.py --lorenztest lorenz --max-tests 5
   python3 c64emu.py --lorenztest lorenz --continue-from oraa
   python3 c64emu.py game.prg --headless 2000000
+  python3 c64emu.py game.d64 --state states/game_0.c64s
 """)
 
 
@@ -8124,6 +8506,12 @@ def main():
             t64_file = a
             break
 
+    state_file = None
+    if "--state" in args:
+        i = args.index("--state")
+        if i + 1 < len(args):
+            state_file = args[i + 1]
+
     if "--headless" in args:
         i = args.index("--headless")
         n = int(args[i + 1]) if i + 1 < len(args) and args[i + 1].isdigit() else 1_500_000
@@ -8132,7 +8520,13 @@ def main():
             sysm.enable_drive()
         if "--sid8580" in args:
             sysm.sid.set_model("8580")
-        if prg_file:
+        if state_file:
+            # Ein Snapshot bringt seinen kompletten Zustand mit — das Image
+            # wird nicht neu gestartet, nur (falls noetig) eingelegt.
+            load_state(sysm, state_file)
+            print(f"Snapshot geladen: {state_file}")
+            sysm.run(n)
+        elif prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
             print("Running PRG for 1,500,000 extra cycles...")
             sysm.run(1_500_000)
@@ -8158,7 +8552,9 @@ def main():
     if "--cycle" in args:
         print("Cycle-accurate mode: badline BA-stall + per-cycle CIA. "
               "Runs slower than real time in pure Python.")
-    if prg_file:
+    if state_file:
+        pass                 # Zustand kommt aus dem Snapshot (siehe unten)
+    elif prg_file:
         _launch_prg(sysm, prg_file, auto_run=not no_autorun)
     elif sid_file:
         info = sysm.load_sid(sid_file)
@@ -8171,6 +8567,12 @@ def main():
         _launch_t64(sysm, t64_file, auto_run=not no_autorun)
     front = PygameFrontend(sysm, scale=scale)
     front.disk_list = d64_list
+    if state_file:
+        try:
+            blob = load_state(sysm, state_file)
+            print(f"Snapshot geladen: {state_file} (vom {blob['time']})")
+        except Exception as e:
+            print(f"Snapshot konnte nicht geladen werden: {e}")
     front.run()
 
 
