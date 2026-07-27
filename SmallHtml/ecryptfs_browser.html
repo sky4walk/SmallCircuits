@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>eCryptfs-Browser — Synology-Sicherungen lokal entschlüsseln</title>
+<style>
+:root {
+  --bg: #16110b;
+  --panel: #1f1811;
+  --panel2: #261e14;
+  --line: #3d3222;
+  --amber: #e8a33d;
+  --amber-bright: #f5bc5e;
+  --amber-dim: #8a6a35;
+  --text: #e9dec9;
+  --muted: #a4977e;
+  --ok: #8ec779;
+  --err: #d97a5a;
+  --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 15px/1.5 var(--sans);
+  display: flex; flex-direction: column;
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* ---- Kopf: Instrumenten-Typenschild ---- */
+header {
+  border-bottom: 1px solid var(--line);
+  padding: 14px 20px 12px;
+  display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+}
+header h1 {
+  margin: 0; font: 600 17px/1 var(--mono);
+  color: var(--amber); letter-spacing: .04em;
+}
+header h1::before { content: "▙ "; color: var(--amber-dim); }
+header .sub { color: var(--muted); font-size: 13px; }
+header .local {
+  margin-left: auto; font: 12px var(--mono); color: var(--amber-dim);
+  border: 1px solid var(--line); border-radius: 3px; padding: 3px 8px;
+}
+
+/* ---- Eingabezeile ---- */
+#controls {
+  display: flex; gap: 10px; padding: 14px 20px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); background: var(--panel);
+  align-items: center;
+}
+#password {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  font: 14px var(--mono); padding: 8px 10px; border-radius: 4px;
+  width: 260px;
+}
+#password:focus-visible, button:focus-visible, #filter:focus-visible {
+  outline: 2px solid var(--amber); outline-offset: 1px;
+}
+button {
+  background: var(--panel2); color: var(--amber-bright);
+  border: 1px solid var(--amber-dim); border-radius: 4px;
+  font: 600 14px var(--sans); padding: 8px 14px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: #2e2416; }
+button:disabled { opacity: .45; cursor: default; }
+button.small {
+  font: 12px var(--sans); padding: 3px 9px; font-weight: 500;
+}
+#filter {
+  background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  font: 13px var(--sans); padding: 7px 10px; border-radius: 4px;
+  width: 220px; margin-left: auto; display: none;
+}
+
+/* ---- Schluesselleiste: Signatur-Chips ---- */
+#keystrip {
+  display: none; gap: 10px; padding: 10px 20px; align-items: center;
+  border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 100%);
+}
+#keystrip .lbl { font: 12px var(--sans); color: var(--muted); }
+.chip {
+  font: 13px var(--mono); letter-spacing: .05em;
+  border: 1px solid var(--line); border-radius: 3px; padding: 4px 10px;
+  color: var(--muted); position: relative;
+}
+.chip.match {
+  color: var(--bg); background: var(--amber); border-color: var(--amber);
+  font-weight: 700;
+}
+.chip.match::after {
+  content: attr(data-role); font: 10px var(--sans); font-weight: 600;
+  position: absolute; top: -9px; right: 6px;
+  background: var(--bg); color: var(--amber); padding: 0 4px;
+  border-radius: 2px;
+}
+.chip.found { border-color: var(--amber-dim); color: var(--text); }
+
+/* ---- Baum ---- */
+#main { flex: 1; overflow: auto; padding: 8px 8px 8px 12px; }
+#tree { font: 14px var(--mono); }
+.node { user-select: none; }
+.row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 8px; border-radius: 4px; min-height: 26px;
+}
+.row:hover { background: var(--panel); }
+.row .cb {
+  accent-color: var(--amber); width: 14px; height: 14px; flex: none;
+  cursor: pointer; margin: 0;
+}
+.row .tw { width: 14px; color: var(--amber-dim); flex: none; cursor: pointer; }
+.row .nm {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row .nm.dir { color: var(--amber-bright); cursor: pointer; }
+.row .nm.plain { color: var(--muted); font-style: italic; }
+.row .sz { color: var(--muted); font-size: 12px; margin-left: auto; flex: none; }
+.row .act { display: none; gap: 6px; flex: none; }
+.row:hover .act, .row:focus-within .act { display: flex; }
+.children { margin-left: 18px; border-left: 1px solid var(--line); padding-left: 4px; }
+.prog {
+  height: 3px; background: var(--amber); border-radius: 2px;
+  margin: 0 8px 2px 30px; width: 0%; transition: width .15s;
+}
+#empty {
+  color: var(--muted); text-align: center; margin-top: 12vh; font-size: 14px;
+}
+#empty .big { font: 600 16px var(--mono); color: var(--amber-dim); }
+
+/* ---- Konsole ---- */
+#console {
+  height: 128px; overflow-y: auto; border-top: 1px solid var(--line);
+  background: #100c07; font: 12px/1.6 var(--mono); padding: 8px 14px;
+  flex: none;
+}
+#console .t { color: var(--amber-dim); margin-right: 8px; }
+#console .ok { color: var(--ok); }
+#console .err { color: var(--err); }
+#console .live::after {
+  content: "▌"; color: var(--amber); margin-left: 2px;
+  animation: blink 1s steps(1) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---- Vorschau ---- */
+dialog {
+  background: var(--panel); color: var(--text); border: 1px solid var(--amber-dim);
+  border-radius: 6px; max-width: min(920px, 92vw); max-height: 88vh;
+  padding: 0;
+}
+dialog::backdrop { background: rgba(10, 7, 3, .75); }
+dialog header {
+  border-bottom: 1px solid var(--line); padding: 10px 14px;
+  display: flex; align-items: center;
+}
+dialog header .nm { font: 13px var(--mono); overflow-wrap: anywhere; }
+dialog header button { margin-left: auto; }
+dialog .body { padding: 14px; overflow: auto; max-height: calc(88vh - 60px); }
+dialog img { max-width: 100%; display: block; }
+dialog pre {
+  font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere;
+  margin: 0;
+}
+@media (max-width: 640px) {
+  #password { width: 100%; }
+  #filter { width: 100%; margin-left: 0; }
+  #console { height: 96px; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>eCryptfs-Browser</h1>
+  <span class="sub">Verschlüsselte Synology-Shares aus Hyper-Backup-Einzelversionen lesen</span>
+  <span class="local">100&nbsp;% lokal · keine Daten verlassen diesen Rechner</span>
+</header>
+
+<div id="controls">
+  <input id="password" type="password" placeholder="Passwort des Shares"
+         autocomplete="off" spellcheck="false">
+  <button id="openBtn">Ordner öffnen</button>
+  <input id="dirInput" type="file" webkitdirectory multiple hidden>
+  <button id="dlSelBtn" style="display:none">Auswahl herunterladen</button>
+  <input id="filter" type="search" placeholder="Im geöffneten Ordner filtern…">
+</div>
+
+<div id="keystrip">
+  <span class="lbl">Abgeleitete Schlüssel:</span>
+  <span class="chip" id="chipA"></span>
+  <span class="chip" id="chipB"></span>
+  <span class="lbl" id="foundLbl"></span>
+</div>
+
+<div id="main">
+  <div id="empty">
+    <div class="big">Kein Ordner geöffnet</div>
+    <p>Passwort eingeben und den Ordner mit den<br>
+    <code>ECRYPTFS_FNEK_ENCRYPTED.…</code>-Dateien öffnen —<br>
+    z.&nbsp;B. <code>Diskstation_1/@Andre@</code> auf der Backup-Platte.</p>
+  </div>
+  <div id="tree"></div>
+</div>
+
+<div id="console" role="log" aria-label="Protokoll"></div>
+
+<dialog id="preview">
+  <header><span class="nm" id="pvName"></span>
+    <button class="small" id="pvClose">Schließen</button></header>
+  <div class="body" id="pvBody"></div>
+</dialog>
+
+<script>
+"use strict";
+/* eCryptfs-Lesekern (Browser + Node >= 18).
+ * Alle AES-Operationen laufen ueber WebCrypto:
+ *  - rohes CBC ohne Padding: PKCS7-Hilfsblock anhaengen
+ *  - ECB: CBC ueber alles mit Null-IV, dann XOR-Korrektur je Block
+ *  - Extent-Strom: ein CBC-Aufruf pro Chunk, XOR-Korrektur an Extent-Grenzen
+ * MD5 (fuer IV-Ableitung) ist nicht in WebCrypto enthalten und daher unten
+ * in Reinform implementiert. */
+
+const EC = (() => {
+
+const subtle = (typeof crypto !== "undefined" ? crypto :
+                require("node:crypto").webcrypto).subtle;
+
+const SALT_CONTENT = hex("0011223344556677");
+const SALT_FNEK = hex("9988776655443322");
+const HASH_ITERATIONS = 65536;
+const MAGIC = 0x3C81B7F5;
+const TAG3 = 0x8C, TAG11 = 0xED, TAG70 = 0x46;
+const FNEK_PREFIX = "ECRYPTFS_FNEK_ENCRYPTED.";
+const PORTABLE = "-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const REV = {}; for (let i = 0; i < 64; i++) REV[PORTABLE[i]] = i;
+
+function hex(s) {
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.substr(i * 2, 2), 16);
+  return out;
+}
+function toHex(a) {
+  return [...a].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function concat(...parts) {
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const p of parts) { out.set(p, pos); pos += p.length; }
+  return out;
+}
+
+/* ----------------------------------------------------------------- MD5 */
+
+function md5(input) {
+  const s = [7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+             5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+             4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+             6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+  const K = new Int32Array(64);
+  for (let i = 0; i < 64; i++) K[i] = Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296) | 0;
+
+  const len = input.length;
+  const withPad = new Uint8Array(((len + 8) >> 6 << 6) + 64);
+  withPad.set(input); withPad[len] = 0x80;
+  const bitLen = len * 8;
+  const dv = new DataView(withPad.buffer);
+  dv.setUint32(withPad.length - 8, bitLen >>> 0, true);
+  dv.setUint32(withPad.length - 4, Math.floor(bitLen / 4294967296), true);
+
+  let a0 = 0x67452301 | 0, b0 = 0xefcdab89 | 0, c0 = 0x98badcfe | 0, d0 = 0x10325476 | 0;
+  const M = new Int32Array(16);
+  for (let off = 0; off < withPad.length; off += 64) {
+    for (let i = 0; i < 16; i++) M[i] = dv.getUint32(off + i * 4, true);
+    let A = a0, B = b0, C = c0, D = d0;
+    for (let i = 0; i < 64; i++) {
+      let F, g;
+      if (i < 16)      { F = (B & C) | (~B & D);        g = i; }
+      else if (i < 32) { F = (D & B) | (~D & C);        g = (5 * i + 1) % 16; }
+      else if (i < 48) { F = B ^ C ^ D;                 g = (3 * i + 5) % 16; }
+      else             { F = C ^ (B | ~D);              g = (7 * i) % 16; }
+      F = (F + A + K[i] + M[g]) | 0;
+      A = D; D = C; C = B;
+      B = (B + ((F << s[i]) | (F >>> (32 - s[i])))) | 0;
+    }
+    a0 = (a0 + A) | 0; b0 = (b0 + B) | 0; c0 = (c0 + C) | 0; d0 = (d0 + D) | 0;
+  }
+  const out = new Uint8Array(16);
+  const odv = new DataView(out.buffer);
+  odv.setInt32(0, a0, true); odv.setInt32(4, b0, true);
+  odv.setInt32(8, c0, true); odv.setInt32(12, d0, true);
+  return out;
+}
+
+/* ------------------------------------------------------- Schluessel */
+
+async function sha512(data) {
+  return new Uint8Array(await subtle.digest("SHA-512", data));
+}
+
+async function deriveKey(passwordBytes, salt) {
+  let data = concat(salt, passwordBytes);
+  for (let i = 0; i < HASH_ITERATIONS; i++) data = await sha512(data);
+  return data;                                      // 64 Byte
+}
+
+async function keySignature(key) {
+  return toHex((await sha512(key)).slice(0, 8));
+}
+
+async function buildKeyRing(password) {
+  const pw = new TextEncoder().encode(password);
+  const ring = { bySig: new Map(), signatures: [] };
+  for (const salt of [SALT_CONTENT, SALT_FNEK]) {
+    const raw = await deriveKey(pw, salt);
+    const sig = await keySignature(raw);
+    const handles = {};
+    for (const bytes of [16, 24, 32]) {
+      handles[bytes] = await subtle.importKey(
+        "raw", raw.slice(0, bytes), { name: "AES-CBC" }, false,
+        ["encrypt", "decrypt"]);
+    }
+    ring.bySig.set(sig, { raw, handles });
+    ring.signatures.push(sig);
+  }
+  return ring;
+}
+
+/* ----------------------------------------- rohes AES via WebCrypto */
+
+async function cbcDecryptRaw(keyHandle, iv, data) {
+  // Padding-Trick: E(K, iv=C_last, "") liefert genau den PKCS7-Block,
+  // der die Gesamtnachricht fuer subtle.decrypt gueltig macht.
+  const lastBlock = data.slice(data.length - 16);
+  const padBlock = new Uint8Array(
+    await subtle.encrypt({ name: "AES-CBC", iv: lastBlock }, keyHandle,
+                         new Uint8Array(0)));
+  const plain = await subtle.decrypt({ name: "AES-CBC", iv }, keyHandle,
+                                     concat(data, padBlock));
+  return new Uint8Array(plain);
+}
+
+async function ecbDecrypt(keyHandle, data) {
+  // CBC ueber alles mit Null-IV, dann Verkettung per XOR rueckgaengig machen:
+  // P_i = Q_i XOR C_{i-1}
+  const q = await cbcDecryptRaw(keyHandle, new Uint8Array(16), data);
+  for (let block = 1; block < data.length / 16; block++) {
+    const base = block * 16;
+    for (let i = 0; i < 16; i++) q[base + i] ^= data[base - 16 + i];
+  }
+  return q;
+}
+
+/* ------------------------------------------------------- Dateinamen */
+
+function decode6bit(text) {
+  const out = [];
+  let bitOffset = 0;
+  for (const ch of text) {
+    const v = REV[ch] ?? 0;
+    if (bitOffset === 0) { out.push((v << 2) & 0xFF); bitOffset = 6; }
+    else if (bitOffset === 6) {
+      out[out.length - 1] |= v >> 4; out.push((v << 4) & 0xFF); bitOffset = 4;
+    } else if (bitOffset === 4) {
+      out[out.length - 1] |= v >> 2; out.push((v << 6) & 0xFF); bitOffset = 2;
+    } else { out[out.length - 1] |= v; bitOffset = 0; }
+  }
+  return new Uint8Array(out);
+}
+
+function parsePacketLength(data, pos) {
+  const first = data[pos];
+  if (first < 192) return [first, pos + 1];
+  if (first < 224) return [((first - 192) << 8) + data[pos + 1] + 192, pos + 2];
+  throw new Error("Paketlaenge nicht unterstuetzt");
+}
+
+function parseTag70(name) {
+  if (!name.startsWith(FNEK_PREFIX)) return null;
+  const raw = decode6bit(name.slice(FNEK_PREFIX.length));
+  if (!raw.length || raw[0] !== TAG70) return null;
+  const [length, pos] = parsePacketLength(raw, 1);
+  return {
+    sig: toHex(raw.slice(pos, pos + 8)),
+    cipherCode: raw[pos + 8],
+    ciphertext: raw.slice(pos + 9, pos + 9 + (length - 9)),
+  };
+}
+
+function keyBytesForCipher(code) {
+  return { 7: 16, 8: 24, 9: 32 }[code] ?? 32;
+}
+
+async function decryptFilename(name, ring) {
+  const parsed = parseTag70(name);
+  if (!parsed) return { name, encrypted: false };
+  const entry = ring.bySig.get(parsed.sig);
+  if (!entry) return { name, encrypted: true, error: "sig " + parsed.sig };
+  const usable = parsed.ciphertext.slice(0,
+    Math.floor(parsed.ciphertext.length / 16) * 16);
+  const handle = entry.handles[keyBytesForCipher(parsed.cipherCode)];
+  const plain = await ecbDecrypt(handle, usable);
+  let sep = -1;
+  for (let i = plain.length - 1; i >= 0; i--) {
+    if (plain[i] === 0 && i < plain.length - 1) { sep = i; break; }
+  }
+  if (sep < 0) return { name, encrypted: true, error: "kein Trennzeichen" };
+  let end = plain.length;
+  while (end > sep + 1 && plain[end - 1] === 0) end--;
+  const decoded = new TextDecoder("utf-8", { fatal: false })
+    .decode(plain.slice(sep + 1, end));
+  return { name: decoded, encrypted: true };
+}
+
+/* ---------------------------------------------------- Dateiinhalte */
+
+function parseHeader(buffer) {
+  const dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const size = dv.getUint32(0) * 4294967296 + dv.getUint32(4);
+  const m1 = dv.getUint32(8), m2 = dv.getUint32(12);
+  if (m1 !== ((m2 ^ MAGIC) >>> 0)) return null;
+  const header = {
+    size,
+    extentSize: dv.getUint32(20),
+    headerExtents: dv.getUint16(24),
+    wrapSig: null, wrappedKey: null, cipherCode: 9,
+  };
+  let pos = 26;
+  while (pos < buffer.length) {
+    const tag = buffer[pos];
+    if (tag === TAG3) {
+      const [length, body] = parsePacketLength(buffer, pos + 1);
+      header.cipherCode = buffer[body + 1];
+      header.wrappedKey = buffer.slice(body + 13, body + length);
+      pos = body + length;
+    } else if (tag === TAG11) {
+      const [length, body] = parsePacketLength(buffer, pos + 1);
+      const fnlen = buffer[body + 1];
+      header.wrapSig = toHex(buffer.slice(body + 2 + fnlen + 4,
+                                          body + 2 + fnlen + 4 + 8));
+      pos = body + length;
+    } else break;
+  }
+  return header.wrappedKey ? header : null;
+}
+
+function deriveExtentIV(rootIV, extentIndex) {
+  const ascii = new TextEncoder().encode(String(extentIndex));
+  const buf = new Uint8Array(32);
+  buf.set(rootIV); buf.set(ascii, 16);
+  return md5(buf);
+}
+
+class EFile {
+  /* readAt(offset, length) -> Promise<Uint8Array>; totalBytes = Dateigroesse
+   * der verschluesselten Datei auf der Platte. */
+  constructor(readAt, totalBytes) {
+    this.readAt = readAt;
+    this.totalBytes = totalBytes;
+  }
+
+  async open(ring) {
+    const head = await this.readAt(0, 8192);
+    this.header = parseHeader(head);
+    if (!this.header) throw new Error("kein eCryptfs-Header");
+
+    let entry = this.header.wrapSig ? ring.bySig.get(this.header.wrapSig) : null;
+    if (!entry) entry = ring.bySig.get(ring.signatures[0]);
+    if (!entry) throw new Error("kein passender Schluessel");
+
+    const keyBytes = this.header.wrappedKey.length;
+    const sessionRaw = await ecbDecrypt(entry.handles[keyBytes] ?? entry.handles[32],
+                                        this.header.wrappedKey);
+    this.sessionKey = await subtle.importKey("raw", sessionRaw,
+      { name: "AES-CBC" }, false, ["encrypt", "decrypt"]);
+    this.rootIV = md5(sessionRaw);
+    this.dataOffset = this.header.extentSize * this.header.headerExtents;
+    return this.header;
+  }
+
+  /* Liefert die Klartextdaten stueckweise an onChunk(Uint8Array, done, total).
+   * extentsPerChunk * extentSize = Lese- und Entschluesselungsgranularitaet. */
+  async decrypt(onChunk, extentsPerChunk = 2048) {
+    const { size, extentSize } = this.header;
+    const totalExtents = Math.ceil(size / extentSize);
+    let produced = 0;
+
+    for (let first = 0; first < totalExtents; first += extentsPerChunk) {
+      const count = Math.min(extentsPerChunk, totalExtents - first);
+      const cipher = await this.readAt(this.dataOffset + first * extentSize,
+                                       count * extentSize);
+      if (cipher.length < count * extentSize)
+        throw new Error("Datei unerwartet kurz");
+
+      // Ein CBC-Lauf ueber den ganzen Chunk, IV des ersten Extents...
+      const plain = await cbcDecryptRaw(this.sessionKey,
+                                        deriveExtentIV(this.rootIV, first),
+                                        cipher);
+      // ...dann je Folge-Extent den ersten Block korrigieren:
+      // P = Q XOR C_prev_last XOR IV_extent
+      for (let e = 1; e < count; e++) {
+        const base = e * extentSize;
+        const iv = deriveExtentIV(this.rootIV, first + e);
+        for (let i = 0; i < 16; i++) {
+          plain[base + i] ^= cipher[base - 16 + i] ^ iv[i];
+        }
+      }
+
+      const want = Math.min(count * extentSize, size - produced);
+      await onChunk(plain.subarray(0, want), produced + want >= size, size);
+      produced += want;
+    }
+    if (size === 0) await onChunk(new Uint8Array(0), true, 0);
+  }
+}
+
+return { buildKeyRing, decryptFilename, parseTag70, parseHeader, EFile,
+         md5, deriveKey, keySignature, deriveExtentIV, toHex, hex,
+         SALT_CONTENT, SALT_FNEK, FNEK_PREFIX };
+})();
+
+
+</script>
+
+<script>
+"use strict";
+(() => {
+
+const $ = id => document.getElementById(id);
+const consoleBox = $("console");
+
+function log(message, cls) {
+  const line = document.createElement("div");
+  const time = new Date().toLocaleTimeString("de-DE");
+  line.innerHTML = `<span class="t">${time}</span>`;
+  const span = document.createElement("span");
+  if (cls) span.className = cls;
+  span.textContent = message;
+  line.appendChild(span);
+  consoleBox.appendChild(line);
+  consoleBox.scrollTop = consoleBox.scrollHeight;
+}
+
+/* Konsolenzeile, die sich fortschreiben laesst (Fortschrittsanzeigen). */
+function liveLine(initial) {
+  const line = document.createElement("div");
+  const time = new Date().toLocaleTimeString("de-DE");
+  line.innerHTML = `<span class="t">${time}</span>`;
+  const span = document.createElement("span");
+  span.className = "live";
+  span.textContent = initial;
+  line.appendChild(span);
+  consoleBox.appendChild(line);
+  consoleBox.scrollTop = consoleBox.scrollHeight;
+  return {
+    set(text) { span.textContent = text; consoleBox.scrollTop = consoleBox.scrollHeight; },
+    done(text, cls) {
+      span.className = cls || "";
+      if (text) span.textContent = text;
+      consoleBox.scrollTop = consoleBox.scrollHeight;
+    },
+  };
+}
+
+const num = n => n.toLocaleString("de-DE");
+const yield0 = () => new Promise(resolve => setTimeout(resolve, 0));
+
+function fmtSize(n) {
+  if (n == null) return "";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return n.toFixed(i ? 1 : 0) + " " + units[i];
+}
+
+/* ---------------- Verzeichniszugriff (zwei Backends) ---------------- */
+
+function backendFromHandle(dirHandle) {
+  return {
+    async list(node) {
+      const out = [];
+      for await (const entry of node.handle.values()) {
+        out.push({ rawName: entry.name, isDir: entry.kind === "directory",
+                   handle: entry });
+      }
+      return out;
+    },
+    async fileOf(node) { return node.handle.getFile(); },
+    root: { handle: dirHandle },
+  };
+}
+
+async function backendFromFileList(files, line) {
+  // Firefox-Fallback: flache Liste mit relativen Pfaden zu Baum aufbauen.
+  // In Bloecken, damit die Seite waehrenddessen reagiert.
+  const rootMap = new Map();
+  for (let index = 0; index < files.length; index++) {
+    const file = files[index];
+    const parts = (file.webkitRelativePath || file.name).split("/");
+    let map = rootMap;
+    for (let i = 1; i < parts.length; i++) {   // parts[0] = gewaehlter Ordner
+      const name = parts[i];
+      const isLeaf = i === parts.length - 1;
+      if (!map.has(name)) {
+        map.set(name, isLeaf ? { file } : { children: new Map() });
+      }
+      const entry = map.get(name);
+      if (!isLeaf) map = entry.children;
+    }
+    if (line && (index & 16383) === 16383) {
+      line.set(`Baue Verzeichnisbaum: ${num(index + 1)} / ${num(files.length)}`);
+      await yield0();
+    }
+  }
+  if (line) line.done(`Verzeichnisbaum aufgebaut: ${num(files.length)} Einträge.`, "ok");
+  return {
+    async list(node) {
+      const map = node.map || rootMap;
+      return [...map.entries()].map(([rawName, value]) => ({
+        rawName,
+        isDir: !!value.children,
+        map: value.children,
+        file: value.file,
+      }));
+    },
+    async fileOf(node) { return node.file; },
+    root: { map: rootMap },
+  };
+}
+
+/* ------------------------------ Zustand ------------------------------ */
+
+let ring = null;
+let ringPassword = null;
+let backend = null;
+const foundSigs = new Set();
+
+async function ensureRing() {
+  const password = $("password").value;
+  if (!password) { log("Bitte zuerst das Share-Passwort eingeben.", "err"); return null; }
+  if (ring && ringPassword === password) return ring;
+  log("Leite Schlüssel ab (2 × 65536 SHA-512-Runden) …");
+  const started = performance.now();
+  ring = await EC.buildKeyRing(password);
+  ringPassword = password;
+  log(`Schlüssel bereit in ${((performance.now() - started) / 1000).toFixed(1)} s`, "ok");
+  $("chipA").textContent = ring.signatures[0];
+  $("chipB").textContent = ring.signatures[1];
+  $("chipA").className = "chip"; $("chipB").className = "chip";
+  $("keystrip").style.display = "flex";
+  return ring;
+}
+
+function noteFoundSig(sig, role) {
+  foundSigs.add(sig);
+  for (const [chipId, ringSig] of [["chipA", ring.signatures[0]],
+                                   ["chipB", ring.signatures[1]]]) {
+    if (ringSig === sig) {
+      const chip = $(chipId);
+      chip.classList.add("match");
+      if (role && !chip.dataset.role) chip.dataset.role = role;
+    }
+  }
+  $("foundLbl").textContent =
+    "Im Ordner gefunden: " + [...foundSigs].join(", ");
+}
+
+/* ------------------------------- Baum ------------------------------- */
+
+async function populate(node, container) {
+  let entries;
+  try { entries = await backend.list(node); }
+  catch (error) { log("Ordner nicht lesbar: " + error.message, "err"); return; }
+
+  const big = entries.length > 1500;
+  const line = big ? liveLine(`Lese ${num(entries.length)} Einträge …`) : null;
+
+  const rows = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    const parsed = EC.parseTag70(entry.rawName);
+    let display = entry.rawName, encrypted = false, failed = false;
+    if (parsed) {
+      encrypted = true;
+      noteFoundSig(parsed.sig, "Dateinamen");
+      const result = await EC.decryptFilename(entry.rawName, ring);
+      if (result.error) { failed = true; }
+      else display = result.name;
+    }
+    rows.push({ ...entry, display, encrypted, failed });
+    if (line && (index & 511) === 511) {
+      line.set(`Entschlüssele Namen: ${num(index + 1)} / ${num(entries.length)}`);
+      await yield0();
+    }
+  }
+
+  const anyDecrypted = rows.some(r => r.encrypted && !r.failed);
+  const anyFailed = rows.some(r => r.failed);
+  if (anyFailed && !anyDecrypted) {
+    log("Keine der abgeleiteten Signaturen passt zu den Dateinamen — "
+        + "vermutlich falsches Passwort für diesen Share.", "err");
+  }
+
+  rows.sort((a, b) => (b.isDir - a.isDir)
+    || a.display.localeCompare(b.display, "de", { numeric: true }));
+
+  // Bei sehr grossen Ordnern Groessen erst beim Ueberfahren nachladen,
+  // sonst feuern zehntausende getFile()-Aufrufe auf einmal.
+  const lazySizes = rows.length > 2000;
+  let fragment = document.createDocumentFragment();
+  for (let index = 0; index < rows.length; index++) {
+    render(rows[index], fragment, lazySizes);
+    if ((index & 1023) === 1023) {
+      container.appendChild(fragment);
+      fragment = document.createDocumentFragment();
+      if (line) line.set(`Zeige Einträge: ${num(index + 1)} / ${num(rows.length)}`);
+      await yield0();
+    }
+  }
+  container.appendChild(fragment);
+  if (line) line.done(`${num(rows.length)} Einträge angezeigt.`, "ok");
+}
+
+function render(entry, container, lazySizes) {
+  const node = document.createElement("div");
+  node.className = "node";
+  const row = document.createElement("div");
+  row.className = "row";
+  row.dataset.name = entry.display.toLowerCase();
+
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "cb";
+  checkbox.title = "Für Sammel-Download auswählen";
+  checkbox.addEventListener("click", event => event.stopPropagation());
+  checkbox.addEventListener("change", () => {
+    if (checkbox.checked) selection.add(entry); else selection.delete(entry);
+    updateSelectionButton();
+  });
+
+  const twisty = document.createElement("span");
+  twisty.className = "tw";
+  twisty.textContent = entry.isDir ? "▸" : "·";
+
+  const name = document.createElement("span");
+  name.className = "nm" + (entry.isDir ? " dir" : "")
+    + (!entry.encrypted && !entry.isDir ? " plain" : "");
+  name.textContent = entry.failed ? entry.rawName + "  (Schlüssel passt nicht)"
+                                  : entry.display;
+  name.title = entry.rawName;
+
+  const size = document.createElement("span");
+  size.className = "sz";
+
+  row.append(checkbox, twisty, name, size);
+  node.appendChild(row);
+
+  if (entry.isDir) {
+    let childBox = null;
+    let busy = false;
+    const toggle = async () => {
+      if (busy) return;
+      if (childBox) {
+        const hidden = childBox.style.display === "none";
+        childBox.style.display = hidden ? "" : "none";
+        twisty.textContent = hidden ? "▾" : "▸";
+        return;
+      }
+      busy = true;
+      twisty.textContent = "⋯";           // Ordner wird gerade gelesen
+      childBox = document.createElement("div");
+      childBox.className = "children";
+      node.appendChild(childBox);
+      await populate(entry, childBox);
+      twisty.textContent = "▾";
+      busy = false;
+    };
+    twisty.addEventListener("click", toggle);
+    name.addEventListener("click", toggle);
+  } else {
+    const actions = document.createElement("span");
+    actions.className = "act";
+    const downloadBtn = document.createElement("button");
+    downloadBtn.className = "small";
+    downloadBtn.textContent = "Herunterladen";
+    downloadBtn.addEventListener("click", () => saveFile(entry, node, size));
+    actions.appendChild(downloadBtn);
+    if (previewable(entry.display)) {
+      const previewBtn = document.createElement("button");
+      previewBtn.className = "small";
+      previewBtn.textContent = "Vorschau";
+      previewBtn.addEventListener("click", () => showPreview(entry));
+      actions.appendChild(previewBtn);
+    }
+    row.appendChild(actions);
+    if (lazySizes) {
+      row.addEventListener("mouseenter", () => fillSize(entry, size),
+                           { once: true });
+    } else {
+      fillSize(entry, size);
+    }
+  }
+  container.appendChild(node);
+}
+
+async function fillSize(entry, sizeEl) {
+  try {
+    const file = await backend.fileOf(entry);
+    if (!entry.encrypted) { sizeEl.textContent = fmtSize(file.size); return; }
+    // Verschluesselte Groesse minus 8-KiB-Header als schnelle Schaetzung;
+    // exakter Wert steht im Header und wird beim Oeffnen gelesen.
+    sizeEl.textContent = "≈ " + fmtSize(Math.max(0, file.size - 8192));
+  } catch { /* Groesse ist Komfort, kein Muss */ }
+}
+
+/* --------------------------- Entschluesseln --------------------------- */
+
+async function openEFile(entry) {
+  const file = await backend.fileOf(entry);
+  const readAt = async (offset, count) =>
+    new Uint8Array(await file.slice(offset, offset + count).arrayBuffer());
+
+  if (!entry.encrypted) return { raw: file };
+
+  const efile = new EC.EFile(readAt, file.size);
+  const header = await efile.open(ring);
+  if (header.wrapSig) noteFoundSig(header.wrapSig, "Dateiinhalte");
+  return { efile, header };
+}
+
+async function saveFile(entry, node, sizeEl) {
+  try {
+    const opened = await openEFile(entry);
+
+    if (opened.raw) {                        // unverschluesselte Datei 1:1
+      triggerDownload(opened.raw, entry.display);
+      log(`${entry.display} unverändert gespeichert (war nicht verschlüsselt).`);
+      return;
+    }
+
+    const { efile, header } = opened;
+    sizeEl.textContent = fmtSize(header.size);
+    const progress = document.createElement("div");
+    progress.className = "prog";
+    node.appendChild(progress);
+    const started = performance.now();
+
+    if (window.showSaveFilePicker) {
+      // Streaming direkt auf die Platte -- auch fuer sehr grosse Dateien
+      const handle = await window.showSaveFilePicker({
+        suggestedName: entry.display });
+      const writable = await handle.createWritable();
+      let written = 0;
+      await efile.decrypt(async (chunk, done, total) => {
+        await writable.write(chunk);
+        written += chunk.length;
+        progress.style.width = total ? (written / total * 100) + "%" : "100%";
+      });
+      await writable.close();
+    } else {
+      if (header.size > 1.5 * 1024 ** 3
+          && !confirm("Ohne Datei-Speichern-API läuft der Download über den "
+              + "Arbeitsspeicher. Datei ist " + fmtSize(header.size)
+              + " groß — trotzdem fortfahren?")) {
+        progress.remove(); return;
+      }
+      const chunks = [];
+      let written = 0;
+      await efile.decrypt(async (chunk, done, total) => {
+        chunks.push(chunk.slice());
+        written += chunk.length;
+        progress.style.width = total ? (written / total * 100) + "%" : "100%";
+      });
+      triggerDownload(new Blob(chunks), entry.display);
+    }
+    progress.remove();
+    const secs = (performance.now() - started) / 1000;
+    log(`${entry.display} entschlüsselt: ${fmtSize(header.size)}`
+        + ` in ${secs.toFixed(1)} s`, "ok");
+  } catch (error) {
+    if (error.name === "AbortError") return;
+    log(`${entry.display}: ${error.message}`, "err");
+  }
+}
+
+function triggerDownload(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+}
+
+/* ------------------------- Sammel-Download ------------------------- */
+
+const selection = new Set();
+
+function updateSelectionButton() {
+  const button = $("dlSelBtn");
+  button.style.display = selection.size ? "" : "none";
+  button.textContent = `Auswahl herunterladen (${num(selection.size)})`;
+}
+
+/* Datei-Eintrag in einen Zielordner (File System Access API) schreiben. */
+async function writeEntryToDir(entry, targetDir, progress, stats) {
+  const opened = await openEFile(entry);
+  const fileHandle = await targetDir.getFileHandle(entry.display, { create: true });
+  const writable = await fileHandle.createWritable();
+  if (opened.raw) {
+    await writable.write(opened.raw);
+  } else {
+    await opened.efile.decrypt(async chunk => { await writable.write(chunk); });
+    stats.bytes += opened.header.size;
+  }
+  await writable.close();
+  stats.files++;
+  progress.set(`Speichere ${num(stats.files)} Dateien … zuletzt: ${entry.display}`);
+}
+
+/* Ordner-Eintrag rekursiv in einen Zielordner spiegeln. */
+async function writeDirToDir(entry, targetDir, progress, stats) {
+  const subTarget = await targetDir.getDirectoryHandle(entry.display, { create: true });
+  const children = await backend.list(entry);
+  for (const child of children) {
+    const parsed = EC.parseTag70(child.rawName);
+    let display = child.rawName, encrypted = false;
+    if (parsed) {
+      encrypted = true;
+      const result = await EC.decryptFilename(child.rawName, ring);
+      if (result.error) {
+        log(`Übersprungen (Name nicht entschlüsselbar): ${child.rawName}`, "err");
+        stats.errors++;
+        continue;
+      }
+      display = result.name;
+    }
+    const resolved = { ...child, display, encrypted };
+    try {
+      if (child.isDir) await writeDirToDir(resolved, subTarget, progress, stats);
+      else await writeEntryToDir(resolved, subTarget, progress, stats);
+    } catch (error) {
+      log(`${display}: ${error.message}`, "err");
+      stats.errors++;
+    }
+  }
+}
+
+/* Fallback ohne Zielordner-API: jede Datei als einzelner Download. */
+async function downloadEntryFlat(entry, progress, stats) {
+  if (entry.isDir) {
+    const children = await backend.list(entry);
+    for (const child of children) {
+      const parsed = EC.parseTag70(child.rawName);
+      let display = child.rawName, encrypted = false;
+      if (parsed) {
+        encrypted = true;
+        const result = await EC.decryptFilename(child.rawName, ring);
+        if (result.error) { stats.errors++; continue; }
+        display = result.name;
+      }
+      await downloadEntryFlat({ ...child, display, encrypted }, progress, stats);
+    }
+    return;
+  }
+  const opened = await openEFile(entry);
+  if (opened.raw) {
+    triggerDownload(opened.raw, entry.display);
+  } else {
+    const chunks = [];
+    await opened.efile.decrypt(async chunk => chunks.push(chunk.slice()));
+    triggerDownload(new Blob(chunks), entry.display);
+    stats.bytes += opened.header.size;
+  }
+  stats.files++;
+  progress.set(`Datei ${num(stats.files)}: ${entry.display}`);
+  await new Promise(resolve => setTimeout(resolve, 300));  // Downloads entzerren
+}
+
+async function downloadSelection() {
+  if (!selection.size) return;
+  const button = $("dlSelBtn");
+  button.disabled = true;
+  const entries = [...selection];
+  const stats = { files: 0, bytes: 0, errors: 0 };
+  const started = performance.now();
+
+  try {
+    if (window.showDirectoryPicker) {
+      const targetDir = await window.showDirectoryPicker({ mode: "readwrite" });
+      const progress = liveLine(`Speichere nach „${targetDir.name}" …`);
+      for (const entry of entries) {
+        try {
+          if (entry.isDir) await writeDirToDir(entry, targetDir, progress, stats);
+          else await writeEntryToDir(entry, targetDir, progress, stats);
+        } catch (error) {
+          if (error.name === "AbortError") throw error;
+          log(`${entry.display}: ${error.message}`, "err");
+          stats.errors++;
+        }
+      }
+      const seconds = (performance.now() - started) / 1000;
+      progress.done(`Fertig: ${num(stats.files)} Dateien, ${fmtSize(stats.bytes)}`
+        + ` in ${seconds.toFixed(1)} s`
+        + (stats.errors ? ` — ${stats.errors} Fehler, siehe oben` : ""),
+        stats.errors ? "err" : "ok");
+    } else {
+      if (entries.some(e => e.isDir)) {
+        log("Hinweis: Im Kompatibilitätsmodus wird jede Datei einzeln "
+          + "heruntergeladen — die Ordnerstruktur geht dabei verloren. Der "
+          + "Browser fragt ggf. um Erlaubnis für mehrere Downloads.", "err");
+      }
+      const progress = liveLine("Starte Downloads …");
+      for (const entry of entries) {
+        try { await downloadEntryFlat(entry, progress, stats); }
+        catch (error) { log(`${entry.display}: ${error.message}`, "err"); stats.errors++; }
+      }
+      progress.done(`Fertig: ${num(stats.files)} Downloads angestoßen`
+        + (stats.errors ? ` — ${stats.errors} Fehler` : ""),
+        stats.errors ? "err" : "ok");
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") log(error.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("dlSelBtn").addEventListener("click", downloadSelection);
+
+/* ----------------------------- Vorschau ----------------------------- */
+
+const IMAGE_RE = /\.(jpe?g|png|gif|webp|bmp|svg)$/i;
+const TEXT_RE = /\.(txt|md|log|csv|json|xml|html?|ini|conf|py|js|c|h|sh|ino|scad)$/i;
+
+function previewable(name) { return IMAGE_RE.test(name) || TEXT_RE.test(name); }
+
+async function showPreview(entry) {
+  try {
+    const opened = await openEFile(entry);
+    const limit = 32 * 1024 * 1024;
+    let data;
+    if (opened.raw) {
+      if (opened.raw.size > limit) { log("Zu groß für die Vorschau.", "err"); return; }
+      data = new Uint8Array(await opened.raw.arrayBuffer());
+    } else {
+      if (opened.header.size > limit) { log("Zu groß für die Vorschau.", "err"); return; }
+      const chunks = [];
+      await opened.efile.decrypt(async chunk => chunks.push(chunk.slice()));
+      data = new Uint8Array(await new Blob(chunks).arrayBuffer());
+    }
+
+    const body = $("pvBody");
+    body.textContent = "";
+    $("pvName").textContent = entry.display;
+    if (IMAGE_RE.test(entry.display)) {
+      const img = document.createElement("img");
+      img.src = URL.createObjectURL(new Blob([data]));
+      body.appendChild(img);
+    } else {
+      const pre = document.createElement("pre");
+      pre.textContent = new TextDecoder("utf-8", { fatal: false })
+        .decode(data.slice(0, 512 * 1024));
+      body.appendChild(pre);
+    }
+    $("preview").showModal();
+  } catch (error) {
+    log(`Vorschau ${entry.display}: ${error.message}`, "err");
+  }
+}
+$("pvClose").addEventListener("click", () => $("preview").close());
+
+/* ------------------------------ Filter ------------------------------ */
+
+let filterTimer = null;
+$("filter").addEventListener("input", () => {
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => {
+    const query = $("filter").value.toLowerCase();
+    for (const row of document.querySelectorAll("#tree .row")) {
+      row.parentElement.style.display =
+        !query || (row.dataset.name || "").includes(query) ? "" : "none";
+    }
+  }, 150);
+});
+
+/* ------------------------------- Start ------------------------------- */
+
+async function openDirectory() {
+  if (!(await ensureRing())) return;
+  foundSigs.clear();
+  $("foundLbl").textContent = "";
+
+  try {
+    if (window.showDirectoryPicker) {
+      const dirHandle = await window.showDirectoryPicker();
+      backend = backendFromHandle(dirHandle);
+      log(`Ordner „${dirHandle.name}" geöffnet.`);
+    } else {
+      // Kompatibilitätsmodus: der Browser liest nach der Auswahl erst die
+      // KOMPLETTE Dateiliste ein, bevor die Seite etwas davon sieht.
+      // Waehrenddessen gibt es keine Zwischenstände -- nur die laufende Zeit.
+      const line = liveLine("Ordnerauswahl geöffnet …");
+      const started = performance.now();
+      const timer = setInterval(() => {
+        const seconds = Math.round((performance.now() - started) / 1000);
+        line.set(`Browser liest den Ordner ein … ${seconds} s`
+          + " — bei sehr vielen Dateien dauert dieser Schritt, es geht trotzdem voran.");
+      }, 500);
+      try {
+        await new Promise(resolve => {
+          $("dirInput").onchange = resolve;
+          $("dirInput").click();
+        });
+      } finally { clearInterval(timer); }
+      const files = [...$("dirInput").files];
+      if (!files.length) { line.done("Keine Dateien übernommen.", "err"); return; }
+      line.done(`${num(files.length)} Dateieinträge vom Browser übernommen.`, "ok");
+      backend = await backendFromFileList(files,
+        liveLine("Baue Verzeichnisbaum …"));
+      log("Hinweis: In Chrome/Edge entfällt dieses Einlesen komplett — dort "
+        + "wird ausschließlich die jeweils aufgeklappte Ebene gelesen.");
+    }
+  } catch (error) {
+    if (error.name !== "AbortError") log(error.message, "err");
+    return;
+  }
+
+  $("empty").style.display = "none";
+  $("filter").style.display = "";
+  selection.clear();
+  updateSelectionButton();
+  const tree = $("tree");
+  tree.textContent = "";
+  await populate(backend.root, tree);
+  log("Wurzelverzeichnis gelesen — Ordner zum Aufklappen anklicken.", "ok");
+}
+
+$("openBtn").addEventListener("click", openDirectory);
+$("password").addEventListener("keydown", event => {
+  if (event.key === "Enter") openDirectory();
+});
+
+if (!window.isSecureContext) {
+  log("Achtung: keine sichere Umgebung (https/file) — WebCrypto ist "
+      + "nicht verfügbar. Datei lokal per Doppelklick öffnen.", "err");
+} else {
+  log("Bereit. Passwort eingeben und Ordner öffnen.");
+}
+
+})();
+</script>
+</body>
+</html>
