@@ -65,7 +65,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.26-snapshots"
+__version__ = "2026.07.27-cia-tod"
 
 
 # =============================================================================
@@ -713,20 +713,32 @@ class Vic:
             # DEN-off write cannot close it again; conversely a DEN/RSEL write
             # that makes this line the top line opens it retroactively.
             rb = self.raster
-            state = bool(self.line_vborder[rb])
-            rsel_n = (val >> 3) & 1
-            bot = 251 if rsel_n else 247
-            top = 51 if rsel_n else 55
-            if rb == bot:
-                state = True
-            elif rb in (247, 251) and state:
-                # tick closed this line under the old RSEL; new RSEL says this
-                # is not the bottom line -> closing never happens (cycle 63)
-                state = bool(self.line_vborder[(rb - 1) % self.LINES_PER_FRAME])
-            if rb == top and (val & 0x10):
-                state = False
-            self._vborder = state
-            self.line_vborder[rb] = 1 if state else 0
+            # The comparison itself happens IN cycle 63 (Bauer 3.9 rules 2/3),
+            # and the CPU's write in that same cycle lands after it. So a
+            # $D011 write at _line_cycles == 62 (== Bauer cycle 63) is too
+            # late to change THIS line's outcome — it only takes effect from
+            # the next line on. That one-cycle window is exactly what the
+            # vborder test measures: delay $33 puts the RSEL=0 write of line
+            # 247 into cycle 63, so line 247 still compares against 251 and
+            # never sets the flip-flop; delay $32 lands a cycle earlier, in
+            # time, and closes the border. Same for the RSEL=1 write on line
+            # 251 (second delay $09 vs $08).
+            if self._line_cycles < 62:
+                state = bool(self.line_vborder[rb])
+                rsel_n = (val >> 3) & 1
+                bot = 251 if rsel_n else 247
+                top = 51 if rsel_n else 55
+                if rb == bot:
+                    state = True
+                elif rb in (247, 251) and state:
+                    # tick closed this line under the old RSEL; new RSEL says
+                    # this is not the bottom line -> closing never happens
+                    state = bool(
+                        self.line_vborder[(rb - 1) % self.LINES_PER_FRAME])
+                if rb == top and (val & 0x10):
+                    state = False
+                self._vborder = state
+                self.line_vborder[rb] = 1 if state else 0
             # The badline condition is evaluated continuously by the VIC, but
             # the row's DMA fetch window starts around cycle 15 — a YSCROLL
             # write establishing the match EARLY in the line starts a badline
@@ -1785,8 +1797,15 @@ class Cia:
     """
     R_PRA = 0x00; R_PRB = 0x01; R_DDRA = 0x02; R_DDRB = 0x03
     R_TA_LO = 0x04; R_TA_HI = 0x05; R_TB_LO = 0x06; R_TB_HI = 0x07
+    R_TOD10 = 0x08; R_TODSEC = 0x09; R_TODMIN = 0x0A; R_TODHR = 0x0B
     R_ICR = 0x0D
     R_CRA = 0x0E; R_CRB = 0x0F
+
+    # TOD pin: on a C64 it hangs on the mains frequency out of the PSU, so
+    # 50 Hz on a PAL machine. 985248 / 50 = 19704.96 cycles per edge. Rounding
+    # down keeps "one second == exactly ten tenths" true at the /5 divider and
+    # costs 24 ppm of drift — two orders below real mains tolerance.
+    TOD_PIN_CYCLES = 19704
 
     F_TA = 0x01
     F_TB = 0x02
@@ -1814,6 +1833,25 @@ class Cia:
         self.timer_b_oneshot = False
         self.icr_data = 0
         self.icr_mask = 0
+        # --- TOD (time-of-day clock) -----------------------------------------
+        # A real 6526 counts edges on its TOD pin and divides them by 5 (CRA
+        # bit 7 = 1, "50 Hz") or by 6 (bit 7 = 0, "60 Hz") to get tenths of a
+        # second. Because the pin is fed from the mains, the divider setting
+        # and the actual mains frequency only agree on the machine the setting
+        # was meant for — which is exactly how software tells PAL from NTSC:
+        # with /6 on 50 Hz mains a "tenth" lasts 0.12 s, and counting CPU
+        # instructions across it gives 20 % more than on NTSC. Flight
+        # Simulator II does this at $AB18 and hangs forever if TOD never moves.
+        self.tod_tenth = 0        # BCD 0..9
+        self.tod_sec = 0          # BCD 00..59
+        self.tod_min = 0          # BCD 00..59
+        self.tod_hr = 0x01        # bit 7 = PM, bits 0..4 = BCD hours 1..12
+        self.tod_alarm = [0, 0, 0, 0]     # tenth, sec, min, hour
+        self.tod_running = True
+        self.tod_latched = False          # a read of the hours freezes the set
+        self.tod_latch = [0, 0, 0, 0]
+        self._tod_acc = 0         # CPU cycles towards the next TOD-pin edge
+        self._tod_div = 0         # TOD-pin edges towards the next tenth
         # CIA1-specific: keyboard matrix, set of (row, col) for pressed keys
         self.keyboard_matrix = set()
         # CIA1-specific: joystick state. joystick_state[0] = port 1, [1] = port 2.
@@ -1883,6 +1921,8 @@ class Cia:
         if offset == self.R_TA_HI:  return (self.timer_a >> 8) & 0xFF
         if offset == self.R_TB_LO:  return self.timer_b & 0xFF
         if offset == self.R_TB_HI:  return (self.timer_b >> 8) & 0xFF
+        if self.R_TOD10 <= offset <= self.R_TODHR:
+            return self._read_tod(offset)
         if offset == self.R_ICR:
             v = self.icr_data
             if self.irq_line:
@@ -1908,6 +1948,8 @@ class Cia:
         elif offset == self.R_TA_HI: self.timer_a_latch = (self.timer_a_latch & 0x00FF) | (val << 8)
         elif offset == self.R_TB_LO: self.timer_b_latch = (self.timer_b_latch & 0xFF00) | val
         elif offset == self.R_TB_HI: self.timer_b_latch = (self.timer_b_latch & 0x00FF) | (val << 8)
+        elif self.R_TOD10 <= offset <= self.R_TODHR:
+            self._write_tod(offset, val)
         elif offset == self.R_ICR:
             if val & 0x80: self.icr_mask |= (val & 0x1F)
             else:          self.icr_mask &= ~(val & 0x1F)
@@ -1926,7 +1968,90 @@ class Cia:
         else:
             self.regs[offset] = val
 
+    # ---------- TOD clock ----------
+
+    @staticmethod
+    def _bcd_inc(v):
+        """Increment a packed-BCD byte by one."""
+        return v + 1 if (v & 0x0F) < 9 else (v & 0xF0) + 0x10
+
+    def _tod_now(self):
+        return [self.tod_tenth, self.tod_sec, self.tod_min, self.tod_hr]
+
+    def _read_tod(self, offset):
+        # Reading the hours latches all four registers so the lower ones can't
+        # roll over between reads; reading the tenths releases the latch again.
+        if offset == self.R_TODHR:
+            if not self.tod_latched:
+                self.tod_latch = self._tod_now()
+                self.tod_latched = True
+            return self.tod_latch[3]
+        src = self.tod_latch if self.tod_latched else self._tod_now()
+        if offset == self.R_TOD10:
+            self.tod_latched = False
+            return src[0]
+        return src[offset - self.R_TOD10]
+
+    def _write_tod(self, offset, val):
+        if self.regs[self.R_CRB] & 0x80:
+            # CRB bit 7 set: the four registers address the alarm instead.
+            self.tod_alarm[offset - self.R_TOD10] = val
+            return
+        if offset == self.R_TODHR:
+            self.tod_hr = val & 0x9F      # writing the hours stops the clock
+            self.tod_running = False
+        elif offset == self.R_TODMIN:
+            self.tod_min = val & 0x7F
+        elif offset == self.R_TODSEC:
+            self.tod_sec = val & 0x7F
+        else:
+            self.tod_tenth = val & 0x0F   # writing the tenths starts it again
+            self._tod_acc = 0
+            self._tod_div = 0
+            self.tod_running = True
+
+    def _tod_advance(self):
+        """One tenth of a second has elapsed on the TOD pin."""
+        if self.tod_tenth < 9:
+            self.tod_tenth += 1
+        else:
+            self.tod_tenth = 0
+            sec = self._bcd_inc(self.tod_sec)
+            if sec <= 0x59:
+                self.tod_sec = sec
+            else:
+                self.tod_sec = 0
+                minute = self._bcd_inc(self.tod_min)
+                if minute <= 0x59:
+                    self.tod_min = minute
+                else:
+                    self.tod_min = 0
+                    pm = self.tod_hr & 0x80
+                    hr = self._bcd_inc(self.tod_hr & 0x1F)
+                    if hr == 0x12:        # 11 -> 12 flips AM/PM
+                        pm ^= 0x80
+                    elif hr > 0x12:       # 12 -> 1
+                        hr = 0x01
+                    self.tod_hr = pm | hr
+        if self._tod_now() == self.tod_alarm:
+            self.icr_data |= self.F_ALARM
+
+    def _tod_pin_edge(self):
+        """Drain whole TOD-pin periods out of the cycle accumulator. Called
+        only when at least one has come due, so the loop stays off the hot
+        path — the accumulator itself is updated inline in tick()."""
+        while self._tod_acc >= self.TOD_PIN_CYCLES:
+            self._tod_acc -= self.TOD_PIN_CYCLES
+            self._tod_div += 1
+            if self._tod_div >= (5 if (self.regs[self.R_CRA] & 0x80) else 6):
+                self._tod_div = 0
+                self._tod_advance()
+
     def tick(self, cycles):
+        if self.tod_running:
+            self._tod_acc += cycles
+            if self._tod_acc >= self.TOD_PIN_CYCLES:
+                self._tod_pin_edge()
         if self.timer_a_running:
             self.timer_a -= cycles
             if self.timer_a <= 0:
@@ -2045,6 +2170,25 @@ class Memory:
                 out[i] = self.rom[0xD000 + (a & 0x0FFF)]
             else:
                 out[i] = self.ram[base + a]
+        return bytes(out)
+
+    def read_vic_block_bank(self, addr, n, bank):
+        """Bulk VIC fetch from a SPECIFIC bank (0..3) — the block equivalent of
+        read_vic_bytes_bank(). The frame renderer composes at the end of the
+        visible area, long after a mid-frame $DD00 switch has moved the VIC
+        window, so a bitmap band that was displayed while bank 3 was selected
+        must be fetched from bank 3 — not from whatever bank happens to be live
+        at render time (The Pawn: picture band in bank 3 over a text window in
+        bank 0)."""
+        addr &= 0x3FFF
+        base = bank * 0x4000
+        out = bytearray(self.ram[base + addr: base + addr + n])
+        if bank in (0, 2):
+            lo = max(addr, 0x1000)
+            hi = min(addr + n, 0x2000)
+            if lo < hi:
+                ro = 0xD000 + (lo & 0x0FFF)
+                out[lo - addr: hi - addr] = self.rom[ro: ro + (hi - lo)]
         return bytes(out)
 
     def read_vic_block(self, addr, n):
@@ -6186,11 +6330,15 @@ class PygameFrontend:
         pixels = np.where(bitmap[:, :, None], fg_rgb, bg_rgb).astype(np.uint8)
         return pixels, bitmap.astype(np.uint8)
 
-    def _render_bitmap_rows(self, rows, d018, mcm, color_ram, d021_rows):
+    def _render_bitmap_rows(self, rows, d018, mcm, color_ram, d021_rows,
+                            bank=None):
         """
         Render a contiguous span of character rows in VIC bitmap mode (BMM
         set for these rows). `rows` is a range of char-row indices (0..24)
-        that all share the same $D018 bases; `mcm` selects multicolor.
+        that all share the same $D018 bases AND the same VIC bank; `mcm`
+        selects multicolor. `bank` is the bank that was live when these rows
+        were displayed (Vic.row_mode_bank); None falls back to the render-time
+        bank.
         Returns (pixels[h,320,3], mask[h,320]) for those rows, h = len(rows)*8.
 
         Hi-res bitmap (mcm=0): each 8x8 cell has two colours from the video
@@ -6200,22 +6348,26 @@ class PygameFrontend:
 
         $D018: bit 3 selects the 8 KB bitmap base within the VIC bank; bits 4-7
         select the video-matrix (colour) base. Fetches go through the VIC's
-        view of memory (read_vic_block), so the chargen-ROM shadow behaves as
-        on hardware and matches the collision logic byte-for-byte.
+        view of memory (read_vic_block_bank), so the chargen-ROM shadow behaves
+        as on hardware and matches the collision logic byte-for-byte — and they
+        use the row's OWN bank, so a picture band that lived in bank 3 is not
+        read out of the bank that happens to be selected at render time.
         """
         np = self.np
         pal = self._palette
         mem = self.system.mem
+        if bank is None:
+            bank = mem.vic_bank()
         bmp_rel = ((d018 >> 3) & 1) * 0x2000
         vm_rel  = ((d018 >> 4) & 0x0F) * 0x400
         r0 = rows[0]
         nrows = len(rows)
         ncells = nrows * 40
         raw = np.frombuffer(
-            mem.read_vic_block(bmp_rel + r0 * 320, ncells * 8),
+            mem.read_vic_block_bank(bmp_rel + r0 * 320, ncells * 8, bank),
             dtype=np.uint8).reshape(nrows, 40, 8)
         vm = np.frombuffer(
-            mem.read_vic_block(vm_rel + r0 * 40, ncells),
+            mem.read_vic_block_bank(vm_rel + r0 * 40, ncells, bank),
             dtype=np.uint8).reshape(nrows, 40)
         bits = np.unpackbits(raw.reshape(ncells, 8), axis=1).reshape(nrows, 40, 8, 8)
 
@@ -6342,23 +6494,30 @@ class PygameFrontend:
         # text dashboard; MC playfield over a hi-res status line) and, by
         # construction, keeps renderer and collision in agreement.
         modes = [vic.row_gfx_mode(r) for r in range(25)]    # (bmm, mcm, d018)
+        # Per-row VIC bank as recorded when the row was fetched. A game that
+        # flips $DD00 mid-frame (picture band in one bank, text window in
+        # another) must have each band read out of its own bank.
+        _rbank = mem.vic_bank()
+        banks = [(_rbank if vic.row_mode_bank[r] == 0xFF else vic.row_mode_bank[r])
+                 for r in range(25)]
         pixels = np.empty((200, 320, 3), dtype=np.uint8)
         bitmap = np.empty((200, 320), dtype=np.uint8)
         r = 0
         while r < 25:
             bmm, mcm, d018 = modes[r]
+            bank = banks[r]
             end = r + 1
             while end < 25:
                 b2, m2, d2 = modes[end]
                 if b2 != bmm or m2 != mcm:
                     break
-                if bmm and d2 != d018:      # bitmap bands need equal bases
-                    break
+                if bmm and (d2 != d018 or banks[end] != bank):
+                    break                   # bitmap bands need equal bases+bank
                 end += 1
             rows = range(r, end)
             if bmm:
                 rp, rm = self._render_bitmap_rows(rows, d018, mcm, color_ram,
-                                                  d021_row[r:end])
+                                                  d021_row[r:end], bank)
             elif mcm:
                 rp, rm = self._render_charmode_multicolor(
                     rows, masks, color_ram, d021_row, d022_row, d023_row)
