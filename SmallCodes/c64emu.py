@@ -65,7 +65,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.27-cia-tod"
+__version__ = "2026.07.28-autostart"
 
 
 # =============================================================================
@@ -4441,6 +4441,15 @@ class System:
         self.drive = None
         self.disk_blocks = 0              # blocks served (traps or drive)
         self.disk_led_timer = 0           # frames the activity LED stays lit
+        # Deferred autostart: a string that is typed into the keyboard buffer
+        # once the machine has come back to the BASIC direct-mode prompt after
+        # an auto-issued LOAD. Deferring matters with --drive, where a LOAD
+        # takes tens of millions of cycles; typing SYS/RUN blindly after a
+        # fixed delay leaves stale keystrokes in the buffer that confuse
+        # self-starting cracked loaders.
+        self.pending_autostart = None
+        self._autostart_saw_busy = False
+        self._autostart_frames = 0
         self._rom_dir = rom_dir
         # KERNAL file-I/O state: open files keyed by logical address (LA).
         # Each entry: {'dev': int, 'sa': int, 'name': bytes, 'data': bytes, 'pos': int}
@@ -4534,6 +4543,46 @@ class System:
         name = self._d64.disk_name().decode("ascii", "replace")
         src_note = " (Laufwerk)" if self.drive is not None else " (Traps)"
         print(f"Diskette gewechselt: {path}  [{name}]{src_note}")
+
+    # ---- deferred autostart -------------------------------------------
+    # $CC is the KERNAL's cursor-blink enable: 0 while the screen editor is
+    # waiting for input (the flashing cursor), non-zero while any routine
+    # holds the cursor off — which is exactly the case during a LOAD. So
+    # "$CC went non-zero and came back to 0 with an empty keyboard buffer"
+    # is a reliable 'the LOAD finished and BASIC is at READY.' signal, and
+    # it works for both the trap loader and the true 1541 (--drive), whose
+    # loads differ in duration by more than an order of magnitude.
+
+    AUTOSTART_TIMEOUT_FRAMES = 60 * 50        # ~60 s of emulated time
+
+    def arm_autostart(self, keys):
+        self.pending_autostart = keys
+        self._autostart_saw_busy = False
+        self._autostart_frames = 0
+
+    def tick_autostart(self):
+        """Call once per emulated frame. Types the armed autostart command as
+        soon as BASIC is back at the direct-mode prompt. Returns True when it
+        fired (or gave up), i.e. when nothing is pending any more."""
+        if not self.pending_autostart:
+            return True
+        self._autostart_frames += 1
+        if self._autostart_frames > self.AUTOSTART_TIMEOUT_FRAMES:
+            print("Autostart: kein READY.-Prompt in Sicht — "
+                  "das Programm startet sich offenbar selbst.")
+            self.pending_autostart = None
+            return True
+        busy = self.mem.ram[0xCC] != 0            # cursor off → LOAD running
+        if busy:
+            self._autostart_saw_busy = True
+            return False
+        if not self._autostart_saw_busy:
+            return False                          # LOAD hasn't even started
+        if self.mem.ram[0xC6] != 0:
+            return False                          # keystrokes still pending
+        keys, self.pending_autostart = self.pending_autostart, None
+        self.type_string(keys)
+        return True
 
     def enable_drive(self):
         """Attach a true 1541 (milestone M0: the drive computer runs and
@@ -7258,6 +7307,7 @@ class PygameFrontend:
             # SID-file playback (no-op for PRG / native mode)
             self.system.sid_play_tick()
             self.step_frame()
+            self.system.tick_autostart()
             frames += 1
             total_frames += 1
             if self._input_log is not None:
@@ -7940,6 +7990,33 @@ def _dump_screen(system):
     print("+" + "-" * 40 + "+")
 
 
+def _run_with_autostart(system, cycles, chunk=19_656):
+    """Run `cycles` cycles in frame-sized chunks, servicing a deferred
+    autostart in between (headless equivalent of the frontend's frame loop)."""
+    left = cycles
+    while left > 0:
+        n = min(chunk, left)
+        system.run(n)
+        left -= n
+        system.tick_autostart()
+
+
+def _petscii_printable(raw):
+    """Render PETSCII filename bytes for the console: control codes and
+    graphics characters become '.', shifted spaces ($A0) become ' '."""
+    out = []
+    for b in raw:
+        if b == 0xA0:
+            out.append(' ')
+        elif 0x20 <= b <= 0x5A:
+            out.append(chr(b))
+        elif 0xC1 <= b <= 0xDA:                # shifted letters
+            out.append(chr(b - 0x80))
+        else:
+            out.append('.')
+    return ''.join(out)
+
+
 def _launch_prg(system, prg_path, auto_run=True, boot_cycles=3_500_000):
     """Boot the system to READY., then load a PRG and optionally type RUN."""
     print(f"Booting {boot_cycles:,} cycles to reach READY ...")
@@ -7970,8 +8047,14 @@ def _launch_d64(system, d64_path, auto_run=True, boot_cycles=3_500_000):
     print("Directory:")
     files = list(d64.list_directory())
     for fname, ftype, t, s, size in files:
-        tstr = ["DEL", "SEQ", "PRG", "USR", "REL"][ftype & 0x0F]
-        print(f"  {fname.decode('ascii','replace'):<16}  {tstr}  "
+        # Cracked disks often carry bogus file types (e.g. $8F, $F0) in their
+        # decorative directory art — index defensively instead of crashing.
+        _TYPES = ("DEL", "SEQ", "PRG", "USR", "REL")
+        low = ftype & 0x0F
+        tstr = _TYPES[low] if low < len(_TYPES) else f"?{low:X}"
+        if not (ftype & 0x80) and low != 0:
+            tstr += "*"                        # unclosed (splat) file
+        print(f"  {_petscii_printable(fname):<16}  {tstr}  "
               f"{size} sectors  (first T{t} S{s})")
     if not files:
         print("(empty disk)")
@@ -7999,18 +8082,25 @@ def _launch_d64(system, d64_path, auto_run=True, boot_cycles=3_500_000):
 
     if is_basic:
         # 'LOAD"*",8\\r' is exactly 10 chars and fits in one buffer fill
-        print('Auto-typing LOAD"*",8 ⏎ then RUN ⏎ ...')
+        print('Auto-typing LOAD"*",8 ⏎ then RUN ⏎ (once READY. is back) ...')
         system.type_string('LOAD"*",8\r')
-        system.run(1_500_000)
-        system.type_string("RUN\r")
+        system.arm_autostart("RUN\r")
     else:
         # 'LOAD"*",8,1\\r' is 12 chars — feed in two parts.
-        print(f'Auto-typing LOAD"*",8,1 ⏎ then SYS {load_addr} ⏎ ...')
         system.type_string('LOAD"*",8')
         system.run(400_000)
         system.type_string(",1\r")
-        system.run(1_500_000)
-        system.type_string(f"SYS{load_addr}\r")
+        if load_addr < 0x0400:
+            # A file that loads over the KERNAL vector page / tape buffer is a
+            # self-starting loader: it hijacks one of the $0300 vectors and
+            # takes control as soon as the LOAD returns. Typing SYS afterwards
+            # would only stuff junk into the keyboard buffer.
+            print(f'Auto-typing LOAD"*",8,1 ⏎ — self-starting loader '
+                  f'(load address ${load_addr:04X} < $0400), no SYS needed.')
+        else:
+            print(f'Auto-typing LOAD"*",8,1 ⏎ then SYS {load_addr} ⏎ '
+                  f'(once READY. is back) ...')
+            system.arm_autostart(f"SYS{load_addr}\r")
 
 
 def _launch_t64(system, t64_path, auto_run=True, boot_cycles=3_500_000):
@@ -8687,16 +8777,16 @@ def main():
             sysm.run(n)
         elif prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
-            print("Running PRG for 1,500,000 extra cycles...")
-            sysm.run(1_500_000)
+            print(f"Running PRG for {n:,} extra cycles...")
+            _run_with_autostart(sysm, n)
         elif d64_file:
             _launch_d64(sysm, d64_file, auto_run=not no_autorun)
-            print("Running for 1,500,000 extra cycles...")
-            sysm.run(1_500_000)
+            print(f"Running for {n:,} extra cycles...")
+            _run_with_autostart(sysm, n)
         elif t64_file:
             _launch_t64(sysm, t64_file, auto_run=not no_autorun)
-            print("Running for 1,500,000 extra cycles...")
-            sysm.run(1_500_000)
+            print(f"Running for {n:,} extra cycles...")
+            _run_with_autostart(sysm, n)
         else:
             print(f"Booting for {n} cycles (headless)...")
             sysm.run(n)
