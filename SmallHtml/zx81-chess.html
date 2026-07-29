@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1K ZX81 Chess</title>
+<style>
+  :root{
+    --case:#15161a;        /* ZX81 Gehäuse, mattschwarz */
+    --case-hi:#26282e;
+    --legend:#b9bcc4;      /* Tastaturbeschriftung, silbergrau */
+    --legend-dim:#6f747f;
+    --phosphor:#dedbcd;    /* TV-Bild: schwarz auf weiss */
+    --ink:#0a0a0a;
+    --alert:#c05a3a;       /* nur fuer "denkt nach" */
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:#0a0b0d;
+    color:var(--legend);
+    font-family:"Helvetica Neue",Helvetica,Arial,sans-serif;
+    display:flex; justify-content:center;
+    padding:24px 16px 48px;
+    -webkit-text-size-adjust:100%;
+  }
+  .machine{width:100%; max-width:560px}
+
+  header{margin-bottom:18px}
+  h1{
+    margin:0; font-size:13px; font-weight:700;
+    letter-spacing:.34em; text-transform:uppercase; color:var(--legend);
+  }
+  .sub{
+    margin:6px 0 0; font-size:12px; line-height:1.5; color:var(--legend-dim);
+    letter-spacing:.02em;
+  }
+
+  .tv{
+    background:var(--case); border-radius:10px; padding:14px;
+    box-shadow:0 1px 0 #34363d inset, 0 18px 40px -20px #000;
+  }
+  canvas{
+    display:block; width:100%; height:auto;
+    background:var(--phosphor);
+    image-rendering:pixelated; image-rendering:crisp-edges;
+    border-radius:2px;
+  }
+
+  .status{
+    display:flex; align-items:baseline; gap:10px;
+    margin:14px 2px 0; min-height:20px;
+    font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+  }
+  .status .dot{
+    width:7px; height:7px; border-radius:50%; background:var(--legend-dim);
+    flex:none; transform:translateY(-1px);
+  }
+  .status.busy .dot{background:var(--alert); animation:pulse 1s ease-in-out infinite}
+  .status.over .dot{background:var(--legend)}
+  @keyframes pulse{50%{opacity:.25}}
+  @media (prefers-reduced-motion:reduce){ .status.busy .dot{animation:none} }
+
+  .keys{margin-top:18px}
+  .krow{display:flex; gap:5px; margin-bottom:5px}
+  .krow button{
+    flex:1 1 0; min-width:0; padding:11px 0 9px;
+    background:var(--case); color:var(--legend);
+    border:0; border-top:1px solid var(--case-hi); border-radius:4px;
+    font:inherit; font-size:13px; font-weight:600; letter-spacing:.08em;
+    cursor:pointer; transition:background .09s;
+  }
+  .krow button:hover{background:var(--case-hi)}
+  .krow button:active{background:#0e0f12; transform:translateY(1px)}
+  .krow button:focus-visible{outline:2px solid var(--legend); outline-offset:2px}
+  .klabel{
+    font-size:10px; letter-spacing:.22em; color:var(--legend-dim);
+    text-transform:uppercase; margin:0 0 6px 2px;
+  }
+
+  .bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:22px}
+  .bar button, .bar select{
+    background:transparent; color:var(--legend);
+    border:1px solid #2e3037; border-radius:4px;
+    padding:7px 12px; font:inherit; font-size:12px; letter-spacing:.06em;
+    cursor:pointer;
+  }
+  .bar button:hover, .bar select:hover{border-color:#4a4d56}
+  .bar button:focus-visible, .bar select:focus-visible{outline:2px solid var(--legend); outline-offset:2px}
+  .bar label{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--legend-dim)}
+
+  details{margin-top:26px; border-top:1px solid #1e2025; padding-top:14px}
+  summary{
+    cursor:pointer; font-size:11px; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--legend-dim);
+  }
+  summary:focus-visible{outline:2px solid var(--legend); outline-offset:3px}
+  details p{font-size:13px; line-height:1.65; color:#8b8f99; margin:12px 0}
+  details code{
+    font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+    background:#17181c; padding:1px 5px; border-radius:3px; color:var(--legend)
+  }
+  details ul{font-size:13px; line-height:1.65; color:#8b8f99; padding-left:20px; margin:12px 0}
+</style>
+</head>
+<body>
+<div class="machine">
+
+  <header>
+    <h1>1K&nbsp;ZX81&nbsp;Chess</h1>
+    <p class="sub">David Horne, 1982. Der Original-Z80-Maschinencode, ausgef&uuml;hrt von einem
+       Z80-Interpreter im Browser.</p>
+  </header>
+
+  <div class="tv">
+    <canvas id="screen" width="256" height="192" aria-label="ZX81-Bildschirm"></canvas>
+  </div>
+
+  <div class="status" id="status"><span class="dot"></span><span id="statusText">Wird geladen</span></div>
+
+  <div class="keys">
+    <p class="klabel">Erst Ziffer, dann Buchstabe &mdash; Startfeld, dann Zielfeld</p>
+    <div class="krow" id="rowDigits"></div>
+    <div class="krow" id="rowLetters"></div>
+  </div>
+
+  <div class="bar">
+    <button id="restart" type="button">Neu starten</button>
+    <label for="speed">Tempo</label>
+    <select id="speed">
+      <option value="4500" selected>ZX81 (~1 MHz)</option>
+      <option value="60000">Schnell</option>
+      <option value="5000000">Sofort</option>
+    </select>
+  </div>
+
+  <details>
+    <summary>Bedienung &amp; Hinweise</summary>
+    <p><strong>Eingabe.</strong> Ein Feld wird wie im Original als <em>Ziffer, dann Buchstabe</em>
+       eingegeben: <code>2</code> <code>E</code> steht f&uuml;r e2. Vier Tasten ergeben einen Zug
+       &mdash; erst das Startfeld, dann das Zielfeld. Also <code>2E4E</code> f&uuml;r e2&ndash;e4.
+       Die Tasten <code>1</code>&ndash;<code>8</code> und <code>A</code>&ndash;<code>H</code> der
+       echten Tastatur funktionieren ebenso.</p>
+    <p><strong>Brettlage.</strong> Reihe 1 steht oben, die Linien laufen von H nach A. Du spielst
+       Wei&szlig; (aufrechte Figuren), der Computer Schwarz (invers dargestellt). Das kleine
+       Quadrat links neben <code>DRH</code> zeigt, wer am Zug ist.</p>
+    <p><strong>Was der Interpreter ausf&uuml;hrt.</strong> Die 942 Bytes von <code>$4000</code> bis
+       <code>$43AD</code> stammen unver&auml;ndert aus dem kommentierten Disassembly. Das Brett
+       <em>ist</em> der Bildschirmspeicher: 11 Bytes je Zeile ab <code>$433F</code>, Figuren als
+       ZX81-Zeichencodes, das oberste Bit als Farbe. Von den drei ROM-Aufrufen sind nur die
+       Einsprungadressen nachgebildet (Tastatur, Tastencode-Umsetzung, Registerkopie).</p>
+    <p><strong>Erg&auml;nzt gegen&uuml;ber dem Original.</strong> Bauernumwandlung (immer zur Dame)
+       und die Rochade f&uuml;r Wei&szlig;: gib den K&ouml;nigszug &uuml;ber zwei Felder ein, also
+       <code>1E</code> <code>1G</code> f&uuml;r die kurze und <code>1E</code> <code>1C</code>
+       f&uuml;r die lange Rochade. Beides liegt als d&uuml;nne Schicht neben dem Z80-Code; die
+       Pr&uuml;fung auf Schach benutzt die Original-Routine <code>SQ_AT</code>.</p>
+    <p><strong>Was das Original nicht kann</strong> und was hier bewusst so bleibt: kein En passant,
+       keine Rochade f&uuml;r den Computer, keine Erkennung von Patt oder Matt auf Seiten des
+       Menschen. Der Computer rechnet einen Halbzug tief und bewertet nach Material, Angriff,
+       Deckung und Schachgebot &mdash; Turmgeschaukel in der Er&ouml;ffnung geh&ouml;rt dazu.
+       Ein Zug, der den eigenen K&ouml;nig im Schach l&auml;sst, wird stillschweigend
+       zur&uuml;ckgenommen.</p>
+  </details>
+
+</div>
+
+<script>
+"use strict";
+
+/* ------------------------------------------------------------------ *
+ * ZX81 Zeichensatz: 8x8-Bitmaps, Code -> 8 Bytes als Hex
+ * ------------------------------------------------------------------ */
+const GLYPHS={0:"0000000000000000",8:"aa55aa55aa55aa55",28:"00384c5464443800",29:"0010301010103800",30:"0038440810207c00",31:"0078041804443800",32:"00081828487c0800",33:"007c407804443800",34:"0018207844443800",35:"007c040810101000",36:"0038443844443800",37:"003844443c083000",38:"003844447c444400",39:"0078447844447800",40:"003c404040403c00",41:"0078444444447800",42:"007c407840407c00",43:"007c407840404000",44:"003c404c44443c00",45:"0044447c44444400",46:"0038101010103800",47:"0004040404443800",48:"0044487048444400",49:"0040404040407c00",50:"00446c5444444400",51:"004464544c444400",52:"0038444444443800",53:"0078447840404000",54:"0038444454483400",55:"0078447850484400",56:"003c403804047800",57:"007c101010101000",58:"0044444444443800",59:"0044444444281000",60:"00444444546c4400",61:"0044281010284400",62:"0044281010101000",63:"007c040810207c00"};
+
+/* ------------------------------------------------------------------ *
+ * Speicherabbild $4000-$43AD, aus dem kommentierten Disassembly
+ * ------------------------------------------------------------------ */
+const IMAGE_HEX = "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e5c5cdbb02444d551428f7cdbd077ec1c5b928060c10fac118e7c1e177c9011d08cd82402b0e26cd8240237ed61c470e0baf8110fdc6612b964f6926437e0601e67ffe00281404fe76280ffe27380b7e042e3786cb7f280206007869c9010bfff5f6f40c0a0df315eb17e9f7090b0a0c3637273335af3246407ee67ffe35284f0e01060821e740fe3328162edffe30281048fe36280b0604fe3728052ee3fe27c07b86f5e5c5fe3f381efe94301acdbb40fe023013f5cd8d42f1fe00280ac1e179fe012805f118dac1e1f12310d3c97ee68021e44020022ef116037b86e5f5fe3f3820fe94301ccdbb40fe00281cfe0120117afe01200ccd8d427bfe523813fe7e300ff1e12b1520d2c97afe01c48d4218f1f1e15f18c5e5c5d5e5c555214040cd2407cd0a4378844ff1cd0a43e1cd18433001804fe1d15e72e5d5cd1843300190f5cdf742cd0142c130020404d1e173e1cdfa42cd1843300105cdfa42cdf74278213c4077eb214140bed8010500180b216340114640011c003801ebedb0c93a3743c630213e4347edb12b2280400656213e4323e5c55dcdbf40fe002019cdf7426bcdf740cdf742cd8242280a2a8040bd20f5c1e137c9c1e110d8a7c906053e08219f43237710fccda040fe0320ee2207405dcdf74021a143cda040fe02eb30dccd824228d7b920f8cdff42d9cd0142d93808cdeb42cd964218c270791218f9214640357e3cc8856f7ec9214640347e856f71c9af3241400656213e4323e5c55dcdbf40fe0320296b220740cdf740cd8242281d5f1643cdff42d9a7cdf241cd0142d97079123803cd994137cdf24118dec1e110c83a4140fe0028fe2145407e2b2b5e1643122b6e62cb45368028023600cdf742c92137437ec68077c92a07401a4f7e36001247c9e67f21f2400605bec82310fb78c97dd9328040cd1042d979c97600020200e47600030400f9d43d7676767676760008a9b7ad761d083733273036273337761e083535353535353535761f080080008000800080762008800080008000800076210800800080008000807622088000800080008000762308b5b5b5b5b5b5b5b5762408b7b3a7b0b6a7b3b77608082d2c2b2a29282726760808080808767676767676767676";
+
+// Compact Z80 core - sufficient for the 1K ZX81 Chess machine code.
+function makeZ80(mem) {
+  const S=0x80, Z=0x40, H=0x10, PV=0x04, N=0x02, CF=0x01;
+  let a=0,f=0,b=0,c=0,d=0,e=0,h=0,l=0;
+  let a_=0,f_=0,b_=0,c_=0,d_=0,e_=0,h_=0,l_=0;
+  let sp=0, pc=0, halted=false;
+
+  const rd  = p => mem[p & 0xffff];
+  const wr  = (p,v) => { mem[p & 0xffff] = v & 0xff; };
+  const rd16= p => rd(p) | (rd(p+1) << 8);
+  const wr16= (p,v) => { wr(p, v & 0xff); wr(p+1, v >> 8); };
+
+  const getHL = () => (h<<8)|l, setHL = v => { h=(v>>8)&0xff; l=v&0xff; };
+  const getBC = () => (b<<8)|c, setBC = v => { b=(v>>8)&0xff; c=v&0xff; };
+  const getDE = () => (d<<8)|e, setDE = v => { d=(v>>8)&0xff; e=v&0xff; };
+
+  function getR(i){ switch(i){case 0:return b;case 1:return c;case 2:return d;case 3:return e;
+    case 4:return h;case 5:return l;case 6:return rd(getHL());default:return a;} }
+  function setR(i,v){ v&=0xff; switch(i){case 0:b=v;break;case 1:c=v;break;case 2:d=v;break;
+    case 3:e=v;break;case 4:h=v;break;case 5:l=v;break;case 6:wr(getHL(),v);break;default:a=v;} }
+  function getRP(i){ return i===0?getBC():i===1?getDE():i===2?getHL():sp; }
+  function setRP(i,v){ v&=0xffff; if(i===0)setBC(v); else if(i===1)setDE(v); else if(i===2)setHL(v); else sp=v; }
+  function getRP2(i){ return i===3?((a<<8)|f):getRP(i); }
+  function setRP2(i,v){ v&=0xffff; if(i===3){a=(v>>8)&0xff; f=v&0xff;} else setRP(i,v); }
+
+  const sz53 = v => (v & 0xa8) | (v===0 ? Z : 0);
+  const parity = v => { let p=v; p^=p>>4; p^=p>>2; p^=p>>1; return (p&1)?0:PV; };
+
+  function add8(v, carry){
+    const r = a + v + carry;
+    const res = r & 0xff;
+    f = sz53(res) | (r>0xff?CF:0) | (((a^~v)&(a^res)&0x80)?PV:0) | (((a&0xf)+(v&0xf)+carry)>0xf?H:0);
+    a = res;
+  }
+  function sub8(v, carry, store){
+    const r = a - v - carry;
+    const res = r & 0xff;
+    const fl = sz53(res) | N | (r<0?CF:0) | (((a^v)&(a^res)&0x80)?PV:0) | (((a&0xf)-(v&0xf)-carry)<0?H:0);
+    if(store){ a = res; f = fl; } else { f = (fl & ~0x28) | (v & 0x28); }
+  }
+  function alu(op, v){
+    switch(op){
+      case 0: add8(v,0); break;
+      case 1: add8(v,(f&CF)?1:0); break;
+      case 2: sub8(v,0,true); break;
+      case 3: sub8(v,(f&CF)?1:0,true); break;
+      case 4: a&=v; f=sz53(a)|H|parity(a); break;
+      case 5: a^=v; f=sz53(a)|parity(a); break;
+      case 6: a|=v; f=sz53(a)|parity(a); break;
+      case 7: sub8(v,0,false); break;
+    }
+  }
+  function inc8(v){ const r=(v+1)&0xff; f=(f&CF)|sz53(r)|((r&0x0f)===0?H:0)|(r===0x80?PV:0); return r; }
+  function dec8(v){ const r=(v-1)&0xff; f=(f&CF)|sz53(r)|N|((v&0x0f)===0?H:0)|(r===0x7f?PV:0); return r; }
+  function addHL(v){ const hl=getHL(); const r=hl+v;
+    f=(f&(S|Z|PV))|((r>0xffff)?CF:0)|(((hl&0xfff)+(v&0xfff))>0xfff?H:0)|((r>>8)&0x28); setHL(r&0xffff); }
+
+  function cond(i){ switch(i){case 0:return !(f&Z);case 1:return !!(f&Z);case 2:return !(f&CF);
+    case 3:return !!(f&CF);case 4:return !(f&PV);case 5:return !!(f&PV);case 6:return !(f&S);default:return !!(f&S);} }
+
+  const push = v => { sp=(sp-2)&0xffff; wr16(sp,v); };
+  const pop  = () => { const v=rd16(sp); sp=(sp+2)&0xffff; return v; };
+
+  function step(){
+    if(halted) return;
+    const op = rd(pc); pc=(pc+1)&0xffff;
+    const x=op>>6, y=(op>>3)&7, zz=op&7, p=y>>1, q=y&1;
+
+    if(op===0xCB){ stepCB(); return; }
+    if(op===0xED){ stepED(); return; }
+
+    switch(x){
+    case 0:
+      switch(zz){
+      case 0:
+        if(y===0){}
+        else if(y===1){ let t;
+          t=a;a=a_;a_=t; t=f;f=f_;f_=t; }
+        else if(y===2){ const o=(rd(pc)<<24>>24); pc=(pc+1)&0xffff; b=(b-1)&0xff; if(b) pc=(pc+o)&0xffff; }
+        else if(y===3){ const o=(rd(pc)<<24>>24); pc=(pc+1)&0xffff; pc=(pc+o)&0xffff; }
+        else { const o=(rd(pc)<<24>>24); pc=(pc+1)&0xffff; if(cond(y-4)) pc=(pc+o)&0xffff; }
+        break;
+      case 1:
+        if(q===0){ setRP(p, rd16(pc)); pc=(pc+2)&0xffff; } else addHL(getRP(p));
+        break;
+      case 2:
+        if(q===0){
+          if(p===0) wr(getBC(),a);
+          else if(p===1) wr(getDE(),a);
+          else if(p===2){ wr16(rd16(pc), getHL()); pc=(pc+2)&0xffff; }
+          else { wr(rd16(pc), a); pc=(pc+2)&0xffff; }
+        } else {
+          if(p===0) a=rd(getBC());
+          else if(p===1) a=rd(getDE());
+          else if(p===2){ setHL(rd16(rd16(pc))); pc=(pc+2)&0xffff; }
+          else { a=rd(rd16(pc)); pc=(pc+2)&0xffff; }
+        }
+        break;
+      case 3: setRP(p, getRP(p) + (q===0?1:-1)); break;
+      case 4: setR(y, inc8(getR(y))); break;
+      case 5: setR(y, dec8(getR(y))); break;
+      case 6: setR(y, rd(pc)); pc=(pc+1)&0xffff; break;
+      case 7:
+        if(y===0){ const cy=(a>>7)&1; a=((a<<1)|cy)&0xff; f=(f&(S|Z|PV))|cy|(a&0x28); }
+        else if(y===1){ const cy=a&1; a=((a>>1)|(cy<<7))&0xff; f=(f&(S|Z|PV))|cy|(a&0x28); }
+        else if(y===2){ const cy=(a>>7)&1; a=((a<<1)|((f&CF)?1:0))&0xff; f=(f&(S|Z|PV))|cy|(a&0x28); }
+        else if(y===3){ const cy=a&1; a=((a>>1)|((f&CF)?0x80:0))&0xff; f=(f&(S|Z|PV))|cy|(a&0x28); }
+        else if(y===4){ // DAA
+          let inc=0, cy=(f&CF)?1:0;
+          if((f&H) || (a&0x0f)>9) inc|=0x06;
+          if(cy || a>0x99) inc|=0x60;
+          if(a>0x99) cy=1;
+          const old=a;
+          if(f&N){ a=(a-inc)&0xff; f=(f&N)|((old&0x0f)<(inc&0x0f)?H:0); }
+          else { f=(f&N)|(((old&0x0f)+(inc&0x0f))>0x0f?H:0); a=(a+inc)&0xff; }
+          f |= sz53(a)|parity(a)|cy;
+        }
+        else if(y===5){ a=(~a)&0xff; f=(f&(S|Z|PV|CF))|H|N|(a&0x28); }
+        else if(y===6){ f=(f&(S|Z|PV))|CF|(a&0x28); }
+        else { const cy=(f&CF)?1:0; f=(f&(S|Z|PV))|(cy?H:0)|(cy?0:CF)|(a&0x28); }
+        break;
+      }
+      break;
+
+    case 1:
+      if(y===6 && zz===6){ halted=true; pc=(pc-1)&0xffff; }
+      else setR(y, getR(zz));
+      break;
+
+    case 2: alu(y, getR(zz)); break;
+
+    case 3:
+      switch(zz){
+      case 0: if(cond(y)) pc=pop(); break;
+      case 1:
+        if(q===0) setRP2(p, pop());
+        else if(p===0) pc=pop();
+        else if(p===1){ let t;
+          t=b;b=b_;b_=t; t=c;c=c_;c_=t; t=d;d=d_;d_=t; t=e;e=e_;e_=t;
+          t=h;h=h_;h_=t; t=l;l=l_;l_=t; }
+        else if(p===2) pc=getHL();
+        else sp=getHL();
+        break;
+      case 2: { const nn=rd16(pc); pc=(pc+2)&0xffff; if(cond(y)) pc=nn; break; }
+      case 3:
+        if(y===0){ pc=rd16(pc); }
+        else if(y===2){ pc=(pc+1)&0xffff; }          // OUT (n),A - no-op
+        else if(y===3){ pc=(pc+1)&0xffff; a=0xff; }  // IN A,(n)
+        else if(y===4){ const t=rd16(sp); wr16(sp,getHL()); setHL(t); }
+        else if(y===5){ let t=d;d=h;h=t; t=e;e=l;l=t; }
+        // DI / EI ignored
+        break;
+      case 4: { const nn=rd16(pc); pc=(pc+2)&0xffff; if(cond(y)){ push(pc); pc=nn; } break; }
+      case 5:
+        if(q===0) push(getRP2(p));
+        else if(p===0){ const nn=rd16(pc); pc=(pc+2)&0xffff; push(pc); pc=nn; }
+        break;
+      case 6: alu(y, rd(pc)); pc=(pc+1)&0xffff; break;
+      case 7: push(pc); pc=y*8; break;
+      }
+      break;
+    }
+  }
+
+  function stepCB(){
+    const op=rd(pc); pc=(pc+1)&0xffff;
+    const x=op>>6, y=(op>>3)&7, zz=op&7;
+    let v=getR(zz);
+    if(x===0){
+      let cy;
+      switch(y){
+        case 0: cy=(v>>7)&1; v=((v<<1)|cy)&0xff; break;
+        case 1: cy=v&1; v=((v>>1)|(cy<<7))&0xff; break;
+        case 2: cy=(v>>7)&1; v=((v<<1)|((f&CF)?1:0))&0xff; break;
+        case 3: cy=v&1; v=((v>>1)|((f&CF)?0x80:0))&0xff; break;
+        case 4: cy=(v>>7)&1; v=(v<<1)&0xff; break;
+        case 5: cy=v&1; v=((v>>1)|(v&0x80))&0xff; break;
+        case 6: cy=(v>>7)&1; v=((v<<1)|1)&0xff; break;
+        default: cy=v&1; v=(v>>1)&0xff; break;
+      }
+      f=sz53(v)|parity(v)|cy; setR(zz,v);
+    } else if(x===1){
+      const r=v&(1<<y);
+      f=(f&CF)|H|(r?0:(Z|PV))|(r&0x80?S:0)|(zz===6?0:(v&0x28));
+    } else if(x===2){ setR(zz, v & ~(1<<y)); }
+    else { setR(zz, v | (1<<y)); }
+  }
+
+  function stepED(){
+    const op=rd(pc); pc=(pc+1)&0xffff;
+    switch(op){
+      case 0xB0: case 0xA0: { // LDIR / LDI
+        wr(getDE(), rd(getHL()));
+        setHL(getHL()+1); setDE(getDE()+1); setBC(getBC()-1);
+        f=(f&(S|Z|CF))|(getBC()?PV:0);
+        if(op===0xB0 && getBC()) pc=(pc-2)&0xffff;
+        break;
+      }
+      case 0xB1: case 0xA1: { // CPIR / CPI
+        const v=rd(getHL());
+        const r=(a-v)&0xff;
+        setHL(getHL()+1); setBC(getBC()-1);
+        f=(f&CF)|N|sz53(r)|(getBC()?PV:0)|(((a&0xf)-(v&0xf))<0?H:0);
+        if(op===0xB1 && getBC() && r!==0) pc=(pc-2)&0xffff;
+        break;
+      }
+      case 0x44: case 0x4C: case 0x54: case 0x5C:
+      case 0x64: case 0x6C: case 0x74: case 0x7C: { // NEG
+        const v=a; a=0; sub8(v,0,true); break;
+      }
+      case 0x43: case 0x53: case 0x63: case 0x73: { // LD (nn),rp
+        wr16(rd16(pc), getRP((op>>4)&3)); pc=(pc+2)&0xffff; break;
+      }
+      case 0x4B: case 0x5B: case 0x6B: case 0x7B: { // LD rp,(nn)
+        setRP((op>>4)&3, rd16(rd16(pc))); pc=(pc+2)&0xffff; break;
+      }
+      case 0x42: case 0x52: case 0x62: case 0x72: { // SBC HL,rp
+        const hl=getHL(), v=getRP((op>>4)&3), cy=(f&CF)?1:0, r=hl-v-cy;
+        f=N|((r&0xffff)===0?Z:0)|((r>>8)&0xa8)|(r<0?CF:0)
+          |(((hl^v)&(hl^(r&0xffff))&0x8000)?PV:0)|(((hl&0xfff)-(v&0xfff)-cy)<0?H:0);
+        setHL(r&0xffff); break;
+      }
+      case 0x4A: case 0x5A: case 0x6A: case 0x7A: { // ADC HL,rp
+        const hl=getHL(), v=getRP((op>>4)&3), cy=(f&CF)?1:0, r=hl+v+cy;
+        f=((r&0xffff)===0?Z:0)|((r>>8)&0xa8)|(r>0xffff?CF:0)
+          |(((hl^~v)&(hl^r)&0x8000)?PV:0)|(((hl&0xfff)+(v&0xfff)+cy)>0xfff?H:0);
+        setHL(r&0xffff); break;
+      }
+      default: break; // IM / LD A,I etc. - not used
+    }
+  }
+
+  return {
+    step,
+    get pc(){return pc;}, set pc(v){pc=v&0xffff;},
+    get sp(){return sp;}, set sp(v){sp=v&0xffff;},
+    get a(){return a;}, set a(v){a=v&0xff;},
+    get f(){return f;}, set f(v){f=v&0xff;},
+    get b(){return b;}, set b(v){b=v&0xff;},
+    get c(){return c;}, set c(v){c=v&0xff;},
+    get d(){return d;}, set d(v){d=v&0xff;},
+    get e(){return e;}, set e(v){e=v&0xff;},
+    get h(){return h;}, set h(v){h=v&0xff;},
+    get l(){return l;}, set l(v){l=v&0xff;},
+    get hl(){return getHL();}, set hl(v){setHL(v);},
+    get de(){return getDE();}, set de(v){setDE(v);},
+    get bc(){return getBC();}, set bc(v){setBC(v);},
+    get halted(){return halted;},
+    get carry(){return !!(f & CF);},
+    push, pop,
+    reset(){ a=f=b=c=d=e=h=l=0; a_=f_=b_=c_=d_=e_=h_=l_=0; halted=false; },
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Maschine
+ * ------------------------------------------------------------------ */
+const ROM_KEYBOARD = 0x02BB, ROM_DECODE = 0x07BD, ROM_COPY = 0x0724;
+const DRIVER = 0x423F, SQ_AT = 0x4210, CHK = 0x4201;
+const DISPLAY_FILE = 0x4332, MOVER = 0x4337;
+const ROW0 = 0x433D, STRIDE = 11;
+const BEST_SCORE = 0x4041;
+
+/* Feldadressen: Reihe 1..8, Spaltenindex 0..7 (0 = H, 7 = A) */
+const sqAddr = (rank, fileIdx) => ROW0 + (rank - 1) * STRIDE + 2 + fileIdx;
+const E1 = sqAddr(1, 3), F1 = sqAddr(1, 2), G1 = sqAddr(1, 1), H1 = sqAddr(1, 0);
+const D1 = sqAddr(1, 4), C1 = sqAddr(1, 5), B1 = sqAddr(1, 6), A1 = sqAddr(1, 7);
+const WK = 0x30, WR = 0x37, WP = 0x35, WQ = 0x36, BP = 0xB5, BQ = 0xB6;
+
+/* leeres Feld: ungerade Adresse = weiss, gerade = schwarz (wie in MPSCAN) */
+const emptyColour = a => (a & 1) ? 0x00 : 0x80;
+
+const mem = new Uint8Array(0x10000);
+const cpu = makeZ80(mem);
+
+let keyQueue = [], waitingForKey = false, gameOver = false, aiThinking = false;
+let statusMsg = "", statusKind = "";
+let rights = { king: false, rookH: false, rookA: false };   /* true = hat sich bewegt */
+
+function loadImage() {
+  mem.fill(0);
+  for (let i = 0; i < IMAGE_HEX.length; i += 2)
+    mem[0x4000 + (i >> 1)] = parseInt(IMAGE_HEX.substr(i, 2), 16);
+  cpu.reset();
+  cpu.sp = 0x7FF0;
+  cpu.pc = DRIVER;
+  keyQueue = []; waitingForKey = false; gameOver = false; aiThinking = false;
+  rights = { king: false, rookH: false, rookA: false };
+  setStatus("Du bist am Zug", "");
+}
+
+/* ------------------------------------------------------------------ *
+ * Unterroutine des Originalcodes aufrufen und auf Rueckkehr warten
+ * ------------------------------------------------------------------ */
+const MAGIC = 0xFFFE;
+function saveCpu() {
+  return { a:cpu.a, f:cpu.f, b:cpu.b, c:cpu.c, d:cpu.d, e:cpu.e,
+           h:cpu.h, l:cpu.l, sp:cpu.sp, pc:cpu.pc };
+}
+function restoreCpu(s) {
+  cpu.a=s.a; cpu.f=s.f; cpu.b=s.b; cpu.c=s.c; cpu.d=s.d; cpu.e=s.e;
+  cpu.h=s.h; cpu.l=s.l; cpu.sp=s.sp; cpu.pc=s.pc;
+}
+function callSub(addr) {
+  cpu.push(MAGIC);
+  cpu.pc = addr;
+  for (let i = 0; i < 4000000; i++) {
+    if (cpu.pc === MAGIC) return true;
+    if (romTrap()) continue;
+    cpu.step();
+    if (cpu.halted) return false;
+  }
+  return false;
+}
+
+/* Wird das Feld vom Gegner des aktuellen Ziehenden angegriffen?
+   Benutzt die Original-Routine SQ_AT. MOVE_LIST wird dabei zerstoert. */
+function squareAttacked(addr) {
+  const s = saveCpu();
+  const atk = [mem[0x4080], mem[0x4081]];
+  mem[0x4080] = addr & 0xFF; mem[0x4081] = (addr >> 8) & 0xFF;
+  callSub(SQ_AT);
+  const hit = cpu.carry;
+  restoreCpu(s);
+  mem[0x4080] = atk[0]; mem[0x4081] = atk[1];
+  return hit;
+}
+
+function inCheck() {
+  const s = saveCpu();
+  const atk = [mem[0x4080], mem[0x4081]];
+  callSub(CHK);
+  const hit = cpu.carry;
+  restoreCpu(s);
+  mem[0x4080] = atk[0]; mem[0x4081] = atk[1];
+  return hit;
+}
+
+/* ------------------------------------------------------------------ *
+ * Ergaenzte Regeln
+ * ------------------------------------------------------------------ */
+function promote() {
+  for (let f = 0; f < 8; f++) {
+    const top = sqAddr(1, f), bot = sqAddr(8, f);
+    if (mem[bot] === WP) mem[bot] = WQ;   /* weisser Bauer erreicht Reihe 8 */
+    if (mem[top] === BP) mem[top] = BQ;   /* schwarzer Bauer erreicht Reihe 1 */
+  }
+}
+
+function updateRights() {
+  if (mem[E1] !== WK) rights.king = true;
+  if (mem[H1] !== WR) rights.rookH = true;
+  if (mem[A1] !== WR) rights.rookA = true;
+}
+
+/* Testet, ob das Feld angegriffen waere, wenn der Koenig dort stuende. */
+function kingSafeOn(target) {
+  const from = mem[E1], to = mem[target];
+  mem[E1] = emptyColour(E1);
+  mem[target] = WK;
+  const attacked = squareAttacked(target);
+  mem[E1] = from; mem[target] = to;
+  return !attacked;
+}
+
+/* Am Haken $4261: DE = Zielfeld, Startfeld steht in ($4007). */
+function tryCastle() {
+  const src = mem[0x4007] | (mem[0x4008] << 8);
+  const dst = cpu.de;
+  if (src !== E1 || mem[src] !== WK) return false;
+  if (dst !== G1 && dst !== C1) return false;
+
+  const kingside = (dst === G1);
+  const rookFrom = kingside ? H1 : A1, rookTo = kingside ? F1 : D1;
+  const moved = kingside ? rights.rookH : rights.rookA;
+  const path = kingside ? [F1, G1] : [D1, C1, B1];
+  const transit = kingside ? F1 : D1;
+
+  let why = "";
+  if (rights.king) why = "K\u00f6nig hat sich bereits bewegt";
+  else if (moved || mem[rookFrom] !== WR) why = "Turm steht nicht mehr bereit";
+  else if (path.some(a => (mem[a] & 0x7F) !== 0)) why = "Felder dazwischen sind besetzt";
+  else if (squareAttacked(E1)) why = "K\u00f6nig steht im Schach";
+  else if (!kingSafeOn(transit)) why = "K\u00f6nig zieht durch ein bedrohtes Feld";
+  else if (!kingSafeOn(dst)) why = "Zielfeld ist bedroht";
+
+  if (why) {
+    setStatus("Rochade nicht m\u00f6glich: " + why, "");
+    cpu.pc = DRIVER;
+    return true;
+  }
+
+  mem[dst] = WK;            mem[E1] = emptyColour(E1);
+  mem[rookTo] = WR;         mem[rookFrom] = emptyColour(rookFrom);
+  mem[MOVER] ^= 0x80;       /* Seite wechseln, wie es sonst $42EB tut */
+  rights.king = true;
+  if (kingside) rights.rookH = true; else rights.rookA = true;
+  setStatus(kingside ? "Kurze Rochade" : "Lange Rochade", "");
+  cpu.pc = 0x4278;          /* weiter bei CALL MPSCAN */
+  return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * ROM-Stubs und Haken im Originalcode
+ * ------------------------------------------------------------------ */
+function romTrap() {
+  const pc = cpu.pc;
+  if (pc === ROM_KEYBOARD) {
+    if (keyQueue.length === 0) { cpu.h = 0; cpu.l = 0xFF; cpu.pc = cpu.pop(); return "wait"; }
+    cpu.h = 0; cpu.l = keyQueue.shift();
+    cpu.pc = cpu.pop(); return true;
+  }
+  if (pc === ROM_DECODE) { mem[0x4000] = cpu.c; cpu.hl = 0x4000; cpu.pc = cpu.pop(); return true; }
+  if (pc === ROM_COPY) {
+    const hl = cpu.hl;
+    mem[hl] = cpu.b; mem[hl - 1] = cpu.c; mem[hl - 2] = cpu.e; mem[hl - 3] = cpu.d;
+    cpu.pc = cpu.pop(); return true;
+  }
+  return false;
+}
+
+/* Adressen, an denen wir eingreifen. Die Tabelle spart pro Befehl neun
+   Vergleiche, was bei der Stufe "Sofort" deutlich sp&uuml;rbar ist. */
+const TRAP = new Uint8Array(0x10000);
+for (const a of [ROM_KEYBOARD, ROM_DECODE, ROM_COPY,
+                 DRIVER, 0x4261, 0x426E, 0x4278, 0x427D, 0x42DC, 0x42F6]) TRAP[a] = 1;
+
+function hooks() {
+  const pc = cpu.pc;
+
+  if (pc === DRIVER) {
+    updateRights();
+    if (!statusMsg || statusKind === "auto") {
+      setStatus(inCheck() ? "Schach \u2014 du bist am Zug" : "Du bist am Zug", "auto");
+    }
+    return false;
+  }
+  if (pc === 0x4261) {                     /* Zielfeld gelesen, vor der Zugliste */
+    if (tryCastle()) return true;
+    return false;
+  }
+  if (pc === 0x426E) { promote(); return false; }          /* nach PMOVE des Menschen */
+  if (pc === 0x427D) {                                      /* Zug liesse den Koenig im Schach */
+    setStatus("Zug zur\u00fcckgenommen \u2014 K\u00f6nig st\u00fcnde im Schach", "");
+    return false;
+  }
+  /* $42EB..$42F6 wird zweimal durchlaufen: einmal ueber CALL $42EB aus dem DRIVER
+     (Feld einfaerben, Seite wechseln) und einmal als Rueckkehr aus MPSCAN.
+     Nur der zweite Durchlauf beendet den Computerzug. */
+  if (pc === 0x4278) { aiThinking = true; setStatus("Computer denkt nach", "busy"); return false; }
+  if (pc === 0x42F6 && aiThinking) {
+    aiThinking = false; promote(); updateRights();
+    setStatus("Du bist am Zug", "auto");
+    return false;
+  }
+  if (pc === 0x42DC && mem[BEST_SCORE] === 0) {
+    gameOver = true;
+    setStatus("Der Computer hat keinen Zug mehr \u2014 du gewinnst", "over");
+    return true;
+  }
+  return false;
+}
+
+/* ------------------------------------------------------------------ *
+ * Ausfuehrung
+ * ------------------------------------------------------------------ */
+function runBudget(budget) {
+  waitingForKey = false;
+  for (let i = 0; i < budget; i++) {
+    if (TRAP[cpu.pc]) {
+      if (hooks()) { if (gameOver) return; continue; }
+      const t = romTrap();
+      if (t === "wait") { waitingForKey = true; return; }
+      if (t) continue;
+    }
+    cpu.step();
+    if (cpu.halted) { gameOver = true; setStatus("Prozessor angehalten", "over"); return; }
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Bildschirm
+ * ------------------------------------------------------------------ */
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d", { alpha: false });
+const img = ctx.createImageData(256, 192);
+const glyphCache = {};
+
+function glyph(code) {
+  if (glyphCache[code]) return glyphCache[code];
+  const base = code & 0x7F, inv = (code & 0x80) !== 0;
+  const hex = GLYPHS[base] || GLYPHS[0];
+  const rows = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) {
+    let v = parseInt(hex.substr(i * 2, 2), 16);
+    if (inv) v ^= 0xFF;
+    rows[i] = v;
+  }
+  glyphCache[code] = rows;
+  return rows;
+}
+
+function render() {
+  const d = img.data;
+  /* Hintergrund: Phosphorweiss */
+  for (let i = 0; i < d.length; i += 4) { d[i] = 0xDE; d[i+1] = 0xDB; d[i+2] = 0xCD; d[i+3] = 255; }
+
+  let p = DISPLAY_FILE;
+  for (let row = 0; row < 24; row++) {
+    for (let col = 0; col < 32; col++) {
+      const ch = mem[p];
+      if (ch === 0x76) break;                 /* HALT beendet die Zeile */
+      p++;
+      if (ch === 0x00) continue;
+      const g = glyph(ch);
+      for (let y = 0; y < 8; y++) {
+        const bits = g[y];
+        if (!bits) continue;
+        let o = ((row * 8 + y) * 256 + col * 8) * 4;
+        for (let x = 0; x < 8; x++, o += 4) {
+          if (bits & (0x80 >> x)) { d[o] = 0x0A; d[o+1] = 0x0A; d[o+2] = 0x0A; }
+        }
+      }
+    }
+    while (mem[p] !== 0x76 && p < 0x4400) p++;  /* Rest der Zeile ueberspringen */
+    p++;                                        /* das HALT selbst */
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/* ------------------------------------------------------------------ *
+ * Statuszeile
+ * ------------------------------------------------------------------ */
+const statusEl = document.getElementById("status");
+const statusTextEl = document.getElementById("statusText");
+function setStatus(msg, kind) {
+  statusMsg = msg; statusKind = kind || "";
+  statusTextEl.textContent = msg;
+  statusEl.className = "status" + (kind === "busy" ? " busy" : kind === "over" ? " over" : "");
+}
+
+/* ------------------------------------------------------------------ *
+ * Tastatur
+ * ------------------------------------------------------------------ */
+function pressKey(code) {
+  if (gameOver) return;
+  if (keyQueue.length < 8) keyQueue.push(code);
+}
+const digitCode = n => 0x1C + n;                       /* '1'..'8' */
+const letterCode = i => 0x26 + i;                      /* 'A'..'H' */
+
+const rowDigits = document.getElementById("rowDigits");
+const rowLetters = document.getElementById("rowLetters");
+for (let n = 1; n <= 8; n++) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = String(n);
+  b.addEventListener("click", () => pressKey(digitCode(n)));
+  rowDigits.appendChild(b);
+}
+for (let i = 0; i < 8; i++) {
+  const b = document.createElement("button");
+  b.type = "button"; b.textContent = "ABCDEFGH"[i];
+  b.addEventListener("click", () => pressKey(letterCode(i)));
+  rowLetters.appendChild(b);
+}
+
+document.addEventListener("keydown", ev => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const k = ev.key;
+  if (k >= "1" && k <= "8") { pressKey(digitCode(+k)); ev.preventDefault(); return; }
+  const up = k.toUpperCase();
+  if (up >= "A" && up <= "H" && up.length === 1) { pressKey(letterCode(up.charCodeAt(0) - 65)); ev.preventDefault(); }
+});
+
+/* ------------------------------------------------------------------ *
+ * Bedienelemente und Hauptschleife
+ * ------------------------------------------------------------------ */
+const speedEl = document.getElementById("speed");
+document.getElementById("restart").addEventListener("click", () => { loadImage(); render(); });
+
+function frame() {
+  if (!gameOver && (!waitingForKey || keyQueue.length > 0)) {
+    runBudget(+speedEl.value);
+  }
+  render();
+  requestAnimationFrame(frame);
+}
+
+loadImage();
+render();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
