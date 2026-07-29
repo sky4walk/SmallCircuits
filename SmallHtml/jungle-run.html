@@ -1,0 +1,1226 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Jungle Run</title>
+<style>
+  :root{
+    --wood-1:#6b4a2a; --wood-2:#4a3018; --wood-3:#8a6238;
+    --shell:#171310; --shell-2:#221c16;
+    --label:#c9bfae; --dim:#7d7263; --accent:#c8a24a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:#0d0b09;
+    color:var(--label);
+    font-family:"Courier New",ui-monospace,monospace;
+    display:flex;flex-direction:column;align-items:center;
+    padding:16px 12px 28px;gap:14px;
+    -webkit-tap-highlight-color:transparent;
+  }
+
+  /* Gehäuse im Stil einer Holzfurnier-Konsole */
+  .console{
+    width:min(680px,100%);
+    background:linear-gradient(180deg,var(--shell-2),var(--shell));
+    border-radius:14px;
+    padding:12px;
+    box-shadow:0 18px 50px #000a, inset 0 1px 0 #ffffff12;
+  }
+  .veneer{
+    height:16px;border-radius:7px 7px 0 0;margin:-4px -4px 10px;
+    background:
+      repeating-linear-gradient(90deg,var(--wood-2) 0 3px,var(--wood-1) 3px 7px,var(--wood-3) 7px 9px,var(--wood-1) 9px 14px);
+    box-shadow:inset 0 -3px 6px #0008;
+  }
+  .screenwrap{position:relative;background:#000;border-radius:6px;overflow:hidden;
+    box-shadow:inset 0 0 0 2px #000, inset 0 0 40px #000c;}
+  canvas{display:block;width:100%;height:auto;image-rendering:pixelated;image-rendering:crisp-edges}
+  .scanlines{position:absolute;inset:0;pointer-events:none;
+    background:repeating-linear-gradient(180deg,#0000 0 2px,#00000038 2px 4px);
+    mix-blend-mode:multiply}
+
+  .switches{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;align-items:center}
+  button{
+    font:inherit;font-size:12px;letter-spacing:.09em;text-transform:uppercase;
+    color:var(--label);background:linear-gradient(180deg,#3a332b,#231d17);
+    border:1px solid #000;border-top-color:#5a5045;
+    border-radius:4px;padding:8px 13px;cursor:pointer;
+  }
+  button:hover{background:linear-gradient(180deg,#463d33,#2b241d)}
+  button:active{transform:translateY(1px)}
+  button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .spacer{flex:1}
+  .romline{margin-top:8px;font-size:11.5px;color:var(--dim);letter-spacing:.02em}
+  .romline code{color:var(--accent)}
+  .console.drop{outline:2px dashed var(--accent);outline-offset:4px}
+  .seedbox{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim)}
+  .seedbox input{width:58px;font:inherit;font-size:12px;background:#0d0b09;color:var(--accent);
+    border:1px solid #3a332b;border-radius:3px;padding:5px 6px;text-align:center}
+
+  /* Touch-Steuerung */
+  .pad{display:none;width:min(680px,100%);gap:10px;user-select:none}
+  .pad.on{display:flex}
+  .dpad{display:grid;grid-template-columns:repeat(3,58px);grid-template-rows:repeat(2,52px);gap:6px}
+  .pad button{font-size:18px;padding:0;height:100%}
+  .dpad .k-up{grid-column:2;grid-row:1}
+  .dpad .k-left{grid-column:1;grid-row:2}
+  .dpad .k-down{grid-column:2;grid-row:2}
+  .dpad .k-right{grid-column:3;grid-row:2}
+  .jump{flex:1}
+  .jump button{width:100%;height:100%;font-size:13px}
+
+  .notes{width:min(680px,100%);font-size:12.5px;line-height:1.65;color:var(--dim)}
+  .notes h2{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);
+    margin:0 0 8px;font-weight:400}
+  .notes table{border-collapse:collapse;width:100%;margin:0 0 14px}
+  .notes td{padding:3px 10px 3px 0;vertical-align:top;border-bottom:1px solid #ffffff0d}
+  .notes td:first-child{color:var(--label);white-space:nowrap;width:1%}
+  .notes p{margin:0 0 10px}
+  kbd{background:#231d17;border:1px solid #3a332b;border-radius:3px;padding:1px 5px;color:var(--label)}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="console">
+  <div class="veneer"></div>
+  <div class="screenwrap">
+    <canvas id="cv" width="640" height="480" aria-label="Spielfeld"></canvas>
+    <div class="scanlines"></div>
+  </div>
+  <div class="switches">
+    <button id="btnStart">Reset</button>
+    <button id="btnPause">Pause</button>
+    <button id="btnSound">Ton: an</button>
+    <button id="btnRom">Grafik laden</button>
+    <span class="spacer"></span>
+    <span class="seedbox">Startszene
+      <input id="seed" value="C4" maxlength="2" aria-label="Startszene (Hex)">
+    </span>
+  </div>
+  <div class="romline"><span id="romStatus">Grafik fest eingebaut aus <code>pitfall.asm</code> &mdash; andere Datei hierher ziehen zum Ersetzen</span></div>
+  <input type="file" id="romFile" accept=".asm,.txt,.s,.a65" hidden>
+</div>
+
+<div class="pad" id="pad">
+  <div class="dpad">
+    <button class="k-up"    data-k="ArrowUp">▲</button>
+    <button class="k-left"  data-k="ArrowLeft">◀</button>
+    <button class="k-down"  data-k="ArrowDown">▼</button>
+    <button class="k-right" data-k="ArrowRight">▶</button>
+  </div>
+  <div class="jump"><button data-k="Space">Springen</button></div>
+</div>
+
+<div class="notes">
+  <h2>Steuerung</h2>
+  <table>
+    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Laufen. An der Leiter: oben angekommen wieder hinaus</td></tr>
+    <tr><td><kbd>Leertaste</kbd> / <kbd>↑</kbd></td><td>Springen; an der Liane: loslassen</td></tr>
+    <tr><td><kbd>↓</kbd></td><td>Neben der Leiter: hinabsteigen, ohne die 100 Punkte fürs Hineinfallen</td></tr>
+    <tr><td><kbd>↑</kbd> <kbd>↓</kbd></td><td>An der Leiter hinauf und hinab &mdash; sonst springt <kbd>↑</kbd> auch untertage</td></tr>
+    <tr><td><kbd>P</kbd></td><td>Pause</td></tr>
+  </table>
+
+  <h2>Regeln</h2>
+  <table>
+    <tr><td>Zeit</td><td>20 Minuten, 3 Leben, Start mit 2000 Punkten</td></tr>
+    <tr><td>Schätze</td><td>32 Stück: Geldsack 2000, Silberbarren 3000, Goldbarren 4000, Ring 5000</td></tr>
+    <tr><td>Abzug</td><td>Loch −100, Berührung eines Baumstamms −1 pro Bild</td></tr>
+    <tr><td>Tödlich</td><td>Feuer, Kobra, Skorpion, Teergrube, Sumpf, Treibsand, Krokodilmaul</td></tr>
+    <tr><td>Skorpion</td><td>Lässt sich überspringen. Der Sprung ist mit 10 Rasterzeilen flach, also früh abspringen</td></tr>
+    <tr><td>Abkürzung</td><td>Untertage überspringt drei Szenen statt einer — die Mauer versperrt eine Richtung</td></tr>
+  </table>
+
+  <h2>Grafik aus dem ROM</h2>
+  <p>Ohne geladene Datei läuft das Spiel mit neu gezeichneter Ersatzgrafik. Zieht man seine eigene
+  <code>pitfall.asm</code> auf das Gehäuse, liest das Spiel daraus die Sprites (<code>Harry0</code>&ndash;<code>Harry8</code>,
+  Stämme, Feuer, Kobra, Krokodile, Schätze, Skorpion, Mauer, Ziffern), die zeilenweisen Farbtabellen
+  (<code>RunColTab</code>, <code>ClimbColTab</code>, <code>LogColor</code>&nbsp;&hellip;), die Szenenfarben aus
+  <code>ColorTab</code> und das Blätterdach aus <code>PFLeavesTab</code> &ndash; und zeichnet damit statt mit der Ersatzgrafik.
+  Der Parser wertet <code>IF</code>/<code>ELSE</code>/<code>ENDIF</code> mit den Schaltern der Datei aus
+  (<code>OPTIMIZE&nbsp;=&nbsp;0</code> wählt die nicht überlappenden Farbtabellen) und hält zusammenhängende
+  Datenbereiche zusammen, weil Tabellen wie <code>RingColor</code> im ROM in die nächste hineinlaufen.
+  Die Bytes stehen von unten nach oben und werden beim Zeichnen umgedreht.</p>
+
+  <h2>Zur Umsetzung</h2>
+  <p>Nachbau der Spielmechanik von <em>Pitfall!</em> (Activision 1982, Entwurf: David Crane) auf Basis der
+  kommentierten Disassembly von Thomas Jentzsch. Übernommen wurden die Algorithmen: das bidirektionale
+  LFSR mit Startwert&nbsp;$C4, das 255 Szenen in beide Laufrichtungen reproduzierbar erzeugt
+  (<code>r&nbsp;&lt;&lt;&nbsp;1&nbsp;|&nbsp;b3^b4^b5^b7</code> nach rechts, gespiegelt nach links), die
+  Bit-Aufteilung der Szene (0–2 Objekt, 3–5 Szenentyp, 6–7 Baumkrone, 7 Mauerseite), die 32er-Sprungtabelle,
+  die Grubengrenzen sowie Punkte- und Zeitlogik. Alle Grafiken sind neu gezeichnet.</p>
+  <p>Eine Datei, kein Framework, keine externen Ressourcen.</p>
+</div>
+
+<script>
+"use strict";
+/* ==========================================================================
+   Jungle Run — Spiellogik nach der Pitfall!-Disassembly, Grafik neu gezeichnet
+   ========================================================================== */
+
+/* ---------- Anzeige ---------- */
+const W = 160, H = 192;                       // logische Auflösung (Atari-Format)
+const view = document.getElementById('cv');
+const vctx = view.getContext('2d');
+const off  = document.createElement('canvas'); off.width = W; off.height = H;
+const g    = off.getContext('2d');
+vctx.imageSmoothingEnabled = false;
+
+/* ---------- Palette (aus ColorTab der Disassembly, NTSC) ---------- */
+const C = {
+  bg:      '#000000',
+  text:    '#dcdcdc',   // $0C
+  leaves:  '#356200',   // DARK_GREEN $D2
+  jungle:  '#669600',   // GREEN $D6
+  branch:  '#4a4408',   // BROWN-2 $10
+  under:   '#8a8a2c',   // BROWN+2 $14
+  ground:  '#b8b840',   // YELLOW-6 $18
+  swamp:   '#3c3cac',   // BLUE $A4
+  trunk:   '#5c5210',
+  vine:    '#8fa838',
+  ladder:  '#c8b46a',
+  brick:   '#a86a3c',
+  brickD:  '#7a4a28',
+  skin:    '#e0a878',
+  shirt:   '#f0f0e0',
+  pants:   '#3c3cac',
+  hair:    '#101008',
+  fire1:   '#fc8000', fire2:'#fcc468', fire3:'#d03000',
+  cobra:   '#68a400', cobraD:'#2a5000',
+  croco:   '#3c9038', crocoD:'#1e5c1c', teeth:'#f0f0e0',
+  scorp:   '#c04040', scorpD:'#802020',
+  bag:     '#d0b060', bagD:'#8a6a20',
+  silver:  '#c8c8c8', silverD:'#808080',
+  gold:    '#fcc468', goldD:'#b88820',
+  ring:    '#f0f0f0', ringD:'#9090c0',
+  logL:    '#a07830', logD:'#5c4018'
+};
+
+/* ==========================================================================
+   ROM-Grafik: liest Sprites, Farbtabellen und Playfield-Muster aus einer
+   pitfall.asm. Es wird nichts eingebettet - die Daten kommen aus der Datei,
+   die der Anwender selbst lädt.
+   ========================================================================== */
+const NTSC =
+  "0000004040406C6C6C909090B0B0B0C8C8C8DCDCDCECECEC" +
+  "444400646410848424A0A034B8B840D0D050E8E85CFCFC68" +
+  "702800844414985C28AC783CBC8C4CCCA05CDCB468ECC878" +
+  "841800983418AC5028C06838D08048E09850F0B058FCC468" +
+  "8800009C2020B03C3CC05858D07070E08888ECA0A0FCB4B4" +
+  "78005C8C2074A03C88B0589CC070B0D088C0DCA0D0ECB4E0" +
+  "480078602090783CA48C58B8A070CCB488DCC49CECD4B0FC" +
+  "1400843020984C3CAC6858C07C70D09488E0A89CECBCB0FC" +
+  "0000881C209C3840B0505CC06874D07C8CE090A4ECA4B8FC" +
+  "00187C1C38903854A85070BC6888CC7CA0DC90B4ECA4C8FC" +
+  "002C5C1C4C783868905084AC689CC07CB4D490CCE8A4E0FC" +
+  "003C2C1C5C48387C64509C8068B4947CD0AC90E4C0A4FCD4" +
+  "003C00205C20407C405C9C5C74B4748CD08CA4E4A4B8FCB8" +
+  "143800345C1C507C386C985084B4689CCC7CB4E490C8FCA4" +
+  "2C30004C500C687018848C249CA834B4C044CCD44CE0EC5C" +
+  "442800644818846830A08444B89C58D0B46CE8CC7CFCE08C";
+const PALETTE = [];
+for (let i=0;i<128;i++) PALETTE.push('#' + NTSC.substr(i*6,6));
+function atariRGB(v){ return PALETTE[(((v>>4)&15)*8) + ((v>>1)&7)] || '#000'; }
+
+let ROM = /*BAKE*/{"harry":[[0,0,0,0,0,51,114,218,30,28,24,88,88,124,62,26,24,16,24,24,24,0],[0,128,128,195,98,98,54,62,28,24,24,60,62,58,56,24,24,16,24,24,24,0],[16,32,34,36,52,50,22,30,28,24,24,28,28,24,24,24,24,16,24,24,24,0],[12,8,40,40,62,10,14,28,24,24,28,28,24,24,24,24,24,16,24,24,24,0],[0,2,67,68,116,20,28,28,24,24,24,60,62,58,56,24,24,16,24,24,24,0],[24,16,28,24,24,24,24,24,24,24,24,24,28,30,26,24,24,16,24,24,24,0],[0,0,0,0,0,0,99,242,246,220,192,192,192,192,192,240,208,144,208,208,192,0],[48,16,16,16,22,20,20,22,18,22,30,28,24,56,56,60,30,26,2,24,24,24],[12,8,8,8,104,40,40,104,72,104,120,56,24,28,28,60,120,88,64,24,24,24]],"runCol":[210,210,210,210,210,210,210,210,210,210,200,200,200,200,200,200,200,74,74,74,18,19],"climbCol":[210,210,210,210,210,210,210,210,210,210,210,210,200,200,200,200,200,200,74,74,74,18],"log":[[0,24,36,90,90,90,102,126,94,118,126,94,118,60,24,0],[0,24,36,90,90,90,102,126,122,110,126,122,110,60,24,0]],"logCol":[18,18,18,18,18,18,18,18,18,18,18,18,18,18,18,18],"fire":[[0,195,231,126,60,24,60,124,124,120,56,56,48,48,16,16],[0,195,231,126,60,24,60,62,62,30,28,28,12,12,8,8]],"fireCol":[16,16,16,16,16,62,62,62,46,46,46,46,46,46,46,46],"cobra":[[0,254,249,249,249,249,96,16,8,12,12,8,56,48,64,0],[0,254,249,249,250,250,96,16,8,12,12,8,56,48,128,0]],"cobraCol":[0,0,4,0,4,0,0,0,0,0,0,0,0,0,66,66],"croco":[[0,0,0,0,0,255,171,3,3,11,46,186,224,128,0,0],[0,0,0,0,0,255,171,85,255,6,4,0,0,0,0,0]],"crocoCol":[208,208,208,208,208,208,208,208,208,208,208,208,208,208,208,208],"bag":[0,62,119,119,99,123,99,111,99,54,54,28,8,28,54,0],"bagCol":[4,4,4,4,4,4,4,4,4,4,4,4,18,4,4,4],"bar":[[0,248,252,254,254,126,62,0,16,0,84,0,146,0,16,0],[0,248,252,254,254,126,62,0,0,40,0,84,0,16,0,0]],"silverCol":[6,6,6,6,6,6,6,14,14,14,14,14,14,14,14,14],"goldCol":[30,30,30,30,30,30,30,14,14,14,14,14,14,14,14,14],"ring":[0,0,56,108,68,68,68,108,56,16,56,124,56,0,0,0],"ringCol":[66,66,30,30,30,30,30,30,30,30,14,14,14,14,14,14],"scorp":[[133,50,61,120,248,198,130,144,136,216,112,0,0,0,0,0],[73,51,60,120,250,196,146,136,216,112,0,0,0,0,0,0]],"scorpCol":[14,14,14,14,14,14,14,14,14,14,14,14,14,14,14,14],"wall":[254,186,186,186,254,238,238,238,254,186,186,186,254,238,238,238],"wallCol":[6,66,66,66,6,66,66,66,6,66,66,66,6,66,66,66],"digits":[[60,102,102,102,102,102,102,60],[60,24,24,24,24,24,56,24],[126,96,96,60,6,6,70,60],[60,70,6,12,12,6,70,60],[12,12,12,126,76,44,28,12],[124,70,6,6,124,96,96,126],[60,102,102,102,124,96,98,60],[24,24,24,24,12,6,66,126],[60,102,102,60,60,102,102,60],[60,70,6,62,102,102,102,60]],"colon":[0,24,24,0,0,24,24,0],"space":[0,0,0,0,0,0,0,0],"leaves":[255,207,131,1,127,61,24,0,255,254,188,24,254,252,120,48],"branch":[24,126,219,153,153,153,153,153,153],"scene":[12,12,210,214,0,16,20,24,164]}/*/BAKE*/;
+
+function parseAsm(text){
+  const SW = {OPTIMIZE:0, FILL_OPT:1, SCREENSAVER:1, TRAINER:0, NTSC:1};
+  const EQ = Object.create(null), labels = Object.create(null);
+  let run = null, pending = [], cond = [], active = true;
+  const DIRECTIVES = /^(processor|include|mac|endm|repeat|repend|subroutine)\b/i;
+
+  function newRun(){ run = {b:[]}; for (const n of pending) labels[n] = {run, off:0}; pending = []; }
+  function breakRun(){ run = null; }
+  function ev(t){
+    t = String(t).trim();
+    if (!t) return null;
+    let m = /^([A-Za-z_]\w*)\s*([-+])\s*(.+)$/.exec(t);
+    if (m){ const a = ev(m[1]), b = ev(m[3]); if (a===null||b===null) return null;
+            return (m[2]==='+' ? a+b : a-b) & 0xFF; }
+    if (/^%[01]+$/.test(t))            return parseInt(t.slice(1),2) & 0xFF;
+    if (/^\$[0-9a-fA-F]+$/.test(t))    return parseInt(t.slice(1),16) & 0xFF;
+    if (/^-?\d+$/.test(t))             return parseInt(t,10) & 0xFF;
+    if (t in SW) return SW[t];
+    if (t in EQ) return EQ[t];
+    return null;
+  }
+  function emit(list){
+    if (!run) newRun();
+    for (const v of list) run.b.push(v === null ? 0 : v & 0xFF);
+  }
+
+  for (let raw of text.replace(/\r/g,'').split('\n')){
+    let line = raw.split(';')[0];
+    if (!line.trim()) continue;
+    const bare = line.trim();
+
+    // Bedingte Übersetzung
+    let m = /^IF\s+(.+)$/i.exec(bare);
+    if (m){ const v = ev(m[1]); cond.push(active); active = active && !!v; continue; }
+    if (/^ELSE$/i.test(bare)){ const outer = cond[cond.length-1]; active = outer && !active; continue; }
+    if (/^ENDIF$/i.test(bare)){ active = cond.pop(); continue; }
+    if (!active) continue;
+
+    // Label in Spalte 1. DASM erlaubt sie auch ohne Doppelpunkt - in dieser
+    // Disassembly steht z. B. "Five" ohne einen.
+    m = /^([A-Za-z_][\w.]*)(:?)/.exec(line);
+    if (m && (m[2] === ':' || !/^\s*=/.test(line.slice(m[0].length)))){
+      const name = m[1];
+      if (run) labels[name] = {run, off: run.b.length}; else pending.push(name);
+      line = line.slice(m[0].length);
+      if (!line.trim()) continue;
+    }
+    const s2 = line.trim();
+
+    // Konstante
+    m = /^([A-Za-z_][\w.]*)\s*=\s*(.+)$/.exec(s2);
+    if (m){ const v = ev(m[2]); if (v !== null) EQ[m[1]] = v; continue; }
+
+    if (/^\.byte\b/i.test(s2)){ emit(s2.slice(5).split(',').filter(t=>t.trim()).map(ev)); continue; }
+    if (/^\.word\b/i.test(s2)){ emit(s2.slice(5).split(',').flatMap(()=>[0,0])); continue; }
+    m = /^(?:\.ds|ds)\s+(.+)$/i.exec(s2);
+    if (m){ const parts = m[1].split(','); const n = ev(parts[0]) || 0;
+            const v = parts.length>1 ? ev(parts[1]) : 0;
+            emit(new Array(n).fill(v)); continue; }
+    if (/^(align|org|seg)\b/i.test(s2)){ breakRun(); continue; }
+    if (DIRECTIVES.test(s2)) continue;
+    breakRun();                       // Maschinenbefehl: Datenlauf endet hier
+  }
+
+  const read = (name, n) => {
+    const L = labels[name]; if (!L) return null;
+    const out = []; for (let i=0;i<n;i++) out.push(L.run.b[L.off+i] ?? 0);
+    return out;
+  };
+  const need = ['Harry0','Harry8','RunColTab','ClimbColTab','Log0','Fire0','Cobra0',
+                'Croco0','MoneyBag','Bar0','Ring','Scorpion0','Wall','Zero','ColorTab',
+                'PFLeavesTab','BranchTab'];
+  for (const n of need) if (!labels[n]) throw new Error('Label ' + n + ' nicht gefunden');
+
+  const D = ['Zero','One','Two','Three','Four','Five','Six','Seven','Eight','Nine'];
+  const rom = {
+    harry:    [0,1,2,3,4,5,6,7,8].map(i => read('Harry'+i, 22)),
+    runCol:   read('RunColTab', 22),
+    climbCol: read('ClimbColTab', 22),
+    log:  [read('Log0',16),   read('Log1',16)],   logCol:  read('LogColor',16),
+    fire: [read('Fire0',16),  read('Fire1',16)],  fireCol: read('FireColor',16),
+    cobra:[read('Cobra0',16), read('Cobra1',16)], cobraCol:read('CobraColor',16),
+    croco:[read('Croco0',16), read('Croco1',16)], crocoCol:read('CrocoColor',16),
+    bag:   read('MoneyBag',16), bagCol: read('MoneyBagColor',16),
+    bar:  [read('Bar0',16),   read('Bar1',16)],
+    silverCol: read('SilverBarColor',16),
+    goldCol:   read('GoldBarColor',17).slice(1),
+    ring:  read('Ring',16), ringCol: read('RingColor',16),
+    scorp:[read('Scorpion0',16), read('Scorpion1',16)], scorpCol: read('ScorpionColor',16),
+    wall:  read('Wall',16), wallCol: read('WallColor',16),
+    digits: D.map(n => { const d = read(n,8); if (!d) throw new Error('Ziffer ' + n + ' nicht gefunden'); return d; }),
+    colon:  read('DoublePoint',8), space: read('Space',8),
+    leaves: read('PFLeavesTab',16),
+    branch: read('BranchTab',9),
+    scene:  read('ColorTab',9)
+  };
+  if (rom.harry.some(h => !h) || !rom.scene) throw new Error('Grafikdaten unvollständig');
+  return rom;
+}
+
+/* Szenenfarben: aus ColorTab, sonst Ersatzpalette */
+const SCENE_FB = [C.text, C.text, C.leaves, C.jungle, C.bg, C.branch, C.under, C.ground, C.swamp];
+function sc(i){ return ROM ? atariRGB(ROM.scene[i]) : SCENE_FB[i]; }
+
+/* Ein Byte über PF0/PF1/PF2 in eine gespiegelte 160-Pixel-Maske */
+const pfCache = Object.create(null);
+function pfMask(byte){
+  if (pfCache[byte]) return pfCache[byte];
+  const m = new Uint8Array(W);
+  const on = (from,to)=>{ for (let i=from;i<=to;i++){ m[i]=1; m[W-1-i]=1; } };
+  for (let b=0;b<4;b++) if (byte & (0x10<<b))  on(b*4, b*4+3);        // PF0: Bits 4..7
+  for (let b=0;b<8;b++) if (byte & (0x80>>b))  on(16+b*4, 19+b*4);    // PF1: Bits 7..0
+  for (let b=0;b<8;b++) if (byte & (1<<b))     on(48+b*4, 51+b*4);    // PF2: Bits 0..7
+  return (pfCache[byte] = m);
+}
+
+/* Sprite aus ROM-Daten. Bytes stehen von unten nach oben, Farbe je Zeile. */
+function romSprite(bytes, cols, x, yTop, flip, skipBottom){
+  if (!bytes) return;
+  x = Math.round(x); yTop = Math.round(yTop);
+  const h = bytes.length;
+  for (let r = 0; r < h - (skipBottom|0); r++){
+    const i = h-1-r, byte = bytes[i];
+    if (!byte) continue;
+    g.fillStyle = atariRGB(cols ? (cols[i] ?? 0x0E) : 0x0E);
+    for (let b=0;b<8;b++) if (byte & (0x80>>b)) g.fillRect(x + (flip ? 7-b : b), yTop+r, 1, 1);
+  }
+}
+
+/* ---------- Vertikale Aufteilung des Bildschirms ---------- */
+const SCORE_Y   = 8;      // Punktestand
+const TIME_Y    = 20;     // Leben + Uhr
+const CANOPY_T  = 32, CANOPY_B = 58;
+const BRANCH_Y  = 60;
+const GROUND_Y  = 120;    // Fußhöhe im Dschungel
+const GRASS_B   = 132;
+const DIRT_B    = 138;
+const TUNNEL_T  = 146, TUNNEL_B = 186;
+const UNDER_Y   = 186;    // Fußhöhe untertage
+const HARRY_H   = 22;
+const HARRY_W   = 8;
+const XMIN = 8, XMAX = 148;             // Szenenwechsel-Grenzen
+const LADDER_TOP = 11, LADDER_BOTTOM = 22, LADDER_X = 72;
+// yPosHarry = 4*climbPos+2 im ROM; hier auf die Bildschirmhöhen abgebildet
+const ladderY = c => Math.round(GROUND_Y + (4*c - 30) * (UNDER_Y-GROUND_Y) / 54);
+const VINE_X = 80, VINE_Y = 59, VINE_L = 37, VINE_A = 0.85, VINE_W = 0.045;
+
+/* ---------- Tabellen aus dem ROM (funktionale Daten) ---------- */
+// Höhenänderung je Sprungbild, 32 Schritte
+const JUMP_TAB = [1,1,1,1,1,1,1,0,1,0,0,1,0,0,0,1,-1,0,0,0,-1,0,0,-1,0,-1,-1,-1,-1,-1,-1,-1];
+const JUMP_LEN = 32;
+
+// Grenzen der Löcher und Gruben, in die Harry fällt
+const B_ONE   = [[72,79]];
+const B_THREE = [[44,55],[72,79],[96,107]];
+const B_PIT   = [[44,107]];
+const B_CLOSED= [[44,55],[64,71],[80,87],[96,107]];   // Krokodilmaul zu
+const B_OPEN  = [[44,61],[64,77],[80,93],[96,107]];   // Krokodilmaul offen
+
+// Grubenfarbe je Szenentyp (aus LadderTab, Bit 7)
+const PIT_BLACK = [true,true,true,false,false,true,true,false];
+// Liane vorhanden (aus LianaTab)
+const HAS_VINE  = [false,false,true,true,true,false,true,false];
+// Anzahl und Abstand der Objektkopien (aus NuSize1Tab)
+const COPIES = [[0],[0,16],[0,32],[0,32,64],[0],[0,32,64]];
+const QSAND  = [0,4,8,16,28,40];   // Breitenversatz des Treibsands
+
+/* ---------- Spielzustand ---------- */
+const S = {};
+function newGame(seed){
+  S.random = seed & 0xFF;
+  S.score = 2000; S.lives = 3;
+  S.timeLeft = 20*60;            // Sekunden
+  S.timeTick = 60;
+  S.treasureBits = [0,0,0,0];
+  S.treasureCnt = 32;
+  S.frameCnt = 0;
+  S.mode = 'title';              // title | play | dying | over | won
+  S.msgTimer = 0; S.msg = '';
+  decodeScene();
+  resetHarry(76);
+}
+function resetHarry(x){
+  S.hx = x; S.hy = GROUND_Y;     // hy = Fußhöhe
+  S.jumpIdx = 0; S.vy = 0;
+  S.state = 'ground';            // ground|jump|air|falling|vine|climb|under
+  S.face = 1; S.frame = 0; S.animT = 0;
+  S.climbPos = 0;                // 0 = nicht an der Leiter, sonst 11..22
+  S.vineCool = 0;
+  S.locked = 0;                  // Laufrichtung während des Sprungs
+  S.kneel = false;
+}
+
+/* ---------- Szenengenerierung: bidirektionales LFSR ---------- */
+function stepRight(){ const r=S.random; S.random = ((r<<1) | (((r>>3)^(r>>4)^(r>>5)^(r>>7))&1)) & 0xFF; }
+function stepLeft (){ const r=S.random; S.random = ((r>>1) | ((((r>>4)^(r>>5)^(r>>6)^r)&1)<<7)) & 0xFF; }
+
+function decodeScene(){
+  const r = S.random;
+  S.sceneType = (r>>3) & 7;
+  S.treePat   = (r>>6) & 3;
+  S.objectType= r & 7;
+  S.objX      = (S.sceneType === 4) ? 60 : 124;
+  if (S.sceneType <= 1){                       // Szene mit Loch → Leiter + Mauer
+    S.ladder = true;
+    S.wallX  = (r & 0x80) ? 136 : 17;
+    S.scorpX = -99;
+  } else {
+    S.ladder = false;
+    S.wallX  = -99;
+    S.scorpX = W/2 - 4;
+  }
+}
+function gotoScene(dir, count){
+  for (let i=0;i<count;i++) dir<0 ? stepLeft() : stepRight();
+  decodeScene();
+}
+
+/* ---------- Schatzverwaltung ---------- */
+function treasureSlot(){ return (S.random>>6) & 3; }
+function treasureMask(){ return 0x80 >> S.objectType; }
+function treasureTaken(){ return (S.treasureBits[treasureSlot()] & treasureMask()) !== 0; }
+function takeTreasure(){
+  S.treasureBits[treasureSlot()] |= treasureMask();
+  S.treasureCnt--;
+  S.score += 2000 + (S.objectType & 3) * 1000;
+  sfx('treasure');
+  if (S.treasureCnt <= 0){ S.mode='won'; S.msg='ALLE SCHÄTZE'; }
+}
+
+/* ---------- Grubengrenzen der aktuellen Szene ---------- */
+function quicksandOffset(){
+  const f = S.frameCnt & 0xFF, seg = f>>6, t = (f>>2)&0x0F;
+  let a = seg===0 ? t : seg===1 ? 15 : seg===2 ? 15-t : 0;
+  return QSAND[Math.min(5, Math.round(a/3))];
+}
+function currentBounds(){
+  const st = S.sceneType;
+  if (st === 0) return B_ONE;
+  if (st === 1) return B_THREE;
+  if (st === 4) return (S.frameCnt & 0x80) ? B_CLOSED : B_OPEN;
+  if (st >= 5){                                  // Treibsand: Breite pulsiert
+    const q = quicksandOffset(), l = 44+q, r = 107-q;
+    return (r > l) ? [[l,r]] : [];
+  }
+  return B_PIT;                                  // Teergrube, Sumpf
+}
+function overHole(x){
+  const c = x + HARRY_W/2;          // Mitte des gezeichneten Sprites
+  for (const [l,r] of currentBounds()) if (c > l && c <= r) return true;
+  return false;
+}
+
+/* ---------- Objekte am Boden ---------- */
+function objectInfo(){
+  let id = S.objectType;
+  if (S.sceneType === 5){                        // Schatzszene
+    if (treasureTaken()) return null;
+    id = 8 | (S.objectType & 3);
+  } else if (S.sceneType === 4) {
+    return null;                                 // Krokodile statt Bodenobjekt
+  }
+  // h = Zeichenhöhe, ch/cw = Kollisionsbox. Die Box ist bewusst klein: im Original
+  // kollidieren nur die tatsächlich gesetzten Pixel, und Harrys Beine sind schmal.
+  if (id <= 5) return {kind:'log',   id, copies:COPIES[id], w:8, h:8,  cw:6, ch:7, rolling:id<4};
+  if (id === 6) return {kind:'fire',  copies:[0], w:8, h:12, cw:6, ch:7};
+  if (id === 7) return {kind:'cobra', copies:[0], w:8, h:14, cw:6, ch:7};
+  return {kind:'treasure', id:id&3, copies:[0], w:8, h:12, cw:8, ch:12};
+}
+function objectRects(info){
+  const out = [];
+  for (const off of info.copies){
+    let x = (S.objX + off) % W; if (x < 0) x += W;
+    out.push({x, y: GROUND_Y - info.h, w: info.w, h: info.h});
+  }
+  return out;
+}
+function objectHitRects(info){
+  return objectRects(info).map(r => ({
+    x: r.x + (info.w - info.cw)/2, y: GROUND_Y - info.ch, w: info.cw, h: info.ch
+  }));
+}
+function overlap(a,b){ return a.x < b.x+b.w && b.x < a.x+a.w && a.y < b.y+b.h && b.y < a.y+a.h; }
+function harryRect(){ return {x:S.hx, y:S.hy-HARRY_H, w:HARRY_W, h:HARRY_H}; }
+// schmale Box für Hindernisse: nur Harrys Beine zählen
+function harryLegs(){ return {x:S.hx+2, y:S.hy-HARRY_H, w:4, h:HARRY_H}; }
+
+/* ---------- Liane ---------- */
+function vineAngle(){ return VINE_A * Math.sin(S.frameCnt * VINE_W); }
+function vineDir(){ return Math.cos(S.frameCnt * VINE_W) >= 0 ? 1 : -1; }
+function vineBottom(){
+  const a = vineAngle();
+  return {x: VINE_X + VINE_L*Math.sin(a), y: VINE_Y + VINE_L*Math.cos(a)};
+}
+
+/* ---------- Eingaben ---------- */
+const keys = Object.create(null);
+const KEYMAP = {ArrowLeft:'l',ArrowRight:'r',ArrowUp:'u',ArrowDown:'d',Space:'j',KeyA:'l',KeyD:'r',KeyW:'u',KeyS:'d'};
+addEventListener('keydown', e=>{
+  if (e.code === 'KeyP'){ togglePause(); e.preventDefault(); return; }
+  const k = KEYMAP[e.code]; if (!k) return;
+  e.preventDefault();
+  if (!keys[k]) keys[k+'_edge'] = true;
+  keys[k] = true;
+  if (S.mode === 'title' || S.mode === 'over' || S.mode === 'won') startRun();
+});
+addEventListener('keyup', e=>{ const k = KEYMAP[e.code]; if (k){ keys[k]=false; e.preventDefault(); } });
+addEventListener('blur', ()=>{ for (const k in keys) keys[k]=false; });
+
+// Touch
+const pad = document.getElementById('pad');
+if (matchMedia('(pointer:coarse)').matches) pad.classList.add('on');
+pad.querySelectorAll('button').forEach(b=>{
+  const k = KEYMAP[b.dataset.k];
+  const on  = e=>{ e.preventDefault(); if(!keys[k]) keys[k+'_edge']=true; keys[k]=true;
+                   if (S.mode!=='play' && S.mode!=='dying') startRun(); };
+  const off = e=>{ e.preventDefault(); keys[k]=false; };
+  b.addEventListener('pointerdown',on); b.addEventListener('pointerup',off);
+  b.addEventListener('pointercancel',off); b.addEventListener('pointerleave',off);
+});
+
+/* ---------- Ton ---------- */
+let actx = null, soundOn = true;
+function sfx(kind){
+  if (!soundOn) return;
+  try{
+    if (!actx) actx = new (window.AudioContext||window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+  }catch(e){ return; }
+  const t = actx.currentTime, o = actx.createOscillator(), gn = actx.createGain();
+  o.connect(gn); gn.connect(actx.destination);
+  const set = (type,f0,f1,dur,vol)=>{
+    o.type = type; o.frequency.setValueAtTime(f0,t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20,f1), t+dur);
+    gn.gain.setValueAtTime(vol,t); gn.gain.exponentialRampToValueAtTime(0.001,t+dur);
+    o.start(t); o.stop(t+dur+0.02);
+  };
+  switch(kind){
+    case 'jump':     set('square',300,620,0.14,0.08); break;
+    case 'treasure': set('square',520,1400,0.28,0.10); break;
+    case 'dead':     set('sawtooth',420,50,0.65,0.11); break;
+    case 'fall':     set('triangle',700,90,0.55,0.09); break;
+    case 'hit':      set('square',150,110,0.06,0.06); break;
+    case 'vine':     set('sine',260,520,0.20,0.07); break;
+    case 'climb':    set('square',200,240,0.05,0.04); break;
+  }
+}
+
+/* ---------- Tod ---------- */
+function killHarry(reason){
+  if (S.mode !== 'play') return;
+  S.lives--; S.mode = 'dying'; S.msgTimer = 90;
+  sfx(reason === 'fall' ? 'fall' : 'dead');
+}
+
+/* ==========================================================================
+   Simulation — ein Schritt entspricht einem Bild (60 Hz)
+   ========================================================================== */
+function update(){
+  S.frameCnt = (S.frameCnt + 1) & 0xFFFF;
+
+  if (S.mode === 'dying'){
+    if (--S.msgTimer <= 0){
+      if (S.lives <= 0){ S.mode = 'over'; S.msg = 'SPIEL ENDE'; }
+      else { S.mode = 'play'; resetHarry(20); }
+    }
+    return;
+  }
+  if (S.mode !== 'play') return;
+
+  /* --- Uhr --- */
+  if (--S.timeTick <= 0){
+    S.timeTick = 60;
+    if (--S.timeLeft <= 0){ S.timeLeft = 0; S.mode = 'over'; S.msg = 'ZEIT ABGELAUFEN'; return; }
+  }
+
+  /* --- rollende Baumstämme wandern jedes zweite Bild nach links --- */
+  const info = objectInfo();
+  if (info && info.kind === 'log' && info.rolling && (S.frameCnt & 1) === 0){
+    S.objX = (S.objX === 0) ? W-1 : S.objX-1;
+  }
+  /* --- Skorpion folgt Harry, jedes achte Bild einen Pixel --- */
+  if (!S.ladder && (S.frameCnt & 7) === 0 && S.state === 'under'){
+    if (S.hx > S.scorpX) S.scorpX++; else if (S.hx < S.scorpX) S.scorpX--;
+  }
+
+  const left = !!keys.l, right = !!keys.r, up = !!keys.u, down = !!keys.d;
+  const jumpEdge = keys.j_edge || keys.u_edge; keys.j_edge = keys.u_edge = false;
+  S.kneel = false;
+
+  /* ================= Liane ================= */
+  if (S.state === 'vine'){
+    const b = vineBottom();
+    S.hx = Math.round(b.x - HARRY_W/2);
+    S.hy = Math.round(b.y + HARRY_H);
+    if (jumpEdge || down){                       // loslassen
+      S.state = 'air';
+      S.vy = 0;
+      S.locked = vineDir();                      // Richtung aus der Schwungbewegung
+      S.face = S.locked;
+      S.vineCool = 24;                           // nicht sofort wieder zugreifen
+      sfx('jump');
+    }
+    checkScroll();
+    return;
+  }
+
+  /* ================= Leiter ================= */
+  if (S.state === 'climb'){
+    S.jumpIdx = 0; S.hx = LADDER_X;
+    if ((S.frameCnt & 7) === 0){                 // eine Sprosse je 8 Bilder
+      if (up)   S.climbPos--;
+      if (down) S.climbPos++;
+      if (up || down) sfx('climb');
+      if (S.climbPos < LADDER_TOP) S.climbPos = LADDER_TOP;
+      if (S.climbPos >= LADDER_BOTTOM){          // unten heraus auf die Tunnelsohle
+        S.climbPos = 0; S.state = 'under'; S.hy = UNDER_Y;
+        return;
+      }
+    }
+    S.hy = ladderY(S.climbPos);
+    if (S.climbPos === LADDER_TOP && (left || right)){   // oben heraus, mit Hüpfer
+      const d = right ? 1 : -1;
+      S.climbPos = 0; S.state = 'jump'; S.jumpIdx = 1;
+      S.locked = d; S.face = d; S.hx = LADDER_X + d*6; S.hy = GROUND_Y - 1;
+    }
+    return;
+  }
+
+  /* ================= Untertage ================= */
+  if (S.state === 'under'){
+    // Sprung untertage: derselbe Bogen wie im Dschungel, nur um die Tunnelsohle.
+    // Im ROM bricht DoJump ausdrücklich bei UNDER_GROUND ab, und die Posenwahl
+    // behandelt "in der Luft auf Tunnelhöhe" - hier wird also genauso gesprungen.
+    let ux = 0;
+    if (S.jumpIdx > 0){
+      ux = S.locked;                               // Richtung bleibt im Flug erhalten
+    } else {
+      // Leiter hat Vorrang vor dem Sprung, sonst hüpft Harry beim Hoch-Drücken
+      // an der Leiter erst einmal wirkungslos in die Luft
+      if (up && S.ladder && S.hx + HARRY_W > 71 && S.hx < 80){
+        S.state = 'climb'; S.climbPos = LADDER_BOTTOM - 1; S.hx = LADDER_X;
+        return;
+      }
+      if (left){ ux = -1; S.face = -1; }
+      else if (right){ ux = 1; S.face = 1; }
+      if (jumpEdge){ S.jumpIdx = 1; S.locked = ux; sfx('jump'); }
+    }
+    if (S.jumpIdx > 0){
+      S.hy -= JUMP_TAB[S.jumpIdx-1];
+      S.jumpIdx = Math.min(JUMP_LEN, S.jumpIdx+1);
+      if (S.hy >= UNDER_Y){ S.hy = UNDER_Y; S.jumpIdx = 0; S.locked = 0; }
+    } else {
+      S.hy = UNDER_Y;
+      if (ux) advanceAnim();
+    }
+    if (ux){
+      const nx = S.hx + ux;
+      // Mauer versperrt den Weg: Bewegung verwerfen, statt Harry zu verschieben
+      const blocked = S.wallX > -50 &&
+        nx < S.wallX + 8 && S.wallX < nx + HARRY_W;
+      if (!blocked) S.hx = nx;
+    }
+    // Skorpion: schmale Beinbox wie bei den Hindernissen oben, sonst streift
+    // Harry ihn auch im Scheitel des Sprungs
+    if (!S.ladder && overlap(harryLegs(), {x:S.scorpX, y:UNDER_Y-7, w:8, h:7})){
+      killHarry('scorp'); return;
+    }
+    checkScroll();
+    return;
+  }
+
+  /* ================= Oberfläche ================= */
+  // waagerechte Bewegung
+  let dx = 0;
+  if (S.state === 'ground'){
+    if (left){ dx = -1; S.face = -1; }
+    else if (right){ dx = 1; S.face = 1; }
+    if (dx) advanceAnim();
+  } else {
+    dx = S.locked;                                // Richtung bleibt im Flug erhalten
+  }
+
+  // Sprung auslösen
+  if (S.state === 'ground' && jumpEdge){
+    S.state = 'jump'; S.jumpIdx = 1;
+    S.locked = dx; sfx('jump');
+  }
+
+  // Sprungbogen aus der ROM-Tabelle
+  if (S.state === 'jump'){
+    S.hy -= JUMP_TAB[S.jumpIdx-1];
+    S.jumpIdx = Math.min(JUMP_LEN, S.jumpIdx+1);
+    if (S.hy >= GROUND_Y){ S.hy = GROUND_Y; S.state = 'ground'; S.jumpIdx = 0; }
+  } else if (S.state === 'air'){                  // nach dem Loslassen der Liane
+    S.vy += 0.22;
+    S.hy += S.vy;
+    if (S.hy >= GROUND_Y){
+      S.hy = GROUND_Y;
+      if (overHole(Math.round(S.hx))) startFall();
+      else { S.state = 'ground'; S.vy = 0; S.locked = 0; }
+    }
+  } else if (S.state === 'falling'){
+    S.hy += 1;
+    if (S.hy >= GROUND_Y + 26 && !S.ladder){ killHarry('pit'); return; }   // Grube: tödlich
+    if (S.hy >= UNDER_Y){ S.hy = UNDER_Y; S.state = 'under'; }
+    S.hx += 0;
+    return;
+  }
+
+  // Kollision mit Bodenobjekten (nur auf/über dem Boden)
+  if (info && S.state !== 'falling'){
+    const hr = (info.kind === 'treasure') ? harryRect() : harryLegs();
+    for (const r of objectHitRects(info)){
+      if (!overlap(hr, r)) continue;
+      if (info.kind === 'fire' || info.kind === 'cobra'){ killHarry('hazard'); return; }
+      if (info.kind === 'treasure'){ takeTreasure(); break; }
+      if (info.kind === 'log' && S.hy >= GROUND_Y){
+        S.score = Math.max(0, S.score - 1);
+        S.kneel = true;
+        if (info.rolling) dx = 0;                 // rollende Stämme halten Harry auf
+        if ((S.frameCnt & 7) === 0) sfx('hit');
+      }
+    }
+  }
+
+  S.hx += dx;
+
+  // In ein Loch treten
+  if (S.state === 'ground' && S.hy >= GROUND_Y && overHole(Math.round(S.hx))) startFall();
+
+  // Leiter von oben besteigen. Im ROM steht das nach der Loch-Prüfung, man muss
+  // also neben dem Loch stehen - dafür kostet es keine 100 Punkte.
+  if (S.state === 'ground' && down && S.ladder && S.hx >= 62 && S.hx <= 80){
+    S.state = 'climb'; S.climbPos = LADDER_TOP + 1;
+    S.hx = LADDER_X; S.hy = ladderY(LADDER_TOP + 1);
+  }
+
+  // Liane ergreifen (nur im Sprung)
+  if (S.vineCool > 0) S.vineCool--;
+  if (S.vineCool === 0 && (S.state === 'jump' || S.state === 'air') && HAS_VINE[S.sceneType]){
+    const b = vineBottom();
+    const grab = {x:b.x-3, y:b.y-10, w:7, h:16};
+    if (overlap(harryRect(), grab)){ S.state = 'vine'; S.jumpIdx = 0; S.vy = 0; sfx('vine'); }
+  }
+
+  checkScroll();
+}
+
+function startFall(){
+  S.state = 'falling'; S.jumpIdx = 0; S.locked = 0;
+  if (S.ladder){ S.score = Math.max(0, S.score - 100); sfx('fall'); }
+  else sfx('fall');
+}
+function advanceAnim(){
+  if (++S.animT >= 4){ S.animT = 0; S.frame = (S.frame + 1) % 5; }
+}
+function checkScroll(){
+  const three = (S.state === 'under' || S.state === 'climb') ? 3 : 1;
+  if (S.hx < XMIN){ gotoScene(-1, three); S.hx = XMAX; }
+  else if (S.hx > XMAX){ gotoScene(1, three); S.hx = XMIN; }
+}
+
+/* ==========================================================================
+   Grafik
+   ========================================================================== */
+const P = {k:C.hair, s:C.skin, w:C.shirt, b:C.pants};
+function sprite(rows, x, y, pal, flip){
+  x = Math.round(x); y = Math.round(y);
+  for (let r=0;r<rows.length;r++){
+    const row = rows[r];
+    for (let c=0;c<row.length;c++){
+      const ch = row[c]; if (ch === '.') continue;
+      const col = pal[ch]; if (!col) continue;
+      g.fillStyle = col;
+      g.fillRect(x + (flip ? row.length-1-c : c), y + r, 1, 1);
+    }
+  }
+}
+
+const HARRY = {
+  stand: [
+    "..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+    ".wwwwww.","wwwwwwww","wwwwwwww",".wwwwww.",".wwwwww.","..wwww..",
+    "..bbbb..","..bbbb..","..bbbb..","..bbbb..",
+    "..b..b..","..b..b..","..b..b..","..b..b..","..b..b..",".kk..kk.",".kk..kk."],
+  run: [
+    ["..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+     "s.wwww..","swwwwww.",".wwwwwws",".wwwwwws","..wwww..","..wwww..",
+     "..bbbb..","..bbbb..","..bbbb..",".bb..bb.",".b....b.",".b....b.",
+     "b.....b.","b.....b.","b......b","kk....kk",".k....kk"],
+    ["..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+     ".wwwwww.","wwwwwwww",".wwwwww.",".wwwwww.","..wwww..","..wwww..",
+     "..bbbb..","..bbbb..","..bbbb..","..bbbb..","..b..b..","..b..b..",
+     "..b..b..","..b..b..","..b..b..",".kk..kk.",".kk..kk."],
+    ["..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+     "..wwww.s",".wwwwwws","swwwwww.","swwwwww.","..wwww..","..wwww..",
+     "..bbbb..","..bbbb..","..bbbb..",".bb..bb.",".b....b.",".b....b.",
+     ".b.....b",".b.....b","b......b","kk....kk","kk.....k"],
+    ["..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+     ".wwwwww.","wwwwwwww",".wwwwww.",".wwwwww.","..wwww..","..wwww..",
+     "..bbbb..","..bbbb..","..bbbb..","..bbbb..","..bb.b..","..b..b..",
+     "..b..b..","..b..b..","..b..b..",".kk..kk.",".kk..kk."]],
+  jump: [
+    "..kkkk..","..kkkk..","..ssss..","..ssss..","..ssss..",
+    "s.wwww.s","swwwwwws",".wwwwww.",".wwwwww.","..wwww..","..wwww..",
+    "..bbbb..","..bbbb..",".bb..bb.",".b....b.","b......b","b......b",
+    "b......b",".b....b.",".b....b.","kk....kk",".k....k."],
+  kneel: [
+    "........","........","........","..kkkk..","..kkkk..","..ssss..","..ssss..",
+    ".wwwwww.","wwwwwwww","wwwwwwww",".wwwwww.","..wwww..",
+    "..bbbb..","..bbbb..",".bbbbbb.",".b....b.","b......b","b......b",
+    "b......b","b......b","kkk..kkk","kkk..kkk"],
+  swing: [
+    "...bb...","..b..b..","..b..b..","..b..b..","..kkkk..","..kkkk..",
+    "..ssss..","..ssss..",".wwwwww.","wwwwwwww","wwwwwwww",".wwwwww.","..wwww..",
+    "..bbbb..","..bbbb..","..bbbb..",".bb..bb.",".b....b.","b......b","b......b",
+    "kk......","......kk"],
+  climb: [
+    "..b..b..","..b..b..","..kkkk..","..kkkk..","..ssss..","..ssss..",
+    ".wwwwww.","wwwwwwww","wwwwwwww",".wwwwww.","..wwww..","..wwww..",
+    "..bbbb..","..bbbb..","..bbbb..","..b..b..","..b..b..","..b..b..",
+    "..b..b..","..b..b..",".kk..k..",".kk..k.."]
+};
+
+const SPR = {
+  log:   {p:{a:C.logL,b:C.logD}, r:["..aaaa..",".abbbba.","abaabaab","abaabaab","abaabaab","abaabaab",".abbbba.","..aaaa.."]},
+  fire:  {p:{a:C.fire1,b:C.fire2,c:C.fire3},
+          r:["...a....","..aba...",".aabba..",".abbba..","aabbbaa.","abbbbba.","abbbbba.","aabbbaa.",".aaaaa..","cccccccc",".cccccc.","..cccc.."]},
+  cobra: {p:{a:C.cobra,b:C.cobraD,e:'#f0f0f0'},
+          r:["..aa....",".aeae...",".aaaa...","..aab...","..aab...","...ab...","...ab...","...ab...","..aab...",".aab....",".ab.....","aab.....","abbb....","aaaaaaa."]},
+  croco: {p:{a:C.croco,b:C.crocoD,t:C.teeth,e:'#f0f0f0'},
+          r:["........","..aaaa..",".aeaaea.","aaaaaaaa","abbbbbba","atttttta","aaaaaaaa","..bbbb..","..bbbb..","..bbbb..","..bbbb..","..bbbb.."]},
+  crocoOpen:{p:{a:C.croco,b:C.crocoD,t:C.teeth,e:'#f0f0f0'},
+          r:["..aaaa..",".aeaaea.","aaaaaaaa","atttttta","........","........","atttttta","aaaaaaaa","..bbbb..","..bbbb..","..bbbb..","..bbbb.."]},
+  scorp: {p:{a:C.scorp,b:C.scorpD},
+          r:["b.....b.",".b...b.b","..aaa..b",".aaaaa.b","a.aaa.ab","b.b.b.b.","........","........"]},
+  bag:   {p:{a:C.bag,b:C.bagD}, r:["........","..bbb...",".b...b..","..bbb...",".aaaaa..","aabaabaa","aabaabaa","aaaaaaaa","aabaabaa",".aaaaa..","..aaa...","........"]},
+  bar:   {p:{a:C.silver,b:C.silverD}, r:["........","........","........","..aaaa..",".aaaaab.","aaaaaabb","abbbbbbb","abbbbbb.",".bbbbb..","........","........","........"]},
+  gold:  {p:{a:C.gold,b:C.goldD}, r:["........","........","........","..aaaa..",".aaaaab.","aaaaaabb","abbbbbbb","abbbbbb.",".bbbbb..","........","........","........"]},
+  ring:  {p:{a:C.ring,b:C.ringD}, r:["........","...aa...","..a..a..","..a..a..","...aa...","..bbbb..",".b.aa.b.","b..aa..b","b.a..a.b",".b....b.","..bbbb..","........"]}
+};
+
+/* --- Ziffernfont 4x7 --- */
+const FONT = {
+'0':["1111","1001","1001","1001","1001","1001","1111"],
+'1':["0010","0110","0010","0010","0010","0010","0111"],
+'2':["1111","0001","0001","1111","1000","1000","1111"],
+'3':["1111","0001","0001","0111","0001","0001","1111"],
+'4':["1001","1001","1001","1111","0001","0001","0001"],
+'5':["1111","1000","1000","1111","0001","0001","1111"],
+'6':["1111","1000","1000","1111","1001","1001","1111"],
+'7':["1111","0001","0001","0010","0010","0100","0100"],
+'8':["1111","1001","1001","1111","1001","1001","1111"],
+'9':["1111","1001","1001","1111","0001","0001","1111"],
+':':["0000","0110","0110","0000","0110","0110","0000"],
+' ':["0000","0000","0000","0000","0000","0000","0000"]
+};
+const SMALL = {
+'A':["010","101","111","101","101"],'B':["110","101","110","101","110"],
+'C':["011","100","100","100","011"],'D':["110","101","101","101","110"],
+'E':["111","100","110","100","111"],'F':["111","100","110","100","100"],
+'G':["011","100","101","101","011"],'H':["101","101","111","101","101"],
+'I':["111","010","010","010","111"],'J':["001","001","001","101","010"],
+'K':["101","110","100","110","101"],'L':["100","100","100","100","111"],
+'M':["101","111","111","101","101"],'N':["101","111","111","111","101"],
+'O':["010","101","101","101","010"],'P':["110","101","110","100","100"],
+'Q':["010","101","101","110","011"],'R':["110","101","110","101","101"],
+'S':["011","100","010","001","110"],'T':["111","010","010","010","010"],
+'U':["101","101","101","101","011"],'V':["101","101","101","010","010"],
+'W':["101","101","111","111","101"],'X':["101","101","010","101","101"],
+'Y':["101","101","010","010","010"],'Z':["111","001","010","100","111"],
+'Ä':["101","010","111","101","101"],'!':["010","010","010","000","010"],
+'.':["000","000","000","000","010"],'-':["000","000","111","000","000"],
+' ':["000","000","000","000","000"],
+'0':["111","101","101","101","111"],'1':["010","110","010","010","111"],
+'2':["110","001","010","100","111"],'3':["110","001","010","001","110"],
+'4':["101","101","111","001","001"],'5':["111","100","110","001","110"],
+'6':["011","100","110","101","010"],'7':["111","001","010","010","010"],
+'8':["010","101","010","101","010"],'9':["010","101","011","001","110"]
+};
+function drawGlyphs(map, text, x, y, col, gw, gap){
+  g.fillStyle = col;
+  for (const ch of text){
+    const rows = map[ch] || map[' '];
+    for (let r=0;r<rows.length;r++)
+      for (let c=0;c<rows[r].length;c++)
+        if (rows[r][c] === '1') g.fillRect(x+c, y+r, 1, 1);
+    x += gw + gap;
+  }
+  return x;
+}
+function textWidth(map, text, gw, gap){ return text.length*(gw+gap) - gap; }
+function centerText(text, y, col){
+  drawGlyphs(SMALL, text, Math.round((W - textWidth(SMALL,text,3,1))/2), y, col, 3, 1);
+}
+
+/* --- Hintergrund: Baumkronen, Stämme, Äste --- */
+function drawCanopy(){
+  if (ROM){ drawCanopyRom(); return; }
+  const pat = S.treePat;
+  const per = [11, 16, 8, 21][pat], amp = [7, 10, 5, 12][pat], ph = pat * 1.7;
+  g.fillStyle = C.leaves;
+  for (let x=0;x<W;x++){
+    const d = Math.round(amp * (0.5 + 0.5*Math.sin(x/per*2 + ph) * Math.cos(x/(per*2.3) + ph)));
+    g.fillRect(x, CANOPY_T, 1, (CANOPY_B - CANOPY_T) - d);
+  }
+  // Stämme
+  g.fillStyle = C.trunk;
+  for (const tx of [10, 74, 138]) g.fillRect(tx, CANOPY_B-4, 6, GROUND_Y-(CANOPY_B-4));
+  // Äste
+  g.fillStyle = C.branch;
+  g.fillRect(16, BRANCH_Y, 30, 3);
+  g.fillRect(62, BRANCH_Y, 34, 3);
+  g.fillRect(116, BRANCH_Y, 28, 3);
+}
+
+// Blätterdach aus PFLeavesTab: oben geschlossen, die unteren 8 Zeilen
+// mit vier Playfield-Bytes je zwei Rasterzeilen (wie in Kernel 1).
+function drawCanopyRom(){
+  g.fillStyle = sc(2);
+  g.fillRect(0, CANOPY_T, W, (CANOPY_B - 8) - CANOPY_T);
+  const base = (S.treePat & 3) * 4;
+  for (let k=0;k<4;k++){
+    const m = pfMask(ROM.leaves[base+k]);
+    for (let y = CANOPY_B-8+k*2; y < CANOPY_B-8+k*2+2; y++)
+      for (let x=0;x<W;x++) if (m[x]) g.fillRect(x, y, 1, 1);
+  }
+  g.fillStyle = sc(6);
+  for (const tx of [10, 74, 138]) g.fillRect(tx, CANOPY_B-4, 6, GROUND_Y-(CANOPY_B-4));
+  const bc = new Array(9).fill(ROM.scene[5]);
+  romSprite(ROM.branch, bc, 24, BRANCH_Y-6, false, 0);
+  romSprite(ROM.branch, bc, 72, BRANCH_Y-6, false, 0);
+  romSprite(ROM.branch, bc, 124, BRANCH_Y-6, true, 0);
+}
+
+function drawGround(){
+  g.fillStyle = sc(3); g.fillRect(0, GROUND_Y, W, GRASS_B - GROUND_Y);
+  g.fillStyle = sc(7); g.fillRect(0, GRASS_B, W, DIRT_B - GRASS_B);
+  g.fillStyle = sc(6); g.fillRect(0, DIRT_B, W, H - DIRT_B);
+  g.fillStyle = sc(4); g.fillRect(0, TUNNEL_T, W, TUNNEL_B - TUNNEL_T);
+
+  const st = S.sceneType;
+  const black = PIT_BLACK[st];
+  if (st <= 1){                                   // Löcher, bis in den Tunnel
+    g.fillStyle = sc(4);
+    for (const [l,r] of currentBounds()) g.fillRect(l, GROUND_Y, r-l+1, TUNNEL_T - GROUND_Y);
+  } else if (st === 4){                            // Sumpf mit Krokodilen
+    g.fillStyle = sc(8); g.fillRect(44, GROUND_Y, 64, DIRT_B - GROUND_Y);
+  } else {
+    const bs = currentBounds();
+    g.fillStyle = black ? sc(4) : sc(8);
+    for (const [l,r] of bs) g.fillRect(l, GROUND_Y, r-l+1, DIRT_B - GROUND_Y);
+  }
+
+  // Leiter
+  if (S.ladder){
+    g.fillStyle = ROM ? atariRGB(ROM.scene[7]) : C.ladder;
+    g.fillRect(72, GROUND_Y, 1, TUNNEL_B - GROUND_Y);
+    g.fillRect(79, GROUND_Y, 1, TUNNEL_B - GROUND_Y);
+    for (let y = GROUND_Y+3; y < TUNNEL_B; y += 6) g.fillRect(73, y, 6, 1);
+  }
+  // Mauer
+  if (S.wallX > -50 && ROM){
+    g.save(); g.beginPath(); g.rect(0, TUNNEL_T, W, TUNNEL_B-TUNNEL_T); g.clip();
+    for (let y = TUNNEL_T; y < TUNNEL_B; y += 14) romSprite(ROM.wall, ROM.wallCol, S.wallX, y, false, 0);
+    g.restore();
+  } else if (S.wallX > -50){
+    for (let y = TUNNEL_T; y < TUNNEL_B; y += 4){
+      const odd = ((y - TUNNEL_T) / 4) & 1;
+      g.fillStyle = odd ? C.brickD : C.brick;
+      g.fillRect(S.wallX, y, 8, 3);
+      g.fillStyle = C.bg;
+      g.fillRect(S.wallX + (odd ? 2 : 5), y, 1, 3);
+    }
+  }
+}
+
+function drawVine(){
+  if (!HAS_VINE[S.sceneType]) return;
+  const b = vineBottom();
+  g.strokeStyle = C.vine; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(VINE_X+0.5, VINE_Y); g.lineTo(b.x+0.5, b.y); g.stroke();
+  g.fillStyle = C.vine; g.fillRect(Math.round(b.x)-1, Math.round(b.y)-1, 3, 3);
+}
+
+const OBJ_TOP = GROUND_Y - 11;   // Unterkante der 16-Zeilen-Box liegt 5 px im Boden
+
+function drawObjects(){
+  if (S.sceneType === 4){                          // Krokodile
+    const open = !(S.frameCnt & 0x80);
+    if (ROM){
+      const pat = ROM.croco[open ? 0 : 1];
+      for (const off of [0,16,32]) romSprite(pat, ROM.crocoCol, S.objX + off - 4, GROUND_Y - 9, false, 0);
+    } else {
+      const s = open ? SPR.crocoOpen : SPR.croco;
+      for (const off of [0,16,32]) sprite(s.r, S.objX + off - 4, GROUND_Y - 8, s.p, false);
+    }
+    return;
+  }
+  const info = objectInfo(); if (!info) return;
+  if (ROM){ drawObjectsRom(info); return; }
+  let s;
+  if (info.kind === 'log')   s = SPR.log;
+  else if (info.kind === 'fire')  s = SPR.fire;
+  else if (info.kind === 'cobra') s = SPR.cobra;
+  else s = [SPR.bag, SPR.bar, SPR.gold, SPR.ring][info.id];
+
+  // Feuer und Kobra animieren durch leichtes Versetzen
+  const wob = (info.kind === 'fire') ? ((S.frameCnt>>3)&1) : 0;
+  for (const r of objectRects(info)) sprite(s.r, r.x, r.y - wob, s.p, false);
+}
+
+// Hindernisse und Schätze aus den ROM-Tabellen. Feuer, Kobra und Barren
+// wechseln im Original über random2 zwischen zwei Mustern.
+function drawObjectsRom(info){
+  const alt = (S.frameCnt >> 3) & 1;
+  let pat, col;
+  if (info.kind === 'log')        { pat = ROM.log[alt];   col = ROM.logCol; }
+  else if (info.kind === 'fire')  { pat = ROM.fire[alt];  col = ROM.fireCol; }
+  else if (info.kind === 'cobra') { pat = ROM.cobra[alt]; col = ROM.cobraCol; }
+  else if (info.id === 0)         { pat = ROM.bag;        col = ROM.bagCol; }
+  else if (info.id === 1)         { pat = ROM.bar[alt];   col = ROM.silverCol; }
+  else if (info.id === 2)         { pat = ROM.bar[alt];   col = ROM.goldCol; }
+  else                            { pat = ROM.ring;       col = ROM.ringCol; }
+  for (const off of info.copies){
+    let x = (S.objX + off) % W; if (x < 0) x += W;
+    romSprite(pat, col, x, OBJ_TOP, false, 0);
+  }
+}
+
+function drawHarry(){
+  if (ROM){ drawHarryRom(); return; }
+  let rows, pal = P, flip = S.face < 0;
+  if (S.state === 'vine')        rows = HARRY.swing;
+  else if (S.state === 'climb')  rows = HARRY.climb;
+  else if (S.kneel)              rows = HARRY.kneel;
+  else if (S.state === 'jump' || S.state === 'air' || S.state === 'falling' || S.jumpIdx > 0) rows = HARRY.jump;
+  else if ((keys.l || keys.r) && S.state !== 'falling') rows = HARRY.run[S.frame & 3];
+  else rows = HARRY.stand;
+  sprite(rows, S.hx, S.hy - HARRY_H, pal, flip);
+}
+
+function drawHarryRom(){
+  let id, clip = 0;
+  if (S.state === 'vine')       id = 6;
+  else if (S.state === 'climb') id = 7 + (S.climbPos & 1);
+  else if (S.kneel)             { id = 0; clip = 5; }   // patOfsHarry = 5
+  else if (S.state === 'jump' || S.state === 'air' || S.state === 'falling' || S.jumpIdx > 0) id = 0;
+  else if (keys.l || keys.r)    id = S.frame % 5;
+  else                          id = 5;
+  romSprite(ROM.harry[id], id >= 7 ? ROM.climbCol : ROM.runCol,
+            S.hx, S.hy - 22 + clip, S.face < 0, clip);
+
+}
+
+function drawHud(){
+  g.fillStyle = C.bg; g.fillRect(0, 0, W, CANOPY_T);
+  if (ROM){ drawHudRom(); return; }
+  const sc = String(Math.min(999999, Math.max(0, Math.round(S.score)))).padStart(6, ' ');
+  drawGlyphs(FONT, sc, 65, SCORE_Y, C.text, 4, 1);
+
+  // Leben
+  g.fillStyle = C.text;
+  for (let i=0;i<S.lives;i++) g.fillRect(44 + i*6, TIME_Y+1, 3, 6);
+
+  const m = Math.floor(S.timeLeft/60), s = S.timeLeft % 60;
+  const t = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  drawGlyphs(FONT, t, 68, TIME_Y, C.text, 4, 1);
+}
+
+function drawHudRom(){
+  const col = new Array(8).fill(ROM.scene[0]);
+  const sn = String(Math.min(999999, Math.max(0, Math.round(S.score)))).padStart(6,' ');
+  for (let i=0;i<6;i++){
+    const ch = sn[i];
+    romSprite(ch === ' ' ? ROM.space : ROM.digits[+ch], col, 56 + i*8, SCORE_Y-1, false, 0);
+  }
+  g.fillStyle = sc(0);
+  for (let i=0;i<S.lives;i++) g.fillRect(28 + i*6, TIME_Y+1, 3, 6);
+  const m = Math.floor(S.timeLeft/60), sec = S.timeLeft % 60;
+  const t = String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+  for (let i=0;i<t.length;i++)
+    romSprite(t[i] === ':' ? ROM.colon : ROM.digits[+t[i]], col, 60 + i*8, TIME_Y-1, false, 0);
+}
+
+function render(){
+  g.fillStyle = C.bg; g.fillRect(0,0,W,H);
+  drawCanopy();
+  drawGround();
+  drawVine();
+  drawObjects();
+  if (!S.ladder && S.scorpX > -50){
+    if (ROM) romSprite(ROM.scorp[(S.frameCnt>>3)&1], ROM.scorpCol, S.scorpX, UNDER_Y-16, S.hx < S.scorpX, 0);
+    else sprite(SPR.scorp.r, S.scorpX, UNDER_Y-8, SPR.scorp.p, S.hx < S.scorpX);
+  }
+  if (S.mode !== 'dying' || (S.frameCnt>>2 & 1)) drawHarry();
+  drawHud();
+
+  if (S.mode === 'title'){
+    overlayBox();
+    centerText('JUNGLE RUN', 78, C.gold);
+    centerText('32 SCHÄTZE - 20 MINUTEN', 90, C.text);
+    centerText('TASTE DRUECKEN', 104, C.jungle);
+  } else if (S.mode === 'over' || S.mode === 'won'){
+    overlayBox();
+    centerText(S.msg, 80, S.mode === 'won' ? C.gold : C.scorp);
+    centerText('PUNKTE ' + Math.round(S.score), 92, C.text);
+    centerText('TASTE FUER NEUSTART', 104, C.jungle);
+  } else if (paused){
+    overlayBox(); centerText('PAUSE', 90, C.text);
+  }
+
+  vctx.drawImage(off, 0, 0, W, H, 0, 0, view.width, view.height);
+}
+function overlayBox(){
+  g.fillStyle = 'rgba(0,0,0,0.78)';
+  g.fillRect(10, 68, W-20, 48);
+  g.strokeStyle = C.ground; g.lineWidth = 1;
+  g.strokeRect(10.5, 68.5, W-21, 47);
+}
+
+/* ==========================================================================
+   Schleife und Bedienelemente
+   ========================================================================== */
+let paused = false, last = 0, acc = 0;
+function loop(ts){
+  requestAnimationFrame(loop);
+  if (!last) last = ts;
+  let dt = ts - last; last = ts;
+  if (dt > 250) dt = 250;
+  acc += dt;
+  const step = 1000/60;
+  let guard = 0;
+  while (acc >= step && guard++ < 6){
+    if (!paused) update();
+    else S.frameCnt++;
+    acc -= step;
+  }
+  render();
+}
+
+function parseSeed(){
+  const v = parseInt(document.getElementById('seed').value.trim(), 16);
+  return (Number.isFinite(v) && v > 0) ? (v & 0xFF) : 0xC4;
+}
+function startRun(){
+  for (const k in keys) keys[k] = false;
+  newGame(parseSeed());
+  S.mode = 'play';
+  paused = false;
+  document.getElementById('btnPause').textContent = 'Pause';
+}
+function togglePause(){
+  if (S.mode !== 'play') return;
+  paused = !paused;
+  document.getElementById('btnPause').textContent = paused ? 'Weiter' : 'Pause';
+}
+/* ---------- pitfall.asm laden ---------- */
+const romStatus = document.getElementById('romStatus');
+const consoleEl = document.querySelector('.console');
+function loadRom(file){
+  const fr = new FileReader();
+  fr.onload = () => {
+    try {
+      ROM = parseAsm(String(fr.result));
+      pfCache2Clear();
+      romStatus.innerHTML = 'Grafik aus <code>' + file.name + '</code>';
+    } catch (e) {
+      ROM = null;
+      romStatus.textContent = 'Konnte die Datei nicht auswerten: ' + e.message;
+    }
+  };
+  fr.onerror = () => { romStatus.textContent = 'Datei nicht lesbar'; };
+  fr.readAsText(file);
+}
+function pfCache2Clear(){ for (const k in pfCache) delete pfCache[k]; }
+document.getElementById('btnRom').addEventListener('click', ()=> document.getElementById('romFile').click());
+document.getElementById('romFile').addEventListener('change', e=>{ if (e.target.files[0]) loadRom(e.target.files[0]); });
+for (const ev of ['dragenter','dragover']) consoleEl.addEventListener(ev, e=>{ e.preventDefault(); consoleEl.classList.add('drop'); });
+for (const ev of ['dragleave','drop'])     consoleEl.addEventListener(ev, e=>{ e.preventDefault(); consoleEl.classList.remove('drop'); });
+consoleEl.addEventListener('drop', e=>{ const f = e.dataTransfer.files[0]; if (f) loadRom(f); });
+
+document.getElementById('btnStart').addEventListener('click', ()=>{ startRun(); view.focus(); });
+document.getElementById('btnPause').addEventListener('click', togglePause);
+document.getElementById('btnSound').addEventListener('click', e=>{
+  soundOn = !soundOn;
+  e.currentTarget.textContent = 'Ton: ' + (soundOn ? 'an' : 'aus');
+});
+document.getElementById('seed').addEventListener('change', startRun);
+
+newGame(0xC4);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
