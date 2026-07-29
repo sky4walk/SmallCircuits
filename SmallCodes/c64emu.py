@@ -38,9 +38,15 @@ Usage
 * `python3 c64emu.py game.prg --no-run`– load but don't auto-RUN
 * `python3 c64emu.py tune.sid`         – boot, load PSID, play 50 Hz
 * `python3 c64emu.py game.d64`         – mount disk, auto-load & start
+* `python3 c64emu.py game.crt`         – Cartridge stecken und starten
 * In the window: F2/F4 = Snapshot speichern/laden (Shift+F2 = Slot 0..9,
   Shift+F4 = Slots auflisten), F8 = sprite-collision on/off,
   F10 = sprite/collision dump, F11 = warp speed toggle, F12 = soft reset.
+
+Cartridges (.crt) are emulated at the expansion port: /EXROM and /GAME drive
+the PLA (8K / 16K / Ultimax), ROML and ROMH answer at $8000-$9FFF and
+$A000-$BFFF resp. $E000-$FFFF, and $DE00/$DF00 (I/O1/I/O2) carry the bank
+register of banked types (Ocean, Magic Desk, C64GS, Dinamic, EasyFlash, ...).
 
 D64 disk images are served through KERNAL traps at two levels: the high-level
 LOAD / OPEN-CHRIN routines, and the low-level serial (IEC) primitives
@@ -65,7 +71,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.28-autostart"
+__version__ = "2026.07.29-cartridge"
 
 
 # =============================================================================
@@ -197,6 +203,9 @@ class Pla:
                 return AddressSpace.OPEN
             return AddressSpace.RAM
         if 0x8000 <= addr <= 0x9FFF:
+            if not self.game and self.exrom:
+                # Ultimax: ROML liegt hier unabhaengig von LORAM/HIRAM.
+                return AddressSpace.CART_LOW
             if not self.exrom and self.hiram and self.loram:
                 return AddressSpace.CART_LOW
             return AddressSpace.RAM
@@ -227,6 +236,564 @@ class Pla:
                 return AddressSpace.KERNAL_ROM
             return AddressSpace.RAM
         return AddressSpace.RAM
+
+
+# =============================================================================
+# Expansion-Port / Cartridges (.CRT)
+# =============================================================================
+#
+# Wie kommen die Cartridge-Daten in den Adressraum?
+#
+#   Der Expansion-Port hat zwei Steuerleitungen, /EXROM und /GAME, die das
+#   Modul selbst auf Masse ziehen kann. Zusammen mit LORAM/HIRAM/CHAREN aus
+#   dem Prozessorport ($01) entscheidet die PLA, wer auf einen Zugriff
+#   antwortet. Es gibt genau drei relevante Modul-Konfigurationen:
+#
+#     /EXROM=0, /GAME=1   ->  8K:      ROML  bei $8000-$9FFF
+#     /EXROM=0, /GAME=0   ->  16K:     ROML  bei $8000-$9FFF
+#                                      ROMH  bei $A000-$BFFF (statt BASIC)
+#     /EXROM=1, /GAME=0   ->  Ultimax: ROML  bei $8000-$9FFF
+#                                      ROMH  bei $E000-$FFFF (statt KERNAL!)
+#                                      $1000-$CFFF ist offen (kein RAM)
+#
+#   Der Chip liefert also nie mehr als 2x8K gleichzeitig. Groessere Module
+#   (32K bis 1 MB) blenden ihre 8K-Baenke ueber ein Register im I/O-Bereich
+#   des Expansion-Ports um: I/O1 = $DE00-$DEFF, I/O2 = $DF00-$DFFF. Diese
+#   beiden Seiten sind im C64 selbst unbelegt und liegen an den Portpins.
+#
+#   Gestartet wird ein Modul auf zwei Wegen:
+#     * 8K/16K: der KERNAL-Reset prueft bei $8004 die Signatur "CBM80"
+#       ($C3 $C2 $CD $38 $30) und macht dann JMP ($8000) -- der Coldstart-
+#       Vektor steht in den ersten beiden Modulbytes.
+#     * Ultimax: der KERNAL ist gar nicht eingeblendet, die CPU holt den
+#       Resetvektor bei $FFFC direkt aus ROMH.
+#
+# Dateiformat .CRT (CCS64/VICE):
+#
+#   Header (>= $40 Bytes, alle Zahlen big endian):
+#     $00  16  Magic "C64 CARTRIDGE   "
+#     $10   4  Headerlaenge (meist $00000040)
+#     $14   2  Version
+#     $16   2  Hardware-Typ (0 = normal, 5 = Ocean, 19 = Magic Desk, ...)
+#     $18   1  /EXROM-Pegel  (0 = aktiv/low)
+#     $19   1  /GAME-Pegel
+#     $1A   1  Subtyp
+#     $20  32  Name, ASCII, mit $00 aufgefuellt
+#
+#   Danach beliebig viele CHIP-Pakete:
+#     $00   4  "CHIP"
+#     $04   4  Gesamtlaenge des Pakets inkl. dieser 16 Byte
+#     $08   2  Chiptyp (0 = ROM, 1 = RAM, 2 = Flash)
+#     $0A   2  Banknummer
+#     $0C   2  Ladeadresse ($8000, $A000 oder $E000)
+#     $0E   2  Groesse der Daten
+#     $10   n  Daten
+#
+#   Ein "Bank" ist also (ROML-Chip, ROMH-Chip) mit gleicher Banknummer.
+#   16K-Chips mit Ladeadresse $8000 werden hier in ROML/ROMH aufgeteilt.
+# =============================================================================
+
+CRT_MAGIC = b"C64 CARTRIDGE   "
+
+CRT_TYPE_NAMES = {
+    0:  "Normal cartridge",       1:  "Action Replay",
+    2:  "KCS Power Cartridge",    3:  "Final Cartridge III",
+    4:  "Simons' BASIC",          5:  "Ocean type 1",
+    6:  "Expert Cartridge",       7:  "Fun Play / Power Play",
+    8:  "Super Games",            9:  "Atomic Power",
+    10: "Epyx Fastload",          11: "Westermann Learning",
+    12: "Rex Utility",            13: "Final Cartridge I",
+    14: "Magic Formel",           15: "C64 Game System / System 3",
+    16: "WarpSpeed",              17: "Dinamic",
+    18: "Zaxxon / Super Zaxxon",  19: "Magic Desk / Domark / HES",
+    20: "Super Snapshot V5",      21: "Comal-80",
+    22: "Structured BASIC",       23: "Ross",
+    24: "Dela EP64",              25: "Dela EP7x8",
+    26: "Dela EP256",             27: "Rex EP256",
+    32: "EasyFlash",              33: "EasyFlash Xbank",
+    36: "Prophet64",              51: "MACH 5",
+}
+
+
+class CrtChip:
+    """Ein CHIP-Paket aus der .crt-Datei."""
+    __slots__ = ("chip_type", "bank", "load_addr", "size", "data")
+
+    def __init__(self, chip_type, bank, load_addr, data):
+        self.chip_type = chip_type
+        self.bank = bank
+        self.load_addr = load_addr
+        self.size = len(data)
+        self.data = data
+
+    def __repr__(self):
+        return (f"<CrtChip bank={self.bank} @${self.load_addr:04X} "
+                f"{self.size} bytes>")
+
+
+class Cartridge:
+    """
+    Basisklasse: ein Modul ohne Bankumschaltung (CRT-Typ 0).
+
+    Unterklassen ueberschreiben io1_read/io1_write/io2_read/io2_write und
+    setzen dabei self.bank sowie die Leitungen self.exrom/self.game
+    (True = Leitung high = inaktiv, wie in Pla).
+    """
+
+    crt_type = 0
+
+    # Feste Hardware-Konfiguration des Modultyps, (exrom, game) mit
+    # True = Leitung high/inaktiv. None = Pegel aus dem CRT-Header nehmen.
+    # Bei den gebankten Typen ist die Verdrahtung durch die Platine
+    # vorgegeben; VICE ignoriert dort die Headerbytes ebenfalls, weil in
+    # freier Wildbahn reichlich .crt-Dateien mit falschem Header kursieren.
+    fixed_lines = None
+
+    def __init__(self, chips, exrom=True, game=True, name="", subtype=0):
+        self.name = name
+        self.subtype = subtype
+        self.header_override = None
+        self.roml_banks = {}          # bank -> bytes (max 8K)
+        self.romh_banks = {}          # bank -> bytes (max 8K)
+        self.chips = list(chips)
+        for c in self.chips:
+            self._install(c)
+        self.n_banks = max(len(self.roml_banks), len(self.romh_banks), 1)
+        # Startzustand der Leitungen.
+        self._init_exrom, self._init_game = self._startup_lines(exrom, game)
+        self.exrom = self._init_exrom
+        self.game = self._init_game
+        self.bank = 0
+        self.enabled = True           # False = Modul hat sich abgeschaltet
+        self.mem = None               # wird von Memory.attach_cart gesetzt
+        self.setup()
+
+    # ---------- Aufbau ----------
+
+    def _install(self, chip):
+        """CHIP-Paket in die ROML/ROMH-Tabellen einsortieren."""
+        data = chip.data
+        addr = chip.load_addr
+        if addr < 0xA000:                       # $8000er-Bereich
+            if len(data) > 0x2000:              # 16K-Chip: aufteilen
+                self.roml_banks[chip.bank] = data[:0x2000]
+                self.romh_banks[chip.bank] = data[0x2000:0x4000]
+            else:
+                self.roml_banks[chip.bank] = data
+        else:                                   # $A000 oder $E000
+            self.romh_banks[chip.bank] = data
+
+    CBM80 = b"\xC3\xC2\xCD\x38\x30"
+
+    def _auto_lines(self):
+        """8K, wenn es nur ROML gibt, sonst 16K."""
+        return (False, not bool(self.romh_banks))
+
+    def _startup_lines(self, hdr_exrom, hdr_game):
+        """Startpegel bestimmen — mit Plausibilitaetspruefung des Headers.
+
+        Viele .crt-Dateien tragen unsinnige /EXROM- und /GAME-Bytes. Der
+        verlaesslichste Gegenbeweis ist die Autostart-Signatur: steht bei
+        $8004 ein "CBM80", muss der KERNAL sichtbar sein (er fuehrt den
+        Test aus), also kann es kein Ultimax-Modul sein.
+        """
+        if self.fixed_lines is not None:
+            want = self.fixed_lines
+            if want != (bool(hdr_exrom), bool(hdr_game)):
+                self.header_override = want
+            return want
+        exrom, game = bool(hdr_exrom), bool(hdr_game)
+        if exrom and not game:                       # Header behauptet Ultimax
+            b = self.roml_banks.get(0)
+            if b is not None and len(b) >= 9 and bytes(b[4:9]) == self.CBM80:
+                want = self._auto_lines()
+                self.header_override = want
+                return want
+        return (exrom, game)
+
+    def setup(self):
+        """Hook fuer Unterklassen (nach dem Einlesen der Chips)."""
+        pass
+
+    def reset(self):
+        self.exrom = self._init_exrom
+        self.game = self._init_game
+        self.bank = 0
+        self.enabled = True
+        self.setup()
+
+    # ---------- Leitungen ----------
+
+    def _lines_changed(self):
+        if self.mem is not None:
+            self.mem.apply_cart_lines()
+
+    def set_lines(self, exrom, game):
+        self.exrom = bool(exrom)
+        self.game = bool(game)
+        self._lines_changed()
+
+    def disable(self):
+        """Modul komplett ausblenden (beide Leitungen high)."""
+        self.enabled = False
+        self.set_lines(True, True)
+
+    # ---------- ROM-Zugriffe ----------
+
+    def read_roml(self, addr):
+        b = self.roml_banks.get(self.bank)
+        if b is None:
+            return 0xFF
+        return b[(addr - 0x8000) % len(b)]
+
+    def read_romh(self, addr):
+        b = self.romh_banks.get(self.bank)
+        if b is None:
+            return 0xFF
+        return b[(addr & 0x1FFF) % len(b)]
+
+    def read_romh_raw(self, off):
+        """ROMH byteweise ueber den Offset 0..$1FFF (fuer VIC im Ultimax)."""
+        b = self.romh_banks.get(self.bank)
+        if b is None:
+            return 0xFF
+        return b[off % len(b)]
+
+    # ---------- I/O1 ($DE00) und I/O2 ($DF00) ----------
+
+    def io1_read(self, addr):  return 0xFF
+    def io1_write(self, addr, val): pass
+    def io2_read(self, addr):  return 0xFF
+    def io2_write(self, addr, val): pass
+
+    # ---------- Info ----------
+
+    def describe(self):
+        roml = len(self.roml_banks)
+        romh = len(self.romh_banks)
+        total = sum(len(b) for b in self.roml_banks.values()) + \
+                sum(len(b) for b in self.romh_banks.values())
+        tname = CRT_TYPE_NAMES.get(self.crt_type, f"Typ {self.crt_type}")
+        mode = ("Ultimax" if (self.exrom and not self.game) else
+                "16K" if (not self.exrom and not self.game) else
+                "8K" if not self.exrom else "aus")
+        return (f"{tname}: {roml} ROML-/{romh} ROMH-Baenke, "
+                f"{total // 1024}K, Startmodus {mode}")
+
+
+# --- Typ 5: Ocean type 1 --------------------------------------------------
+# 32K..512K. Schreiben nach $DE00: Bank = Wert & $3F.
+
+class OceanCart(Cartridge):
+    crt_type = 5
+    def _startup_lines(self, e, g):
+        return self._auto_lines()
+    def io1_write(self, addr, val):
+        self.bank = val & 0x3F
+
+
+# --- Typ 19: Magic Desk / Domark / HES Australia --------------------------
+# Schreiben nach $DE00: Bits 0-6 Bank, Bit 7 = 1 blendet das Modul aus.
+
+class MagicDeskCart(Cartridge):
+    crt_type = 19
+    fixed_lines = (False, True)
+    def io1_write(self, addr, val):
+        if val & 0x80:
+            self.set_lines(True, True)
+        else:
+            self.bank = val & 0x7F
+            self.set_lines(False, True)
+
+
+# --- Typ 15: C64 Game System / System 3 -----------------------------------
+# Lesen von $DE00+X waehlt Bank X, Schreiben nach $DE00 waehlt Bank 0.
+
+class GameSystemCart(Cartridge):
+    crt_type = 15
+    fixed_lines = (False, True)
+    def io1_read(self, addr):
+        self.bank = addr & 0xFF
+        return 0xFF
+    def io1_write(self, addr, val):
+        self.bank = 0
+
+
+# --- Typ 17: Dinamic ------------------------------------------------------
+# Lesen von $DE00+X waehlt Bank X (0..15).
+
+class DinamicCart(Cartridge):
+    crt_type = 17
+    fixed_lines = (False, True)
+    def io1_read(self, addr):
+        self.bank = addr & 0x0F
+        return 0xFF
+
+
+# --- Typ 7: Fun Play / Power Play -----------------------------------------
+# $DE00: Bank = ((v>>3)&7) | ((v&1)<<3); $86 schaltet ab.
+
+class FunPlayCart(Cartridge):
+    crt_type = 7
+    fixed_lines = (False, True)
+    def io1_write(self, addr, val):
+        if (val & 0xC6) == 0x86:
+            self.set_lines(True, True)
+            return
+        self.bank = ((val >> 3) & 0x07) | ((val & 0x01) << 3)
+        self.set_lines(False, True)
+
+
+# --- Typ 8: Super Games ---------------------------------------------------
+# $DE00: Bits 0-1 Bank, Bit 2 = 8K statt 16K, Bit 3 = abschalten.
+
+class SuperGamesCart(Cartridge):
+    crt_type = 8
+    fixed_lines = (False, False)
+    def setup(self):
+        self._locked = False
+    def io1_write(self, addr, val):
+        if self._locked:
+            return
+        self.bank = val & 0x03
+        if val & 0x04:
+            self.set_lines(False, True)      # 8K
+        else:
+            self.set_lines(False, False)     # 16K
+        if val & 0x08:
+            self._locked = True
+            self.set_lines(True, True)
+
+
+# --- Typ 4: Simons' BASIC -------------------------------------------------
+# 16K. Lesen von $DE00 -> 8K-Modus, Schreiben -> 16K-Modus.
+
+class SimonsBasicCart(Cartridge):
+    crt_type = 4
+    fixed_lines = (False, False)
+    def io1_read(self, addr):
+        self.set_lines(False, True)
+        return 0xFF
+    def io1_write(self, addr, val):
+        self.set_lines(False, False)
+
+
+# --- Typ 18: Zaxxon / Super Zaxxon ----------------------------------------
+# ROML ist 4K und liegt doppelt bei $8000 und $9000. Ein Lesezugriff auf
+# $8xxx waehlt ROMH-Bank 0, einer auf $9xxx ROMH-Bank 1.
+
+class ZaxxonCart(Cartridge):
+    crt_type = 18
+    fixed_lines = (False, False)
+    def read_roml(self, addr):
+        self.bank = 1 if (addr & 0x1000) else 0
+        b = self.roml_banks.get(0)
+        if b is None:
+            return 0xFF
+        return b[(addr & 0x0FFF) % len(b)]
+
+
+# --- Typ 21: Comal-80 -----------------------------------------------------
+# 16K-Baenke. $DE00: Bits 0-1 Bank, Bit 7 = 1 -> 16K an, sonst aus.
+
+class Comal80Cart(Cartridge):
+    crt_type = 21
+    fixed_lines = (False, False)
+    def io1_write(self, addr, val):
+        self.bank = val & 0x03
+        if val & 0x80:
+            self.set_lines(False, False)
+        else:
+            self.set_lines(True, True)
+    def io1_read(self, addr):
+        return self.bank
+
+
+# --- Typ 16: WarpSpeed ----------------------------------------------------
+# 16K dauerhaft eingeblendet, I/O1/I/O2 spiegeln ROM $1E00/$1F00.
+# Schreiben nach $DE00 schaltet ein, nach $DF00 aus.
+
+class WarpSpeedCart(Cartridge):
+    crt_type = 16
+    fixed_lines = (False, False)
+    def _rom(self, off):
+        b = self.roml_banks.get(0)
+        return b[off % len(b)] if b else 0xFF
+    def io1_read(self, addr): return self._rom(0x1E00 + (addr & 0xFF))
+    def io2_read(self, addr): return self._rom(0x1F00 + (addr & 0xFF))
+    def io1_write(self, addr, val): self.set_lines(False, False)
+    def io2_write(self, addr, val): self.set_lines(True, True)
+
+
+# --- Typ 3: Final Cartridge III -------------------------------------------
+# 4x16K. I/O1/I/O2 spiegeln ROM $1E00/$1F00 der aktuellen Bank.
+# Schreiben nach $DFFF: Bits 0-1 Bank, Bit 4 /GAME, Bit 5 /EXROM.
+
+class FinalIIICart(Cartridge):
+    crt_type = 3
+    fixed_lines = (False, False)
+    def setup(self):
+        self._locked = False
+    def io1_read(self, addr):
+        b = self.romh_banks.get(self.bank)
+        return b[0x1E00 + (addr & 0xFF)] if b and len(b) > 0x1EFF else 0xFF
+    def io2_read(self, addr):
+        b = self.romh_banks.get(self.bank)
+        return b[0x1F00 + (addr & 0xFF)] if b and len(b) > 0x1FFF else 0xFF
+    def io2_write(self, addr, val):
+        if (addr & 0xFF) != 0xFF or self._locked:
+            return
+        self.bank = val & 0x03
+        self.set_lines(bool(val & 0x20), bool(val & 0x10))
+        if val & 0x40:
+            self._locked = True
+
+
+# --- Typ 10: Epyx Fastload ------------------------------------------------
+# 8K, mit einem Kondensator am /EXROM-Pin: jeder Zugriff auf ROML oder
+# $DE00 laedt ihn nach, sonst faellt /EXROM nach rund 512 Zyklen wieder auf
+# high und das Modul verschwindet. I/O2 spiegelt ROM $1F00.
+
+class EpyxFastloadCart(Cartridge):
+    crt_type = 10
+    fixed_lines = (False, True)
+    DISCHARGE = 512
+    def setup(self):
+        self._alarm = 0
+    def _cpu_cycles(self):
+        if self.mem is not None and getattr(self.mem, "cpu", None) is not None:
+            return self.mem.cpu.cycles
+        return 0
+    def _recharge(self):
+        self._alarm = self._cpu_cycles() + self.DISCHARGE
+        if self.exrom:
+            self.set_lines(False, True)
+    def _maybe_discharge(self):
+        if not self.exrom and self._cpu_cycles() >= self._alarm:
+            self.set_lines(True, True)
+    def read_roml(self, addr):
+        self._recharge()
+        return Cartridge.read_roml(self, addr)
+    def io1_read(self, addr):
+        self._recharge()
+        return 0xFF
+    def io2_read(self, addr):
+        self._maybe_discharge()
+        b = self.roml_banks.get(0)
+        return b[0x1F00 + (addr & 0xFF)] if b and len(b) > 0x1FFF else 0xFF
+
+
+# --- Typ 32: EasyFlash ----------------------------------------------------
+# 64 Baenke a 2x8K. $DE00 = Bank, $DE02 = Steuerregister
+# (Bit0 /EXROM invers, Bit1 /GAME, Bit2 = "GAME kommt aus Bit1").
+# $DF00-$DFFF sind 256 Byte RAM auf dem Modul.
+
+class EasyFlashCart(Cartridge):
+    crt_type = 32
+    def setup(self):
+        self.ram = bytearray(256)
+        self._ctrl = 0
+    def io1_write(self, addr, val):
+        a = addr & 0xFF
+        if a == 0x00:
+            self.bank = val & 0x3F
+        elif a == 0x02:
+            self._ctrl = val
+            exrom = not bool(val & 0x02)
+            if val & 0x04:
+                game = not bool(val & 0x01)
+            else:
+                game = self._init_game
+            self.set_lines(exrom, game)
+    def io1_read(self, addr):
+        a = addr & 0xFF
+        if a == 0x00: return self.bank
+        if a == 0x02: return self._ctrl
+        return 0xFF
+    def io2_read(self, addr):  return self.ram[addr & 0xFF]
+    def io2_write(self, addr, val): self.ram[addr & 0xFF] = val & 0xFF
+
+
+CRT_HANDLERS = {
+    0:  Cartridge,
+    3:  FinalIIICart,
+    4:  SimonsBasicCart,
+    5:  OceanCart,
+    7:  FunPlayCart,
+    8:  SuperGamesCart,
+    10: EpyxFastloadCart,
+    15: GameSystemCart,
+    16: WarpSpeedCart,
+    17: DinamicCart,
+    18: ZaxxonCart,
+    19: MagicDeskCart,
+    21: Comal80Cart,
+    32: EasyFlashCart,
+}
+
+
+def parse_crt(data, verbose=True):
+    """Rohe .crt-Bytes -> Cartridge-Objekt."""
+    if len(data) < 0x40 or data[:16] != CRT_MAGIC:
+        raise ValueError("keine gueltige .crt-Datei (Magic 'C64 CARTRIDGE   ' fehlt)")
+    hdr_len = int.from_bytes(data[0x10:0x14], "big")
+    if hdr_len < 0x40:
+        hdr_len = 0x40
+    version = int.from_bytes(data[0x14:0x16], "big")
+    ctype = int.from_bytes(data[0x16:0x18], "big")
+    exrom_line = data[0x18]        # 0 = aktiv (low)
+    game_line = data[0x19]
+    subtype = data[0x1A] if hdr_len > 0x1A else 0
+    name = data[0x20:0x40].split(b"\x00")[0].decode("ascii", "replace").strip()
+
+    chips = []
+    pos = hdr_len
+    while pos + 16 <= len(data):
+        if data[pos:pos + 4] != b"CHIP":
+            # Manche Dumps haben Muell zwischen den Paketen: naechstes "CHIP"
+            # suchen, statt aufzugeben.
+            nxt = data.find(b"CHIP", pos + 1)
+            if nxt < 0:
+                break
+            pos = nxt
+            continue
+        plen = int.from_bytes(data[pos + 4:pos + 8], "big")
+        chip_type = int.from_bytes(data[pos + 8:pos + 10], "big")
+        bank = int.from_bytes(data[pos + 10:pos + 12], "big")
+        load = int.from_bytes(data[pos + 12:pos + 14], "big")
+        size = int.from_bytes(data[pos + 14:pos + 16], "big")
+        if plen < 16:
+            plen = 16 + size
+        payload = data[pos + 16:pos + 16 + size]
+        if chip_type != 1 and payload:          # 1 = RAM ohne Daten
+            chips.append(CrtChip(chip_type, bank, load, bytes(payload)))
+        pos += plen
+
+    if not chips:
+        raise ValueError("keine CHIP-Pakete in der .crt-Datei gefunden")
+
+    cls = CRT_HANDLERS.get(ctype)
+    if cls is None:
+        if verbose:
+            tname = CRT_TYPE_NAMES.get(ctype, "unbekannt")
+            print(f"CRT: Hardware-Typ {ctype} ({tname}) wird noch nicht "
+                  f"emuliert — versuche es als normales Modul.")
+        cls = Cartridge
+    cart = cls(chips, exrom=bool(exrom_line), game=bool(game_line),
+               name=name, subtype=subtype)
+    cart.crt_type = ctype if cls is Cartridge else cls.crt_type
+    cart.crt_version = version
+    if verbose and cart.header_override is not None:
+        e, g = cart.header_override
+        print(f"CRT: Header meldet /EXROM={exrom_line} /GAME={game_line} — "
+              f"unplausibel fuer diesen Modultyp, korrigiert auf "
+              f"/EXROM={int(e)} /GAME={int(g)}.")
+    return cart
+
+
+def load_crt(path, verbose=True):
+    with open(path, "rb") as f:
+        return parse_crt(f.read(), verbose=verbose)
 
 
 # =============================================================================
@@ -2094,6 +2661,8 @@ class Memory:
         self.ram = bytearray(self.SIZE)
         self.rom = bytearray(self.SIZE)
         self.pla = Pla()
+        self.cart = None                   # gestecktes Modul (siehe attach_cart)
+        self.cpu = None                    # von System gesetzt; Epyx braucht Zyklen
         self.vic       = vic       if vic       is not None else Vic()
         self.sid       = sid       if sid       is not None else Sid()
         self.color_ram = color_ram if color_ram is not None else ColorRam()
@@ -2107,6 +2676,52 @@ class Memory:
     def reset(self):
         self.pla.reset()
         self.ram[Config.ADDR_PROCESSOR_PORT_REG] = self.pla.prozessorport
+        if self.cart is not None:
+            self.cart.reset()
+            self.apply_cart_lines()
+
+    # --- Expansion-Port ---
+
+    def attach_cart(self, cart):
+        """Modul stecken: /EXROM und /GAME uebernehmen."""
+        self.cart = cart
+        cart.mem = self
+        cart.reset()
+        self.apply_cart_lines()
+        return cart
+
+    def detach_cart(self):
+        self.cart = None
+        self.pla.set_exrom()
+        self.pla.set_game()
+
+    def apply_cart_lines(self):
+        """Leitungspegel des Moduls in die PLA uebernehmen."""
+        c = self.cart
+        if c is None:
+            return
+        if c.exrom: self.pla.set_exrom()
+        else:       self.pla.clear_exrom()
+        if c.game:  self.pla.set_game()
+        else:       self.pla.clear_game()
+
+    def _vic_ultimax_romh(self, addr):
+        """Im Ultimax-Modus holt der VIC $3000-$3FFF jeder Bank aus ROMH
+        (dort liegt der Bereich $F000-$FFFF der CPU-Sicht)."""
+        return self.cart.read_romh_raw(0x1000 + (addr & 0x0FFF))
+
+    def _ultimax_overlay(self, out, addr, n):
+        """ROMH-Fenster $3000-$3FFF in einen VIC-Blockabzug einblenden."""
+        lo = max(addr, 0x3000)
+        hi = min(addr + n, 0x4000)
+        for i in range(lo, hi):
+            out[i - addr] = self._vic_ultimax_romh(i)
+        return out
+
+    @property
+    def _ultimax(self):
+        return (self.cart is not None
+                and self.pla.exrom and not self.pla.game)
 
     # --- direct access ---
 
@@ -2146,6 +2761,8 @@ class Memory:
         regardless of what RAM is there.
         """
         addr &= 0x3FFF
+        if self._ultimax and addr >= 0x3000:
+            return self._vic_ultimax_romh(addr)
         bank = self.vic_bank()
         if bank in (0, 2) and 0x1000 <= addr < 0x2000:
             return self.rom[0xD000 + (addr & 0x0FFF)]
@@ -2170,6 +2787,11 @@ class Memory:
                 out[i] = self.rom[0xD000 + (a & 0x0FFF)]
             else:
                 out[i] = self.ram[base + a]
+        if self._ultimax:
+            for i in range(n):
+                a = (addr + i) & 0x3FFF
+                if a >= 0x3000:
+                    out[i] = self._vic_ultimax_romh(a)
         return bytes(out)
 
     def read_vic_block_bank(self, addr, n, bank):
@@ -2189,6 +2811,8 @@ class Memory:
             if lo < hi:
                 ro = 0xD000 + (lo & 0x0FFF)
                 out[lo - addr: hi - addr] = self.rom[ro: ro + (hi - lo)]
+        if self._ultimax:
+            self._ultimax_overlay(out, addr, n)
         return bytes(out)
 
     def read_vic_block(self, addr, n):
@@ -2206,6 +2830,8 @@ class Memory:
             if lo < hi:
                 ro = 0xD000 + (lo & 0x0FFF)
                 out[lo - addr: hi - addr] = self.rom[ro: ro + (hi - lo)]
+        if self._ultimax:
+            self._ultimax_overlay(out, addr, n)
         return bytes(out)
 
     # --- system access ---
@@ -2222,17 +2848,42 @@ class Memory:
                 if addr < 0xDC00: return self.color_ram.read(addr - 0xD800)
                 if addr < 0xDD00: return self.cia1.read(addr - 0xDC00)
                 if addr < 0xDE00: return self.cia2.read(addr - 0xDD00)
+                # $DE00-$DFFF liegen am Expansion-Port (I/O1 / I/O2).
+                if self.cart is not None:
+                    if addr < 0xDF00: return self.cart.io1_read(addr) & 0xFF
+                    return self.cart.io2_read(addr) & 0xFF
                 return 0xFF
             return self.read_ram_direct(addr)
         if 0xA000 <= addr <= 0xBFFF:
-            if self.pla.address_space(addr) == AddressSpace.BASIC_ROM:
+            space = self.pla.address_space(addr)
+            if space == AddressSpace.BASIC_ROM:
                 return self.read_rom_direct(addr)
+            if space == AddressSpace.CART_HIGH:
+                return self.cart.read_romh(addr) & 0xFF
+            if space == AddressSpace.OPEN:
+                return self._open_bus(addr)
             return self.read_ram_direct(addr)
         if 0xE000 <= addr <= 0xFFFF:
-            if self.pla.address_space(addr) == AddressSpace.KERNAL_ROM:
+            space = self.pla.address_space(addr)
+            if space == AddressSpace.KERNAL_ROM:
                 return self.read_rom_direct(addr)
+            if space == AddressSpace.CART_HIGH:
+                return self.cart.read_romh(addr) & 0xFF
             return self.read_ram_direct(addr)
+        if 0x8000 <= addr <= 0x9FFF:
+            if self.cart is not None and \
+                    self.pla.address_space(addr) == AddressSpace.CART_LOW:
+                return self.cart.read_roml(addr) & 0xFF
+            return self.read_ram_direct(addr)
+        if self.cart is not None and 0x1000 <= addr <= 0xCFFF:
+            if self.pla.address_space(addr) == AddressSpace.OPEN:
+                return self._open_bus(addr)
         return self.read_ram_direct(addr)
+
+    def _open_bus(self, addr):
+        """Nicht belegter Adressbereich (nur im Ultimax-Modus). Auf echter
+        Hardware liegt hier der zuletzt vom VIC geholte Wert an."""
+        return getattr(self.vic, "last_fetch", 0xFF) & 0xFF
 
     def write_system_byte(self, addr, val):
         addr &= 0xFFFF
@@ -2249,6 +2900,11 @@ class Memory:
                 elif addr < 0xDC00: self.color_ram.write(addr - 0xD800, val)
                 elif addr < 0xDD00: self.cia1.write(addr - 0xDC00, val)
                 elif addr < 0xDE00: self.cia2.write(addr - 0xDD00, val)
+                elif self.cart is not None:
+                    # Expansion-Port: hier sitzt bei den meisten Modulen das
+                    # Bankregister.
+                    if addr < 0xDF00: self.cart.io1_write(addr, val)
+                    else:             self.cart.io2_write(addr, val)
                 return
             self.write_ram_direct(addr, val)
             return
@@ -4432,6 +5088,8 @@ class System:
         self.vic.color_ram = self.color_ram   # for per-row colour-RAM snapshots
         self.chargen_rom = bytes(chargen)
         self.cpu = CPU(self.mem)
+        self.mem.cpu = self.cpu           # Epyx-Fastload braucht Zyklenzaehler
+        self.cart = None                  # gestecktes .crt-Modul
         self.sid._cpu = self.cpu          # cycle timestamps for write queue
         self._d64 = None
         # Zuletzt geladenes Image/Programm — nur fuer Snapshot-Dateinamen.
@@ -5499,10 +6157,43 @@ class System:
         cpu.cycles += 1000 + len(payload) * 8
         self._do_rts()
 
+    # ---------- Cartridges ----------
+
+    def attach_crt(self, path, verbose=True):
+        """Ein .crt-Modul stecken und die Maschine kalt starten."""
+        cart = load_crt(path, verbose=verbose)
+        self.cart = self.mem.attach_cart(cart)
+        self._last_image = path
+        if verbose:
+            label = f" {cart.name!r}" if cart.name else ""
+            print(f"Cartridge{label}: {cart.describe()}")
+        self.reset()
+        return cart
+
+    def detach_crt(self):
+        self.mem.detach_cart()
+        self.cart = None
+        self.reset()
+
+    def cart_signature(self):
+        """True, wenn bei $8004 die Autostart-Signatur 'CBM80' steht."""
+        if self.cart is None:
+            return False
+        sig = bytes(self.mem.read_system_byte(0x8004 + i) for i in range(5))
+        return sig == b"\xC3\xC2\xCD\x38\x30"
+
     def reset(self):
-        """Soft-reset: PLA back to default, CPU re-reads reset vector."""
+        """Soft-reset: PLA back to default, CPU re-reads reset vector.
+        Ein gestecktes Modul bleibt gesteckt und zieht /EXROM bzw. /GAME
+        sofort wieder auf seinen Startpegel — genau wie beim echten C64."""
         self.mem.reset()
         self.vic.__init__()
+        # __init__ setzt vic.mem/vic.color_ram auf None -- die Verdrahtung
+        # muss danach wieder hergestellt werden, sonst laeuft _fetch_row ins
+        # Leere und der Renderer bekommt nie eine Bildschirmzeile zu sehen
+        # (Symptom: nach F12 bleibt das Fenster schwarz).
+        self.vic.mem = self.mem
+        self.vic.color_ram = self.color_ram
         self.sid.__init__()
         self.sid._cpu = self.cpu
         self.cia1.__init__("CIA1")
@@ -5633,6 +6324,12 @@ def _snap_apply(obj, data):
             # Lebende Verdrahtung (z.B. cia2.port_a_in_fn, via1.port_b_in)
             # niemals mit einem Datenwert überschreiben.
             continue
+        if val is None and cur is not None and not isinstance(cur, _SNAP_PLAIN):
+            # Dito für Objektverweise (vic.mem, vic.color_ram, ...): _snap_enc
+            # überspringt sie beim Speichern, aber ein Snapshot aus einer
+            # Version, in der so ein Verweis versehentlich None war, würde die
+            # lebende Verdrahtung sonst kappen.
+            continue
         val = _snap_dec(val)
         # Container möglichst IN PLACE füllen: andere Objekte können denselben
         # Puffer referenzieren, ein neues Objekt würde die Referenz abhängen.
@@ -5662,12 +6359,17 @@ def _snap_components(system):
         ("cpu",  system.cpu,        {"trace"}),
         ("mem",  system.mem,        {"rom"}),
         ("pla",  system.mem.pla,    set()),
-        ("vic",  system.vic,        set()),
+        ("vic",  system.vic,        {"mem", "color_ram"}),
         ("sid",  system.sid,        set()),
         ("cram", system.color_ram,  set()),
         ("cia1", system.cia1,       set()),
         ("cia2", system.cia2,       set()),
     ]
+    if system.cart is not None:
+        # ROM-Inhalte kommen aus der .crt-Datei; nur der Schaltzustand
+        # (Bank, Leitungen) muss in den Snapshot.
+        comp.append(("cart", system.cart,
+                     {"roml_banks", "romh_banks", "chips", "mem"}))
     for i, v in enumerate(system.sid.voices):
         comp.append((f"sidv{i}", v, set()))
     drv = system.drive
@@ -7201,8 +7903,13 @@ class PygameFrontend:
                     path = event.file
                     if path.lower().endswith(".d64"):
                         self.system.swap_disk(path)
+                    elif path.lower().endswith(".crt"):
+                        try:
+                            _launch_crt(self.system, path)
+                        except Exception as ex:
+                            print(f"Cartridge konnte nicht geladen werden: {ex}")
                     else:
-                        print(f"Kein D64: {path}")
+                        print(f"Kein D64/CRT: {path}")
                 elif event.type == self.pygame.KEYDOWN:
                     # Host hotkeys (not passed to the C64)
                     if event.key == self.pygame.K_F11:
@@ -8039,6 +8746,26 @@ def _launch_prg(system, prg_path, auto_run=True, boot_cycles=3_500_000):
             print(f"ML program loaded — type SYS {load_addr} at the prompt to start.")
 
 
+def _launch_crt(system, crt_path, boot_cycles=0):
+    """Ein .crt-Modul stecken. Der Start passiert ueber den Reset:
+    bei 8K/16K findet der KERNAL die 'CBM80'-Signatur bei $8004 und springt
+    ueber JMP ($8000); im Ultimax-Modus holt die CPU den Resetvektor bei
+    $FFFC direkt aus dem Modul."""
+    cart = system.attach_crt(crt_path)
+    if system.cart_signature():
+        cold = system.mem.read_system_word(0x8000)
+        print(f"Autostart: CBM80-Signatur gefunden, Coldstart-Vektor ${cold:04X}")
+    elif cart.exrom and not cart.game:
+        print(f"Ultimax-Modus: Start ueber den Resetvektor "
+              f"${system.cpu.pc:04X} aus ROMH")
+    else:
+        print("Keine CBM80-Signatur — das Modul startet vermutlich nicht von "
+              "selbst (evtl. SYS oder eine Taste noetig).")
+    if boot_cycles:
+        system.run(boot_cycles)
+    return cart
+
+
 def _launch_d64(system, d64_path, auto_run=True, boot_cycles=3_500_000):
     """Mount a D64, boot to READY, then issue LOAD via the keyboard buffer."""
     d64 = system.mount_d64(d64_path)
@@ -8590,6 +9317,8 @@ USAGE
     game.d64    mount disk image, auto-load first file & start
     game.t64    mount tape archive, auto-load first file & start
     tune.sid    load PSID and play at 50 Hz
+    game.crt    Modul stecken und ueber Reset starten (Autostart per
+                CBM80-Signatur bzw. Resetvektor im Ultimax-Modus)
 
 GENERAL OPTIONS
   -h, --help            show this help and exit
@@ -8641,7 +9370,8 @@ IN-WINDOW KEYS
   Shift+F2              naechsten Snapshot-Slot waehlen (0..9)
   Shift+F4              vorhandene Snapshots auflisten
   F11                   toggle warp (unthrottled) speed
-  F12                   soft reset
+  F12                   soft reset (Modul bleibt gesteckt)
+  Drag&Drop .crt        Modul im laufenden Betrieb stecken + Reset
   arrow keys            authentic C64 cursor keys
   numeric keypad        joystick; KP0 toggles between port 1 and port 2
 
@@ -8654,6 +9384,7 @@ SNAPSHOTS
 
 EXAMPLES
   python3 c64emu.py bruce_lee.d64
+  python3 c64emu.py international_soccer.crt
   python3 c64emu.py music.sid
   python3 c64emu.py --cputest
   python3 c64emu.py --lorenztest lorenz --max-tests 5
@@ -8739,6 +9470,11 @@ def main():
     d64_file = None
     d64_list = []
     t64_file = None
+    crt_file = None
+    for a in args:
+        if a.lower().endswith(".crt") and os.path.exists(a):
+            crt_file = a
+            break
     for a in args:
         if a.lower().endswith(".prg") and os.path.exists(a):
             prg_file = a
@@ -8775,6 +9511,10 @@ def main():
             load_state(sysm, state_file)
             print(f"Snapshot geladen: {state_file}")
             sysm.run(n)
+        elif crt_file:
+            _launch_crt(sysm, crt_file)
+            print(f"Running cartridge for {n:,} cycles...")
+            sysm.run(n)
         elif prg_file:
             _launch_prg(sysm, prg_file, auto_run=not no_autorun)
             print(f"Running PRG for {n:,} extra cycles...")
@@ -8803,6 +9543,8 @@ def main():
               "Runs slower than real time in pure Python.")
     if state_file:
         pass                 # Zustand kommt aus dem Snapshot (siehe unten)
+    elif crt_file:
+        _launch_crt(sysm, crt_file)
     elif prg_file:
         _launch_prg(sysm, prg_file, auto_run=not no_autorun)
     elif sid_file:
