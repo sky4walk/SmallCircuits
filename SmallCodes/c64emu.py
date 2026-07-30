@@ -4832,9 +4832,12 @@ class D64Image:
         17, 17, 17, 17, 17,
     )
 
-    def __init__(self, path):
-        with open(path, "rb") as f:
-            data = f.read()
+    def __init__(self, path, data=None):
+        # `data` erlaubt ein Abbild ohne Datei auf der Platte — genau das
+        # braucht ein Snapshot, der sein D64 eingebettet mitbringt.
+        if data is None:
+            with open(path, "rb") as f:
+                data = f.read()
         if len(data) not in (174848, 175531):
             raise ValueError(
                 f"Not a standard 35-track D64: {len(data)} bytes "
@@ -5094,6 +5097,7 @@ class System:
         self._d64 = None
         # Zuletzt geladenes Image/Programm — nur fuer Snapshot-Dateinamen.
         self._last_image = None
+        self._cia2_iec_hooks = None    # IEC-Hooks, damit reset() sie neu setzen kann
         # --- 1541 drive emulation (M0: drive computer boots alongside) ---
         # Opt-in via --drive; the KERNAL trap loader stays the default path.
         self.drive = None
@@ -5271,6 +5275,9 @@ class System:
             self.drive.idle_until = 0
             self.drive.sync_to(self.cpu.cycles + 3)
             self.iec.poll()
+        # Die Hooks merken: cia2.__init__() in reset() wirft sie weg, und ohne
+        # sie ist der IEC-Bus stumm (Symptom: nach F12 "DEVICE NOT PRESENT").
+        self._cia2_iec_hooks = (_sync_then_read, _sync_before_write)
         self.cia2.port_a_in_fn = _sync_then_read
         self.cia2.port_a_write_hook = _sync_before_write
         self.drive.via1.port_b_in = self.iec.via1_port_b_in
@@ -5536,9 +5543,12 @@ class System:
         0xFFAB: "_trap_iec_untalk",   # UNTALK
     }
 
-    def mount_d64(self, path):
+    def mount_d64(self, path, data=None):
         """Mount a D64 image. LOAD and KERNAL file-I/O calls from the running
-        CPU will be served from this image. Pass None to unmount."""
+        CPU will be served from this image. Pass None to unmount. `data`
+        mountet ein Abbild direkt aus dem Speicher (Snapshot-Wiederherstellung);
+        `path` bleibt dann nur der Name, unter dem spaeter zurueckgeschrieben
+        wird."""
         if path is None:
             self._d64 = None
             self._open_files.clear()
@@ -5548,7 +5558,7 @@ class System:
             for addr in self._KERNAL_TRAPS:
                 self.cpu.traps.pop(addr, None)
             return None
-        self._d64 = D64Image(path)
+        self._d64 = D64Image(path, data)
         self._last_image = path
         self._open_files.clear()
         self._current_input_la = None
@@ -6198,6 +6208,13 @@ class System:
         self.sid._cpu = self.cpu
         self.cia1.__init__("CIA1")
         self.cia2.__init__("CIA2")
+        # CIA2 neu initialisieren heisst: die IEC-Hooks des echten 1541 sind
+        # weg. Wieder anloeten — ein Reset am echten C64 zieht dem Laufwerk ja
+        # auch nicht das Kabel ab (das Laufwerk selbst wird bewusst NICHT
+        # resettet, genau wie in Hardware).
+        if self.drive is not None and self._cia2_iec_hooks is not None:
+            self.cia2.port_a_in_fn, self.cia2.port_a_write_hook = \
+                self._cia2_iec_hooks
         self.cpu.reset()
         self._sid_play_addr = 0
 
@@ -6455,7 +6472,23 @@ def load_state(system, path, verbose=True):
         print("Achtung: Snapshot wurde im "
               f"{'--cycle' if blob.get('cycle_accurate') else 'Batch'}-Modus "
               "erstellt, läuft jetzt im anderen Modus")
-    # --- Diskette zuerst: ein evtl. nötiges Mounten würde sonst den gerade
+    # --- Laufwerk zuerst: der Snapshot weiß selbst, ob er mit echtem 1541
+    #     erstellt wurde. Ohne Drive würden dessen Teile (drv, drvcpu, ...)
+    #     verworfen UND die KERNAL-Traps aus dem Snapshot leer zurückgeschrieben
+    #     — es gäbe also gar keinen Disk-Pfad mehr. Muss vor dem Mounten
+    #     passieren, weil mount_d64() sich danach richtet, ob ein Drive da ist.
+    if blob.get("has_drive") and system.drive is None:
+        if system.enable_drive():
+            if verbose:
+                print("Snapshot: echtes 1541 automatisch aktiviert "
+                      "(Snapshot mit --drive erstellt)")
+        else:
+            print("Snapshot: 1541 konnte nicht aktiviert werden — "
+                  "Laufwerkszustand wird verworfen")
+    elif system.drive is not None and not blob.get("has_drive"):
+        print("Snapshot: ohne echtes 1541 erstellt, läuft jetzt mit --drive "
+              "— Laufwerk behält seinen aktuellen Zustand")
+    # --- Diskette danach: ein evtl. nötiges Mounten würde sonst den gerade
     #     zurückgeschriebenen Zustand wieder verändern.
     disk = blob.get("disk")
     if disk is not None:
@@ -6469,6 +6502,20 @@ def load_state(system, path, verbose=True):
                 cur = system._d64
             except Exception as e:
                 print(f"Snapshot: Diskette konnte nicht eingelegt werden: {e}")
+        if cur is None and disk.get("data") and disk["kind"] == "D64Image":
+            # Das Abbild steckt vollstaendig im Snapshot — also von dort
+            # mounten, statt die Disk fallen zu lassen. Nachladen im Spiel
+            # funktioniert damit auch ohne die D64-Datei auf der Platte.
+            try:
+                system.mount_d64(disk["path"] or "snapshot.d64",
+                                 data=disk["data"])
+                cur = system._d64
+                if verbose:
+                    print("Snapshot: Diskettenabbild aus dem Snapshot "
+                          f"gemountet ({disk['path']!r}, "
+                          f"{len(disk['data'])} Bytes)")
+            except Exception as e:
+                print(f"Snapshot: eingebettetes Abbild unbrauchbar: {e}")
         if cur is None:
             print("Snapshot: Diskettenabbild fehlt "
                   f"({disk['path']!r}) — Zustand wird ohne Disk geladen")
@@ -6746,6 +6793,10 @@ class PygameFrontend:
         # keypad joystick can't "ghost" into menu keys. A few games use port 1
         # (e.g. Bruce Lee reads $DC01); press keypad 0 to switch for those.
         self._joy_port = 1
+        # Diamant-Modus: Pfeiltasten liefern statt der C64-Cursortasten
+        # das Apple-II-Steuerkreuz @ / ; : — so steuern sich Ultima II/III/IV
+        # (die die echten Cursortasten ignorieren). Umschalten mit Ende/End.
+        self._diamond = False
         self.disk_list = []
         self._disk_idx = 0
         self.shown_fps = 0.0
@@ -6897,8 +6948,14 @@ class PygameFrontend:
                        if k in self._key_chars]
         suppress_shift = any(self._c64_symbols[c][0] == (1, 7)
                              for c in active_syms) or bool(active_syms)
+        # Diamant-Modus: Pfeile → @ (5,6) N, / (6,7) S, ; (6,2) O, : (5,5) W.
+        # Alle vier sind am C64 unshifted, also kein synthetisches Shift.
+        diamond = {p.K_UP: (5, 6), p.K_DOWN: (6, 7),
+                   p.K_RIGHT: (6, 2), p.K_LEFT: (5, 5)}
         for key in self._keys_down:
-            if key == p.K_UP:
+            if self._diamond and key in diamond:
+                mat.add(diamond[key])          # Ultima-Steuerkreuz
+            elif key == p.K_UP:
                 mat.add((1, 7))                # left shift
                 mat.add((0, 7))                # CRSR↕ → with shift = up
             elif key == p.K_LEFT:
@@ -7986,6 +8043,13 @@ class PygameFrontend:
                     if event.key == self.pygame.K_F10:
                         self._sprite_diag_dump()
                         self._flicker_diag()
+                        continue
+                    if event.key == self.pygame.K_END:
+                        # Diamant-Modus fuer Ultima & Co. umschalten.
+                        self._diamond = not self._diamond
+                        self._rebuild_matrix()
+                        self._osd("Diamant-Modus (Pfeile = @ / ; :) "
+                                  f"{'AN' if self._diamond else 'AUS'}")
                         continue
                     if event.key in (self.pygame.K_KP0, self.pygame.K_F9):
                         # Cycle the keypad joystick: Port 2 → Port 1 → Both.
@@ -9373,6 +9437,7 @@ IN-WINDOW KEYS
   F12                   soft reset (Modul bleibt gesteckt)
   Drag&Drop .crt        Modul im laufenden Betrieb stecken + Reset
   arrow keys            authentic C64 cursor keys
+  Ende / End            Diamant-Modus: Pfeile = @ / ; : (Ultima II/III/IV)
   numeric keypad        joystick; KP0 toggles between port 1 and port 2
 
 SNAPSHOTS
@@ -9380,7 +9445,11 @@ SNAPSHOTS
   Farb-RAM, Laufwerk samt Diskettenabbild) nach
   states/<image>_<slot>.c64s; F4 stellt ihn wieder her. Damit laesst sich
   in einem Spiel jederzeit weitermachen. Zusaetzlich:
-  --state DATEI         Snapshot beim Start laden (auch mit --headless)
+  --state DATEI         Snapshot beim Start laden (auch mit --headless).
+                        Der Snapshot bringt sein Diskettenabbild selbst mit und
+                        aktiviert das echte 1541 automatisch, falls er damit
+                        erstellt wurde — --drive und die D64 auf der
+                        Kommandozeile sind also nicht noetig.
 
 EXAMPLES
   python3 c64emu.py bruce_lee.d64
