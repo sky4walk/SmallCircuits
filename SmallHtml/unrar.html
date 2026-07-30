@@ -1511,7 +1511,7 @@ async function parseRar(file){
   const sig=await readAt(file,0,8);
   const isRar=sig[0]===0x52&&sig[1]===0x61&&sig[2]===0x72&&sig[3]===0x21&&sig[4]===0x1a&&sig[5]===0x07;
   if(!isRar)throw {code:'notrar'};
-  if(sig[6]===0x01)throw {code:'rar5'};
+  if(sig[6]===0x01)return await parseRar5(file);
   if(sig[6]!==0x00)throw {code:'unknown'};
 
   const size=file.size;
@@ -1563,7 +1563,7 @@ async function parseRar(file){
       if(htype===0x7b)break;
     }
   }
-  return {blocks,files,size,headerEncrypted};
+  return {fmt:'rar4',blocks,files,size,headerEncrypted};
 }
 
 /* Solid-Gruppen: fortlaufende Laeufe, in denen jede Folge-Datei solid=true ist.
@@ -1579,6 +1579,7 @@ function computeSolidGroups(files){
 }
 
 async function extract(file,entry,password){
+  if(entry.fmt==='rar5')return await extractRar5(file,entry,password);
   const group=entry._group||[entry];
   const solidGroup = group.length>1 || entry.solid;
   if(!solidGroup){
@@ -1658,12 +1659,319 @@ async function streamExtract(file, entry, password, sink, onProgress){
 }
 
 /* =========================================================================
+ *  RAR 5 — Container, Krypto (PBKDF2-HMAC-SHA256 / AES-256-CBC) und
+ *  Dekompressor unpack50. Port aus unrar unpack50.cpp / crypt5.cpp.
+ *  Einschränkungen v1: keine soliden Archive, keine verschlüsselten Header,
+ *  Ausgabe vollständig im Speicher (kein Ringpuffer).
+ * =======================================================================*/
+const R5_NC=306, R5_DCB=64, R5_DCX=80, R5_LDC=16, R5_RC=44, R5_BC=20;
+const R5_HUFF_B=R5_NC+R5_DCB+R5_RC+R5_LDC, R5_HUFF_X=R5_NC+R5_DCX+R5_RC+R5_LDC;
+const R5_QUICK=9, R5_MAXFILTER=0x400000;
+const F_DELTA=0, F_E8=1, F_E8E9=2, F_ARM=3;
+
+class Bit5{
+  constructor(b){this.b=b;this.InAddr=0;this.InBit=0;}
+  fgetbits(){const b=this.b,a=this.InAddr;return ((((b[a]||0)<<16)|((b[a+1]||0)<<8)|(b[a+2]||0))>>>(8-this.InBit))&0xffff;}
+  getbits32(){const b=this.b,a=this.InAddr;
+    let v=((((b[a]||0)<<24)|((b[a+1]||0)<<16)|((b[a+2]||0)<<8)|(b[a+3]||0))>>>0);
+    v=((v*Math.pow(2,this.InBit))%4294967296)>>>0;
+    return (v|(this.InBit?((b[a+4]||0)>>>(8-this.InBit)):0))>>>0;}
+  addbits(n){n+=this.InBit;this.InAddr+=n>>3;this.InBit=n&7;}
+}
+function mkTab5(lt,off,size){
+  const D={MaxNum:size,DecodeLen:new Uint32Array(16),DecodePos:new Uint32Array(16),DecodeNum:new Uint16Array(size)};
+  const cnt=new Uint32Array(16);
+  for(let i=0;i<size;i++)cnt[lt[off+i]&0xf]++;
+  cnt[0]=0;
+  let up=0;
+  for(let i=1;i<16;i++){up+=cnt[i];D.DecodeLen[i]=(up<<(16-i))>>>0;up*=2;D.DecodePos[i]=D.DecodePos[i-1]+cnt[i-1];}
+  const cp=Uint32Array.from(D.DecodePos);
+  for(let i=0;i<size;i++){const bl=lt[off+i]&0xf;if(bl)D.DecodeNum[cp[bl]++]=i;}
+  D.QuickBits=(size===R5_NC)?R5_QUICK:R5_QUICK-3;
+  const qs=1<<D.QuickBits;
+  D.QuickLen=new Uint8Array(qs);D.QuickNum=new Uint16Array(qs);
+  let cur=1;
+  for(let code=0;code<qs;code++){
+    const bf=(code<<(16-D.QuickBits))>>>0;
+    while(cur<16&&bf>=D.DecodeLen[cur])cur++;
+    D.QuickLen[code]=cur;
+    let dist=bf-D.DecodeLen[cur-1];dist>>>=(16-cur);
+    const pos=D.DecodePos[cur]+dist;
+    D.QuickNum[code]=(cur<16&&pos<size)?D.DecodeNum[pos]:0;
+  }
+  return D;
+}
+function decNum5(inp,D){
+  const bf=inp.fgetbits();
+  if(bf<D.DecodeLen[D.QuickBits]){const c=bf>>>(16-D.QuickBits);inp.addbits(D.QuickLen[c]);return D.QuickNum[c];}
+  let bits=15;
+  for(let i=D.QuickBits+1;i<15;i++)if(bf<D.DecodeLen[i]){bits=i;break;}
+  inp.addbits(bits);
+  let dist=bf-D.DecodeLen[bits-1];dist>>>=(16-bits);
+  const pos=D.DecodePos[bits]+dist;
+  return pos>=D.MaxNum?0:D.DecodeNum[pos];
+}
+function slotLen5(inp,slot){
+  let lb,len=2;
+  if(slot<8){lb=0;len+=slot;}else{lb=(slot>>2)-1;len+=(4|(slot&3))<<lb;}
+  if(lb>0){len+=inp.fgetbits()>>>(16-lb);inp.addbits(lb);}
+  return len;
+}
+function filtData5(inp){
+  const n=(inp.fgetbits()>>>14)+1;inp.addbits(2);
+  let d=0;for(let i=0;i<n;i++){d+=(inp.fgetbits()>>>8)<<(i*8);inp.addbits(8);}
+  return d>>>0;
+}
+function blockHdr5(inp){
+  inp.addbits((8-inp.InBit)&7);
+  const fl=inp.fgetbits()>>>8;inp.addbits(8);
+  const bc=((fl>>3)&3)+1;
+  if(bc===4)throw {code:'corrupt5'};
+  const saved=inp.fgetbits()>>>8;inp.addbits(8);
+  let bs=0;for(let i=0;i<bc;i++){bs+=(inp.fgetbits()>>>8)<<(i*8);inp.addbits(8);}
+  if(((0x5a^fl^bs^(bs>>8)^(bs>>16))&0xff)!==saved)throw {code:'corrupt5'};
+  return {blockSize:bs,blockBitSize:(fl&7)+1,blockStart:inp.InAddr,
+          lastBlockInFile:(fl&0x40)!==0,tablePresent:(fl&0x80)!==0};
+}
+function readTab5(inp,hdr,extraDist){
+  if(!hdr.tablePresent)return null;
+  const bl=new Uint8Array(R5_BC);
+  for(let i=0;i<R5_BC;i++){
+    const len=inp.fgetbits()>>>12;inp.addbits(4);
+    if(len===15){let zc=inp.fgetbits()>>>12;inp.addbits(4);
+      if(zc===0)bl[i]=15;else{zc+=2;while(zc-->0&&i<R5_BC)bl[i++]=0;i--;}}
+    else bl[i]=len;
+  }
+  const BD=mkTab5(bl,0,R5_BC);
+  const tsize=extraDist?R5_HUFF_X:R5_HUFF_B;
+  const tab=new Uint8Array(tsize);
+  for(let i=0;i<tsize;){
+    const num=decNum5(inp,BD);
+    if(num<16){tab[i++]=num;}
+    else if(num<18){
+      let n; if(num===16){n=(inp.fgetbits()>>>13)+3;inp.addbits(3);}else{n=(inp.fgetbits()>>>9)+11;inp.addbits(7);}
+      if(i===0)throw {code:'corrupt5'};
+      while(n-->0&&i<tsize){tab[i]=tab[i-1];i++;}
+    }else{
+      let n; if(num===18){n=(inp.fgetbits()>>>13)+3;inp.addbits(3);}else{n=(inp.fgetbits()>>>9)+11;inp.addbits(7);}
+      while(n-->0&&i<tsize)tab[i++]=0;
+    }
+  }
+  const dc=extraDist?R5_DCX:R5_DCB;
+  return {LD:mkTab5(tab,0,R5_NC),DD:mkTab5(tab,R5_NC,dc),
+          LDD:mkTab5(tab,R5_NC+dc,R5_LDC),RD:mkTab5(tab,R5_NC+dc+R5_LDC,R5_RC)};
+}
+const r5g4=(b,o)=>((b[o])|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0;
+const r5p4=(v,b,o)=>{b[o]=v&0xff;b[o+1]=(v>>>8)&0xff;b[o+2]=(v>>>16)&0xff;b[o+3]=(v>>>24)&0xff;};
+function applyFilter5(dest,flt){
+  const start=flt.blockStart,size=flt.blockLength;
+  if(size<=0||start+size>dest.length)return;
+  if(flt.type===F_E8||flt.type===F_E8E9){
+    const fo=start,FS=0x1000000,cmp2=flt.type===F_E8E9?0xe9:0xe8;
+    let p=start;
+    for(let cur=0;cur+4<size;){
+      const c=dest[p++];cur++;
+      if(c===0xe8||c===cmp2){
+        const off=(cur+fo)%FS,addr=r5g4(dest,p);
+        if((addr&0x80000000)!==0){ if(((((addr+off)>>>0))&0x80000000)===0)r5p4((addr+FS)>>>0,dest,p); }
+        else { if(((((addr-FS)>>>0))&0x80000000)!==0)r5p4((addr-off)>>>0,dest,p); }
+        p+=4;cur+=4;
+      }
+    }
+  }else if(flt.type===F_ARM){
+    const fo=start;
+    for(let cur=0;cur+3<size;cur+=4){
+      const d=start+cur;
+      if(dest[d+3]===0xeb){
+        let o=dest[d]+dest[d+1]*0x100+dest[d+2]*0x10000;
+        o=(o-(((fo+cur)/4)|0))>>>0;
+        dest[d]=o&0xff;dest[d+1]=(o>>>8)&0xff;dest[d+2]=(o>>>16)&0xff;
+      }
+    }
+  }else if(flt.type===F_DELTA){
+    const ch=flt.channels,src=dest.slice(start,start+size),out=new Uint8Array(size);
+    let sp=0;
+    for(let c=0;c<ch;c++){let prev=0;for(let dp=c;dp<size;dp+=ch){prev=(prev-src[sp++])&0xff;out[dp]=prev;}}
+    dest.set(out,start);
+  }
+}
+function unpack50(packed,unpSize){
+  const inp=new Bit5(packed), dest=new Uint8Array(unpSize), extraDist=false;
+  let hdr=blockHdr5(inp), tabs=readTab5(inp,hdr,extraDist);
+  if(!tabs)throw {code:'corrupt5'};
+  let ptr=0,lastLen=0;
+  const od=[0,0,0,0], filters=[];
+  const copyStr=(len,dist)=>{
+    let s=ptr-dist;
+    if(s<0||dist===0)throw {code:'corrupt5'};
+    for(let i=0;i<len&&ptr<unpSize;i++)dest[ptr++]=dest[s++];
+  };
+  while(ptr<unpSize){
+    while(inp.InAddr>hdr.blockStart+hdr.blockSize-1 ||
+         (inp.InAddr===hdr.blockStart+hdr.blockSize-1&&inp.InBit>=hdr.blockBitSize)){
+      if(hdr.lastBlockInFile){ applyF(); return dest; }
+      hdr=blockHdr5(inp);
+      const t=readTab5(inp,hdr,extraDist); if(t)tabs=t;
+    }
+    if(inp.InAddr>=packed.length)break;
+    const ms=decNum5(inp,tabs.LD);
+    if(ms<256){dest[ptr++]=ms;continue;}
+    if(ms>=262){
+      let len=slotLen5(inp,ms-262), dist=1;
+      const ds=decNum5(inp,tabs.DD);
+      let db;
+      if(ds<4){db=0;dist+=ds;}else{db=(ds>>1)-1;dist+=(2|(ds&1))*Math.pow(2,db);}
+      if(db>0){
+        if(db>=4){
+          if(db>4){ if(db>36)throw {code:'bigdict5'};
+            dist+=(inp.getbits32()>>>(36-db))*16; inp.addbits(db-4); }
+          dist+=decNum5(inp,tabs.LDD);
+        }else{ dist+=inp.fgetbits()>>>(16-db); inp.addbits(db); }
+      }
+      if(dist>0x100){len++;if(dist>0x2000){len++;if(dist>0x40000)len++;}}
+      od[3]=od[2];od[2]=od[1];od[1]=od[0];od[0]=dist;
+      lastLen=len; copyStr(len,dist); continue;
+    }
+    if(ms===256){
+      const bstart=filtData5(inp);
+      let blen=filtData5(inp);
+      if(blen>R5_MAXFILTER)blen=0;
+      const type=inp.fgetbits()>>>13;inp.addbits(3);
+      let ch=0;
+      if(type===F_DELTA){ch=(inp.fgetbits()>>>11)+1;inp.addbits(5);}
+      filters.push({type,blockStart:bstart+ptr,blockLength:blen,channels:ch});
+      continue;
+    }
+    if(ms===257){ if(lastLen!==0)copyStr(lastLen,od[0]); continue; }
+    const dn=ms-258, dist=od[dn];
+    for(let i=dn;i>0;i--)od[i]=od[i-1];
+    od[0]=dist;
+    const len=slotLen5(inp,decNum5(inp,tabs.RD));
+    lastLen=len; copyStr(len,dist);
+  }
+  function applyF(){ for(const f of filters)applyFilter5(dest,f); }
+  applyF();
+  return dest;
+}
+/* --- RAR5-Krypto --- */
+async function deriveKey5(password,salt,lg2){
+  const subtle=globalThis.crypto.subtle;
+  const pwd=new TextEncoder().encode(password);
+  const base=await subtle.importKey('raw',pwd,{name:'PBKDF2'},false,['deriveBits']);
+  const c=1<<lg2;
+  const run=async n=>new Uint8Array(await subtle.deriveBits(
+    {name:'PBKDF2',salt,iterations:n,hash:'SHA-256'},base,256));
+  const key=await run(c), hashKey=await run(c+16), pcv=await run(c+32);
+  const pswCheck=new Uint8Array(8);
+  for(let i=0;i<32;i++)pswCheck[i%8]^=pcv[i];
+  return {key,hashKey,pswCheck};
+}
+async function crcToMac5(crc,hashKey){
+  const subtle=globalThis.crypto.subtle;
+  const k=await subtle.importKey('raw',hashKey,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+  const raw=Uint8Array.from([crc&0xff,(crc>>>8)&0xff,(crc>>>16)&0xff,(crc>>>24)&0xff]);
+  const dig=new Uint8Array(await subtle.sign('HMAC',k,raw));
+  let v=0; for(let i=0;i<32;i++)v^=dig[i]<<((i&3)*8);
+  return v>>>0;
+}
+/* --- RAR5-Container --- */
+function vint(b,p){ let v=0,sh=1;
+  for(let i=0;i<10;i++){ const c=b[p++]; v+=(c&0x7f)*sh; if(!(c&0x80))break; sh*=128; }
+  return [v,p];
+}
+function extra5(b,start,size){
+  const out={crypt:null};
+  let p=start;const end=start+size;
+  while(p<end){
+    let rs,ty; [rs,p]=vint(b,p);
+    const re=p+rs; if(rs===0||re>end)break;
+    [ty,p]=vint(b,p);
+    if(ty===1){
+      let ver,fl; [ver,p]=vint(b,p); [fl,p]=vint(b,p);
+      const lg2=b[p++], salt=b.slice(p,p+16); p+=16;
+      const iv=b.slice(p,p+16); p+=16;
+      let chk=null; if(fl&1){chk=b.slice(p,p+8);}
+      out.crypt={ver,flags:fl,lg2,salt,iv,pswCheck:chk,usesMac:!!(fl&2)};
+    }
+    p=re;
+  }
+  return out;
+}
+async function parseRar5(file){
+  const size=file.size;
+  const buf=await readAt(file,0,Math.min(size,4*1048576));   // Kopfbereich reicht meist
+  const blocks=[{type:'marker',start:0,len:8,label:'Marker (Rar5)'}];
+  const files=[]; let off=8, headerEncrypted=false, archCrypt=null;
+  let b=buf, base=0;
+  while(off+7<=size){
+    if(off-base+64>b.length){ b=await readAt(file,off,Math.min(size-off,4*1048576)); base=off; }
+    let p=off-base+4, hs, ht, hf;
+    [hs,p]=vint(b,p);
+    const hStart=p, hEnd=hStart+hs;
+    if(hs===0||base+hEnd>size)break;
+    [ht,p]=vint(b,p); [hf,p]=vint(b,p);
+    let extraSize=0,dataSize=0;
+    if(hf&1)[extraSize,p]=vint(b,p);
+    if(hf&2)[dataSize,p]=vint(b,p);
+    const label={1:'Archiv-Kopf',2:'Datei',3:'Dienstblock',4:'Header-Verschlüsselung',5:'Archiv-Ende'}[ht]||('Typ '+ht);
+    blocks.push({type:ht===2?'fhead':'header',start:off,len:hs,label});
+    if(ht===4){
+      let ver,cf; [ver,p]=vint(b,p); [cf,p]=vint(b,p);
+      const lg2=b[p++], salt=b.slice(p,p+16); p+=16;
+      archCrypt={lg2,salt,pswCheck:(cf&1)?b.slice(p,p+8):null};
+      headerEncrypted=true; break;
+    }
+    if(ht===2||ht===3){
+      let ff,unp,attr,ci,os,nl;
+      [ff,p]=vint(b,p); [unp,p]=vint(b,p); [attr,p]=vint(b,p);
+      if(ff&2)p+=4;
+      let crc=0; if(ff&4){crc=rd32(b,p);p+=4;}
+      [ci,p]=vint(b,p); [os,p]=vint(b,p); [nl,p]=vint(b,p);
+      const name=new TextDecoder('utf-8').decode(b.subarray(p,p+nl)); p+=nl;
+      const ex=extraSize?extra5(b,hEnd-extraSize,extraSize):{crypt:null};
+      if(ht===2){
+        files.push({fmt:'rar5', name, unpSize:unp, packSize:dataSize,
+          fileCrc:crc, dir:!!(ff&1),
+          method:0x30+((ci>>7)&7), unpVer:50,
+          solid:!!(ci&0x40), dictSize:0x20000<<((ci>>10)&0x0f),
+          crypt:ex.crypt, encrypted:!!ex.crypt,
+          salt:null, dataOffset:base+hEnd, idx:files.length});
+      }
+    }
+    off=base+hEnd+dataSize;
+    if(ht===5)break;
+  }
+  return {fmt:'rar5',blocks,files,size,headerEncrypted,archCrypt};
+}
+async function extractRar5(file,entry,password){
+  if(entry.dir)return {plain:new Uint8Array(0),crcOk:true};
+  if(entry.solid)throw {code:'solid5'};
+  let packed=await readAt(file,entry.dataOffset,entry.packSize);
+  let keys=null;
+  if(entry.encrypted){
+    if(!password)throw {code:'nopw'};
+    keys=await deriveKey5(password,entry.crypt.salt,entry.crypt.lg2);
+    if(entry.crypt.pswCheck){
+      let same=true;
+      for(let i=0;i<8;i++)if(keys.pswCheck[i]!==entry.crypt.pswCheck[i])same=false;
+      if(!same)throw {code:'badpw5'};
+    }
+    packed=await decryptCBC(keys.key,entry.crypt.iv,packed.subarray(0,packed.length&~15));
+  }
+  const plain = entry.method===0x30 ? packed.subarray(0,entry.unpSize)
+                                    : unpack50(packed,entry.unpSize);
+  let c=crc32(plain);
+  if(keys&&entry.crypt.usesMac)c=await crcToMac5(c,keys.hashKey);
+  return {plain,crcOk:c===entry.fileCrc};
+}
+
+/* =========================================================================
  *  Debug / Diagnose — Kennzahlen zu einer Datei, ohne Inhalt preiszugeben:
  *  nur Struktur, Krypto-Hex-Präfix und Segment-CRCs. Die Segment-CRCs lassen
  *  sich mit einer separat (via unrar/WinRAR) entpackten Referenz abgleichen,
  *  um eine Abweichung auf ein 256-MB-Segment einzugrenzen.
  * =======================================================================*/
-const TOOL_VERSION='2026-rar34-v13 (PPMd SEE2 fix, verifiziert an 3.13 GB)';
+const TOOL_VERSION='2026-rar345-v14 (RAR5: Container, AES-256, unpack50)';
 const DIAG_SEG=1048576;   // 1-MB-Segmente für feine Lokalisierung
 let lastDiag=null;   // {outTotal, crc, segs, segSize} der letzten Voll-Diagnose — für Referenz-Abgleich
 const hex8=n=>(n>>>0).toString(16).padStart(8,'0');
@@ -1931,7 +2239,9 @@ async function analyze(){
       results.hidden=true;
       return;
     }
-    log(`RAR 4 erkannt · ${parsed.files.length} Datei(en)`, 'ok');
+    log(`${parsed.fmt==='rar5'?'RAR 5':'RAR 4'} erkannt · ${parsed.files.length} Datei(en)`, 'ok');
+    if(parsed.fmt==='rar5'&&parsed.files.some(f=>f.solid))
+      log('Hinweis: Dieses RAR5-Archiv enthält solide Dateien — die werden noch nicht unterstützt. Nicht-solide Dateien lassen sich normal entpacken.','warn');
     renderSummary(); renderRibbon(); renderRows();
     results.hidden=false;
   }catch(err){
@@ -2011,7 +2321,9 @@ async function doExtract(idx,btn){
   // der flache Pfad müsste sonst die Summe aller Dateien der Gruppe im Speicher allokieren.
   const groupUnp = group.reduce((a,e)=>a+e.unpSize,0);
   const total = group.length>1 ? groupUnp : entry.unpSize;
-  const large = total > STREAM_THRESHOLD;
+  // RAR5 wird derzeit vollständig im Speicher entpackt (kein Ringpuffer) —
+  // deshalb kein Streaming-Pfad; Ausgabe läuft über den normalen Download.
+  const large = entry.fmt!=='rar5' && total > STREAM_THRESHOLD;
 
   // Grosse Dateien streamen: Ziel ist die Platte (Chrome/Edge via File System
   // Access API) oder – als Fallback (Firefox u.a.) – ein Blob-Download. In beiden
@@ -2093,6 +2405,15 @@ async function doExtract(idx,btn){
     }else if(err.code==='oldpack'){
       log(`„${entry.name}": Datei ist im alten RAR-2.0-Format komprimiert (VER ${err.ver}). Die Entschlüsselung (Crypt20) funktioniert, aber der RAR-2.0-Dekompressor (unpack20) ist noch nicht implementiert. Gespeicherte (unkomprimierte) Dateien im selben Archiv gehen dagegen.`,'warn');
       statusCell.innerHTML=badge('fail','RAR2.0-Kompression');
+    }else if(err.code==='badpw5'){
+      log(`„${entry.name}": falsches Passwort (RAR5 prüft das direkt am Header, ohne Entpacken).`,'warn');
+      statusCell.innerHTML=badge('fail','falsches Passwort');
+    }else if(err.code==='solid5'){
+      log(`„${entry.name}": solide RAR5-Dateien werden noch nicht unterstützt.`,'warn');
+      statusCell.innerHTML=badge('fail','solid (RAR5)');
+    }else if(err.code==='corrupt5'||err.code==='bigdict5'){
+      log(`„${entry.name}": RAR5-Strom nicht lesbar (${err.code==='bigdict5'?'Wörterbuch > 64 GB':'beschädigt oder unerwartetes Format'}).`,'warn');
+      statusCell.innerHTML=badge('fail','RAR5-Fehler');
     }else if(err.code==='oldcrypt'){
       log(`„${entry.name}": nicht unterstütztes Alt-Verschlüsselungsverfahren (VER ${err.ver}, RAR 1.3/1.5).`,'warn');
       statusCell.innerHTML=badge('fail','Alt-Chiffre');
