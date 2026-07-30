@@ -766,47 +766,83 @@ function parseOdsContentXml(doc){
     if(pp){ const al=pp.getAttribute('fo:text-align'); if(al==='end') style.align='right'; else if(al==='center') style.align='center'; else if(al==='start') style.align='left'; }
     cellStyles[name]=style;
   }
+  /* LibreOffice schreibt das *komplette* Blatt-Raster in content.xml: die letzte
+     Spaltendefinition traegt table:number-columns-repeated="16364", die letzte Zeile
+     table:number-rows-repeated="1048501". Wuerde man diese Wiederholungen naiv
+     expandieren, entstuenden ~16 Mio. Zellobjekte und ebenso viele <td> - der Browser
+     bleibt haengen. Deshalb: leere, unformatierte Zellen/Zeilen am Ende werden nur
+     "gemerkt" und erst dann materialisiert, wenn rechts/darunter noch Inhalt folgt.
+     Zusaetzlich harte Obergrenzen als Sicherheitsnetz. */
+  const MAX_IMPORT_COLS=256, MAX_IMPORT_ROWS=5000;
+  const EMPTY_STYLE={bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''};
+  const blankCell=()=>({raw:'',style:Object.assign({},EMPTY_STYLE),computed:''});
+  const styleIsPlain=s=>!s.bold&&!s.italic&&!s.underline&&s.align==='left'&&!s.color&&!s.bg&&s.numFmt==='general'&&s.borderSides==='0000';
+  let truncated=false;
+
   const table=doc.getElementsByTagNameNS(ns.t,'table')[0];
   const colWidthsOut=[];
   if(table){
     for(const colEl of Array.from(table.children)){
       if(colEl.localName!=='table-column') continue;
-      const repeat=parseInt(colEl.getAttribute('table:number-columns-repeated')||'1',10);
+      const repeat=parseInt(colEl.getAttribute('table:number-columns-repeated')||'1',10)||1;
       const sName=colEl.getAttribute('table:style-name');
       const w=(sName && colStyleWidths[sName])?colStyleWidths[sName]:DEFAULT_COL_W;
-      for(let i=0;i<repeat;i++) colWidthsOut.push(w);
+      for(let i=0;i<repeat && colWidthsOut.length<MAX_IMPORT_COLS;i++) colWidthsOut.push(w);
     }
   }
   const rowEls=table?Array.from(table.getElementsByTagNameNS(ns.t,'table-row')):[];
   const rowHeightsOut=[];
   const grid=[]; let maxCols=1;
+  const pendingRowHs=[];                 // uebersprungene Leerzeilen (Position bleibt erhalten)
   for(const rowEl of rowEls){
     const rsName=rowEl.getAttribute('table:style-name');
     const rowH=(rsName && rowStyleHeights[rsName])?rowStyleHeights[rsName]:DEFAULT_ROW_H;
+    const rowRepeat=parseInt(rowEl.getAttribute('table:number-rows-repeated')||'1',10)||1;
     const row=[];
+    let pending=[], pendingCount=0;      // zurueckgehaltene Leerzellen (auch formatierte!)
     for(const cellEl of Array.from(rowEl.children)){
       if(cellEl.localName!=='table-cell' && cellEl.localName!=='covered-table-cell') continue;
-      const repeat=parseInt(cellEl.getAttribute('table:number-columns-repeated')||'1',10);
+      if(row.length+pendingCount>=MAX_IMPORT_COLS){ truncated=true; break; }
+      const repeat=parseInt(cellEl.getAttribute('table:number-columns-repeated')||'1',10)||1;
       const styleName=cellEl.getAttribute('table:style-name');
-      const style=(styleName && cellStyles[styleName])?cellStyles[styleName]:{bold:false,italic:false,underline:false,align:'left',color:'',bg:'',numFmt:'general',borderSides:'0000',borderColor:''};
+      const style=(styleName && cellStyles[styleName])?cellStyles[styleName]:EMPTY_STYLE;
       const formula=cellEl.getAttribute('table:formula');
       const valueType=cellEl.getAttribute('office:value-type');
+      // Anzeigetext: alle <text:p> der Zelle (mehrzeilige Zellen bleiben erhalten)
+      const displayText=()=>Array.from(cellEl.getElementsByTagNameNS(ns.tx,'p')).map(p=>p.textContent).join(' ').trim();
       let raw='';
       if(formula) raw=odfFormulaToInternal(formula);
-      else if(valueType==='float') raw=cellEl.getAttribute('office:value')||'0';
+      else if(valueType==='float'||valueType==='percentage'||valueType==='currency') raw=cellEl.getAttribute('office:value')||'0';
       else if(valueType==='boolean') raw=cellEl.getAttribute('office:boolean-value')==='true'?'TRUE':'FALSE';
-      else if(valueType==='string'){ const p=cellEl.getElementsByTagNameNS(ns.tx,'p')[0]; raw=p?p.textContent:''; }
-      for(let i=0;i<repeat;i++) row.push({raw,style:Object.assign({},style),computed:''});
+      // Datum/Zeit kennt MiniCalc nicht als Typ -> als angezeigten Text uebernehmen
+      else if(valueType==='date') raw=displayText()||cellEl.getAttribute('office:date-value')||'';
+      else if(valueType==='time') raw=displayText()||cellEl.getAttribute('office:time-value')||'';
+      else raw=displayText();            // string bzw. Zelle ohne office:value-type
+      // Leere Zellen zurueckhalten: folgt rechts noch Inhalt, werden sie (samt Format)
+      // nachgeholt - sonst verworfen. So verschwinden die Filler-Zellen am Zeilenende,
+      // auch wenn LibreOffice ihnen wie hier den Kopfzeilen-Style "ce1" mitgibt.
+      if(raw===''){ pending.push({style,repeat}); pendingCount+=repeat; continue; }
+      for(const pe of pending){
+        const st=styleIsPlain(pe.style)?null:pe.style;
+        for(let i=0;i<pe.repeat && row.length<MAX_IMPORT_COLS;i++)
+          row.push(st?{raw:'',style:Object.assign({},st),computed:''}:blankCell());
+      }
+      pending=[]; pendingCount=0;
+      for(let i=0;i<repeat && row.length<MAX_IMPORT_COLS;i++) row.push({raw,style:Object.assign({},style),computed:''});
     }
-    // LibreOffice fasst mehrere gleichartige (meist leere) Zeilen mit table:number-rows-repeated zusammen -
-    // ohne Expansion würden sich alle nachfolgenden Zeilenindizes verschieben.
-    const rowRepeat=Math.min(parseInt(rowEl.getAttribute('table:number-rows-repeated')||'1',10), 1000);
-    for(let i=0;i<rowRepeat;i++){
+    if(row.length===0){                  // vollstaendig leere Zeile: nur vormerken
+      for(let i=0;i<rowRepeat && pendingRowHs.length<MAX_IMPORT_ROWS;i++) pendingRowHs.push(rowH);
+      continue;
+    }
+    while(pendingRowHs.length && grid.length<MAX_IMPORT_ROWS){ rowHeightsOut.push(pendingRowHs.shift()); grid.push([]); }
+    pendingRowHs.length=0;
+    for(let i=0;i<rowRepeat && grid.length<MAX_IMPORT_ROWS;i++){
       rowHeightsOut.push(rowH);
       grid.push(row.map(cell=>({raw:cell.raw, style:Object.assign({},cell.style), computed:''})));
     }
     if(row.length>maxCols) maxCols=row.length;
   }
+  if(truncated) console.warn('ODS-Import: Blatt auf max. '+MAX_IMPORT_COLS+' Spalten / '+MAX_IMPORT_ROWS+' Zeilen begrenzt.');
   const newRows=Math.max(grid.length,1), newCols=Math.max(maxCols,1);
   const outData=[];
   for(let r=0;r<newRows;r++){
