@@ -142,6 +142,22 @@
   .badge.done{background:var(--key); color:#fff}
   .badge.fail{background:var(--locked); color:#fff}
   .badge.needs{background:#fff; color:var(--muted); border-color:var(--line-strong)}
+  .prog{display:inline-flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px}
+  .prog-track{width:110px; height:6px; background:#e2e5db; border-radius:3px; overflow:hidden; border:1px solid var(--line-strong)}
+  .prog-fill{display:block; height:100%; background:var(--key); width:0%; transition:width .12s linear}
+  .prog-num{color:var(--muted); min-width:32px; text-align:right}
+  .dbgwrap{margin-top:18px; border-top:1px solid var(--line); padding-top:14px}
+  .dbgtoggle{font-family:var(--mono); font-size:12px; color:var(--muted); cursor:pointer; user-select:none}
+  .dbgtoggle input{vertical-align:middle; margin-right:6px}
+  #dbgPanel{margin-top:12px; background:#f4f5f0; border:1px solid var(--line-strong); border-radius:3px; padding:14px}
+  .dbghint{font-size:12px; color:var(--muted); margin:0 0 10px}
+  .dbgrow{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:10px}
+  .dbgbtn{font-family:var(--mono); font-size:12px; padding:6px 12px; border:1px solid var(--line-strong); background:#fff; border-radius:2px; cursor:pointer}
+  .dbgbtn:hover{background:var(--key); color:#fff; border-color:var(--key)}
+  .dbgbtn:disabled{opacity:.5; cursor:default; background:#fff; color:var(--muted)}
+  .dbgprog{font-family:var(--mono); font-size:11px; color:var(--muted)}
+  .dbgref{font-family:var(--mono); font-size:11px; color:var(--muted); display:flex; flex-direction:column; gap:4px}
+  .dbgout{width:100%; min-height:220px; margin:4px 0 10px; font-family:var(--mono); font-size:11px; line-height:1.45; border:1px solid var(--line-strong); border-radius:2px; padding:10px; background:#fff; white-space:pre; overflow:auto; box-sizing:border-box}
   .rowact{display:flex; gap:12px; align-items:center; justify-content:flex-end}
   .act{
     font-family:var(--sans); font-size:13.5px; cursor:pointer; padding:7px 13px; border-radius:2px;
@@ -248,10 +264,33 @@
     <div class="log" id="log"></div>
   </div>
 
+  <div class="dbgwrap">
+    <label class="dbgtoggle"><input type="checkbox" id="dbgToggle"> 🔧 Debug-Modus (Diagnosedaten erzeugen)</label>
+    <div id="dbgPanel" hidden>
+      <p class="dbghint">Erzeugt einen anonymen Diagnosebericht (nur Struktur, Hex-Präfix, Segment-CRCs — kein Dateiinhalt). Zuerst oben ein Archiv analysieren und – falls verschlüsselt – das Passwort eintragen.</p>
+      <div class="dbgrow">
+        <button id="dbgQuick" class="dbgbtn">Schnell-Diagnose</button>
+        <button id="dbgFull" class="dbgbtn">Voll-Diagnose (Dekompression, dauert)</button>
+        <span id="dbgProg" class="dbgprog"></span>
+      </div>
+      <div class="dbgrow">
+        <label class="dbgref">Referenz-Datei (von unrar/WinRAR entpackt) — wenn VOR der Voll-Diagnose gewählt, wird byte-genau verglichen:
+          <input type="file" id="dbgRefFile"></label>
+        <button id="dbgByte" class="dbgbtn" disabled>Byte-genauer Vergleich (Voll-Diagnose + Referenz)</button>
+        <button id="dbgRefBtn" class="dbgbtn" disabled>nur Segment-CRCs der Referenz</button>
+      </div>
+      <textarea id="dbgOut" class="dbgout" readonly placeholder="Diagnosebericht erscheint hier …"></textarea>
+      <div class="dbgrow"><button id="dbgCopy" class="dbgbtn">In Zwischenablage kopieren</button></div>
+    </div>
+  </div>
+
   <footer>
-    Vollständig entschlüsselt werden gespeicherte Dateien (Methode <code>store</code>). Komprimierte Dateien
-    (<code>m1</code>–<code>m5</code>) werden erkannt und ihr Schlüssel abgeleitet, brauchen zum Auspacken aber
-    noch den LZSS/PPMd-Depacker. Die Schlüsselableitung bildet den <code>rar29</code>-Puffer-Bug von unrar exakt nach.
+    Entschlüsselt und entpackt werden gespeicherte (<code>store</code>) sowie LZSS/Huffman-komprimierte
+    Dateien (<code>m1</code>–<code>m5</code>) — inklusive der Standard-VM-Filter (x86-<code>e8</code>/<code>e9</code>,
+    Delta, RGB, Audio, Itanium); der Depacker ist byte-genau gegen <code>unrar</code> geprüft.
+    Unterstützt: Speichern, LZSS+Huffman, Standard-VM-Filter, PPMd (Variante H) und Solid-Archive (LZSS &amp; PPMd, inkl. Filter-Fortsetzung über Dateigrenzen).
+    Die Schlüsselableitung bildet den <code>rar29</code>-Puffer-Bug von unrar exakt nach.
+    Große Dateien (&gt;&nbsp;128&nbsp;MB) werden über einen 4-MB-Ringpuffer direkt auf die Platte gestreamt (File&nbsp;System&nbsp;Access&nbsp;API, Chrome/Edge) — der Speicherbedarf bleibt konstant, unabhängig von der entpackten Größe.
   </footer>
 </div>
 
@@ -261,6 +300,12 @@
  * =======================================================================*/
 const CRC_TABLE=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?(0xEDB88320^(c>>>1)):(c>>>1);t[n]=c>>>0;}return t;})();
 function crc32(b){let c=0xFFFFFFFF;for(let i=0;i<b.length;i++)c=CRC_TABLE[(c^b[i])&0xff]^(c>>>8);return(c^0xFFFFFFFF)>>>0;}
+// Inkrementeller CRC32 fuer Streaming grosser Dateien
+function crc32Init(){return 0xFFFFFFFF;}
+function crc32Update(c,b){for(let i=0;i<b.length;i++)c=CRC_TABLE[(c^b[i])&0xff]^(c>>>8);return c;}
+function crc32Final(c){return (c^0xFFFFFFFF)>>>0;}
+const STREAM_THRESHOLD=128*1048576;                 // ab 128 MB entpackt: direkt auf Platte
+const FS_ACCESS = typeof window!=='undefined' && typeof window.showSaveFilePicker==='function';
 const rotl=(x,n)=>((x<<n)|(x>>>(32-n)))|0;
 
 class RarSHA1{
@@ -316,6 +361,1146 @@ async function decryptCBC(key,iv,data){
 }
 
 /* =========================================================================
+ *  RAR 2.0 Legacy-Chiffre (Crypt20) — für Alt-Archive (UNP_VER 20..28, kein
+ *  Salt). 32-Runden-Feistel mit 256er-Substitutionstabelle, CRC-basiertem
+ *  Key-Schedule und blockweiser Key-Evolution. Port aus unrar crypt2.cpp.
+ *  Passwort wird als Einzelbyte (Latin1/OEM) behandelt, NICHT als UTF-16LE.
+ * =======================================================================*/
+const InitSubstTable20=Uint8Array.from([
+  215,19,149,35,73,197,192,205,249,28,16,119,48,221,2,42,232,1,177,233,14,88,219,25,223,195,244,90,87,239,153,137,
+  255,199,147,70,92,66,246,13,216,40,62,29,217,230,86,6,71,24,171,196,101,113,218,123,93,91,163,178,202,67,44,235,
+  107,250,75,234,49,167,125,211,83,114,157,144,32,193,143,36,158,124,247,187,89,214,141,47,121,228,61,130,213,194,174,251,
+  97,110,54,229,115,57,152,94,105,243,212,55,209,245,63,11,164,200,31,156,81,176,227,21,76,99,139,188,127,17,248,51,
+  207,120,189,210,8,226,41,72,183,203,135,165,166,60,98,7,122,38,155,170,69,172,252,238,39,134,59,128,236,27,240,80,
+  131,3,85,206,145,79,154,142,159,220,201,133,74,64,20,129,224,185,138,103,173,182,43,34,254,82,198,151,231,180,58,10,
+  118,26,102,12,50,132,22,191,136,111,162,179,45,4,148,108,161,56,78,126,242,222,15,175,146,23,33,241,181,190,77,225,
+  0,46,169,186,68,95,237,65,53,208,253,168,9,18,100,52,116,184,160,96,109,37,30,106,140,104,150,5,204,117,112,84
+]);
+const CRCTab20=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n>>>0;for(let k=0;k<8;k++)c=(c&1)?((0xEDB88320^(c>>>1))>>>0):(c>>>1);t[n]=c>>>0;}return t;})();
+const rotls20=(x,n)=>{n&=31;return ((x<<n)|(x>>>(32-n)))>>>0;};
+const rg4_20=(b,o)=>(b[o]|(b[o+1]<<8)|(b[o+2]<<16)|(b[o+3]<<24))>>>0;
+const rp4_20=(v,b,o)=>{b[o]=v&0xff;b[o+1]=(v>>>8)&0xff;b[o+2]=(v>>>16)&0xff;b[o+3]=(v>>>24)&0xff;};
+class Crypt20{
+  constructor(){this.S=new Uint8Array(256);this.K=new Uint32Array(4);}
+  subst(t){t>>>=0;return (this.S[t&255]|(this.S[(t>>>8)&255]<<8)|(this.S[(t>>>16)&255]<<16)|(this.S[(t>>>24)&255]<<24))>>>0;}
+  setKey(pw){ // pw: Uint8Array (Einzelbyte-Passwort)
+    const K=this.K,S=this.S,L=pw.length;
+    K[0]=0xD3A3B879;K[1]=0x3F6D12F7;K[2]=0x7515A235;K[3]=0xA4E7F123;
+    S.set(InitSubstTable20);
+    for(let J=0;J<256;J++)for(let I=0;I<L;I+=2){
+      const p0=pw[I]??0, p1=(I+1<L)?pw[I+1]:0;
+      let N1=CRCTab20[(p0-J)&0xff]&0xff, N2=CRCTab20[(p1+J)&0xff]&0xff;
+      for(let Kk=1;N1!==N2;N1=(N1+1)&0xff,Kk++){const a=N1,b=(N1+I+Kk)&0xff;const t=S[a];S[a]=S[b];S[b]=t;}
+    }
+    const Psw=new Uint8Array(((L&15)!==0?((L|15)+1):L)||16); Psw.set(pw.subarray(0,L));
+    for(let I=0;I<L;I+=16) this.encBlock(Psw,I);
+  }
+  encBlock(buf,off){const K=this.K;
+    let A=(rg4_20(buf,off)^K[0])>>>0,B=(rg4_20(buf,off+4)^K[1])>>>0,C=(rg4_20(buf,off+8)^K[2])>>>0,D=(rg4_20(buf,off+12)^K[3])>>>0;
+    for(let I=0;I<32;I++){let T=(((C+rotls20(D,11))>>>0)^K[I&3])>>>0;const TA=(A^this.subst(T))>>>0;T=(((D^rotls20(C,17))>>>0)+K[I&3])>>>0;const TB=(B^this.subst(T))>>>0;A=C;B=D;C=TA;D=TB;}
+    rp4_20((C^K[0])>>>0,buf,off);rp4_20((D^K[1])>>>0,buf,off+4);rp4_20((A^K[2])>>>0,buf,off+8);rp4_20((B^K[3])>>>0,buf,off+12);
+    this.updKeys(buf,off);}
+  decBlock(buf,off){const K=this.K;
+    let A=(rg4_20(buf,off)^K[0])>>>0,B=(rg4_20(buf,off+4)^K[1])>>>0,C=(rg4_20(buf,off+8)^K[2])>>>0,D=(rg4_20(buf,off+12)^K[3])>>>0;
+    const In=buf.slice(off,off+16);
+    for(let I=31;I>=0;I--){let T=(((C+rotls20(D,11))>>>0)^K[I&3])>>>0;const TA=(A^this.subst(T))>>>0;T=(((D^rotls20(C,17))>>>0)+K[I&3])>>>0;const TB=(B^this.subst(T))>>>0;A=C;B=D;C=TA;D=TB;}
+    rp4_20((C^K[0])>>>0,buf,off);rp4_20((D^K[1])>>>0,buf,off+4);rp4_20((A^K[2])>>>0,buf,off+8);rp4_20((B^K[3])>>>0,buf,off+12);
+    this.updKeys(In,0);}
+  updKeys(buf,off){const K=this.K;for(let I=0;I<16;I+=4){K[0]=(K[0]^CRCTab20[buf[off+I]])>>>0;K[1]=(K[1]^CRCTab20[buf[off+I+1]])>>>0;K[2]=(K[2]^CRCTab20[buf[off+I+2]])>>>0;K[3]=(K[3]^CRCTab20[buf[off+I+3]])>>>0;}}
+  decrypt(data){for(let I=0;I+16<=data.length;I+=16)this.decBlock(data,I);return data;}
+}
+/* Passwort -> Einzelbyte (Latin1/OEM), wie unrar WideToChar für Alt-Chiffren. */
+function pwToBytesLatin1(password){
+  if(typeof password!=='string')return password;
+  const b=new Uint8Array(password.length);
+  for(let i=0;i<password.length;i++)b[i]=password.charCodeAt(i)&0xff;
+  return b;
+}
+/* Verschlüsselung eines Datenstroms je nach Verfahren:
+ *   Salt (0x400)            -> AES-128-CBC (RAR 2.9/3.0)
+ *   kein Salt, VER 20..28   -> Crypt20 (RAR 2.0)
+ * gibt den entschlüsselten (ggf. noch komprimierten) Strom zurück. */
+async function decryptStreamForEntry(password,entry,packed){
+  if(entry.salt){
+    const {key,iv}=deriveKey(password,entry.salt);
+    return await decryptCBC(key,iv,packed);
+  }
+  const ver=entry.unpVer||0;
+  if(ver>=20&&ver<29){
+    const c=new Crypt20(); c.setKey(pwToBytesLatin1(password));
+    return c.decrypt(packed.slice());
+  }
+  throw {code:'oldcrypt',ver};   // RAR 1.3/1.5 (VER<20) o.ä. nicht unterstützt
+}
+/* Blockweiser Entschlüsseler — hält den Zustand (AES-CBC-IV bzw. Crypt20-Key)
+ * über aufeinanderfolgende, 16-Byte-ausgerichtete Chunks. So kann ein grosser
+ * Strom Stück für Stück entschlüsselt werden, ohne alles gleichzeitig im
+ * Speicher zu halten. `.chunk(c)` erwartet eine Länge als Vielfaches von 16. */
+async function makeDecryptor(password,entry){
+  if(entry.salt){                                        // AES-128-CBC (RAR 2.9/3.0)
+    const {key,iv}=deriveKey(password,entry.salt);
+    const subtle=globalThis.crypto.subtle;
+    const k=await subtle.importKey('raw',key,{name:'AES-CBC'},false,['encrypt','decrypt']);
+    let curIV=iv;
+    return { async chunk(c){
+      const last=c.subarray(c.length-16).slice();        // letzter Chiffreblock = IV des nächsten Chunks
+      const padEnc=new Uint8Array(await subtle.encrypt({name:'AES-CBC',iv:last},k,new Uint8Array(16).fill(16)));
+      const ext=new Uint8Array(c.length+16);ext.set(c,0);ext.set(padEnc.subarray(0,16),c.length);
+      const out=new Uint8Array(await subtle.decrypt({name:'AES-CBC',iv:curIV},k,ext));
+      curIV=last;
+      return out;
+    }};
+  }
+  const ver=entry.unpVer||0;
+  if(ver>=20&&ver<29){                                   // Crypt20 (RAR 2.0), von Natur aus blockweise
+    const cc=new Crypt20(); cc.setKey(pwToBytesLatin1(password));
+    return { async chunk(c){ return cc.decrypt(c.slice()); } };
+  }
+  throw {code:'oldcrypt',ver};
+}
+/* Entschlüsselt einen komprimierten Strom chunkweise IN den vorhandenen Puffer
+ * (der Dekompressor braucht ihn am Stück). Spitzenbedarf ~1× Puffergrösse statt
+ * ~3× wie beim Entschlüsseln des ganzen Blocks auf einmal. */
+async function decryptInPlace(password,entry,packed){
+  const dec=await makeDecryptor(password,entry);
+  const CH=4*1048576;
+  for(let o=0;o<packed.length;o+=CH){
+    const plain=await dec.chunk(packed.subarray(o,Math.min(o+CH,packed.length)));
+    packed.set(plain,o);
+  }
+  return packed;
+}
+
+const NC30=299, DC30=60, LDC30=17, RC30=28, BC30=20;
+const HUFF_TABLE_SIZE30=NC30+DC30+RC30+LDC30, LOW_DIST_REP_COUNT=16, MAX_QUICK_DECODE_BITS=9;
+const VM_MEMSIZE=0x40000, VM_MEMMASK=VM_MEMSIZE-1, MAX3_UNPACK_CHANNELS=1024;
+const MAX3_INC_LZ_MATCH=0x104; // Flush-Marge Ringpuffer
+const VMSF_NONE=0,VMSF_E8=1,VMSF_E8E9=2,VMSF_ITANIUM=3,VMSF_RGB=4,VMSF_AUDIO=5,VMSF_DELTA=6;
+
+const LDecode=[0,1,2,3,4,5,6,7,8,10,12,14,16,20,24,28,32,40,48,56,64,80,96,112,128,160,192,224];
+const LBits=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5];
+const SDDecode=[0,4,8,16,32,64,128,192], SDBits=[2,2,3,4,5,6,6,6];
+const DBitLengthCounts=[4,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,14,0,12];
+const DDecode=new Array(DC30), DBits=new Array(DC30);
+(function(){let Dist=0,BL=0,Slot=0;for(let I=0;I<DBitLengthCounts.length;I++,BL++)for(let J=0;J<DBitLengthCounts[I];J++,Slot++,Dist+=(1<<BL)){DDecode[Slot]=Dist;DBits[Slot]=BL;}})();
+
+
+/* ===== PPMd (Variante H) ===== */
+const INT_BITS=7, PERIOD_BITS=7, TOT_BITS=INT_BITS+PERIOD_BITS;
+const INTERVAL=1<<INT_BITS, BIN_SCALE=1<<TOT_BITS, MAX_FREQ=124;
+const MAX_O=64, TOP=(1<<24)>>>0, BOT=(1<<15)>>>0;
+const UNIT_SIZE=12, N1=4,N2=4,N3=4, N4=((128+3-1*N1-2*N2-3*N3)/4)|0, N_INDEXES=N1+N2+N3+N4;
+const BASE=16; // Heap-Basis (>0), damit Offset 0 == NULL
+const ExpEscape=[25,14,9,7,5,5,4,4,4,3,3,3,2,2,2,2];
+const InitBinEsc=[0x3CDD,0x1F3F,0x59BF,0x48F3,0x64A1,0x5ABC,0x6632,0x6051];
+const GET_MEAN=(S,SH,R)=>((S+(1<<(SH-R)))>>SH);
+
+class ModelPPM{
+  constructor(){ this.SubAllocatorSize=0; this.pool=null; this.dv=null;
+    this.SEE2=[]; for(let i=0;i<25;i++){this.SEE2[i]=[];for(let k=0;k<16;k++)this.SEE2[i][k]={Summ:0,Shift:0,Count:0};}
+    this.DummySEE2={Summ:0,Shift:0,Count:0};
+    this.BinSumm=new Uint16Array(128*64);
+    this.CharMask=new Uint8Array(256); this.NS2Indx=new Uint8Array(256);
+    this.NS2BSIndx=new Uint8Array(256); this.HB2Flag=new Uint8Array(256);
+    this.Indx2Units=new Uint8Array(N_INDEXES); this.Units2Indx=new Uint8Array(128);
+    this.FreeList=new Uint32Array(N_INDEXES); // next-Offset je Index (0=leer)
+  }
+  // ---- Pool / Struct-Zugriff (LE) ----
+  U8(o){return this.pool[o];} sU8(o,v){this.pool[o]=v&0xff;}
+  U16(o){return this.dv.getUint16(o,true);} sU16(o,v){this.dv.setUint16(o,v&0xffff,true);}
+  U32(o){return this.dv.getUint32(o,true);} sU32(o,v){this.dv.setUint32(o,v>>>0,true);}
+  // STATE (6): Symbol@0 Freq@1 Successor@2
+  stSym(p){return this.pool[p];} stSetSym(p,v){this.pool[p]=v&0xff;}
+  stFreq(p){return this.pool[p+1];} stSetFreq(p,v){this.pool[p+1]=v&0xff;}
+  stSucc(p){return this.U32(p+2);} stSetSucc(p,v){this.sU32(p+2,v);}
+  stCopy(dst,src){this.pool.copyWithin(dst,src,src+6);}
+  stSwap(a,b){const P=this.pool;for(let i=0;i<6;i++){const t=P[a+i];P[a+i]=P[b+i];P[b+i]=t;}}
+  // CONTEXT (12): NumStats@0 | SummFreq@2,Stats@4 (NS>1) / OneState@2 | Suffix@8
+  ctxNS(c){return this.U16(c);} ctxSetNS(c,v){this.sU16(c,v);}
+  ctxSumm(c){return this.U16(c+2);} ctxSetSumm(c,v){this.sU16(c+2,v);}
+  ctxStats(c){return this.U32(c+4);} ctxSetStats(c,v){this.sU32(c+4,v);}
+  ctxSuffix(c){return this.U32(c+8);} ctxSetSuffix(c,v){this.sU32(c+8,v);}
+  ctxOne(c){return c+2;} // Offset der OneState
+  // MEM_BLK (12): Stamp@0 NU@2 next@4 prev@8
+  mbStamp(b){return this.U16(b);} mbSetStamp(b,v){this.sU16(b,v);}
+  mbNU(b){return this.U16(b+2);} mbSetNU(b,v){this.sU16(b+2,v);}
+  mbNext(b){return this.U32(b+4);} mbSetNext(b,v){this.sU32(b+4,v);}
+  mbPrev(b){return this.U32(b+8);} mbSetPrev(b,v){this.sU32(b+8,v);}
+  mbInsertAt(b,p){const nx=this.mbNext(p);this.mbSetPrev(b,p);this.mbSetNext(b,nx);this.mbSetNext(p,b);this.mbSetPrev(nx,b);}
+  mbRemove(b){const pv=this.mbPrev(b),nx=this.mbNext(b);this.mbSetNext(pv,nx);this.mbSetPrev(nx,pv);}
+
+  // ---- SubAllocator ----
+  U2B(NU){return UNIT_SIZE*NU;}
+  MBPtr(base,items){return base+this.U2B(items);}
+  insertNode(p,indx){this.sU32(p,this.FreeList[indx]);this.FreeList[indx]=p;}
+  removeNode(indx){const r=this.FreeList[indx];this.FreeList[indx]=this.U32(r);return r;}
+  splitBlock(pv,oldI,newI){
+    let UDiff=this.Indx2Units[oldI]-this.Indx2Units[newI];
+    let p=pv+this.U2B(this.Indx2Units[newI]);
+    let i=this.Units2Indx[UDiff-1];
+    if(this.Indx2Units[i]!==UDiff){ this.insertNode(p,--i); p+=this.U2B(i=this.Indx2Units[i]); UDiff-=i; }
+    this.insertNode(p,this.Units2Indx[UDiff-1]);
+  }
+  startSubAllocator(SASize){
+    const t=(SASize<<20)>>>0;
+    if(this.SubAllocatorSize===t)return true;
+    const AllocSize=((t/FIXED12())|0)*UNIT_SIZE+2*UNIT_SIZE;
+    this.pool=new Uint8Array(BASE+AllocSize+UNIT_SIZE);
+    this.dv=new DataView(this.pool.buffer);
+    this.HeapStart=BASE;
+    this.HeapEnd=BASE+AllocSize-UNIT_SIZE;
+    this.SubAllocatorSize=t;
+    return true;
+  }
+  stopSubAllocator(){this.SubAllocatorSize=0;this.pool=null;this.dv=null;}
+  initSubAllocator(){
+    this.FreeList.fill(0);
+    this.pText=this.HeapStart;
+    const SAS=this.SubAllocatorSize;
+    const Size2=FIXED12()*(((SAS/8/FIXED12())|0)*7);
+    const RealSize2=((Size2/FIXED12())|0)*UNIT_SIZE;
+    const Size1=SAS-Size2;
+    const RealSize1=((Size1/FIXED12())|0)*UNIT_SIZE+UNIT_SIZE;
+    this.LoUnit=this.UnitsStart=this.HeapStart+RealSize1;
+    this.FakeUnitsStart=this.HeapStart+Size1;
+    this.HiUnit=this.LoUnit+RealSize2;
+    let i,k;
+    for(i=0,k=1;i<N1;i++,k+=1)this.Indx2Units[i]=k;
+    for(k++;i<N1+N2;i++,k+=2)this.Indx2Units[i]=k;
+    for(k++;i<N1+N2+N3;i++,k+=3)this.Indx2Units[i]=k;
+    for(k++;i<N1+N2+N3+N4;i++,k+=4)this.Indx2Units[i]=k;
+    for(this.GlueCount=0,k=0,i=0;k<128;k++){ i+=(this.Indx2Units[i]<k+1)?1:0; this.Units2Indx[k]=i; }
+  }
+  glueFreeBlocks(){
+    // s0 als temporären MEM_BLK am reservierten Slot (Offset 4, im BASE-Prefix) führen
+    const s0=4;
+    if(this.LoUnit!==this.HiUnit)this.pool[this.LoUnit]=0;
+    this.mbSetNext(s0,s0);this.mbSetPrev(s0,s0);
+    for(let i=0;i<N_INDEXES;i++) while(this.FreeList[i]){
+      let p=this.removeNode(i); this.mbInsertAt(p,s0); this.mbSetStamp(p,0xFFFF); this.mbSetNU(p,this.Indx2Units[i]);
+    }
+    for(let p=this.mbNext(s0);p!==s0;p=this.mbNext(p)){
+      let p1;
+      while(this.mbStamp(p1=this.MBPtr(p,this.mbNU(p)))===0xFFFF && this.mbNU(p)+this.mbNU(p1)<0x10000){
+        this.mbRemove(p1); this.mbSetNU(p,this.mbNU(p)+this.mbNU(p1));
+      }
+    }
+    let p;
+    while((p=this.mbNext(s0))!==s0){
+      this.mbRemove(p); let sz=this.mbNU(p);
+      for(;sz>128;sz-=128,p=this.MBPtr(p,128)) this.insertNode(p,N_INDEXES-1);
+      let i=this.Units2Indx[sz-1];
+      if(this.Indx2Units[i]!==sz){ const k=sz-this.Indx2Units[--i]; this.insertNode(this.MBPtr(p,sz-k),k-1); }
+      this.insertNode(p,i);
+    }
+  }
+  allocUnitsRare(indx){
+    if(!this.GlueCount){ this.GlueCount=255; this.glueFreeBlocks(); if(this.FreeList[indx])return this.removeNode(indx); }
+    let i=indx;
+    do{
+      if(++i===N_INDEXES){
+        this.GlueCount--;
+        i=this.U2B(this.Indx2Units[indx]);
+        const j=FIXED12()*this.Indx2Units[indx];
+        if(this.FakeUnitsStart-this.pText>j){ this.FakeUnitsStart-=j; this.UnitsStart-=i; return this.UnitsStart; }
+        return 0;
+      }
+    }while(!this.FreeList[i]);
+    const RetVal=this.removeNode(i); this.splitBlock(RetVal,i,indx); return RetVal;
+  }
+  allocUnits(NU){
+    let indx=this.Units2Indx[NU-1];
+    if(this.FreeList[indx])return this.removeNode(indx);
+    let RetVal=this.LoUnit; this.LoUnit+=this.U2B(this.Indx2Units[indx]);
+    if(this.LoUnit<=this.HiUnit)return RetVal;
+    this.LoUnit-=this.U2B(this.Indx2Units[indx]);
+    return this.allocUnitsRare(indx);
+  }
+  allocContext(){
+    if(this.HiUnit!==this.LoUnit)return (this.HiUnit-=UNIT_SIZE);
+    if(this.FreeList[0])return this.removeNode(0);
+    return this.allocUnitsRare(0);
+  }
+  expandUnits(OldPtr,OldNU){
+    const i0=this.Units2Indx[OldNU-1], i1=this.Units2Indx[OldNU];
+    if(i0===i1)return OldPtr;
+    const ptr=this.allocUnits(OldNU+1);
+    if(ptr){ this.pool.copyWithin(ptr,OldPtr,OldPtr+this.U2B(OldNU)); this.insertNode(OldPtr,i0); }
+    return ptr;
+  }
+  shrinkUnits(OldPtr,OldNU,NewNU){
+    const i0=this.Units2Indx[OldNU-1], i1=this.Units2Indx[NewNU-1];
+    if(i0===i1)return OldPtr;
+    if(this.FreeList[i1]){ const ptr=this.removeNode(i1); this.pool.copyWithin(ptr,OldPtr,OldPtr+this.U2B(NewNU)); this.insertNode(OldPtr,i0); return ptr; }
+    else { this.splitBlock(OldPtr,i0,i1); return OldPtr; }
+  }
+  freeUnits(ptr,OldNU){this.insertNode(ptr,this.Units2Indx[OldNU-1]);}
+
+  // ---- RangeCoder ----
+  rcInit(){ this.low=0;this.code=0;this.range=0xffffffff;
+    for(let i=0;i<4;i++)this.code=((this.code<<8)|this.readByte())>>>0; }
+  rcGetCount(scale){ this.range=(this.range/scale)>>>0; return (((this.code-this.low)>>>0)/this.range)>>>0; }
+  rcGetShift(shift){ this.range=this.range>>>shift; return (((this.code-this.low)>>>0)/this.range)>>>0; }
+  rcDecode(lo,hi){ this.low=(this.low+ (this.range*lo>>>0))>>>0; this.range=(this.range*((hi-lo)>>>0))>>>0; }
+  rcNormalize(){
+    while( (((this.low^(this.low+this.range))>>>0)<TOP) || (this.range<BOT && ((this.range=(((-this.low)>>>0)&(BOT-1))>>>0),true)) ){
+      this.code=((this.code<<8)|this.readByte())>>>0;
+      this.range=(this.range<<8)>>>0;
+      this.low=(this.low<<8)>>>0;
+    }
+  }
+
+  // ---- Modell ----
+  restartModelRare(){
+    this.CharMask.fill(0);
+    this.initSubAllocator();
+    this.InitRL=-(this.MaxOrder<12?this.MaxOrder:12)-1;
+    this.MinContext=this.MaxContext=this.allocContext();
+    this.ctxSetSuffix(this.MinContext,0);
+    this.OrderFall=this.MaxOrder;
+    this.ctxSetNS(this.MinContext,256); this.ctxSetSumm(this.MinContext,256+1);
+    const stats=this.allocUnits(256/2);
+    this.FoundState=stats; this.ctxSetStats(this.MinContext,stats);
+    this.RunLength=this.InitRL; this.PrevSuccess=0;
+    for(let i=0;i<256;i++){ const p=stats+i*6; this.stSetSym(p,i); this.stSetFreq(p,1); this.stSetSucc(p,0); }
+    for(let i=0;i<128;i++)for(let k=0;k<8;k++)for(let m=0;m<64;m+=8)
+      this.BinSumm[i*64+(k+m)]=(BIN_SCALE-((InitBinEsc[k]/(i+2))|0))&0xffff;
+    for(let i=0;i<25;i++)for(let k=0;k<16;k++){const s=this.SEE2[i][k];s.Shift=PERIOD_BITS-4;s.Summ=((5*i+10)<<s.Shift)&0xffff;s.Count=4;}
+  }
+  startModelRare(MaxOrder){
+    this.EscCount=1; this.MaxOrder=MaxOrder; this.restartModelRare();
+    this.NS2BSIndx[0]=0; this.NS2BSIndx[1]=2;
+    for(let i=2;i<11;i++)this.NS2BSIndx[i]=4;
+    for(let i=11;i<256;i++)this.NS2BSIndx[i]=6;
+    for(let i=0;i<3;i++)this.NS2Indx[i]=i;
+    let m=3,k=1,Step=1;
+    for(let i=3;i<256;i++){ this.NS2Indx[i]=m; if(!--k){k=++Step;m++;} }
+    for(let i=0;i<0x40;i++)this.HB2Flag[i]=0;
+    for(let i=0x40;i<0x100;i++)this.HB2Flag[i]=0x08;
+    this.DummySEE2.Shift=PERIOD_BITS;
+  }
+  see2Mean(s){ let r=(s.Summ&0xffff)>>s.Shift; s.Summ=(s.Summ-r)&0xffff; return r+(r===0?1:0); }
+  see2Update(s){ if(s.Shift<PERIOD_BITS && --s.Count===0){ s.Summ=(s.Summ+s.Summ)&0xffff; s.Count=3<<s.Shift++; } }
+
+  createChild(pc,pStats,upSym,upFreq,upSucc){
+    const nc=this.allocContext(); if(!nc)return 0;
+    this.ctxSetNS(nc,1);
+    const os=this.ctxOne(nc); this.stSetSym(os,upSym); this.stSetFreq(os,upFreq); this.stSetSucc(os,upSucc);
+    this.ctxSetSuffix(nc,pc); this.stSetSucc(pStats,nc); return nc;
+  }
+  rescale(ctx){
+    const OldNS=this.ctxNS(ctx); let i=OldNS-1, Adder, EscFreq;
+    const stats=this.ctxStats(ctx);
+    let p=this.FoundState;
+    for(;p!==stats;p-=6)this.stSwap(p,p-6);
+    this.stSetFreq(stats,this.stFreq(stats)+4); this.ctxSetSumm(ctx,this.ctxSumm(ctx)+4);
+    EscFreq=this.ctxSumm(ctx)-this.stFreq(p);
+    Adder=(this.OrderFall!==0)?1:0;
+    this.stSetFreq(p,(this.stFreq(p)+Adder)>>1); let summ=this.stFreq(p);
+    do{
+      p+=6; EscFreq-=this.stFreq(p);
+      this.stSetFreq(p,(this.stFreq(p)+Adder)>>1); summ+=this.stFreq(p);
+      if(this.stFreq(p)>this.stFreq(p-6)){
+        let p1=p; const tS=this.pool.slice(p,p+6);
+        const tFreq=tS[1];
+        do{ this.stCopy(p1,p1-6); }while((p1-=6)!==stats && tFreq>this.stFreq(p1-6));
+        this.pool.set(tS,p1);
+      }
+    }while(--i);
+    if(this.stFreq(p)===0){
+      do{ i++; p-=6; }while(this.stFreq(p)===0);
+      EscFreq+=i; const newNS=OldNS-i; this.ctxSetNS(ctx,newNS);
+      if(newNS===1){
+        const tS=this.pool.slice(stats,stats+6); let tFreq=tS[1];
+        do{ tFreq-=(tFreq>>1); EscFreq>>=1; }while(EscFreq>1);
+        this.freeUnits(stats,(OldNS+1)>>1);
+        const os=this.ctxOne(ctx); this.pool.set(tS,os); this.stSetFreq(os,tFreq); this.FoundState=os; return;
+      }
+    }
+    summ+=(EscFreq-(EscFreq>>1)); this.ctxSetSumm(ctx,summ);
+    const n0=(OldNS+1)>>1, n1=(this.ctxNS(ctx)+1)>>1;
+    let ns=stats;
+    if(n0!==n1)ns=this.shrinkUnits(stats,n0,n1);
+    this.ctxSetStats(ctx,ns); this.FoundState=ns;
+  }
+  createSuccessors(Skip,p1){
+    let pc=this.MinContext; const UpBranch=this.stSucc(this.FoundState);
+    const ps=[]; let p=0;
+    if(!Skip){ ps.push(this.FoundState); if(!this.ctxSuffix(pc))return this.csNoLoop(pc,ps,UpBranch); }
+    if(p1){ p=p1; pc=this.ctxSuffix(pc); }
+    else {
+      let entered=false;
+      // Nachbildung der do/while mit LOOP_ENTRY
+      while(true){
+        if(!entered){
+          pc=this.ctxSuffix(pc);
+          if(this.ctxNS(pc)!==1){ p=this.ctxStats(pc); if(this.stSym(p)!==this.stSym(this.FoundState)) do{p+=6;}while(this.stSym(p)!==this.stSym(this.FoundState)); }
+          else p=this.ctxOne(pc);
+        }
+        entered=false;
+        if(this.stSucc(p)!==UpBranch){ pc=this.stSucc(p); break; }
+        if(ps.length>=MAX_O)return 0;
+        ps.push(p);
+        if(!this.ctxSuffix(pc))return this.csNoLoop(pc,ps,UpBranch);
+      }
+      return this.csFinish(pc,ps,UpBranch);
+    }
+    // p1-Zweig: direkt LOOP_ENTRY
+    while(true){
+      if(this.stSucc(p)!==UpBranch){ pc=this.stSucc(p); break; }
+      if(ps.length>=MAX_O)return 0;
+      ps.push(p);
+      if(!this.ctxSuffix(pc))return this.csNoLoop(pc,ps,UpBranch);
+      pc=this.ctxSuffix(pc);
+      if(this.ctxNS(pc)!==1){ p=this.ctxStats(pc); if(this.stSym(p)!==this.stSym(this.FoundState)) do{p+=6;}while(this.stSym(p)!==this.stSym(this.FoundState)); }
+      else p=this.ctxOne(pc);
+    }
+    return this.csFinish(pc,ps,UpBranch);
+  }
+  csNoLoop(pc,ps,UpBranch){ return this.csFinish(pc,ps,UpBranch); }
+  csFinish(pc,ps,UpBranch){
+    if(ps.length===0)return pc;
+    const upSym=this.U8(UpBranch); const upSucc=UpBranch+1; let upFreq;
+    if(this.ctxNS(pc)!==1){
+      if(pc<=this.pText)return 0;
+      let p=this.ctxStats(pc); if(this.stSym(p)!==upSym) do{p+=6;}while(this.stSym(p)!==upSym);
+      const cf=this.stFreq(p)-1, s0=this.ctxSumm(pc)-this.ctxNS(pc)-cf;
+      upFreq=1+((2*cf<=s0)?((5*cf>s0)?1:0):(((2*cf+3*s0-1)/(2*s0))|0));
+    } else upFreq=this.stFreq(this.ctxOne(pc));
+    for(let idx=ps.length-1; idx>=0; idx--){
+      pc=this.createChild(pc,ps[idx],upSym,upFreq,upSucc);
+      if(!pc)return 0;
+    }
+    return pc;
+  }
+  updateModel(){
+    const fsP=this.FoundState;
+    const fsSym=this.stSym(fsP), fsFreq=this.stFreq(fsP); let fsSucc=this.stSucc(fsP);
+    let p=0, pc, Successor;
+    if(fsFreq<((MAX_FREQ/4)|0) && (pc=this.ctxSuffix(this.MinContext))!==0){
+      if(this.ctxNS(pc)!==1){
+        p=this.ctxStats(pc);
+        if(this.stSym(p)!==fsSym){ do{p+=6;}while(this.stSym(p)!==fsSym);
+          if(this.stFreq(p)>=this.stFreq(p-6)){ this.stSwap(p,p-6); p-=6; } }
+        if(this.stFreq(p)<MAX_FREQ-9){ this.stSetFreq(p,this.stFreq(p)+2); this.ctxSetSumm(pc,this.ctxSumm(pc)+2); }
+      } else { p=this.ctxOne(pc); this.stSetFreq(p,this.stFreq(p)+(this.stFreq(p)<32?1:0)); }
+    }
+    if(!this.OrderFall){
+      const nc=this.createSuccessors(true,p);
+      if(!nc)return this.restart();
+      this.stSetSucc(this.FoundState,nc); this.MinContext=this.MaxContext=nc; return;
+    }
+    this.sU8(this.pText,fsSym); this.pText++;
+    Successor=this.pText;
+    if(this.pText>=this.FakeUnitsStart)return this.restart();
+    if(fsSucc){
+      if(fsSucc<=this.pText){ fsSucc=this.createSuccessors(false,p); if(!fsSucc)return this.restart(); }
+      if(!--this.OrderFall){ Successor=fsSucc; this.pText-=(this.MaxContext!==this.MinContext)?1:0; }
+    } else { this.stSetSucc(this.FoundState,Successor); fsSucc=this.MinContext; }
+    let ns=this.ctxNS(this.MinContext);
+    let s0=this.ctxSumm(this.MinContext)-ns-(fsFreq-1);
+    for(pc=this.MaxContext; pc!==this.MinContext; pc=this.ctxSuffix(pc)){
+      let ns1=this.ctxNS(pc);
+      if(ns1!==1){
+        if((ns1&1)===0){
+          const np=this.expandUnits(this.ctxStats(pc),ns1>>1);
+          if(!np)return this.restart(); this.ctxSetStats(pc,np);
+        }
+        this.ctxSetSumm(pc,this.ctxSumm(pc)+((2*ns1<ns)?1:0)+2*(((4*ns1<=ns)?1:0)&((this.ctxSumm(pc)<=8*ns1)?1:0)));
+      } else {
+        const np=this.allocUnits(1); if(!np)return this.restart();
+        this.stCopy(np,this.ctxOne(pc)); this.ctxSetStats(pc,np);
+        let f=this.stFreq(np);
+        if(f<((MAX_FREQ/4)|0)-1)this.stSetFreq(np,f+f); else this.stSetFreq(np,MAX_FREQ-4);
+        this.ctxSetSumm(pc,this.stFreq(np)+this.InitEsc+((ns>3)?1:0));
+      }
+      let cf=2*fsFreq*(this.ctxSumm(pc)+6);
+      let sf=s0+this.ctxSumm(pc);
+      let addFreq;
+      if(cf<6*sf){ addFreq=1+((cf>sf)?1:0)+((cf>=4*sf)?1:0); this.ctxSetSumm(pc,this.ctxSumm(pc)+3); }
+      else { addFreq=4+((cf>=9*sf)?1:0)+((cf>=12*sf)?1:0)+((cf>=15*sf)?1:0); this.ctxSetSumm(pc,this.ctxSumm(pc)+addFreq); }
+      const np2=this.ctxStats(pc)+ns1*6;
+      this.stSetSucc(np2,Successor); this.stSetSym(np2,fsSym); this.stSetFreq(np2,addFreq);
+      this.ctxSetNS(pc,ns1+1);
+    }
+    this.MaxContext=this.MinContext=fsSucc;
+  }
+  restart(){ this.restartCount=(this.restartCount||0)+1; this.restartModelRare(); this.EscCount=0; return; }
+  clearMask(){ this.EscCount=1; this.CharMask.fill(0); }
+
+  decodeBinSymbol(ctx){
+    const rs=this.ctxOne(ctx);
+    this.HiBitsFlag=this.HB2Flag[this.stSym(this.FoundState)];
+    const idx=(this.stFreq(rs)-1)*64 + (this.PrevSuccess+this.NS2BSIndx[this.ctxNS(this.ctxSuffix(ctx))-1]+
+      this.HiBitsFlag+2*this.HB2Flag[this.stSym(rs)]+((this.RunLength>>26)&0x20));
+    let bs=this.BinSumm[idx];
+    if(this.rcGetShift(TOT_BITS)<bs){
+      this.FoundState=rs; this.stSetFreq(rs,this.stFreq(rs)+(this.stFreq(rs)<128?1:0));
+      this.SubLow=0; this.SubHigh=bs;
+      this.BinSumm[idx]=(bs+INTERVAL-GET_MEAN(bs,PERIOD_BITS,2))&0xffff;
+      this.PrevSuccess=1; this.RunLength++;
+    } else {
+      this.SubLow=bs; this.BinSumm[idx]=(bs-GET_MEAN(bs,PERIOD_BITS,2))&0xffff; this.SubHigh=BIN_SCALE;
+      this.InitEsc=ExpEscape[this.BinSumm[idx]>>10]; // Achtung: nach Update? nein, unrar nutzt bs vor... siehe Hinweis
+      this.NumMasked=1; this.CharMask[this.stSym(rs)]=this.EscCount; this.PrevSuccess=0; this.FoundState=0;
+    }
+  }
+  update1(ctx,p){
+    this.FoundState=p; this.stSetFreq(p,this.stFreq(p)+4); this.ctxSetSumm(ctx,this.ctxSumm(ctx)+4);
+    if(this.stFreq(p)>this.stFreq(p-6)){ this.stSwap(p,p-6); this.FoundState=p-6; if(this.stFreq(p-6)>MAX_FREQ)this.rescale(ctx); }
+  }
+  update2(ctx,p){
+    this.FoundState=p; this.stSetFreq(p,this.stFreq(p)+4); this.ctxSetSumm(ctx,this.ctxSumm(ctx)+4);
+    if(this.stFreq(p)>MAX_FREQ)this.rescale(ctx);
+    this.EscCount=(this.EscCount+1)&0xFF; this.RunLength=this.InitRL;
+  }
+  decodeSymbol1(ctx){
+    this.SubScale=this.ctxSumm(ctx); let p=this.ctxStats(ctx);
+    const count=this.rcGetCount(this.SubScale);
+    if(count>=this.SubScale)return false;
+    let HiCnt=this.stFreq(p);
+    if(count<HiCnt){
+      this.SubHigh=HiCnt; this.PrevSuccess=(2*HiCnt>this.SubScale)?1:0; this.RunLength+=this.PrevSuccess;
+      this.FoundState=p; HiCnt+=4; this.stSetFreq(p,HiCnt); this.ctxSetSumm(ctx,this.ctxSumm(ctx)+4);
+      if(HiCnt>MAX_FREQ)this.rescale(ctx); this.SubLow=0; return true;
+    } else if(this.FoundState===0)return false;
+    this.PrevSuccess=0; let i=this.ctxNS(ctx)-1;
+    while(true){ p+=6; HiCnt+=this.stFreq(p);
+      if(HiCnt>count)break;
+      if(--i===0){
+        this.HiBitsFlag=this.HB2Flag[this.stSym(this.FoundState)];
+        this.SubLow=HiCnt; this.CharMask[this.stSym(p)]=this.EscCount;
+        this.NumMasked=this.ctxNS(ctx); i=this.NumMasked-1; this.FoundState=0;
+        do{ p-=6; this.CharMask[this.stSym(p)]=this.EscCount; }while(--i);
+        this.SubHigh=this.SubScale; return true;
+      }
+    }
+    this.SubHigh=HiCnt; this.SubLow=HiCnt-this.stFreq(p); this.update1(ctx,p); return true;
+  }
+  makeEscFreq2(ctx,Diff){
+    let see;
+    const NumStats=this.ctxNS(ctx);
+    if(NumStats!==256){
+      const idx=this.NS2Indx[Diff-1];
+      const col=((Diff<this.ctxNS(this.ctxSuffix(ctx))-NumStats)?1:0)+2*((this.ctxSumm(ctx)<11*NumStats)?1:0)+
+        4*((this.NumMasked>Diff)?1:0)+this.HiBitsFlag;
+      see=this.SEE2[idx][col]; this.SubScale=this.see2Mean(see);
+    } else { see=this.DummySEE2; this.SubScale=1; }
+    return see;
+  }
+  decodeSymbol2(ctx){
+    let i=this.ctxNS(ctx)-this.NumMasked;
+    const see=this.makeEscFreq2(ctx,i);
+    const ps=[]; let p=this.ctxStats(ctx)-6; let HiCnt=0;
+    do{ do{ p+=6; }while(this.CharMask[this.stSym(p)]===this.EscCount); HiCnt+=this.stFreq(p); ps.push(p); }while(--i);
+    this.SubScale+=HiCnt;
+    const count=this.rcGetCount(this.SubScale);
+    if(count>=this.SubScale)return false;
+    let idx=0; p=ps[0];
+    if(count<HiCnt){
+      HiCnt=0; while((HiCnt+=this.stFreq(p))<=count){ idx++; p=ps[idx]; }
+      this.SubHigh=HiCnt; this.SubLow=HiCnt-this.stFreq(p);
+      this.see2Update(see); this.update2(ctx,p);
+    } else {
+      this.SubLow=HiCnt; this.SubHigh=this.SubScale; i=this.ctxNS(ctx)-this.NumMasked;
+      for(let j=0;j<i;j++)this.CharMask[this.stSym(ps[j])]=this.EscCount;
+      see.Summ=(see.Summ+this.SubScale)&0xffff; this.NumMasked=this.ctxNS(ctx);
+    }
+    return true;
+  }
+
+  decodeInit(readByte, escCharRef){
+    this.readByte=readByte;
+    let MaxOrder=this.readByte();
+    const Reset=(MaxOrder&0x20)!==0;
+    let MaxMB=0;
+    if(Reset)MaxMB=this.readByte();
+    else if(this.SubAllocatorSize===0)return {ok:false};
+    let escChar=escCharRef;
+    if(MaxOrder&0x40)escChar=this.readByte();
+    this.rcInit();
+    if(Reset){
+      MaxOrder=(MaxOrder&0x1f)+1;
+      if(MaxOrder>16)MaxOrder=16+(MaxOrder-16)*3;
+      if(MaxOrder===1){ this.stopSubAllocator(); return {ok:false}; }
+      this.startSubAllocator(MaxMB+1);
+      this.startModelRare(MaxOrder);
+    }
+    this.PPMEscChar=escChar;
+    return {ok:this.MinContext!==0, escChar};
+  }
+  decodeChar(){
+    if(this.MinContext<=this.pText||this.MinContext>this.HeapEnd)return -1;
+    if(this.ctxNS(this.MinContext)!==1){
+      if(this.ctxStats(this.MinContext)<=this.pText||this.ctxStats(this.MinContext)>this.HeapEnd)return -1;
+      if(!this.decodeSymbol1(this.MinContext))return -1;
+    } else this.decodeBinSymbol(this.MinContext);
+    this.rcDecode(this.SubLow,this.SubHigh);
+    while(!this.FoundState){
+      this.rcNormalize();
+      do{ this.OrderFall++; this.MinContext=this.ctxSuffix(this.MinContext);
+        if(this.MinContext<=this.pText||this.MinContext>this.HeapEnd)return -1;
+      }while(this.ctxNS(this.MinContext)===this.NumMasked);
+      if(!this.decodeSymbol2(this.MinContext))return -1;
+      this.rcDecode(this.SubLow,this.SubHigh);
+    }
+    const Symbol=this.stSym(this.FoundState);
+    if(!this.OrderFall && this.stSucc(this.FoundState)>this.pText)
+      this.MinContext=this.MaxContext=this.stSucc(this.FoundState);
+    else { this.updateModel(); if(this.EscCount===0)this.clearMask(); }
+    this.rcNormalize();
+    return Symbol;
+  }
+}
+function FIXED12(){return 12;}
+
+
+/* ===== Ende PPMd ===== */
+class BitInput{
+  constructor(buf){this.InBuf=buf;this.InAddr=0;this.InBit=0;}
+  getbits(){const b=this.InBuf;let bf=((b[this.InAddr]||0)<<16)|((b[this.InAddr+1]||0)<<8)|(b[this.InAddr+2]||0);bf>>>=(8-this.InBit);return bf&0xffff;}
+  addbits(bits){bits+=this.InBit;this.InAddr+=bits>>3;this.InBit=bits&7;}
+}
+// RarVM::ReadData — variable-length Ganzzahl
+function vmReadData(inp){
+  let Data=inp.getbits();
+  switch(Data&0xc000){
+    case 0: inp.addbits(6); return (Data>>10)&0xf;
+    case 0x4000:
+      if((Data&0x3c00)===0){ Data=(0xffffff00|((Data>>2)&0xff))>>>0; inp.addbits(14); }
+      else { Data=(Data>>6)&0xff; inp.addbits(10); }
+      return Data>>>0;
+    case 0x8000: inp.addbits(2); Data=inp.getbits(); inp.addbits(16); return Data>>>0;
+    default: inp.addbits(2); Data=(inp.getbits()<<16)>>>0; inp.addbits(16); Data=(Data|inp.getbits())>>>0; inp.addbits(16); return Data>>>0;
+  }
+}
+
+function makeDecodeTable(lengthTable,off,size){
+  const dec={MaxNum:size,DecodeLen:new Uint32Array(16),DecodePos:new Uint32Array(16),QuickBits:0,DecodeNum:new Uint16Array(size)};
+  const LengthCount=new Uint32Array(16);
+  for(let i=0;i<size;i++)LengthCount[lengthTable[off+i]&0xf]++;
+  LengthCount[0]=0;dec.DecodePos[0]=0;dec.DecodeLen[0]=0;let UpperLimit=0;
+  for(let i=1;i<16;i++){UpperLimit+=LengthCount[i];dec.DecodeLen[i]=(UpperLimit<<(16-i))>>>0;UpperLimit*=2;dec.DecodePos[i]=dec.DecodePos[i-1]+LengthCount[i-1];}
+  const CopyDecodePos=Uint32Array.from(dec.DecodePos);
+  for(let i=0;i<size;i++){const cbl=lengthTable[off+i]&0xf;if(cbl!==0){const last=CopyDecodePos[cbl];dec.DecodeNum[last]=i;CopyDecodePos[cbl]++;}}
+  dec.QuickBits=(size===NC30)?MAX_QUICK_DECODE_BITS:(MAX_QUICK_DECODE_BITS-3);
+  const q=1<<dec.QuickBits;dec.QuickLen=new Uint8Array(q);dec.QuickNum=new Uint16Array(q);let cur=1;
+  for(let Code=0;Code<q;Code++){const BitField=(Code<<(16-dec.QuickBits))>>>0;
+    while(cur<16&&BitField>=dec.DecodeLen[cur])cur++;dec.QuickLen[Code]=cur;
+    let Dist=BitField-dec.DecodeLen[cur-1];Dist>>>=(16-cur);let Pos;
+    if(cur<16&&(Pos=dec.DecodePos[cur]+Dist)<size)dec.QuickNum[Code]=dec.DecodeNum[Pos];else dec.QuickNum[Code]=0;}
+  return dec;
+}
+function decodeNumber(inp,dec){
+  const BitField=inp.getbits()&0xfffe;
+  if(BitField<dec.DecodeLen[dec.QuickBits]){const Code=BitField>>>(16-dec.QuickBits);inp.addbits(dec.QuickLen[Code]);return dec.QuickNum[Code];}
+  let Bits=15;for(let i=dec.QuickBits+1;i<15;i++)if(BitField<dec.DecodeLen[i]){Bits=i;break;}
+  inp.addbits(Bits);let Dist=BitField-dec.DecodeLen[Bits-1];Dist>>>=(16-Bits);let Pos=dec.DecodePos[Bits]+Dist;
+  if(Pos>=dec.MaxNum)Pos=0;return dec.DecodeNum[Pos];
+}
+
+// ---- RarVM Standardfilter ----
+const rawGet4=(M,i)=>((M[i]|(M[i+1]<<8)|(M[i+2]<<16)|(M[i+3]<<24))>>>0);
+const rawPut4=(v,M,i)=>{M[i]=v&0xff;M[i+1]=(v>>>8)&0xff;M[i+2]=(v>>>16)&0xff;M[i+3]=(v>>>24)&0xff;};
+const sbyte=x=>((x&0xff)^0x80)-0x80;
+const STDFILTERS=[[53,0xad576887,VMSF_E8],[57,0x3cd7e57e,VMSF_E8E9],[120,0x3769893f,VMSF_ITANIUM],[29,0x0e06077d,VMSF_DELTA],[149,0x1c2c5dc8,VMSF_RGB],[216,0xbc85e701,VMSF_AUDIO]];
+function vmPrepare(code){
+  let xor=0; for(let i=1;i<code.length;i++)xor^=code[i];
+  if((xor&0xff)!==code[0]) return VMSF_NONE;
+  const cc=crc32(code,code.length);
+  for(const[len,crc,type]of STDFILTERS) if(crc===cc&&len===code.length) return type;
+  return VMSF_NONE;
+}
+class RarVM{
+  constructor(){this.Mem=new Uint8Array(VM_MEMSIZE+4);}
+  itGet(D,BitPos,BitCount){let a=BitPos>>3,b=BitPos&7;let bf=(D[a]|(D[a+1]<<8)|(D[a+2]<<16)|(D[a+3]<<24))>>>0;bf>>>=b;return (bf&(0xffffffff>>>(32-BitCount)))>>>0;}
+  itSet(D,BitField,BitPos,BitCount){let a=BitPos>>3,b=BitPos&7;let mask=(~(((0xffffffff>>>(32-BitCount))<<b)>>>0))>>>0;BitField=(BitField<<b)>>>0;
+    for(let i=0;i<4;i++){D[a+i]=(D[a+i]&mask)|(BitField&0xff);mask=((mask>>>8)|0xff000000)>>>0;BitField>>>=8;}}
+  // liefert {off,size}: Position der gefilterten Daten in Mem
+  execute(Type,R){
+    const Mem=this.Mem, BlockSize=R[4]&VM_MEMMASK;
+    let ok=this.stdFilter(Type,R);
+    let off;
+    if(Type===VMSF_DELTA||Type===VMSF_RGB||Type===VMSF_AUDIO) off=(2*BlockSize>VM_MEMSIZE||!ok)?0:BlockSize;
+    else off=0;
+    return {off,size:BlockSize};
+  }
+  stdFilter(Type,R){
+    const Mem=this.Mem;
+    switch(Type){
+      case VMSF_E8: case VMSF_E8E9:{
+        const DataSize=R[4]>>>0, FileOffset=R[6]>>>0;
+        if(DataSize>VM_MEMSIZE||DataSize<4)return false;
+        const FileSize=0x1000000, cmp2=(Type===VMSF_E8E9)?0xe9:0xe8;
+        let i=0, CurPos=0; const lim=DataSize-4;
+        while(CurPos<lim){
+          const CurByte=Mem[i++]; CurPos++;
+          if(CurByte===0xe8||CurByte===cmp2){
+            const Offset=(CurPos+FileOffset)>>>0;
+            let Addr=rawGet4(Mem,i);
+            if(Addr&0x80000000){ if(((Addr+Offset)>>>0 & 0x80000000)===0) rawPut4((Addr+FileSize)>>>0,Mem,i); }
+            else { if(((Addr-FileSize)>>>0 & 0x80000000)!==0) rawPut4((Addr-Offset)>>>0,Mem,i); }
+            i+=4; CurPos+=4;
+          }
+        } return true; }
+      case VMSF_ITANIUM:{
+        const DataSize=R[4]>>>0; let FileOffset=R[6]>>>0;
+        if(DataSize>VM_MEMSIZE||DataSize<21)return false;
+        let CurPos=0, p=0; FileOffset>>>=4;
+        const Masks=[4,4,6,6,0,0,7,7,4,4,0,0,4,4,0,0];
+        while(CurPos<DataSize-21){
+          const Byte=(Mem[p]&0x1f)-0x10;
+          if(Byte>=0){ const CmdMask=Masks[Byte];
+            if(CmdMask!==0) for(let I=0;I<=2;I++) if(CmdMask&(1<<I)){
+              const StartPos=I*41+5;
+              if(this.itGet(Mem.subarray(p),StartPos+37,4)===5){
+                const Offset=this.itGet(Mem.subarray(p),StartPos+13,20);
+                this.itSet(Mem.subarray(p),(Offset-FileOffset)&0xfffff,StartPos+13,20);
+              }}}
+          p+=16; CurPos+=16; FileOffset=(FileOffset+1)>>>0;
+        } return true; }
+      case VMSF_DELTA:{
+        const DataSize=R[4]>>>0, Channels=R[0]>>>0, Border=DataSize*2; let SrcPos=0;
+        if(DataSize>VM_MEMSIZE/2||Channels>MAX3_UNPACK_CHANNELS||Channels===0)return false;
+        for(let ch=0;ch<Channels;ch++){let PrevByte=0;
+          for(let DestPos=DataSize+ch;DestPos<Border;DestPos+=Channels){PrevByte=(PrevByte-Mem[SrcPos++])&0xff;Mem[DestPos]=PrevByte;}}
+        return true; }
+      case VMSF_RGB:{
+        const DataSize=R[4]>>>0, Width=(R[0]-3)>>>0, PosR=R[1]>>>0;
+        if(DataSize>VM_MEMSIZE/2||DataSize<3||Width>DataSize||PosR>2)return false;
+        const dst=DataSize, Channels=3; let SrcPos=0;
+        for(let ch=0;ch<Channels;ch++){let PrevByte=0;
+          for(let I=ch;I<DataSize;I+=Channels){
+            let Pred;
+            if(I>=Width+3){const up=dst+I-Width,UB=Mem[up],ULB=Mem[up-3];const P=PrevByte+UB-ULB;
+              const pa=Math.abs(P-PrevByte),pb=Math.abs(P-UB),pc=Math.abs(P-ULB);
+              Pred=(pa<=pb&&pa<=pc)?PrevByte:(pb<=pc?UB:ULB);}
+            else Pred=PrevByte;
+            PrevByte=Mem[dst+I]=(Pred-Mem[SrcPos++])&0xff;}}
+        for(let I=PosR,Bd=DataSize-2;I<Bd;I+=3){const G=Mem[dst+I+1];Mem[dst+I]=(Mem[dst+I]+G)&0xff;Mem[dst+I+2]=(Mem[dst+I+2]+G)&0xff;}
+        return true; }
+      case VMSF_AUDIO:{
+        const DataSize=R[4]>>>0, Channels=R[0]>>>0, dst=DataSize; let SrcPos=0;
+        if(DataSize>VM_MEMSIZE/2||Channels>128||Channels===0)return false;
+        for(let ch=0;ch<Channels;ch++){
+          let PrevByte=0,PrevDelta=0; const Dif=new Array(7).fill(0);
+          let D1=0,D2=0,D3=0,K1=0,K2=0,K3=0,ByteCount=0;
+          for(let I=ch;I<DataSize;I+=Channels,ByteCount++){
+            D3=D2; D2=PrevDelta-D1; D1=PrevDelta;
+            let Pred=((8*PrevByte+K1*D1+K2*D2+K3*D3)>>3)&0xff;
+            const CurByte=Mem[SrcPos++];
+            Pred=(Pred-CurByte)&0xff; Mem[dst+I]=Pred;
+            PrevDelta=sbyte(Pred-PrevByte); PrevByte=Pred;
+            let Dv=sbyte(CurByte)<<3;
+            Dif[0]+=Math.abs(Dv); Dif[1]+=Math.abs(Dv-D1); Dif[2]+=Math.abs(Dv+D1);
+            Dif[3]+=Math.abs(Dv-D2); Dif[4]+=Math.abs(Dv+D2); Dif[5]+=Math.abs(Dv-D3); Dif[6]+=Math.abs(Dv+D3);
+            if((ByteCount&0x1f)===0){let MinDif=Dif[0],NumMinDif=0;Dif[0]=0;
+              for(let J=1;J<7;J++){if(Dif[J]<MinDif){MinDif=Dif[J];NumMinDif=J;}Dif[J]=0;}
+              switch(NumMinDif){case 1:if(K1>=-16)K1--;break;case 2:if(K1<16)K1++;break;
+                case 3:if(K2>=-16)K2--;break;case 4:if(K2<16)K2++;break;case 5:if(K3>=-16)K3--;break;case 6:if(K3<16)K3++;break;}}
+          }}
+        return true; }
+    }
+    return true;
+  }
+}
+
+class Unpack29{
+  constructor(destSize){this.dest=new Uint8Array(destSize);this.destSize=destSize;this.UnpPtr=0;
+    this.OldDist=[0,0,0,0];this.LastLength=0;this.PrevLowDist=0;this.LowDistRepCount=0;
+    this.UnpOldTable=new Uint8Array(HUFF_TABLE_SIZE30);this.BT={LD:null,DD:null,LDD:null,RD:null,BD:null};this.TablesRead3=false;
+    this.PrgStack=[]; this.Filters=[]; this.OldFilterLengths=[]; this.LastFilter=0; this.VM=new RarVM();
+    this.ppm=null; this.blockType='lz'; this.PPMEscChar=2;}
+  insertOldDist(d){this.OldDist[3]=this.OldDist[2];this.OldDist[2]=this.OldDist[1];this.OldDist[1]=this.OldDist[0];this.OldDist[0]=d;}
+  copyString(Length,Distance){let src=this.UnpPtr-Distance;const dst=this.dest,N=this.destSize;
+    if(Distance>this.UnpPtr){while(Length-->0&&this.UnpPtr<N)dst[this.UnpPtr++]=0;return;}
+    while(Length-->0){if(this.UnpPtr>=N)return;dst[this.UnpPtr++]=dst[src++];}}
+  readTables(inp){
+    const BitLength=new Uint8Array(BC30),Table=new Uint8Array(HUFF_TABLE_SIZE30);
+    inp.addbits((8-inp.InBit)&7);let BitField=inp.getbits();
+    if(BitField&0x8000){
+      this.blockType='ppm';
+      if(this.diag)this.diag.block('ppm',this.fileProduced||0);
+      if(!this.ppm)this.ppm=new ModelPPM();
+      const rb=()=>{const b=inp.InBuf[inp.InAddr]||0;inp.InAddr++;return b;};
+      const init=this.ppm.decodeInit(rb,this.PPMEscChar);
+      if(!init.ok)throw {code:'ppm'};
+      this.PPMEscChar=init.escChar; return true;
+    }
+    this.blockType='lz';
+    if(this.diag)this.diag.block('lz',this.fileProduced||0);
+    this.PrevLowDist=0;this.LowDistRepCount=0;
+    if(!(BitField&0x4000))this.UnpOldTable.fill(0);
+    inp.addbits(2);
+    for(let i=0;i<BC30;i++){const L=inp.getbits()>>>12;inp.addbits(4);
+      if(L===15){let z=inp.getbits()>>>12;inp.addbits(4);if(z===0)BitLength[i]=15;else{z+=2;while(z-->0&&i<BC30)BitLength[i++]=0;i--;}}
+      else BitLength[i]=L;}
+    this.BT.BD=makeDecodeTable(BitLength,0,BC30);
+    for(let i=0;i<HUFF_TABLE_SIZE30;){const Number=decodeNumber(inp,this.BT.BD);
+      if(Number<16){Table[i]=(Number+this.UnpOldTable[i])&0xf;i++;}
+      else if(Number<18){let N;if(Number===16){N=(inp.getbits()>>>13)+3;inp.addbits(3);}else{N=(inp.getbits()>>>9)+11;inp.addbits(7);}
+        if(i===0)throw {code:'corrupt'};while(N-->0&&i<HUFF_TABLE_SIZE30){Table[i]=Table[i-1];i++;}}
+      else{let N;if(Number===18){N=(inp.getbits()>>>13)+3;inp.addbits(3);}else{N=(inp.getbits()>>>9)+11;inp.addbits(7);}
+        while(N-->0&&i<HUFF_TABLE_SIZE30)Table[i++]=0;}}
+    this.TablesRead3=true;
+    this.BT.LD=makeDecodeTable(Table,0,NC30);this.BT.DD=makeDecodeTable(Table,NC30,DC30);
+    this.BT.LDD=makeDecodeTable(Table,NC30+DC30,LDC30);this.BT.RD=makeDecodeTable(Table,NC30+DC30+LDC30,RC30);
+    this.UnpOldTable.set(Table);return true;}
+  readEndOfBlock(inp){const BitField=inp.getbits();let NewTable,NewFile=false;
+    if(BitField&0x8000){NewTable=true;inp.addbits(1);}else{NewFile=true;NewTable=(BitField&0x4000)!==0;inp.addbits(2);}
+    this.TablesRead3=!NewTable;if(NewFile)return false;return this.readTables(inp);}
+  readVMCode(inp){
+    let FirstByte=inp.getbits()>>>8; inp.addbits(8);
+    let Length=(FirstByte&7)+1;
+    if(Length===7){Length=(inp.getbits()>>>8)+7;inp.addbits(8);}
+    else if(Length===8){Length=inp.getbits();inp.addbits(16);}
+    if(Length===0)return false;
+    const code=new Uint8Array(Length);
+    for(let i=0;i<Length;i++){code[i]=inp.getbits()>>>8;inp.addbits(8);}
+    return this.addVMCode(FirstByte,code);
+  }
+  addVMCode(FirstByte,code){
+    const buf=new Uint8Array(code.length+8);buf.set(code);const vin=new BitInput(buf);
+    let FiltPos;
+    if(FirstByte&0x80){FiltPos=vmReadData(vin);if(FiltPos===0){this.Filters=[];this.OldFilterLengths=[];this.PrgStack=[];}else FiltPos--;}
+    else FiltPos=this.LastFilter;
+    if(FiltPos>this.Filters.length||FiltPos>this.OldFilterLengths.length)return false;
+    this.LastFilter=FiltPos;
+    const NewFilter=(FiltPos===this.Filters.length);
+    const sf={BlockStart:0,BlockLength:0,Type:VMSF_NONE,InitR:[0,0,0,0,0,0,0],NextWindow:false};
+    if(NewFilter){this.Filters.push({Type:VMSF_NONE});this.OldFilterLengths.push(0);}
+    let BlockStart=vmReadData(vin);
+    if(FirstByte&0x40)BlockStart+=258;
+    if(this.streaming){ sf.BlockStart=(BlockStart+this.UnpPtr)&this.MaxWinMask;
+      sf.NextWindow=this.WrPtr!==this.UnpPtr && ((this.WrPtr-this.UnpPtr)&this.MaxWinMask)<=BlockStart; }
+    else sf.BlockStart=(BlockStart+this.UnpPtr)>>>0;
+    if(FirstByte&0x20){sf.BlockLength=vmReadData(vin);this.OldFilterLengths[FiltPos]=sf.BlockLength;}
+    else sf.BlockLength=(FiltPos<this.OldFilterLengths.length)?this.OldFilterLengths[FiltPos]:0;
+    sf.InitR[4]=sf.BlockLength;
+    if(FirstByte&0x10){const InitMask=vin.getbits()>>>9;vin.addbits(7);
+      for(let I=0;I<7;I++)if(InitMask&(1<<I))sf.InitR[I]=vmReadData(vin);}
+    if(NewFilter){
+      const VMCodeSize=vmReadData(vin);
+      if(VMCodeSize>=0x10000||VMCodeSize===0)return false;
+      const vmcode=new Uint8Array(VMCodeSize);
+      for(let i=0;i<VMCodeSize;i++){vmcode[i]=vin.getbits()>>>8;vin.addbits(8);}
+      this.Filters[FiltPos].Type=vmPrepare(vmcode);
+    }
+    sf.Type=this.Filters[FiltPos].Type;
+    this.PrgStack.push(sf);
+    return true;
+  }
+  readVMCodePPM(){
+    const p=this.ppm; let FirstByte=p.decodeChar(); if(FirstByte===-1)return false;
+    let Length=(FirstByte&7)+1;
+    if(Length===7){const b=p.decodeChar();if(b===-1)return false;Length=b+7;}
+    else if(Length===8){const b1=p.decodeChar(),b2=p.decodeChar();if(b1===-1||b2===-1)return false;Length=b1*256+b2;}
+    if(Length===0)return false;
+    const code=new Uint8Array(Length);
+    for(let i=0;i<Length;i++){const c=p.decodeChar();if(c===-1)return false;code[i]=c;}
+    return this.addVMCode(FirstByte,code);
+  }
+  applyFilters(){
+    if(this.PrgStack.length===0)return this.dest;
+    const out=new Uint8Array(this.destSize); let outPos=0, WrittenBorder=0;
+    const N=this.destSize, stack=this.PrgStack;
+    for(let I=0;I<stack.length;I++){
+      const flt=stack[I]; if(!flt)continue;
+      const BlockStart=flt.BlockStart, BlockLength=flt.BlockLength;
+      if(BlockStart>=WrittenBorder && BlockStart<N && BlockStart+BlockLength<=N){
+        if(WrittenBorder!==BlockStart){out.set(this.dest.subarray(WrittenBorder,BlockStart),outPos);outPos+=BlockStart-WrittenBorder;WrittenBorder=BlockStart;}
+        if(BlockLength>0 && BlockLength<=VM_MEMSIZE){
+          this.VM.Mem.set(this.dest.subarray(BlockStart,BlockStart+BlockLength),0);
+          let R=flt.InitR.slice(); R[6]=outPos>>>0;
+          let res=this.VM.execute(flt.Type,R);
+          let fdata=this.VM.Mem.subarray(res.off,res.off+res.size), fsize=res.size;
+          // gestapelte Filter auf denselben Block
+          while(I+1<stack.length){const nx=stack[I+1];
+            if(!nx||nx.BlockStart!==BlockStart||nx.BlockLength!==fsize)break;
+            this.VM.Mem.set(fdata,0); R=nx.InitR.slice(); R[6]=outPos>>>0;
+            res=this.VM.execute(nx.Type,R); fdata=this.VM.Mem.subarray(res.off,res.off+res.size); fsize=res.size; I++;}
+          out.set(fdata.subarray(0,fsize),outPos); outPos+=fsize;
+          WrittenBorder=BlockStart+BlockLength;
+        }
+      }
+    }
+    if(WrittenBorder<N){out.set(this.dest.subarray(WrittenBorder,N),outPos);outPos+=N-WrittenBorder;}
+    return out.subarray(0,outPos);
+  }
+  run(packed,solid,fileEnd=null){
+    const buf=new Uint8Array(packed.length+8);buf.set(packed,0);const inp=new BitInput(buf);this.inp=inp;
+    if(!solid){this.TablesRead3=false;this.UnpOldTable.fill(0);this.PPMEscChar=2;this.blockType='lz';
+      this.OldDist=[0,0,0,0];this.LastLength=0;this.PrevLowDist=0;this.LowDistRepCount=0;
+      this.Filters=[];this.OldFilterLengths=[];this.LastFilter=0;}
+    // Filter-Definitionen (Filters/OldFilterLengths/LastFilter) persistieren bei RAR3-Solid
+    // (InitFilters30 setzt nur bei !Solid zurueck); PrgStack wird pro Datei geleert.
+    this.PrgStack=[];
+    const end=(fileEnd==null)?this.destSize:fileEnd; const fileStart=this.UnpPtr;
+    if(!solid||!this.TablesRead3)this.readTables(inp);
+    let Bits;
+    while(true){
+      if(this.UnpPtr>=end)break;
+      if(this.blockType==='ppm'){
+        const ch=this.ppm.decodeChar();
+        if(ch===-1)break;
+        if(ch===this.PPMEscChar){
+          const nx=this.ppm.decodeChar();
+          if(nx===-1)break;
+          if(nx===0){ if(!this.readTables(inp))break; continue; }
+          if(nx===2)break;
+          if(nx===3){ if(!this.readVMCodePPM())break; continue; }
+          if(nx===4){ let dist=0; let bad=false; for(let i=0;i<3;i++){const c=this.ppm.decodeChar(); if(c===-1){bad=true;break;} dist=(dist<<8)+c;} if(bad)break; const len=this.ppm.decodeChar(); if(len===-1)break; this.copyString(len+32,dist+2); continue; }
+          if(nx===5){ const len=this.ppm.decodeChar(); if(len===-1)break; this.copyString(len+4,1); continue; }
+        }
+        this.dest[this.UnpPtr++]=ch; continue;
+      }
+      const Number=decodeNumber(inp,this.BT.LD);
+      if(Number<256){this.dest[this.UnpPtr++]=Number;continue;}
+      if(Number>=271){let n=Number-271;let Length=LDecode[n]+3;
+        if((Bits=LBits[n])>0){Length+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        const DistNumber=decodeNumber(inp,this.BT.DD);let Distance=DDecode[DistNumber]+1;
+        if((Bits=DBits[DistNumber])>0){
+          if(DistNumber>9){
+            if(Bits>4){Distance+=((inp.getbits()>>>(20-Bits))<<4);inp.addbits(Bits-4);}
+            if(this.LowDistRepCount>0){this.LowDistRepCount--;Distance+=this.PrevLowDist;}
+            else{const LowDist=decodeNumber(inp,this.BT.LDD);
+              if(LowDist===16){this.LowDistRepCount=LOW_DIST_REP_COUNT-1;Distance+=this.PrevLowDist;}
+              else{Distance+=LowDist;this.PrevLowDist=LowDist;}}
+          }else{Distance+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}}
+        if(Distance>=0x2000){Length++;if(Distance>=0x40000)Length++;}
+        this.insertOldDist(Distance);this.LastLength=Length;this.copyString(Length,Distance);continue;}
+      if(Number===256){if(!this.readEndOfBlock(inp))break;continue;}
+      if(Number===257){if(!this.readVMCode(inp))break;continue;}
+      if(Number===258){if(this.LastLength!==0)this.copyString(this.LastLength,this.OldDist[0]);continue;}
+      if(Number<263){const DistNum=Number-259;const Distance=this.OldDist[DistNum];
+        for(let i=DistNum;i>0;i--)this.OldDist[i]=this.OldDist[i-1];this.OldDist[0]=Distance;
+        const LengthNumber=decodeNumber(inp,this.BT.RD);let Length=LDecode[LengthNumber]+2;
+        if((Bits=LBits[LengthNumber])>0){Length+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        this.LastLength=Length;this.copyString(Length,Distance);continue;}
+      if(Number<272){let n=Number-263;let Distance=SDDecode[n]+1;
+        if((Bits=SDBits[n])>0){Distance+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        this.insertOldDist(Distance);this.LastLength=2;this.copyString(2,Distance);continue;}
+    }
+    // Solid-PPM: abschliessenden Stream-Ende-Marker (Escape->nx) dekodieren.
+    // Bei Dateien < Fenstergroesse laeuft unrars Schleife bis nx==2; diese DecodeChar-
+    // Aufrufe aktualisieren das PPM-Modell fuer die naechste Solid-Datei.
+    if(fileEnd!=null && this.blockType==='ppm'){
+      const ch=this.ppm.decodeChar();
+      if(ch===this.PPMEscChar){
+        const nx=this.ppm.decodeChar();
+        if(nx===0){ this.readTables(inp); }
+        // nx===2 (EOF) / nx===-1: Modell ist aktualisiert, nichts weiter
+      }
+    }
+    if(fileEnd==null)return this.applyFilters();
+    return this.applyFiltersRegion(fileStart,end);
+  }
+  applyFiltersRegion(fileStart,end){
+    // Nicht-destruktiv: liest ROHE Fensterdaten (dest bleibt fuer folgende Solid-Dateien roh),
+    // gibt gefilterte Kopie der Region [fileStart,end) zurueck.
+    const stack=this.PrgStack;
+    if(stack.length===0) return this.dest.slice(fileStart,end);
+    const out=new Uint8Array(end-fileStart); let outPos=0, WrittenBorder=fileStart;
+    for(let I=0;I<stack.length;I++){
+      const flt=stack[I]; if(!flt)continue;
+      const BS=flt.BlockStart, BL=flt.BlockLength;
+      if(BS>=WrittenBorder && BS<end && BS+BL<=end){
+        if(WrittenBorder!==BS){out.set(this.dest.subarray(WrittenBorder,BS),outPos);outPos+=BS-WrittenBorder;WrittenBorder=BS;}
+        if(BL>0 && BL<=VM_MEMSIZE){
+          this.VM.Mem.set(this.dest.subarray(BS,BS+BL),0);
+          let R=flt.InitR.slice(); R[6]=outPos>>>0;
+          let res=this.VM.execute(flt.Type,R);
+          let fdata=this.VM.Mem.subarray(res.off,res.off+res.size), fsize=res.size;
+          while(I+1<stack.length){const nx=stack[I+1]; if(!nx||nx.BlockStart!==BS||nx.BlockLength!==fsize)break;
+            this.VM.Mem.set(fdata,0); R=nx.InitR.slice(); R[6]=outPos>>>0; res=this.VM.execute(nx.Type,R); fdata=this.VM.Mem.subarray(res.off,res.off+res.size); fsize=res.size; I++;}
+          out.set(fdata.subarray(0,fsize),outPos); outPos+=fsize;
+          WrittenBorder=BS+BL;
+        }
+      }
+    }
+    if(WrittenBorder<end){out.set(this.dest.subarray(WrittenBorder,end),outPos);outPos+=end-WrittenBorder;}
+    return out.subarray(0,outPos);
+  }
+  // ===== Streaming: 4-MB-Ringpuffer + Flush-Callback (konstanter Speicher) =====
+  _initStream(){
+    this.streaming=true;
+    this.MaxWinSize=0x400000; this.MaxWinMask=this.MaxWinSize-1;
+    this.Window=new Uint8Array(this.MaxWinSize);
+    this.WrPtr=0; this.PrevPtr=0; this.FirstWinDone=false;
+    this.WrittenFileSize=0; this.DestUnpSize=0; this.sink=null; this.fileProduced=0;
+  }
+  putByteS(b){this.Window[this.UnpPtr]=b;this.UnpPtr=(this.UnpPtr+1>=this.MaxWinSize)?0:this.UnpPtr+1;this.fileProduced++;}
+  copyStringS(Length,Distance){
+    const W=this.Window,MWS=this.MaxWinSize,MASK=this.MaxWinMask;
+    let SrcPtr=this.UnpPtr-Distance;
+    if(Distance>this.UnpPtr){
+      SrcPtr+=MWS;
+      if(Distance>MWS||!this.FirstWinDone){
+        while(Length-->0){W[this.UnpPtr]=0;this.UnpPtr=(this.UnpPtr+1>=MWS)?0:this.UnpPtr+1;this.fileProduced++;}
+        return;
+      }
+    }
+    while(Length-->0){W[this.UnpPtr]=W[SrcPtr&MASK];SrcPtr++;this.UnpPtr=(this.UnpPtr+1>=MWS)?0:this.UnpPtr+1;this.fileProduced++;}
+  }
+  async unpWriteData(data,start,size){
+    if(this.WrittenFileSize>=this.DestUnpSize){this.WrittenFileSize+=size;return;}
+    let ws=size; const left=this.DestUnpSize-this.WrittenFileSize;
+    if(ws>left)ws=left;
+    if(ws>0)await this.sink(data.slice(start,start+ws));   // Kopie + Backpressure (async Sink)
+    this.WrittenFileSize+=size;
+  }
+  async unpWriteArea(startPtr,endPtr){
+    const MWS=this.MaxWinSize,W=this.Window;
+    if(endPtr<startPtr){ await this.unpWriteData(W,startPtr,MWS-startPtr); await this.unpWriteData(W,0,endPtr); }
+    else if(endPtr>startPtr){ await this.unpWriteData(W,startPtr,endPtr-startPtr); }
+  }
+  async unpWriteBuf30(){
+    if(this.diag)this.diag.flushes++;
+    let WrittenBorder=this.WrPtr;
+    let WriteSize=(this.UnpPtr-WrittenBorder)&this.MaxWinMask;
+    const stack=this.PrgStack,W=this.Window,MWS=this.MaxWinSize;
+    for(let I=0;I<stack.length;I++){
+      const flt=stack[I]; if(!flt)continue;
+      if(flt.NextWindow){flt.NextWindow=false;continue;}
+      const BlockStart=flt.BlockStart, BlockLength=flt.BlockLength;
+      if(((BlockStart-WrittenBorder)&this.MaxWinMask)<WriteSize){
+        if(WrittenBorder!==BlockStart){
+          await this.unpWriteArea(WrittenBorder,BlockStart);
+          WrittenBorder=BlockStart;
+          WriteSize=(this.UnpPtr-WrittenBorder)&this.MaxWinMask;
+        }
+        if(BlockLength<=WriteSize){
+          const BlockEnd=(BlockStart+BlockLength)&this.MaxWinMask;
+          if(BlockStart<BlockEnd||BlockEnd===0){ this.VM.Mem.set(W.subarray(BlockStart,BlockStart+BlockLength),0); }
+          else{ const first=MWS-BlockStart; this.VM.Mem.set(W.subarray(BlockStart,MWS),0); this.VM.Mem.set(W.subarray(0,BlockEnd),first); }
+          let R=flt.InitR.slice(); R[6]=this.WrittenFileSize>>>0;
+          if(this.diag)this.diag.filter(flt.Type,this.WrittenFileSize,BlockLength,R[6]);
+          let res=this.VM.execute(flt.Type,R);
+          let fdata=this.VM.Mem.subarray(res.off,res.off+res.size), fsize=res.size;
+          stack[I]=null;
+          while(I+1<stack.length){ const nx=stack[I+1];
+            if(!nx||nx.BlockStart!==BlockStart||nx.BlockLength!==fsize||nx.NextWindow)break;
+            this.VM.Mem.set(fdata,0); R=nx.InitR.slice(); R[6]=this.WrittenFileSize>>>0;
+            res=this.VM.execute(nx.Type,R); fdata=this.VM.Mem.subarray(res.off,res.off+res.size); fsize=res.size; I++; stack[I]=null; }
+          await this.unpWriteData(fdata,0,fsize);
+          WrittenBorder=BlockEnd;
+          WriteSize=(this.UnpPtr-WrittenBorder)&this.MaxWinMask;
+        }else{
+          for(let J=I;J<stack.length;J++){const f2=stack[J];if(f2&&f2.NextWindow)f2.NextWindow=false;}
+          this.WrPtr=WrittenBorder; return;
+        }
+      }
+    }
+    await this.unpWriteArea(WrittenBorder,this.UnpPtr);
+    this.WrPtr=this.UnpPtr;
+  }
+  async runStream(packed,solid,destUnpSize,sink){
+    if(!this.streaming)this._initStream();
+    const inp=new BitInput(packed); this.inp=inp;   // keine +8-Kopie (BitInput schuetzt mit ||0)
+    this.sink=sink; this.DestUnpSize=destUnpSize; this.WrittenFileSize=0; this.fileProduced=0;
+    if(!solid){
+      this.TablesRead3=false;this.UnpOldTable.fill(0);this.PPMEscChar=2;this.blockType='lz';
+      this.OldDist=[0,0,0,0];this.LastLength=0;this.PrevLowDist=0;this.LowDistRepCount=0;
+      this.Filters=[];this.OldFilterLengths=[];this.LastFilter=0;
+      this.UnpPtr=0;this.WrPtr=0;this.PrevPtr=0;this.FirstWinDone=false;
+    }
+    this.PrgStack=[];
+    if(!solid||!this.TablesRead3)this.readTables(inp);
+    let Bits;
+    while(true){
+      this.FirstWinDone=this.FirstWinDone||(this.PrevPtr>this.UnpPtr);
+      this.PrevPtr=this.UnpPtr;
+      if(((this.WrPtr-this.UnpPtr)&this.MaxWinMask)<=MAX3_INC_LZ_MATCH && this.WrPtr!==this.UnpPtr){
+        await this.unpWriteBuf30();
+        if(this.WrittenFileSize>this.DestUnpSize)return;
+      }
+      if(this.fileProduced>=destUnpSize){
+        if(this.blockType==='ppm'){ const ch=this.ppm.decodeChar(); if(ch===this.PPMEscChar){ const nx=this.ppm.decodeChar(); if(nx===0)this.readTables(inp); } }
+        break;
+      }
+      if(this.blockType==='ppm'){
+        const ch=this.ppm.decodeChar();
+        if(ch===-1){if(this.diag)this.diag.stop('ppm:ch===-1 (Range-Decoder-Ende)',this);break;}
+        if(ch===this.PPMEscChar){
+          const nx=this.ppm.decodeChar();
+          if(nx===-1){if(this.diag)this.diag.stop('ppm:nx===-1',this);break;}
+          if(nx===0){ if(!this.readTables(inp)){if(this.diag)this.diag.stop('ppm:readTables=false (NewFile)',this);break;} continue; }
+          if(nx===2){if(this.diag)this.diag.stop('ppm:nx===2 (PPM-Stop)',this);break;}
+          if(nx===3){ if(this.diag)this.diag.n3++; if(!this.readVMCodePPM()){if(this.diag)this.diag.stop('ppm:readVMCodePPM=false',this);break;} continue; }
+          if(nx===4){ let dist=0;let bad=false;for(let i=0;i<3;i++){const c=this.ppm.decodeChar();if(c===-1){bad=true;break;}dist=(dist<<8)+c;}if(bad){if(this.diag)this.diag.stop('ppm:nx4 dist eof',this);break;}const len=this.ppm.decodeChar();if(len===-1){if(this.diag)this.diag.stop('ppm:nx4 len eof',this);break;}if(this.diag){this.diag.n4++;this.diag.ppmOp(this.fileProduced,'nx4',len+32,dist+2);}this.copyStringS(len+32,dist+2);continue;}
+          if(nx===5){const len=this.ppm.decodeChar();if(len===-1){if(this.diag)this.diag.stop('ppm:nx5 len eof',this);break;}if(this.diag){this.diag.n5++;this.diag.ppmOp(this.fileProduced,'nx5',len+4,1);}this.copyStringS(len+4,1);continue;}
+          if(this.diag)this.diag.n1++;
+        }
+        this.putByteS(ch); continue;
+      }
+      const Number=decodeNumber(inp,this.BT.LD);
+      if(Number<256){this.putByteS(Number);continue;}
+      if(Number>=271){let n=Number-271;let Length=LDecode[n]+3;
+        if((Bits=LBits[n])>0){Length+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        const DistNumber=decodeNumber(inp,this.BT.DD);let Distance=DDecode[DistNumber]+1;
+        if((Bits=DBits[DistNumber])>0){
+          if(DistNumber>9){
+            if(Bits>4){Distance+=((inp.getbits()>>>(20-Bits))<<4);inp.addbits(Bits-4);}
+            if(this.LowDistRepCount>0){this.LowDistRepCount--;Distance+=this.PrevLowDist;}
+            else{const LowDist=decodeNumber(inp,this.BT.LDD);
+              if(LowDist===16){this.LowDistRepCount=LOW_DIST_REP_COUNT-1;Distance+=this.PrevLowDist;}
+              else{Distance+=LowDist;this.PrevLowDist=LowDist;}}
+          }else{Distance+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}}
+        if(Distance>=0x2000){Length++;if(Distance>=0x40000)Length++;}
+        this.insertOldDist(Distance);this.LastLength=Length;this.copyStringS(Length,Distance);continue;}
+      if(Number===256){if(!this.readEndOfBlock(inp)){if(this.diag)this.diag.stop('lz:readEndOfBlock=false (NewFile-Bit)',this);break;}continue;}
+      if(Number===257){if(!this.readVMCode(inp)){if(this.diag)this.diag.stop('lz:readVMCode=false',this);break;}continue;}
+      if(Number===258){if(this.LastLength!==0)this.copyStringS(this.LastLength,this.OldDist[0]);continue;}
+      if(Number<263){const DistNum=Number-259;const Distance=this.OldDist[DistNum];
+        for(let i=DistNum;i>0;i--)this.OldDist[i]=this.OldDist[i-1];this.OldDist[0]=Distance;
+        const LengthNumber=decodeNumber(inp,this.BT.RD);let Length=LDecode[LengthNumber]+2;
+        if((Bits=LBits[LengthNumber])>0){Length+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        this.LastLength=Length;this.copyStringS(Length,Distance);continue;}
+      if(Number<272){let n=Number-263;let Distance=SDDecode[n]+1;
+        if((Bits=SDBits[n])>0){Distance+=inp.getbits()>>>(16-Bits);inp.addbits(Bits);}
+        this.insertOldDist(Distance);this.LastLength=2;this.copyStringS(2,Distance);continue;}
+    }
+    await this.unpWriteBuf30();   // finaler Flush (Rest bis DestUnpSize)
+  }
+}
+function unpack29(packed,unpSize,solid=false){return new Unpack29(unpSize).run(packed,solid);}
+// Solid-Gruppe: files=[{data,unpSize,method,solid}] in Reihenfolge; gibt Array von Uint8Array je Datei zurück.
+function unpackSolid(files){
+  const total=files.reduce((a,f)=>a+f.unpSize,0);
+  const u=new Unpack29(total); const out=[]; let cum=0;
+  for(const f of files){
+    if(f.method===0x30){ u.dest.set(f.data.subarray(0,f.unpSize),cum); u.UnpPtr=cum+f.unpSize; out.push(u.dest.subarray(cum,cum+f.unpSize)); cum+=f.unpSize; continue; }
+    const seg=u.run(f.data, f.solid, cum+f.unpSize);
+    out.push(seg); cum+=f.unpSize;
+  }
+  return out;
+}
+
+// ---- Streaming-Varianten (4-MB-Ringpuffer, konstanter Speicher; sink erhaelt Uint8Array-Chunks) ----
+// unpack29Stream(packed, unpSize, solid, sink): dekodiert eine Datei streamend.
+async function unpack29Stream(packed,unpSize,solid,sink){
+  const u=new Unpack29(0); u._initStream(); await u.runStream(packed,solid,unpSize,sink); return u;
+}
+// unpackSolidStream(files, sink): Solid-Gruppe streamend; sink(fileIndex, chunk) pro Datei.
+async function unpackSolidStream(files,sink){
+  const u=new Unpack29(0); u._initStream();
+  for(let idx=0;idx<files.length;idx++){ const f=files[idx];
+    if(f.method===0x30){
+      // Store: Rohbytes ins Fenster (fuer Folge-Matches) und an den Sink
+      u.PrgStack=[]; u.DestUnpSize=f.unpSize; u.WrittenFileSize=0; u.fileProduced=0; u.sink=c=>sink(idx,c);
+      const data=f.data;
+      for(let i=0;i<f.unpSize;i++){ u.putByteS(data[i]);
+        if(((u.WrPtr-u.UnpPtr)&u.MaxWinMask)<=MAX3_INC_LZ_MATCH && u.WrPtr!==u.UnpPtr) await u.unpWriteBuf30(); }
+      await u.unpWriteBuf30();
+    } else {
+      await u.runStream(f.data, f.solid, f.unpSize, c=>sink(idx,c));
+    }
+  }
+  return u;
+}
+
+
+/* =========================================================================
  *  RAR4-Parser (lazy, slice-basiert)
  * =======================================================================*/
 const rd16=(b,o)=>b[o]|(b[o+1]<<8);
@@ -332,26 +1517,36 @@ async function parseRar(file){
   const size=file.size;
   const blocks=[{type:'marker',start:0,len:7,label:'Marker (Rar!)'}];
   const files=[];
+  let headerEncrypted=false;
   let off=7;
   while(off+7<=size){
     const base=await readAt(file,off,Math.min(11,size-off));
     const htype=base[2], flags=rd16(base,3), hsize=rd16(base,5);
     if(hsize<7)break;
+    // -hp: Haupt-Header-Flag MHD_PASSWORD (0x0080) => alle Folge-Header sind AES-verschlüsselt.
+    // Ohne Passwort-basierte Header-Entschlüsselung sind Datei-Köpfe unlesbar (Parser blind).
+    if(htype===0x73&&(flags&0x0080)){
+      headerEncrypted=true;
+      blocks.push({type:'header',start:off,len:hsize,label:'Archiv-Kopf (verschlüsselte Header)'});
+      break;
+    }
     if(htype===0x74){ // FILE
       const hdr=await readAt(file,off,Math.min(hsize,size-off));
       let packSize=rd32(hdr,7);
-      const unpSize=rd32(hdr,11);
+      let unpSize=rd32(hdr,11);
       const fileCrc=rd32(hdr,16);
+      const unpVer=hdr[24];
       const method=hdr[25];
       const nameSize=rd16(hdr,26);
       let q=32;
-      if(flags&0x100){packSize+=rd32(hdr,32)*0x100000000;q=40;}
+      if(flags&0x100){packSize+=rd32(hdr,32)*0x100000000;unpSize+=rd32(hdr,36)*0x100000000;q=40;}
       const nameBytes=hdr.subarray(q,q+nameSize);q+=nameSize;
       let name;try{name=new TextDecoder('utf-8',{fatal:false}).decode(nameBytes);}catch{name='(?)';}
       const salt=(flags&0x400)?hdr.subarray(q,q+8).slice():null;
       const encrypted=!!(flags&0x04);
+      const solid=!!(flags&0x10);
       const dataOffset=off+hsize;
-      const entry={name,method,packSize,unpSize,fileCrc,encrypted,salt,dataOffset,idx:files.length};
+      const entry={name,method,unpVer,packSize,unpSize,fileCrc,encrypted,solid,salt,dataOffset,idx:files.length};
       files.push(entry);
       blocks.push({type:'fhead',start:off,len:hsize,label:`Datei-Kopf · ${name}`});
       blocks.push({type:encrypted?'enc':'plain',start:dataOffset,len:packSize,label:`Daten · ${name}`,entry});
@@ -368,23 +1563,239 @@ async function parseRar(file){
       if(htype===0x7b)break;
     }
   }
-  return {blocks,files,size};
+  return {blocks,files,size,headerEncrypted};
+}
+
+/* Solid-Gruppen: fortlaufende Laeufe, in denen jede Folge-Datei solid=true ist.
+ * Eine Solid-Datei braucht das dekomprimierte Fenster ihrer Vorgaenger, daher wird
+ * die ganze Gruppe auf einmal via unpackSolid dekodiert und pro Gruppe gecacht. */
+const solidCache=new Map();
+function computeSolidGroups(files){
+  let cur=null;
+  for(const e of files){
+    if(e.solid && cur){ cur.push(e); } else { cur=[e]; }
+    e._group=cur; e._groupPos=cur.length-1;
+  }
 }
 
 async function extract(file,entry,password){
-  const data=await readAt(file,entry.dataOffset,entry.packSize);
-  if(entry.method!==0x30)throw {code:'compressed'};
-  let plain;
-  if(entry.encrypted){
-    if(!password)throw {code:'nopw'};
-    const {key,iv}=deriveKey(password,entry.salt);
-    const dec=await decryptCBC(key,iv,data);
-    plain=dec.subarray(0,entry.unpSize);
-  }else{
-    plain=data.subarray(0,entry.unpSize);
+  const group=entry._group||[entry];
+  const solidGroup = group.length>1 || entry.solid;
+  if(!solidGroup){
+    // Einzeldatei
+    let packed=await readAt(file,entry.dataOffset,entry.packSize);
+    if(entry.encrypted){
+      if(!password)throw {code:'nopw'};
+      packed=await decryptStreamForEntry(password,entry,packed);   // AES (RAR3) oder Crypt20 (RAR2.0)
+    }
+    let plain;
+    if(entry.method===0x30) plain=packed.subarray(0,entry.unpSize);
+    else if(entry.unpVer&&entry.unpVer<29) throw {code:'oldpack',ver:entry.unpVer}; // RAR2.0-Kompression: unpack20 nicht implementiert
+    else plain=unpack29(packed,entry.unpSize,false); // wirft {code:'ppm'}/{code:'vm'}/{code:'corrupt'}
+    return {plain,crcOk:crc32(plain)===entry.fileCrc};
   }
-  const crcOk=crc32(plain)===entry.fileCrc;
-  return {plain,crcOk};
+  // Solid-Gruppe: komplett dekodieren (Fenster/Tabellen/PPM-Modell/Filter werden fortgefuehrt)
+  const gid=group[0].dataOffset;
+  let segs=solidCache.get(gid);
+  if(!segs){
+    const input=[];
+    for(const e of group){
+      let packed=await readAt(file,e.dataOffset,e.packSize);
+      if(e.encrypted){
+        if(!password)throw {code:'nopw'};
+        packed=await decryptStreamForEntry(password,e,packed);   // je Datei eigenes Verfahren/Salt
+      }
+      input.push({data:packed,unpSize:e.unpSize,method:e.method,solid:e.solid});
+    }
+    segs=unpackSolid(input);                          // Array je Datei
+    solidCache.set(gid,segs);
+  }
+  const plain=segs[entry._groupPos];
+  return {plain,crcOk:crc32(plain)===entry.fileCrc};
+}
+
+/* Streamt eine grosse Datei direkt auf die Platte (writable = FileSystemWritableFileStream).
+ * Haelt nie die ganze Ausgabe im Speicher: 4-MB-Fenster + inkrementeller CRC. */
+/* Streamende Extraktion in eine Senke `sink(chunk)` (Platte oder Blob), mit
+ * optionalem Fortschritts-Callback. Store-Dateien werden vollständig chunkweise
+ * gelesen, entschlüsselt und geschrieben (Speicher ~Chunk-Grösse); komprimierte
+ * und solide Dateien werden entschlüsselt und dann streamend entpackt. */
+async function streamExtract(file, entry, password, sink, onProgress){
+  let c=crc32Init(), written=0;
+  const emit=async(chunk)=>{ c=crc32Update(c,chunk); written+=chunk.length; await sink(chunk); if(onProgress)onProgress(written); };
+  const group=entry._group||[entry];
+  const solidGroup = group.length>1 || entry.solid;
+  const CH=4*1048576;
+  if(!solidGroup){
+    if(entry.method===0x30){
+      // STORE: nichts zu dekomprimieren -> lesen + (falls verschlüsselt) entschlüsseln + schreiben, alles chunkweise
+      let dec=null;
+      if(entry.encrypted){ if(!password)throw {code:'nopw'}; dec=await makeDecryptor(password,entry); }
+      let remaining=entry.unpSize;
+      for(let o=0;o<entry.packSize && remaining>0;o+=CH){
+        const len=Math.min(CH, entry.packSize-o);
+        let chunk=await readAt(file, entry.dataOffset+o, len);
+        if(dec) chunk=await dec.chunk(chunk);
+        if(chunk.length>remaining) chunk=chunk.subarray(0,remaining);   // AES-/Block-Padding am Ende abschneiden
+        remaining-=chunk.length;
+        await emit(chunk);
+      }
+    } else if(entry.unpVer&&entry.unpVer<29){ throw {code:'oldpack',ver:entry.unpVer}; }
+    else {
+      let packed=await readAt(file,entry.dataOffset,entry.packSize);
+      if(entry.encrypted){ if(!password)throw {code:'nopw'}; packed=await decryptInPlace(password,entry,packed); }
+      await unpack29Stream(packed, entry.unpSize, false, emit);
+    }
+  } else {
+    const input=[];
+    for(const e of group){ let packed=await readAt(file,e.dataOffset,e.packSize);
+      if(e.encrypted){ if(!password)throw {code:'nopw'}; packed=await decryptInPlace(password,e,packed); }
+      input.push({data:packed,unpSize:e.unpSize,method:e.method,solid:e.solid}); }
+    const target=entry._groupPos;
+    await unpackSolidStream(input, (idx,chunk)=> idx===target ? emit(chunk) : undefined);
+  }
+  return { crcOk: crc32Final(c)===entry.fileCrc, written };
+}
+
+/* =========================================================================
+ *  Debug / Diagnose — Kennzahlen zu einer Datei, ohne Inhalt preiszugeben:
+ *  nur Struktur, Krypto-Hex-Präfix und Segment-CRCs. Die Segment-CRCs lassen
+ *  sich mit einer separat (via unrar/WinRAR) entpackten Referenz abgleichen,
+ *  um eine Abweichung auf ein 256-MB-Segment einzugrenzen.
+ * =======================================================================*/
+const TOOL_VERSION='2026-rar34-v13 (PPMd SEE2 fix, verifiziert an 3.13 GB)';
+const DIAG_SEG=1048576;   // 1-MB-Segmente für feine Lokalisierung
+let lastDiag=null;   // {outTotal, crc, segs, segSize} der letzten Voll-Diagnose — für Referenz-Abgleich
+const hex8=n=>(n>>>0).toString(16).padStart(8,'0');
+const hexBytes=u=>[...u].map(x=>x.toString(16).padStart(2,'0')).join(' ');
+function makeDiag(){
+  return { blocks:[], tail:[], blockCount:0, filters:{}, filterSamples:[], flushes:0, filterCount:0, exit:null, exitPos:0, exitInAddr:0, exitInBit:0, exitBlock:'',
+    stop(reason,u){ if(this.exit)return; this.exit=reason; this.exitPos=u.fileProduced; this.exitInAddr=u.inp?u.inp.InAddr:0; this.exitInBit=u.inp?u.inp.InBit:0; this.exitBlock=u.blockType; },
+    block(type,at){ this.blockCount++; if(this.blocks.length<40)this.blocks.push({type,at}); this.tail.push({type,at}); if(this.tail.length>24)this.tail.shift(); },
+    n1:0,n3:0,n4:0,n5:0,nLit:0, ppmCopies:[],
+    ppmOp(pos,kind,len,dist){ this.ppmCopies.push({pos,kind,len,dist}); if(this.ppmCopies.length>4096)this.ppmCopies.shift(); },
+    filter(type,start,len,r6){ const n={1:'E8',2:'E8E9',3:'ITANIUM',4:'RGB',5:'AUDIO',6:'DELTA'}[type]||('T'+type);
+      this.filters[n]=(this.filters[n]||0)+1; this.filterCount++;
+      const spans2g=start<0x80000000&&(start+len)>=0x80000000;
+      if(this.filterSamples.length<12||spans2g)this.filterSamples.push({type:n,start,len,r6,spans2g}); } };
+}
+function makeSegCRC(segSize){
+  let segC=crc32Init(),segBytes=0,total=0; const list=[];
+  return {
+    feed(chunk){ let o=0; while(o<chunk.length){ const room=segSize-segBytes,take=Math.min(room,chunk.length-o);
+      segC=crc32Update(segC,chunk.subarray(o,o+take)); segBytes+=take; total+=take; o+=take;
+      if(segBytes>=segSize){ list.push({seg:list.length,bytes:segBytes,crc:crc32Final(segC)>>>0}); segC=crc32Init(); segBytes=0; } } },
+    finish(){ if(segBytes>0)list.push({seg:list.length,bytes:segBytes,crc:crc32Final(segC)>>>0}); return {list,total}; }
+  };
+}
+async function runFileDiagnostics(file,entry,password,full,onProgress,parsedInfo,refFile){
+  const L=[],p=x=>L.push(x);
+  p('=== RAR-Entschlüsseler Diagnose ===');
+  p(`Werkzeug: ${TOOL_VERSION}`);
+  p(`Archiv: ${file.name||'(unbenannt)'} · ${file.size} B · Header-verschlüsselt(-hp): ${!!parsedInfo.headerEncrypted}`);
+  p('');
+  p('--- Datei ---');
+  p(`Name: ${entry.name}`);
+  p(`Methode: 0x${entry.method.toString(16)} (${entry.method===0x30?'store':'m'+(entry.method-0x30)}) · UNP_VER: ${entry.unpVer}`);
+  p(`unpSize: ${entry.unpSize} · packSize: ${entry.packSize} · pack%16: ${entry.packSize%16}`);
+  p(`fileCrc(Soll): ${hex8(entry.fileCrc)} · encrypted: ${entry.encrypted} · salt: ${entry.salt?hexBytes(entry.salt):'—'} · solid: ${entry.solid}`);
+  p(`dataOffset: ${entry.dataOffset}`);
+  p('');
+  p('--- Archiv-Blöcke ---');
+  for(const b of parsedInfo.blocks)p(`  ${String(b.type).padEnd(7)} @${b.start} len=${b.len} · ${b.label}`);
+  p('');
+  if(entry.encrypted){
+    p('--- Entschlüsselungs-Vorschau (erster Block) ---');
+    try{
+      const first=await readAt(file,entry.dataOffset,Math.min(entry.packSize,4*1048576));
+      const dec=await makeDecryptor(password,entry);
+      const plain=await dec.chunk(first.subarray(0,first.length&~15));
+      p(`entschlüsselte erste 48 B: ${hexBytes(plain.subarray(0,48))}`);
+      if(entry.method!==0x30){
+        try{ const probe=new Unpack29(0); probe._initStream(); const inp=new BitInput(plain); probe.inp=inp; probe.readTables(inp);
+          p(`erster Block liest sich als ${probe.blockType.toUpperCase()} → Passwort sehr wahrscheinlich KORREKT`); }
+        catch(e){ p(`Probe-Tabellenlesung wirft (${e.code||e.message}) → Passwort vermutlich FALSCH oder Daten beschädigt`); }
+      }
+    }catch(e){ p(`Vorschau-Fehler: ${e.code||e.message}`); }
+    p('');
+  }
+  if(full){
+    p(`--- Voll-Diagnose (Dekompression, Segmente à ${DIAG_SEG/1048576} MB) ---`);
+    const t0=performance.now();
+    let packed=await readAt(file,entry.dataOffset,entry.packSize);
+    if(entry.encrypted)packed=await decryptInPlace(password,entry,packed);
+    const seg=makeSegCRC(DIAG_SEG); let outCRC=crc32Init(),outTotal=0,err=null;
+    let firstBad=-1, badMine=null, badRef=null, refBuf=null, refPos=0;
+    const sink=async(chunk)=>{
+      if(refFile&&firstBad<0){
+        const end=Math.min(refPos+chunk.length,refFile.size);
+        if(end>refPos){
+          refBuf=new Uint8Array(await refFile.slice(refPos,end).arrayBuffer());
+          const n=Math.min(refBuf.length,chunk.length);
+          for(let i=0;i<n;i++) if(refBuf[i]!==chunk[i]){
+            firstBad=refPos+i;
+            badMine=chunk.slice(Math.max(0,i-8),Math.min(chunk.length,i+16));
+            badRef =refBuf.slice(Math.max(0,i-8),Math.min(refBuf.length,i+16));
+            break;
+          }
+        }
+        refPos+=chunk.length;
+      }
+      outCRC=crc32Update(outCRC,chunk); outTotal+=chunk.length; seg.feed(chunk); if(onProgress)onProgress(outTotal);
+    };
+    const u=new Unpack29(0); u._initStream(); u.diag=makeDiag();
+    try{
+      if(entry.method===0x30){ const CH=4*1048576; for(let o=0;o<entry.unpSize;o+=CH)await sink(packed.subarray(o,Math.min(o+CH,entry.unpSize))); }
+      else await u.runStream(packed,false,entry.unpSize,sink);
+    }catch(e){ err=e; }
+    const dt=Math.round(performance.now()-t0),{list}=seg.finish(),finalCRC=crc32Final(outCRC)>>>0;
+    p(`abgeschlossen: ${!err}${err?(' · Fehler: '+(err.code||err.message)):''}`);
+    if(u.diag.exit)p(`Abbruchgrund: ${u.diag.exit}\n  bei Ausgabe=${u.diag.exitPos} · InAddr=${u.diag.exitInAddr}/${entry.packSize} · InBit=${u.diag.exitInBit} · Blocktyp=${u.diag.exitBlock}`);
+    p(`Ausgabe: ${outTotal} B (Soll ${entry.unpSize}, ${outTotal===entry.unpSize?'exakt':'ABWEICHUNG'})`);
+    p(`CRC(berechnet): ${hex8(finalCRC)} · CRC(Soll): ${hex8(entry.fileCrc)} · ${finalCRC===entry.fileCrc?'OK ✓':'FEHLER ✗'}`);
+    p(`Zeit: ${dt} ms · Fenster-Flushes: ${u.diag.flushes} · Blöcke gesamt: ${u.diag.blockCount}`);
+    p(`PPM-Modell-Neustarts (Speichererschöpfung): ${u.ppm?(u.ppm.restartCount||0):'—'}`);
+    if(refFile){
+      p('--- Byte-genauer Referenz-Vergleich ---');
+      if(firstBad<0)p(`keine Abweichung in den ersten ${outTotal} B${u.diag.exit?' — Ausgabe bis zum Abbruch korrekt, der Dekoder stoppt nur zu früh.':' — Ausgabe stimmt vollständig mit der Referenz überein ✓'}`);      else{
+        p(`ERSTES abweichendes Byte: Offset ${firstBad}`);
+        const lastPpm=[...u.diag.tail].reverse().find(b=>b.type==='ppm');
+        const lastBlk=[...u.diag.tail].reverse().find(b=>b.at<=firstBad);
+        if(lastPpm)p(`  letzter PPM-Blockstart: ${lastPpm.at} → Abweichung ${firstBad-lastPpm.at} B danach`);
+        if(lastBlk)p(`  Block davor: ${lastBlk.type}@${lastBlk.at} → Abweichung ${firstBad-lastBlk.at} B nach Blockbeginn`);
+        p(`  mein  (…8 B davor | ab Fehler): ${hexBytes(badMine)}`);
+        p(`  Ref.  (…8 B davor | ab Fehler): ${hexBytes(badRef)}`);
+        const cps=u.diag.ppmCopies;
+        const cover=cps.filter(o=>o.pos<=firstBad&&firstBad<o.pos+o.len);
+        const near=cps.filter(o=>o.pos>firstBad-3000&&o.pos<firstBad+300);
+        p(`  Kopie, die das Fehlerbyte erzeugt: ${cover.length?cover.map(o=>`${o.kind} pos=${o.pos} len=${o.len} dist=${o.dist}${o.dist>0x400000?' ⟵ DIST > 4MB-Fenster!':''}`).join(' | '):'KEINE — das Byte kam aus einem PPM-Literal'}`);
+        if(near.length){ p(`  PPM-Kopien in der Umgebung (${near.length}):`);
+          for(const o of near.slice(-15))p(`    ${o.kind} pos=${o.pos} (${o.pos-firstBad>=0?'+':''}${o.pos-firstBad}) len=${o.len} dist=${o.dist}${o.dist>0x400000?' ⟵ >4MB':''}`); }
+      }
+    }
+    p(`PPM-Opcodes: Literale-Escapes(nx1)=${u.diag.n1} VM(nx3)=${u.diag.n3} LZ-Kopie(nx4)=${u.diag.n4} RLE(nx5)=${u.diag.n5}`);
+    if(u.diag.ppmCopies.length){
+      const mx=u.diag.ppmCopies.reduce((a,o)=>Math.max(a,o.dist),0);
+      const over=u.diag.ppmCopies.filter(o=>o.dist>0x400000).length;
+      p(`  grösste PPM-Kopier-Distanz: ${mx} (Fenster 4194304) · Kopien mit Distanz > Fenster: ${over}`);
+    }
+    p(`erste Blöcke: ${u.diag.blocks.map(b=>b.type+'@'+b.at).join(', ')}`);
+    p(`letzte Blöcke vor Abbruch: ${u.diag.tail.map(b=>b.type+'@'+b.at).join(', ')}`);
+    p(`Filter gesamt: ${u.diag.filterCount} · nach Typ: ${JSON.stringify(u.diag.filters)}`);
+    if(u.diag.filterSamples.length){ p('Filter-Beispiele (Typ start len R6):'); for(const f of u.diag.filterSamples)p(`  ${f.type} start=${f.start} len=${f.len} R6=${f.r6}${f.spans2g?' ⟵ überspannt 2GB':''}`); }
+    lastDiag={outTotal, crc:finalCRC, segs:list, segSize:DIAG_SEG};
+    p(`Segment-CRCs (à ${DIAG_SEG/1048576} MB, ${list.length} Segmente${list.length>60?', erste 60':''}):`);
+    for(const s of list.slice(0,60))p(`  Seg ${String(s.seg).padStart(4)} [${s.seg*DIAG_SEG}..${s.seg*DIAG_SEG+s.bytes}) ${s.bytes}B crc=${hex8(s.crc)}`);
+  }
+  return L.join('\n');
+}
+async function segmentCRCsOfFile(file,cutoff,onProgress){
+  const seg=makeSegCRC(DIAG_SEG),CH=8*1048576; let done=0,cutCRC=null,cutC=crc32Init(),cutRemain=cutoff||0;
+  for(let o=0;o<file.size;o+=CH){ const b=new Uint8Array(await file.slice(o,Math.min(o+CH,file.size)).arrayBuffer());
+    seg.feed(b);
+    if(cutoff&&cutRemain>0){ const take=Math.min(cutRemain,b.length); cutC=crc32Update(cutC,b.subarray(0,take)); cutRemain-=take; if(cutRemain===0)cutCRC=crc32Final(cutC)>>>0; }
+    done+=b.length; if(onProgress)onProgress(done); }
+  const r=seg.finish(); r.cutCRC=cutCRC; return r;
 }
 
 /* =========================================================================
@@ -405,7 +1816,7 @@ function fmtBytes(n){if(n<1024)return n+' B';if(n<1024*1024)return (n/1024).toFi
 function methodLabel(m){return m===0x30?'gespeichert':`komprimiert · m${m-0x30}`;}
 
 function setFile(file){
-  currentFile=file; parsed=null; lastExtract=null;
+  currentFile=file; parsed=null; lastExtract=null; solidCache.clear();
   results.hidden=true; preview.hidden=true;
   drop.classList.add('loaded');
   $('#dzMain').textContent=file.name;
@@ -426,6 +1837,72 @@ drop.addEventListener('drop',e=>{const f=e.dataTransfer.files[0];if(f)setFile(f)
 go.addEventListener('click',analyze);
 pw.addEventListener('keydown',e=>{if(e.key==='Enter'&&!go.disabled)analyze();});
 
+/* --- Debug-Panel --- */
+const dbgToggle=$('#dbgToggle'),dbgPanel=$('#dbgPanel'),dbgOut=$('#dbgOut'),dbgProg=$('#dbgProg');
+const dbgQuick=$('#dbgQuick'),dbgFull=$('#dbgFull'),dbgCopy=$('#dbgCopy'),dbgRefFile=$('#dbgRefFile'),dbgRefBtn=$('#dbgRefBtn'),dbgByte=$('#dbgByte');
+dbgToggle.addEventListener('change',()=>{dbgPanel.hidden=!dbgToggle.checked;});
+function dbgEntry(){ if(!parsed||!parsed.files.length)return null; return parsed.files.find(f=>f.packSize>0)||parsed.files[0]; }
+async function dbgRun(full,useRef){
+  if(!parsed){dbgOut.value='Zuerst oben ein Archiv analysieren.';return;}
+  const e=dbgEntry(); if(!e){dbgOut.value='Keine Datei im Archiv gefunden.';return;}
+  if(e.encrypted&&!pw.value){dbgOut.value='Datei ist verschlüsselt — bitte oben das Passwort eintragen.';return;}
+  const ref=useRef?(dbgRefFile.files[0]||null):null;
+  if(useRef&&!ref){dbgOut.value='Bitte zuerst eine Referenz-Datei wählen.';return;}
+  dbgQuick.disabled=dbgFull.disabled=dbgByte.disabled=true; dbgProg.textContent='läuft … (kann dauern)';
+  try{
+    const t=full?e.unpSize:1;
+    const rep=await runFileDiagnostics(currentFile,e,pw.value,full,w=>{dbgProg.textContent=`${Math.floor(w/t*100)}%`;},parsed,ref);
+    dbgOut.value=rep; dbgProg.textContent='fertig';
+  }catch(err){ dbgOut.value='Diagnose-Fehler: '+(err.code||err.message||err); dbgProg.textContent='Fehler'; }
+  dbgQuick.disabled=dbgFull.disabled=false; dbgByte.disabled=!dbgRefFile.files[0];
+}
+dbgQuick.addEventListener('click',()=>dbgRun(false,false));
+dbgFull.addEventListener('click',()=>dbgRun(true,false));
+dbgByte.addEventListener('click',()=>dbgRun(true,true));
+dbgRefFile.addEventListener('change',()=>{dbgRefBtn.disabled=dbgByte.disabled=!dbgRefFile.files[0];});
+dbgRefBtn.addEventListener('click',async()=>{
+  const f=dbgRefFile.files[0]; if(!f)return;
+  dbgRefBtn.disabled=true; dbgProg.textContent='Referenz wird gehasht …';
+  try{
+    const cutoff=lastDiag?lastDiag.outTotal:0;
+    const {list,total,cutCRC}=await segmentCRCsOfFile(f,cutoff,w=>{dbgProg.textContent=`Referenz ${Math.floor(w/f.size*100)}%`;});
+    let s=`\n=== Referenz-Abgleich: ${f.name} (${total} B) ===\n`;
+    if(lastDiag){
+      // 1) Präfix-Vergleich: sind meine ersten outTotal Bytes korrekt?
+      if(cutCRC!=null){
+        const okPrefix = cutCRC===lastDiag.crc;
+        s+=`Präfix-Test (erste ${lastDiag.outTotal} B): mein CRC=${hex8(lastDiag.crc)} · Referenz-CRC=${hex8(cutCRC)} → `;
+        s+= okPrefix ? 'IDENTISCH ✓ — meine Ausgabe ist bis zum Abbruch KORREKT; der Dekompressor stoppt nur zu früh.\n'
+                     : 'UNTERSCHIEDLICH ✗ — die Abweichung liegt VOR dem Abbruch.\n';
+      }
+      // 2) Segmentweiser Abgleich (gleich große Segmente)
+      let firstDiff=-1;
+      for(let i=0;i<Math.min(list.length,lastDiag.segs.length);i++){
+        if(list[i].bytes===lastDiag.segs[i].bytes && list[i].crc!==lastDiag.segs[i].crc){firstDiff=i;break;}
+      }
+      if(firstDiff>=0) s+=`Erstes abweichendes ${DIAG_SEG/1048576}-MB-Segment: #${firstDiff} → Bereich [${firstDiff*DIAG_SEG} .. ${(firstDiff+1)*DIAG_SEG}) — hier beginnt der Fehler.\n`;
+      else s+=`Alle vergleichbaren (vollständigen) Segmente stimmen überein — die Abweichung liegt im letzten, unvollständigen Segment.\n`;
+      // Fenster um die Abweichung: mein CRC | Referenz-CRC nebeneinander
+      const center = firstDiff>=0 ? firstDiff : Math.max(0,lastDiag.segs.length-1);
+      const lo=Math.max(0,center-3), hi=Math.min(list.length, lastDiag.segs.length+1, center+5);
+      s+=`Segment-Vergleich (mein | Referenz), à ${DIAG_SEG/1048576} MB:\n`;
+      for(let i=lo;i<hi;i++){
+        const mine=lastDiag.segs[i], ref=list[i];
+        const mark=(mine&&ref)?(mine.bytes!==ref.bytes?'(Teilsegment, unvergleichbar)':(mine.crc===ref.crc?'=':'≠  ⟵ ABWEICHUNG')):'—';
+        s+=`  Seg ${String(i).padStart(4)} [${i*DIAG_SEG}..] mein=${mine?hex8(mine.crc):'—'} ref=${ref?hex8(ref.crc):'—'} ${mark}\n`;
+      }
+    }else{
+      s+='(Zuerst „Voll-Diagnose" laufen lassen, dann ist ein automatischer Abgleich möglich.)\n';
+    }
+    dbgOut.value+=s; dbgProg.textContent='fertig';
+  }catch(err){ dbgProg.textContent='Fehler'; dbgOut.value+='\nReferenz-Fehler: '+(err.message||err); }
+  dbgRefBtn.disabled=false;
+});
+dbgCopy.addEventListener('click',async()=>{
+  try{ await navigator.clipboard.writeText(dbgOut.value); dbgProg.textContent='kopiert ✓'; }
+  catch{ dbgOut.select(); document.execCommand('copy'); dbgProg.textContent='kopiert ✓'; }
+});
+
 /* --- demo --- */
 $('#demo').addEventListener('click',()=>{
   const bytes=Uint8Array.from(atob(DEMO_B64),c=>c.charCodeAt(0));
@@ -445,6 +1922,15 @@ async function analyze(){
   try{
     log(`Signatur prüfen …`);
     parsed=await parseRar(currentFile);
+    computeSolidGroups(parsed.files);
+    if(parsed.headerEncrypted){
+      log('Dieses Archiv wurde mit verschlüsselten Headern erstellt (WinRAR-Option „Dateinamen verschlüsseln", -hp). '+
+          'Schon die Datei-Liste ist AES-verschlüsselt und lässt sich ohne Header-Entschlüsselung nicht lesen — '+
+          'das ist NICHT dasselbe wie ein falsches Passwort. Diese Variante wird derzeit noch nicht unterstützt.', 'warn');
+      fileinfo.textContent='Verschlüsselte Header (-hp) — Datei-Liste nicht lesbar. Wenn du im Archiv die Dateinamen erst nach Passwort-Eingabe siehst, ist es dieser Typ.';
+      results.hidden=true;
+      return;
+    }
     log(`RAR 4 erkannt · ${parsed.files.length} Datei(en)`, 'ok');
     renderSummary(); renderRibbon(); renderRows();
     results.hidden=false;
@@ -493,13 +1979,11 @@ function renderRows(){
   parsed.files.forEach(entry=>{
     const tr=document.createElement('tr');
     const store=entry.method===0x30;
-    let statusHtml, actionHtml, actEnabled=true, actLabel;
-    if(entry.encrypted){statusHtml=badge('locked','🔒 verschlüsselt'); actLabel='Entschlüsseln';}
-    else{statusHtml=badge('open','offen'); actLabel='Speichern';}
-    if(!store){actEnabled=false;}
+    let statusHtml, actionHtml, actLabel;
+    if(entry.encrypted){statusHtml=badge('locked','🔒 verschlüsselt'); actLabel=store?'Entschlüsseln':'Entschlüsseln';}
+    else{statusHtml=badge('open','offen'); actLabel=store?'Speichern':'Entpacken';}
     actionHtml=`<div class="rowact">`+
-      (store?`<button class="act" data-idx="${entry.idx}">${actLabel}</button>`
-            :`${badge('needs','Depacker nötig')}`)+
+      `<button class="act" data-idx="${entry.idx}">${actLabel}</button>`+
       `<span class="savelink" data-save="${entry.idx}" hidden>speichern ↓</span></div>`;
     tr.innerHTML=
       `<td><span class="fname" data-open="${entry.idx}">${escapeHtml(entry.name)}</span></td>`+
@@ -510,27 +1994,82 @@ function renderRows(){
     rows.appendChild(tr);
   });
   rows.querySelectorAll('.act').forEach(b=>b.addEventListener('click',()=>doExtract(+b.dataset.idx,b)));
-  rows.querySelectorAll('.fname').forEach(b=>b.addEventListener('click',()=>{
-    const e=parsed.files[+b.dataset.open];
-    if(e.method===0x30)doExtract(+b.dataset.open,null);
-  }));
+  rows.querySelectorAll('.fname').forEach(b=>b.addEventListener('click',()=>doExtract(+b.dataset.open,null)));
 }
 
 async function doExtract(idx,btn){
   const entry=parsed.files[idx];
   const statusCell=rows.querySelector(`[data-status="${idx}"]`);
   const saveLink=rows.querySelector(`[data-save="${idx}"]`);
+  // Passwort-Prüfung VOR dem Speicherziel-Dialog (sonst bliebe eine leere Datei zurück)
+  const group=entry._group||[entry];
+  const needPw = group.some(e=>e.encrypted);
+  if(needPw && !pw.value){
+    log(`„${entry.name}": Passwort nötig.`,'warn');statusCell.innerHTML=badge('locked','🔒 Passwort nötig');return;
+  }
+  // Grosse Dateien direkt auf Platte streamen. Bei Solid zählt die GRUPPEN-Gesamtgröße:
+  // der flache Pfad müsste sonst die Summe aller Dateien der Gruppe im Speicher allokieren.
+  const groupUnp = group.reduce((a,e)=>a+e.unpSize,0);
+  const total = group.length>1 ? groupUnp : entry.unpSize;
+  const large = total > STREAM_THRESHOLD;
+
+  // Grosse Dateien streamen: Ziel ist die Platte (Chrome/Edge via File System
+  // Access API) oder – als Fallback (Firefox u.a.) – ein Blob-Download. In beiden
+  // Fällen wird blockweise entschlüsselt; der Speicher bleibt nahe der Chunk- bzw.
+  // Dateigrösse statt beim Mehrfachen.
+  let sink=null, finalize=null, cleanup=null, targetLabel='';
+  if(large){
+    const suggested=(entry.name.split(/[\\/]/).pop()||'datei');
+    if(FS_ACCESS){
+      let handle;
+      try{ handle=await window.showSaveFilePicker({suggestedName:suggested}); }
+      catch(e){ if(e&&e.name==='AbortError') return;
+        log(`„${entry.name}": Speicherziel konnte nicht geöffnet werden (${e.name||e}).`,'warn'); return; }
+      const writable=await handle.createWritable();
+      sink=c=>writable.write(c); finalize=()=>writable.close(); cleanup=()=>writable.abort().catch(()=>{});
+      targetLabel='Platte';
+    }else{
+      const parts=[];
+      sink=c=>{ parts.push(c.slice()); };            // Kopie: Dekompressor-Puffer werden wiederverwendet
+      finalize=()=>{ downloadParts(parts,suggested); parts.length=0; };
+      cleanup=()=>{ parts.length=0; };
+      targetLabel='Download';
+      log(`„${entry.name}": ${fmtBytes(total)} — Firefox unterstützt kein direktes Platten-Streaming. Ich entschlüssele blockweise und biete am Ende einen Download an (Speicher bleibt nahe der Dateigrösse).`,'warn');
+    }
+  }
+
   if(btn){btn.disabled=true;btn.textContent='…';}
   try{
     if(entry.encrypted){
-      if(!pw.value){log(`„${entry.name}": Passwort nötig.`,'warn');statusCell.innerHTML=badge('locked','🔒 Passwort nötig');if(btn){btn.disabled=false;btn.textContent='Entschlüsseln';}return;}
       log(`„${entry.name}": Schlüssel ableiten (262144 Runden) …`);
       await new Promise(r=>setTimeout(r,15)); // UI paint
     }
     const t0=performance.now();
+    if(large){
+      statusCell.innerHTML=progressCell(0);
+      let lastPct=-1;
+      const onProgress=w=>{ const p=total?Math.min(100,Math.floor(w/total*100)):0; if(p!==lastPct){lastPct=p;
+        const f=statusCell.querySelector('.prog-fill'), n=statusCell.querySelector('.prog-num');
+        if(f)f.style.width=p+'%'; if(n)n.textContent=p+'%'; } };
+      const {crcOk,written}=await streamExtract(currentFile,entry,pw.value,sink,onProgress);
+      const dt=Math.round(performance.now()-t0);
+      if(entry.encrypted&&!crcOk){
+        solidCache.clear(); await cleanup();
+        log(`„${entry.name}": CRC stimmt nicht — falsches Passwort oder beschädigt. Es wurde nichts gespeichert.`,'warn');
+        statusCell.innerHTML=badge('fail','falsches Passwort');
+        if(btn){btn.disabled=false;btn.textContent='Entschlüsseln';}
+        return;
+      }
+      await finalize();
+      log(`„${entry.name}": ${fmtBytes(written)} ${targetLabel==='Platte'?'auf Platte gestreamt':'als Download bereitgestellt'} in ${dt} ms · CRC ${crcOk?'ok ✓':'✗'}`, crcOk?'ok':'warn');
+      statusCell.innerHTML=badge(crcOk?'done':'fail', crcOk?(targetLabel==='Platte'?'gestreamt ✓':'geladen ✓'):'CRC-Fehler');
+      if(btn){btn.disabled=false;btn.textContent='erneut';}
+      return;
+    }
     const {plain,crcOk}=await extract(currentFile,entry,pw.value);
     const dt=Math.round(performance.now()-t0);
     if(entry.encrypted&&!crcOk){
+      solidCache.clear();   // dekodierter Müll darf nicht für den nächsten Versuch gecacht bleiben
       log(`„${entry.name}": CRC stimmt nicht — falsches Passwort oder beschädigt.`,'warn');
       statusCell.innerHTML=badge('fail','falsches Passwort');
       if(btn){btn.disabled=false;btn.textContent='Entschlüsseln';}
@@ -543,12 +2082,31 @@ async function doExtract(idx,btn){
     if(saveLink){saveLink.hidden=false;saveLink.onclick=()=>save(entry.name,plain);}
     if(btn){btn.textContent=actLabelDone(entry);}
   }catch(err){
-    if(err.code==='compressed')log(`„${entry.name}": komprimiert — Depacker noch nicht angebunden.`,'warn');
-    else log(`„${entry.name}": ${err.message||err}`,'warn');
-    if(btn){btn.disabled=false;btn.textContent=entry.encrypted?'Entschlüsseln':'Speichern';}
+    if(cleanup){try{await cleanup();}catch(_){}}
+    if(entry.encrypted)solidCache.clear();   // evtl. mit falschem Passwort dekodierte Gruppe verwerfen
+    if(err.code==='ppm'){
+      log(`„${entry.name}": PPMd-Fortsetzung fehlgeschlagen — evtl. sehr grosse Solid-Datei (>4 MB) oder beschädigt.`,'warn');
+      statusCell.innerHTML=badge('fail','PPMd-Fehler');
+    }else if(err.code==='solid'){
+      log(`„${entry.name}": Solid-Fortsetzung fehlgeschlagen — beschädigt oder unerwartete Struktur.`,'warn');
+      statusCell.innerHTML=badge('fail','Solid-Fehler');
+    }else if(err.code==='oldpack'){
+      log(`„${entry.name}": Datei ist im alten RAR-2.0-Format komprimiert (VER ${err.ver}). Die Entschlüsselung (Crypt20) funktioniert, aber der RAR-2.0-Dekompressor (unpack20) ist noch nicht implementiert. Gespeicherte (unkomprimierte) Dateien im selben Archiv gehen dagegen.`,'warn');
+      statusCell.innerHTML=badge('fail','RAR2.0-Kompression');
+    }else if(err.code==='oldcrypt'){
+      log(`„${entry.name}": nicht unterstütztes Alt-Verschlüsselungsverfahren (VER ${err.ver}, RAR 1.3/1.5).`,'warn');
+      statusCell.innerHTML=badge('fail','Alt-Chiffre');
+    }else if(entry.encrypted){
+      log(`„${entry.name}": Entschlüsselung/Entpacken fehlgeschlagen — falsches Passwort oder beschädigt.`,'warn');
+      statusCell.innerHTML=badge('fail','falsches Passwort');
+    }else{
+      log(`„${entry.name}": beschädigt oder unerwartetes Format (${err.code||err.message||err}).`,'warn');
+      statusCell.innerHTML=badge('fail','Fehler');
+    }
+    if(btn){btn.disabled=false;btn.textContent=entry.encrypted?'Entschlüsseln':(entry.method===0x30?'Speichern':'Entpacken');}
   }
 }
-function actLabelDone(entry){return entry.encrypted?'erneut':'erneut';}
+function actLabelDone(entry){return 'erneut';}
 
 function showPreview(entry,plain,crcOk){
   preview.hidden=false;
@@ -586,6 +2144,17 @@ function save(name,bytes){
   a.href=url;a.download=name.split('/').pop();a.click();
   setTimeout(()=>URL.revokeObjectURL(url),1000);
   log(`„${name}" gespeichert.`);
+}
+/* Download aus vielen Teil-Chunks (Blob-Fallback ohne File System Access API). */
+function downloadParts(parts,filename){
+  const blob=new Blob(parts,{type:'application/octet-stream'});
+  const url=URL.createObjectURL(blob);const a=document.createElement('a');
+  a.href=url;a.download=filename;a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),4000);
+}
+/* Fortschrittsbalken-Zelle. */
+function progressCell(pct){
+  return `<span class="prog"><span class="prog-track"><span class="prog-fill" style="width:${pct}%"></span></span><span class="prog-num">${pct}%</span></span>`;
 }
 function escapeHtml(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
