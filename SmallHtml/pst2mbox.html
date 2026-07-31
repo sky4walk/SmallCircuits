@@ -1,0 +1,1514 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PST → mbox</title>
+<style>
+  :root{
+    --paper:#eff1f3; --surface:#ffffff; --ink:#14171c; --muted:#5c6570;
+    --rule:#c6ccd4; --rule-soft:#dfe3e8;
+    --accent:#0e6b70; --accent-soft:#d9e8e8; --warn:#9d5406; --bad:#9c2b26;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper); color:var(--ink);
+    font:400 13px/1.55 ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 72px}
+
+  h1{font-size:20px;font-weight:600;letter-spacing:-.02em;margin:0 0 4px}
+  .lede{color:var(--muted);margin:0 0 26px;max-width:64ch}
+  .lede b{color:var(--ink);font-weight:600}
+
+  .eyebrow{
+    font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
+    color:var(--muted);margin:26px 0 8px;display:flex;align-items:center;gap:10px;
+  }
+  .eyebrow::after{content:"";flex:1;height:1px;background:var(--rule-soft)}
+
+  /* Ablagefeld */
+  .drop{
+    border:1.5px dashed var(--rule); background:var(--surface);
+    padding:34px 20px; text-align:center; cursor:pointer;
+    transition:border-color .12s, background .12s;
+  }
+  .drop:hover,.drop:focus-visible{border-color:var(--accent);background:#fbfdfd;outline:none}
+  .drop.over{border-color:var(--accent);background:var(--accent-soft);border-style:solid}
+  .drop strong{display:block;font-size:14px;font-weight:600;margin-bottom:5px}
+  .drop span{color:var(--muted);font-size:12px}
+
+  /* Statusleiste: invertiert, wie eine Werkzeug-Statuszeile */
+  .readout{
+    background:var(--ink); color:#e7eaee; padding:9px 14px;
+    display:flex; flex-wrap:wrap; gap:0 26px; font-size:11.5px; line-height:1.9;
+  }
+  .readout i{font-style:normal;color:#8f99a6;letter-spacing:.06em;text-transform:uppercase;font-size:10px}
+  .readout b{font-weight:600;color:#fff;margin-left:6px}
+  .readout .ok{color:#6fd3c0}
+
+  /* Ordnerbaum */
+  .tree{background:var(--surface);border:1px solid var(--rule-soft);max-height:390px;overflow:auto}
+  .row{display:flex;align-items:center;gap:9px;padding:2px 12px;cursor:pointer}
+  .row:hover{background:#f4f7f7}
+  .row input{margin:0;accent-color:var(--accent);flex:none;width:13px;height:13px}
+  .row .glyph{white-space:pre;color:var(--rule);flex:none}
+  .row .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .row .n{color:var(--muted);font-variant-numeric:tabular-nums;flex:none;font-size:11.5px}
+  .row.empty .name,.row.empty .n{color:#98a1ac}
+  .toolbar{display:flex;gap:16px;align-items:center;padding:7px 12px;border-bottom:1px solid var(--rule-soft);background:#f7f9f9}
+  .toolbar button{
+    background:none;border:none;padding:0;font:inherit;font-size:11.5px;
+    color:var(--accent);cursor:pointer;text-decoration:underline;text-underline-offset:2px
+  }
+  .toolbar .sp{flex:1}
+  .toolbar label{font-size:11.5px;color:var(--muted);display:flex;gap:6px;align-items:center;cursor:pointer}
+
+  /* Optionen */
+  .opts{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:2px 26px;
+        background:var(--surface);border:1px solid var(--rule-soft);padding:12px 14px}
+  .opt{display:flex;gap:9px;align-items:flex-start;padding:5px 0;cursor:pointer}
+  .opt input{margin:3px 0 0;accent-color:var(--accent);flex:none}
+  .opt em{font-style:normal;display:block;color:var(--muted);font-size:11.5px}
+
+  /* Aktion */
+  .go{display:flex;align-items:center;gap:14px;margin-top:18px;flex-wrap:wrap}
+  button.primary{
+    font:inherit;font-weight:600;font-size:13px;
+    background:var(--accent);color:#fff;border:none;padding:10px 22px;cursor:pointer;
+  }
+  button.primary:hover{background:#0b585c}
+  button.primary:disabled{background:#a8b2b8;cursor:default}
+  button.primary:focus-visible,.row:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+  .status{color:var(--muted);font-size:12px}
+
+  .bar{height:3px;background:var(--rule-soft);margin-top:14px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .15s linear}
+  @media (prefers-reduced-motion:reduce){.bar i{transition:none}}
+
+  /* Ergebnis */
+  .files{border:1px solid var(--rule-soft);background:var(--surface)}
+  .file{display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--rule-soft)}
+  .file:last-child{border-bottom:none}
+  .file .fn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .file .sz{color:var(--muted);font-size:11.5px;font-variant-numeric:tabular-nums}
+  .file a{color:var(--accent);font-weight:600;text-decoration:none;border-bottom:1px solid currentColor}
+
+  .note{border-left:2px solid var(--warn);background:#fdf7ef;padding:9px 13px;color:#5a4021;font-size:12px;margin-top:12px}
+  .note.bad{border-color:var(--bad);background:#fcf1f0;color:#6b2320}
+  .hidden{display:none}
+  footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--rule-soft);color:var(--muted);font-size:11.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>PST → mbox</h1>
+  <p class="lede">Konvertiert Outlook-Archive (<b>.pst</b>, <b>.ost</b>) in das mbox-Format — vollständig im
+     Browser. Die Datei wird nicht hochgeladen und verlässt diesen Rechner nicht.</p>
+
+  <div class="drop" id="drop" tabindex="0" role="button" aria-label="PST-Datei auswählen">
+    <strong>PST-Datei hierher ziehen</strong>
+    <span>oder klicken zum Auswählen</span>
+    <input type="file" id="file" accept=".pst,.ost" hidden>
+  </div>
+  <div id="err" class="note bad hidden"></div>
+
+  <section id="result" class="hidden">
+    <div class="eyebrow">Datei</div>
+    <div class="readout" id="readout"></div>
+
+    <div class="eyebrow">Ordner</div>
+    <div class="tree">
+      <div class="toolbar">
+        <button type="button" id="selAll">alle</button>
+        <button type="button" id="selNone">keine</button>
+        <button type="button" id="selFull">nur gefüllte</button>
+        <span class="sp"></span>
+        <label><input type="checkbox" id="showEmpty"> leere Ordner anzeigen</label>
+      </div>
+      <div id="tree"></div>
+    </div>
+
+    <div class="eyebrow">Optionen</div>
+    <div class="opts">
+      <label class="opt"><input type="checkbox" id="oAtt" checked>
+        <span>Anhänge einbetten<em>Base64 im MIME-Teil, sonst nur Text</em></span></label>
+      <label class="opt"><input type="checkbox" id="oHdr" checked>
+        <span>Original-Kopfzeilen<em>Internet-Header aus der PST übernehmen</em></span></label>
+      <label class="opt"><input type="checkbox" id="oZip" checked>
+        <span>ZIP mit Ordnerstruktur<em>eine mbox je Ordner statt einer Sammeldatei</em></span></label>
+      <label class="opt"><input type="checkbox" id="oMail">
+        <span>Nur E-Mails<em>Termine, Kontakte und Aufgaben überspringen</em></span></label>
+      <label class="opt"><input type="checkbox" id="oBcc">
+        <span>Bcc-Empfänger ausgeben<em>in der PST gespeicherte Blindkopien</em></span></label>
+    </div>
+
+    <div class="go">
+      <button class="primary" id="run">Konvertieren</button>
+      <span class="status" id="status"></span>
+    </div>
+    <div class="bar"><i id="bar"></i></div>
+    <div id="warn" class="note hidden"></div>
+
+    <div id="out" class="hidden">
+      <div class="eyebrow">Ergebnis</div>
+      <div class="files" id="files"></div>
+    </div>
+  </section>
+
+  <footer>
+    Eigenständige Seite ohne externe Abhängigkeiten — speicherbar und offline nutzbar.
+    Implementiert nach der Spezifikation MS-PST (NDB-, LTP- und Messaging-Layer).
+  </footer>
+</div>
+
+<script>
+/* ===================================================================
+ * pstlib.js - PST/OST -> mbox, reines JavaScript, keine Abhaengigkeiten
+ * Implementiert MS-PST: NDB-Layer, LTP-Layer, Messaging-Layer.
+ * =================================================================== */
+var PSTLIB = (function () {
+  'use strict';
+
+  /* ---------- Verschluesselungstabellen (MS-PST 5.1) ---------- */
+  var T_COMP = new Uint8Array([71,241,180,230,11,106,114,72,133,78,158,235,226,248,148,83,224,187,160,2,232,90,9,171,219,227,186,198,124,195,16,221,57,5,150,48,245,55,96,130,140,201,19,74,107,29,243,251,143,38,151,202,145,23,1,196,50,45,110,49,149,255,217,35,209,0,94,121,220,68,59,26,40,197,97,87,32,144,61,131,185,67,190,103,210,70,66,118,192,109,91,126,178,15,22,41,60,169,3,84,13,218,93,223,246,183,199,98,205,141,6,211,105,92,134,214,20,247,165,102,117,172,177,233,69,33,112,12,135,159,116,164,34,76,111,191,31,86,170,46,179,120,51,80,176,163,146,188,207,25,28,167,99,203,30,77,62,75,27,155,79,231,240,238,173,58,181,89,4,234,64,85,37,81,229,122,137,56,104,82,123,252,39,174,215,189,250,7,244,204,142,95,239,53,156,132,43,21,213,119,52,73,182,18,10,127,113,136,253,157,24,65,125,147,216,88,44,206,254,36,175,222,184,54,200,161,128,166,153,152,168,47,14,129,101,115,228,194,162,138,212,225,17,208,8,139,42,242,237,154,100,63,193,108,249,236]);
+  var T_H1 = new Uint8Array([65,54,19,98,168,33,110,187,244,22,204,4,127,100,232,93,30,242,203,42,116,197,94,53,210,149,71,158,150,45,154,136,76,125,132,63,219,172,49,182,72,95,246,196,216,57,139,231,35,59,56,142,200,193,223,37,177,32,165,70,96,78,156,251,170,211,86,81,69,124,85,0,7,201,43,157,133,155,9,160,143,173,179,15,99,171,137,75,215,167,21,90,113,102,66,191,38,74,107,152,250,234,119,83,178,112,5,44,253,89,58,134,126,206,6,235,130,120,87,199,141,67,175,180,28,212,91,205,226,233,39,79,195,8,114,128,207,176,239,245,40,109,190,48,77,52,146,213,14,60,34,50,229,228,249,159,194,209,10,129,18,225,238,145,131,118,227,151,230,97,138,23,121,164,183,220,144,122,92,140,2,166,202,105,222,80,26,17,147,185,82,135,88,252,237,29,55,73,27,106,224,41,51,153,189,108,217,148,243,64,84,111,240,198,115,184,214,62,101,24,68,31,221,103,16,241,12,25,236,174,3,161,20,123,169,11,255,248,163,192,162,1,247,46,188,36,104,117,13,254,186,47,181,208,218,61]);
+  var T_H2 = new Uint8Array([20,83,15,86,179,200,122,156,235,101,72,23,22,21,159,2,204,84,124,131,0,13,12,11,162,98,168,118,219,217,237,199,197,164,220,172,133,116,214,208,167,155,174,154,150,113,102,195,99,153,184,221,115,146,142,132,125,165,94,209,93,147,177,87,81,80,128,137,82,148,79,78,10,107,188,141,127,110,71,70,65,64,68,1,17,203,3,63,247,244,225,169,143,60,58,249,251,240,25,48,130,9,46,201,157,160,134,73,238,111,77,109,196,45,129,52,37,135,27,136,170,252,6,161,18,56,253,76,66,114,100,19,55,36,106,117,119,67,255,230,180,75,54,92,228,216,53,61,69,185,44,236,183,49,43,41,7,104,163,14,105,123,24,158,33,57,190,40,26,91,120,245,35,202,42,176,175,62,254,4,140,231,229,152,50,149,211,246,74,232,166,234,233,243,213,47,112,32,242,31,5,103,173,85,16,206,205,227,39,59,218,186,215,194,38,212,145,29,210,28,34,51,248,250,241,90,239,207,144,182,139,181,189,192,191,8,151,30,108,226,97,224,198,193,89,171,187,88,222,95,223,96,121,126,178,138]);
+
+  function decryptInPlace(buf, method, key) {
+    var i, x, salt, lo, hi;
+    if (method === 1) {
+      for (i = 0; i < buf.length; i++) buf[i] = T_COMP[buf[i]];
+    } else if (method === 2) {
+      salt = (((key >>> 16) & 0xffff) ^ (key & 0xffff)) & 0xffff;
+      for (i = 0; i < buf.length; i++) {
+        lo = salt & 0xff; hi = (salt >>> 8) & 0xff;
+        x = (buf[i] + lo) & 0xff;
+        x = T_H1[x];
+        x = (x + hi) & 0xff;
+        x = T_H2[x];
+        x = (x - hi) & 0xff;
+        x = T_COMP[x];
+        buf[i] = (x - lo) & 0xff;
+        salt = (salt + 1) & 0xffff;
+      }
+    }
+    return buf;
+  }
+
+  /* ---------- kleine Helfer ---------- */
+  function bidKey(bid) { return bid - (bid % 2); }          // Bit 0 = reserviert
+  function bidIsInternal(bid) { return Math.floor(bid / 2) % 2 === 1; }
+  function nidType(nid) { return nid & 0x1f; }
+  function nidIndex(nid) { return (nid >>> 5) >>> 0; }
+
+  var NID_ROOT_FOLDER = 0x122;
+  var NID_MESSAGE_STORE = 0x21;
+  var NID_RECIPIENT_TABLE = 0x692;
+  var NID_ATTACHMENT_TABLE = 0x671;
+
+  var NT_NORMAL_FOLDER = 0x02, NT_SEARCH_FOLDER = 0x03,
+      NT_NORMAL_MESSAGE = 0x04, NT_ATTACHMENT = 0x05,
+      NT_ASSOC_MESSAGE = 0x08, NT_HIERARCHY_TABLE = 0x0d,
+      NT_CONTENTS_TABLE = 0x0e, NT_ASSOC_CONTENTS_TABLE = 0x0f;
+
+  function concatBytes(list) {
+    var n = 0, i, o = 0;
+    for (i = 0; i < list.length; i++) n += list[i].length;
+    var out = new Uint8Array(n);
+    for (i = 0; i < list.length; i++) { out.set(list[i], o); o += list[i].length; }
+    return out;
+  }
+
+  /* ===================================================================
+   * NDB-Layer
+   * =================================================================== */
+  function Pst(bytes) {
+    this.u8 = bytes;
+    this.dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    this._readHeader();
+    this.nbt = new Map();
+    this.bbt = new Map();
+    this._loadTrees();
+  }
+
+  Pst.prototype.u16 = function (o) { return this.dv.getUint16(o, true); };
+  Pst.prototype.u32 = function (o) { return this.dv.getUint32(o, true); };
+  Pst.prototype.u64 = function (o) {
+    return this.dv.getUint32(o, true) + this.dv.getUint32(o + 4, true) * 4294967296;
+  };
+  Pst.prototype.uInt = function (o) { return this.unicode ? this.u64(o) : this.u32(o); };
+
+  Pst.prototype._readHeader = function () {
+    if (this.u8.length < 564) throw new Error('Datei zu klein fuer eine PST-Datei.');
+    if (this.u32(0) !== 0x4e444221) throw new Error('Keine PST/OST-Datei (Signatur "!BDN" fehlt).');
+    this.wVer = this.u16(10);
+    this.wVerClient = this.u16(12);
+    this.unicode = this.wVer >= 23;          // 14/15 = ANSI, 23/36/37 = Unicode
+    this.isOst = this.u16(8) !== 0x4d53;     // "SM" = PST
+    var rootOff, crypt;
+    if (this.unicode) {
+      rootOff = 0xb4; crypt = this.u8[0x201];
+      this.nbtRoot = this.u64(rootOff + 36 + 8);
+      this.bbtRoot = this.u64(rootOff + 52 + 8);
+      this.fileEof = this.u64(rootOff + 4);
+    } else {
+      rootOff = 0xa4; crypt = this.u8[0x1cd];
+      this.nbtRoot = this.u32(rootOff + 20 + 4);
+      this.bbtRoot = this.u32(rootOff + 28 + 4);
+      this.fileEof = this.u32(rootOff + 4);
+    }
+    if (crypt > 2) crypt = 0;
+    this.crypt = crypt;
+    this.blockTrailerLen = this.unicode ? 16 : 12;
+  };
+
+  /* BTree-Seiten (512 Byte) rekursiv einlesen */
+  Pst.prototype._walkBT = function (ib, isNbt, seen, depth) {
+    if (!ib || ib + 512 > this.u8.length) return;
+    if (seen.has(ib)) return;
+    seen.add(ib);
+    if (depth > 32) return;
+    var cEnt, cbEnt, cLevel, base = ib;
+    if (this.unicode) {
+      cEnt = this.u8[ib + 488]; cbEnt = this.u8[ib + 490]; cLevel = this.u8[ib + 491];
+    } else {
+      cEnt = this.u8[ib + 496]; cbEnt = this.u8[ib + 498]; cLevel = this.u8[ib + 499];
+    }
+    if (!cbEnt) return;
+    var maxEnt = Math.floor((this.unicode ? 488 : 496) / cbEnt);
+    if (cEnt > maxEnt) cEnt = maxEnt;
+    for (var i = 0; i < cEnt; i++) {
+      var o = base + i * cbEnt;
+      if (cLevel > 0) {
+        var child = this.unicode ? this.u64(o + 16) : this.u32(o + 8);
+        this._walkBT(child, isNbt, seen, depth + 1);
+      } else if (isNbt) {
+        var nid = this.u32(o);
+        if (this.unicode) {
+          this.nbt.set(nid, { nid: nid, bidData: this.u64(o + 8), bidSub: this.u64(o + 16), nidParent: this.u32(o + 24) });
+        } else {
+          this.nbt.set(nid, { nid: nid, bidData: this.u32(o + 4), bidSub: this.u32(o + 8), nidParent: this.u32(o + 12) });
+        }
+      } else {
+        var bid, off, cb;
+        if (this.unicode) { bid = this.u64(o); off = this.u64(o + 8); cb = this.u16(o + 16); }
+        else { bid = this.u32(o); off = this.u32(o + 4); cb = this.u16(o + 8); }
+        this.bbt.set(bidKey(bid), { bid: bid, ib: off, cb: cb });
+      }
+    }
+  };
+
+  Pst.prototype._loadTrees = function () {
+    this._walkBT(this.nbtRoot, true, new Set(), 0);
+    this._walkBT(this.bbtRoot, false, new Set(), 0);
+    if (this.nbt.size === 0) throw new Error('Node-BTree leer - Datei vermutlich beschaedigt.');
+  };
+
+  /* Rohdaten eines Blocks (entschluesselt) */
+  Pst.prototype.readBlock = function (bid) {
+    var e = this.bbt.get(bidKey(bid));
+    if (!e) throw new Error('Block ' + bid + ' nicht im Block-BTree.');
+    if (e.ib + e.cb > this.u8.length) throw new Error('Block ' + bid + ' liegt ausserhalb der Datei.');
+    var data = this.u8.slice(e.ib, e.ib + e.cb);
+    if (this.crypt && !bidIsInternal(e.bid)) decryptInPlace(data, this.crypt, e.bid % 4294967296);
+    return data;
+  };
+
+  /* Datenbaum aufloesen -> Liste der Blattbloecke */
+  Pst.prototype.readDataBlocks = function (bid, depth) {
+    depth = depth || 0;
+    if (!bid) return [];
+    var d = this.readBlock(bid);
+    if (bidIsInternal(bid) && d.length >= 8 && d[0] === 0x01 && depth < 8) {
+      var cEnt = this.u16b(d, 2);
+      var step = this.unicode ? 8 : 4;
+      var out = [];
+      for (var i = 0; i < cEnt; i++) {
+        var o = 8 + i * step;
+        if (o + step > d.length) break;
+        var cb = this.unicode ? this.u64b(d, o) : this.u32b(d, o);
+        out.push.apply(out, this.readDataBlocks(cb, depth + 1));
+      }
+      return out;
+    }
+    return [d];
+  };
+
+  Pst.prototype.readNodeData = function (bid) { return concatBytes(this.readDataBlocks(bid)); };
+
+  /* Hilfsleser auf beliebigen Uint8Arrays */
+  Pst.prototype.u16b = function (b, o) { return b[o] | (b[o + 1] << 8); };
+  Pst.prototype.u32b = function (b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; };
+  Pst.prototype.u64b = function (b, o) { return this.u32b(b, o) + this.u32b(b, o + 4) * 4294967296; };
+
+  /* Subnode-BTree eines Knotens -> Map<nid,{bidData,bidSub}> */
+  Pst.prototype.readSubnodes = function (bidSub, map, depth) {
+    map = map || new Map();
+    depth = depth || 0;
+    if (!bidSub || depth > 8) return map;
+    var d;
+    try { d = this.readBlock(bidSub); } catch (e) { return map; }
+    if (d.length < 4 || d[0] !== 0x02) return map;
+    var cLevel = d[1], cEnt = this.u16b(d, 2);
+    var start = this.unicode ? 8 : 4;
+    var step = cLevel === 0 ? (this.unicode ? 24 : 12) : (this.unicode ? 16 : 8);
+    for (var i = 0; i < cEnt; i++) {
+      var o = start + i * step;
+      if (o + step > d.length) break;
+      if (cLevel === 0) {
+        var nid = this.unicode ? this.u32b(d, o) : this.u32b(d, o);
+        var bd = this.unicode ? this.u64b(d, o + 8) : this.u32b(d, o + 4);
+        var bs = this.unicode ? this.u64b(d, o + 16) : this.u32b(d, o + 8);
+        map.set(nid >>> 0, { nid: nid >>> 0, bidData: bd, bidSub: bs });
+      } else {
+        var cb = this.unicode ? this.u64b(d, o + 8) : this.u32b(d, o + 4);
+        this.readSubnodes(cb, map, depth + 1);
+      }
+    }
+    return map;
+  };
+
+  /* ===================================================================
+   * LTP-Layer: Heap-on-Node / BTree-on-Heap / PC / TC
+   * =================================================================== */
+  function HN(pst, blocks) {
+    this.pst = pst;
+    this.blocks = blocks;
+    this.maps = [];
+    for (var i = 0; i < blocks.length; i++) {
+      var b = blocks[i], m = null;
+      if (b.length >= 4) {
+        var ibHnpm = b[0] | (b[1] << 8);
+        if (ibHnpm + 4 <= b.length) {
+          var cAlloc = b[ibHnpm] | (b[ibHnpm + 1] << 8);
+          var arr = new Uint32Array(cAlloc + 1), ok = true;
+          for (var j = 0; j <= cAlloc; j++) {
+            var p = ibHnpm + 4 + j * 2;
+            if (p + 2 > b.length) { ok = false; break; }
+            arr[j] = b[p] | (b[p + 1] << 8);
+          }
+          if (ok) m = arr;
+        }
+      }
+      this.maps.push(m);
+    }
+    var h = blocks[0];
+    this.sig = h && h.length > 3 ? h[2] : 0;
+    this.clientSig = h && h.length > 3 ? h[3] : 0;
+    this.userRoot = h && h.length >= 8 ? pst.u32b(h, 4) : 0;
+  }
+
+  HN.prototype.get = function (hid) {
+    if (!hid || (hid & 0x1f) !== 0) return null;
+    var idx = (hid >>> 5) & 0x7ff;
+    var blk = (hid >>> 16) & 0xffff;
+    if (idx < 1 || blk >= this.blocks.length) return null;
+    var map = this.maps[blk];
+    if (!map || idx >= map.length) return null;
+    var s = map[idx - 1], e = map[idx];
+    var b = this.blocks[blk];
+    if (e > b.length || s > e) return null;
+    return b.subarray(s, e);
+  };
+
+  /* Kontext: HN + Subnodes eines Knotens */
+  function openNode(pst, node) {
+    var blocks = pst.readDataBlocks(node.bidData);
+    return {
+      pst: pst,
+      node: node,
+      hn: new HN(pst, blocks),
+      subs: pst.readSubnodes(node.bidSub),
+      cp: null
+    };
+  }
+
+  /* HNID aufloesen: HID -> Heap, NID -> Subnode */
+  function resolveHnid(ctx, hnid) {
+    if (!hnid) return null;
+    if ((hnid & 0x1f) === 0) return ctx.hn.get(hnid);
+    var sn = ctx.subs.get(hnid >>> 0);
+    if (!sn) return null;
+    try { return ctx.pst.readNodeData(sn.bidData); } catch (e) { return null; }
+  }
+
+  /* BTree-on-Heap auslesen -> [{key:Uint8Array, val:Uint8Array}] */
+  function bthRecords(ctx, hidRoot) {
+    var out = [];
+    var hdr = ctx.hn.get(hidRoot);
+    if (!hdr || hdr.length < 8 || hdr[0] !== 0xb5) return out;
+    var cbKey = hdr[1], cbEnt = hdr[2], levels = hdr[3];
+    var root = ctx.pst.u32b(hdr, 4);
+    (function walk(hid, lvl, depth) {
+      if (depth > 16) return;
+      var d = ctx.hn.get(hid);
+      if (!d) return;
+      if (lvl > 0) {
+        var sz = cbKey + 4;
+        for (var i = 0; i + sz <= d.length; i += sz) walk(ctx.pst.u32b(d, i + cbKey), lvl - 1, depth + 1);
+      } else {
+        var s = cbKey + cbEnt;
+        for (var k = 0; k + s <= d.length; k += s) out.push({ key: d.subarray(k, k + cbKey), val: d.subarray(k + cbKey, k + s) });
+      }
+    })(root, levels, 0);
+    return out;
+  }
+
+  /* ---------- Property-Typen ---------- */
+  function isVarType(t) {
+    return t === 0x000d || t === 0x001e || t === 0x001f || t === 0x0102 || (t & 0x1000) !== 0;
+  }
+  function fixedSize(t) {
+    switch (t) {
+      case 0x0002: case 0x000b: return 2;
+      case 0x0003: case 0x0004: case 0x000a: return 4;
+      case 0x0005: case 0x0006: case 0x0007: case 0x0014: case 0x0040: return 8;
+      case 0x0048: return 16;
+      default: return 0;
+    }
+  }
+
+  var CP_MAP = {
+    874: 'windows-874', 932: 'shift_jis', 936: 'gbk', 949: 'euc-kr', 950: 'big5',
+    1250: 'windows-1250', 1251: 'windows-1251', 1252: 'windows-1252', 1253: 'windows-1253',
+    1254: 'windows-1254', 1255: 'windows-1255', 1256: 'windows-1256', 1257: 'windows-1257',
+    1258: 'windows-1258', 20127: 'windows-1252', 28591: 'iso-8859-1', 28592: 'iso-8859-2',
+    28595: 'iso-8859-5', 28597: 'iso-8859-7', 28599: 'iso-8859-9', 28605: 'iso-8859-15',
+    65000: 'utf-8', 65001: 'utf-8'
+  };
+  var _decoders = {};
+  function decodeText(bytes, label) {
+    if (!bytes) return '';
+    label = label || 'windows-1252';
+    try {
+      if (!_decoders[label]) _decoders[label] = new TextDecoder(label);
+      return _decoders[label].decode(bytes);
+    } catch (e) {
+      var s = '';
+      for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      return s;
+    }
+  }
+  function decodeUtf16(bytes) {
+    if (!bytes) return '';
+    var n = bytes.length & ~1, s = '', chunk = [];
+    for (var i = 0; i < n; i += 2) {
+      chunk.push(bytes[i] | (bytes[i + 1] << 8));
+      if (chunk.length === 4096) { s += String.fromCharCode.apply(null, chunk); chunk = []; }
+    }
+    if (chunk.length) s += String.fromCharCode.apply(null, chunk);
+    return s;
+  }
+  function filetimeToDate(bytes) {
+    if (!bytes || bytes.length < 8) return null;
+    var lo = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    var hi = (bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24)) >>> 0;
+    var ft = hi * 4294967296 + lo;
+    if (ft === 0) return null;
+    var ms = ft / 10000 - 11644473600000;
+    if (!isFinite(ms) || ms < -2208988800000 || ms > 4102444800000) return null;
+    return new Date(ms);
+  }
+
+  function decodeValue(ctx, type, bytes) {
+    if (bytes === null || bytes === undefined) return null;
+    var dv, i, out;
+    switch (type) {
+      case 0x0002: return (bytes[0] | (bytes[1] << 8)) << 16 >> 16;
+      case 0x0003: case 0x000a: return ctx.pst.u32b(bytes, 0) | 0;
+      case 0x0004: return new DataView(bytes.buffer, bytes.byteOffset, bytes.length).getFloat32(0, true);
+      case 0x000b: return (bytes[0] | (bytes[1] << 8)) !== 0;
+      case 0x0005: case 0x0007:
+        return new DataView(bytes.buffer, bytes.byteOffset, bytes.length).getFloat64(0, true);
+      case 0x0006: case 0x0014: {
+        var lo = ctx.pst.u32b(bytes, 0), hi = ctx.pst.u32b(bytes, 4) | 0;
+        return hi * 4294967296 + lo;
+      }
+      case 0x0040: return filetimeToDate(bytes);
+      case 0x0048: {
+        var s = '';
+        for (i = 0; i < bytes.length; i++) s += ('0' + bytes[i].toString(16)).slice(-2);
+        return s;
+      }
+      case 0x001f: return decodeUtf16(bytes);
+      case 0x001e: return decodeText(bytes, ctx.cp);
+      case 0x0102: case 0x000d: return bytes;
+      default:
+        if (type & 0x1000) {
+          var base = type & 0x0fff;
+          out = [];
+          if (isVarType(base)) {
+            if (bytes.length < 4) return out;
+            var cnt = ctx.pst.u32b(bytes, 0);
+            if (cnt > 100000) return out;
+            var offs = [];
+            for (i = 0; i < cnt; i++) {
+              if (4 + i * 4 + 4 > bytes.length) return out;
+              offs.push(ctx.pst.u32b(bytes, 4 + i * 4));
+            }
+            offs.push(bytes.length);
+            for (i = 0; i < cnt; i++) {
+              var a = offs[i], b = offs[i + 1];
+              if (a > bytes.length || b > bytes.length || a > b) continue;
+              out.push(decodeValue(ctx, base, bytes.subarray(a, b)));
+            }
+          } else {
+            var fs = fixedSize(base) || 4;
+            for (i = 0; i + fs <= bytes.length; i += fs) out.push(decodeValue(ctx, base, bytes.subarray(i, i + fs)));
+          }
+          return out;
+        }
+        return bytes;
+    }
+  }
+
+  /* Property Context lesen -> Map propId -> {type, value, raw} */
+  function readPC(ctx) {
+    var props = new Map();
+    if (ctx.hn.clientSig !== 0xbc) return props;
+    var recs = bthRecords(ctx, ctx.hn.userRoot);
+    var pending = [];
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i];
+      if (r.key.length < 2 || r.val.length < 6) continue;
+      var propId = r.key[0] | (r.key[1] << 8);
+      var type = r.val[0] | (r.val[1] << 8);
+      var raw;
+      if (isVarType(type)) raw = resolveHnid(ctx, ctx.pst.u32b(r.val, 2));
+      else if (fixedSize(type) <= 4) raw = r.val.subarray(2, 6);
+      else raw = resolveHnid(ctx, ctx.pst.u32b(r.val, 2));
+      pending.push({ id: propId, type: type, raw: raw, hnid: isVarType(type) || fixedSize(type) > 4 ? ctx.pst.u32b(r.val, 2) : 0 });
+    }
+    /* Codepage vorab bestimmen, damit PT_STRING8 korrekt dekodiert wird */
+    for (i = 0; i < pending.length; i++) {
+      var p = pending[i];
+      if ((p.id === 0x3fde || p.id === 0x3ffd) && p.raw && p.raw.length >= 4) {
+        var cp = ctx.pst.u32b(p.raw, 0);
+        if (CP_MAP[cp]) { ctx.cp = CP_MAP[cp]; break; }
+      }
+    }
+    for (i = 0; i < pending.length; i++) {
+      var q = pending[i];
+      props.set(q.id, { type: q.type, value: decodeValue(ctx, q.type, q.raw), raw: q.raw, hnid: q.hnid });
+    }
+    return props;
+  }
+
+  /* Table Context lesen -> {cols, rows:[Map propId->value]} */
+  function readTC(ctx) {
+    var res = { cols: [], rows: [] };
+    if (ctx.hn.clientSig !== 0x7c) return res;
+    var ti = ctx.hn.get(ctx.hn.userRoot);
+    if (!ti || ti.length < 22 || ti[0] !== 0x7c) return res;
+    var P = ctx.pst;
+    var cCols = ti[1];
+    var endCEB = P.u16b(ti, 8);          // rgib[3] = Zeilengroesse
+    var startCEB = P.u16b(ti, 6);        // rgib[2] = Beginn Cell Existence Bitmap
+    var hidRowIndex = P.u32b(ti, 10);
+    var hnidRows = P.u32b(ti, 14);
+    var cols = [];
+    for (var c = 0; c < cCols; c++) {
+      var o = 22 + c * 8;
+      if (o + 8 > ti.length) break;
+      cols.push({
+        type: P.u16b(ti, o),
+        id: P.u16b(ti, o + 2),
+        ibData: P.u16b(ti, o + 4),
+        cbData: ti[o + 6],
+        iBit: ti[o + 7]
+      });
+    }
+    res.cols = cols;
+    var rowSize = endCEB;
+    if (!rowSize) return res;
+
+    /* gueltige Zeilen-IDs aus dem Row-Index */
+    var valid = null;
+    var idx = bthRecords(ctx, hidRowIndex);
+    if (idx.length) {
+      valid = new Set();
+      for (var i = 0; i < idx.length; i++) if (idx[i].key.length >= 4) valid.add(P.u32b(idx[i].key, 0));
+    }
+
+    var blocks = [];
+    if (!hnidRows) return res;
+    if ((hnidRows & 0x1f) === 0) {
+      var one = ctx.hn.get(hnidRows);
+      if (one) blocks = [one];
+    } else {
+      var sn = ctx.subs.get(hnidRows >>> 0);
+      if (sn) { try { blocks = P.readDataBlocks(sn.bidData); } catch (e) { blocks = []; } }
+    }
+
+    for (var b = 0; b < blocks.length; b++) {
+      var blk = blocks[b];
+      var n = Math.floor(blk.length / rowSize);
+      for (var r = 0; r < n; r++) {
+        var ro = r * rowSize;
+        var rowId = P.u32b(blk, ro);
+        if (valid && !valid.has(rowId)) continue;
+        var row = new Map();
+        row.set('rowId', rowId);
+        for (var k = 0; k < cols.length; k++) {
+          var col = cols[k];
+          /* Cell Existence Bitmap pruefen */
+          var byteIdx = ro + startCEB + (col.iBit >> 3);
+          if (byteIdx < blk.length && !(blk[byteIdx] & (1 << (7 - (col.iBit & 7))))) continue;
+          var vo = ro + col.ibData;
+          if (vo + col.cbData > blk.length) continue;
+          var raw;
+          if (isVarType(col.type) || fixedSize(col.type) > col.cbData) {
+            raw = resolveHnid(ctx, P.u32b(blk, vo));
+          } else {
+            raw = blk.subarray(vo, vo + col.cbData);
+          }
+          if (raw === null || raw === undefined) continue;
+          row.set(col.id, decodeValue(ctx, col.type, raw));
+        }
+        res.rows.push(row);
+      }
+    }
+    return res;
+  }
+
+  /* ===================================================================
+   * Messaging-Layer
+   * =================================================================== */
+  var P = {
+    SUBJECT: 0x0037, NORM_SUBJECT: 0x0e1d,
+    SENDER_NAME: 0x0c1a, SENDER_ADDR: 0x0c1f, SENDER_ADDRTYPE: 0x0c1e,
+    SENDER_SMTP: 0x5d01, REP_SMTP: 0x5d02,
+    REP_NAME: 0x0042, REP_ADDR: 0x0065, REP_ADDRTYPE: 0x0064,
+    DISPLAY_TO: 0x0e04, DISPLAY_CC: 0x0e03, DISPLAY_BCC: 0x0e02,
+    DELIVERY_TIME: 0x0e06, SUBMIT_TIME: 0x0039, CREATION_TIME: 0x3007,
+    BODY: 0x1000, BODY_HTML: 0x1013, RTF_COMPRESSED: 0x1009,
+    HEADERS: 0x007d, MSG_ID: 0x1035, IN_REPLY_TO: 0x1042, REFERENCES: 0x1039,
+    DISPLAY_NAME: 0x3001, EMAIL_ADDR: 0x3003, SMTP_ADDR: 0x39fe,
+    ADDRTYPE: 0x3002, RECIP_TYPE: 0x0c15,
+    ATTACH_DATA: 0x3701, ATTACH_FNAME: 0x3704, ATTACH_LONG_FNAME: 0x3707,
+    ATTACH_MIME: 0x370e, ATTACH_CID: 0x3712, ATTACH_METHOD: 0x3705,
+    ATTACH_DISPO: 0x3716, ATTACH_EXT: 0x3703,
+    CONTENT_COUNT: 0x3602, SUBFOLDERS: 0x360a, MSG_CLASS: 0x001a,
+    IMPORTANCE: 0x0017, PRIORITY: 0x0026
+  };
+
+  function pv(props, id) {
+    var p = props.get(id);
+    return p ? p.value : null;
+  }
+  function ps(props, id) {
+    var v = pv(props, id);
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') return v;
+    return '';
+  }
+  function stripSubjectPrefix(s) {
+    if (s && s.charCodeAt(0) === 0x01) return s.substring(2);
+    return s || '';
+  }
+
+  /* --- RTF (PidTagRtfCompressed, LZFu) --- */
+  var LZFU_DICT = '{\\rtf1\\ansi\\mac\\deff0\\deftab720{\\fonttbl;}{\\f0\\fnil \\froman \\fswiss ' +
+    '\\fmodern \\fscript \\fdecor MS Sans SerifSymbolArialTimes New RomanCourier' +
+    '{\\colortbl\\red0\\green0\\blue0\r\n\\par \\pard\\plain\\f0\\fs20\\b\\i\\u\\tab\\tx';
+
+  function lzfuDecompress(pst, bytes) {
+    if (!bytes || bytes.length < 16) return null;
+    var compSize = pst.u32b(bytes, 0), rawSize = pst.u32b(bytes, 4), magic = pst.u32b(bytes, 8);
+    if (magic === 0x414c454d) return bytes.subarray(16);      // "MELA" = unkomprimiert
+    if (magic !== 0x75465a4c) return null;                     // "LZFu"
+    if (rawSize > 64 * 1024 * 1024) return null;
+    var dict = new Uint8Array(4096);
+    for (var i = 0; i < LZFU_DICT.length; i++) dict[i] = LZFU_DICT.charCodeAt(i) & 0xff;
+    var wr = LZFU_DICT.length;
+    var out = new Uint8Array(rawSize), oi = 0;
+    var pos = 16, end = Math.min(bytes.length, compSize + 4);
+    while (pos < end && oi < rawSize) {
+      var ctrl = bytes[pos++];
+      for (var bit = 0; bit < 8 && pos < end && oi < rawSize; bit++) {
+        if (ctrl & (1 << bit)) {
+          if (pos + 1 >= end) { pos = end; break; }
+          var b1 = bytes[pos++], b2 = bytes[pos++];
+          var off = (b1 << 4) | (b2 >> 4);
+          var len = (b2 & 0x0f) + 2;
+          if (off === (wr % 4096)) { pos = end; break; }
+          for (var k = 0; k < len && oi < rawSize; k++) {
+            var c = dict[(off + k) % 4096];
+            out[oi++] = c;
+            dict[wr % 4096] = c; wr++;
+          }
+        } else {
+          var lit = bytes[pos++];
+          out[oi++] = lit;
+          dict[wr % 4096] = lit; wr++;
+        }
+      }
+    }
+    return out.subarray(0, oi);
+  }
+
+  /* --- Empfaenger / Anhaenge --- */
+  function readRecipients(pst, subs) {
+    var out = [];
+    var sn = subs.get(NID_RECIPIENT_TABLE);
+    if (!sn) return out;
+    var tc;
+    try { tc = readTC(openNode(pst, sn)); } catch (e) { return out; }
+    for (var i = 0; i < tc.rows.length; i++) {
+      var r = tc.rows[i];
+      var addr = r.get(P.SMTP_ADDR) || '';
+      var at = r.get(P.ADDRTYPE) || '';
+      if (!addr && String(at).toUpperCase() === 'SMTP') addr = r.get(P.EMAIL_ADDR) || '';
+      if (!addr) addr = r.get(P.EMAIL_ADDR) || '';
+      out.push({
+        name: r.get(P.DISPLAY_NAME) || '',
+        addr: typeof addr === 'string' ? addr : '',
+        type: r.get(P.RECIP_TYPE) || 1
+      });
+    }
+    return out;
+  }
+
+  function readAttachments(pst, subs) {
+    var out = [];
+    var sn = subs.get(NID_ATTACHMENT_TABLE);
+    if (!sn) return out;
+    var tc;
+    try { tc = readTC(openNode(pst, sn)); } catch (e) { return out; }
+    for (var i = 0; i < tc.rows.length; i++) {
+      var nid = tc.rows[i].get('rowId');
+      var an = subs.get(nid >>> 0);
+      if (!an) continue;
+      var ctx, props;
+      try { ctx = openNode(pst, an); props = readPC(ctx); } catch (e) { continue; }
+      var rec = props.get(P.ATTACH_DATA);
+      var att = {
+        filename: ps(props, P.ATTACH_LONG_FNAME) || ps(props, P.ATTACH_FNAME) || '',
+        mime: ps(props, P.ATTACH_MIME),
+        cid: ps(props, P.ATTACH_CID),
+        method: pv(props, P.ATTACH_METHOD) || 1,
+        dispo: ps(props, P.ATTACH_DISPO),
+        data: null,
+        embedded: null
+      };
+      if (rec) {
+        if (rec.type === 0x000d && rec.hnid && (rec.hnid & 0x1f) !== 0) {
+          var esn = ctx.subs.get(rec.hnid >>> 0);
+          if (esn) { try { att.embedded = readMessage(pst, esn, true); } catch (e) { } }
+        } else if (rec.value instanceof Uint8Array) {
+          att.data = rec.value;
+        }
+      }
+      if (!att.filename) {
+        att.filename = att.embedded ? 'nachricht.eml' : ('anhang-' + (i + 1) + (ps(props, P.ATTACH_EXT) || '.dat'));
+      }
+      out.push(att);
+    }
+    return out;
+  }
+
+  function readMessage(pst, node, isEmbedded) {
+    var ctx = openNode(pst, node);
+    var props = readPC(ctx);
+    var m = {
+      nid: node.nid,
+      props: props,
+      subject: stripSubjectPrefix(ps(props, P.SUBJECT)) || ps(props, P.NORM_SUBJECT),
+      msgClass: ps(props, P.MSG_CLASS),
+      headers: ps(props, P.HEADERS),
+      messageId: ps(props, P.MSG_ID),
+      inReplyTo: ps(props, P.IN_REPLY_TO),
+      references: ps(props, P.REFERENCES),
+      body: ps(props, P.BODY),
+      html: null,
+      rtf: null,
+      date: pv(props, P.DELIVERY_TIME) || pv(props, P.SUBMIT_TIME) || pv(props, P.CREATION_TIME) || null,
+      displayTo: ps(props, P.DISPLAY_TO),
+      displayCc: ps(props, P.DISPLAY_CC),
+      displayBcc: ps(props, P.DISPLAY_BCC),
+      recipients: [],
+      attachments: [],
+      embedded: !!isEmbedded
+    };
+    var h = props.get(P.BODY_HTML);
+    if (h) {
+      if (typeof h.value === 'string') m.html = h.value;
+      else if (h.value instanceof Uint8Array) m.html = decodeText(h.value, ctx.cp || 'utf-8');
+    }
+    if (!m.body && !m.html) {
+      var rc = props.get(P.RTF_COMPRESSED);
+      if (rc && rc.value instanceof Uint8Array) {
+        var rtf = lzfuDecompress(pst, rc.value);
+        if (rtf) m.rtf = rtf;
+      }
+    }
+    /* Absender */
+    var senderAddr = ps(props, P.SENDER_SMTP) || ps(props, P.REP_SMTP);
+    if (!senderAddr && String(ps(props, P.SENDER_ADDRTYPE)).toUpperCase() === 'SMTP') senderAddr = ps(props, P.SENDER_ADDR);
+    if (!senderAddr && String(ps(props, P.REP_ADDRTYPE)).toUpperCase() === 'SMTP') senderAddr = ps(props, P.REP_ADDR);
+    if (!senderAddr) senderAddr = ps(props, P.SENDER_ADDR) || ps(props, P.REP_ADDR);
+    m.senderAddr = senderAddr;
+    m.senderName = ps(props, P.SENDER_NAME) || ps(props, P.REP_NAME);
+    try { m.recipients = readRecipients(pst, ctx.subs); } catch (e) { }
+    try { m.attachments = readAttachments(pst, ctx.subs); } catch (e) { }
+    return m;
+  }
+
+  /* --- Ordnerbaum --- */
+  function readFolders(pst) {
+    var seen = new Set();
+    function build(nid, path, depth) {
+      if (seen.has(nid) || depth > 32) return null;
+      seen.add(nid);
+      var node = pst.nbt.get(nid >>> 0);
+      if (!node) return null;
+      var name = '';
+      var count = 0;
+      try {
+        var props = readPC(openNode(pst, node));
+        name = ps(props, P.DISPLAY_NAME);
+        count = pv(props, P.CONTENT_COUNT) || 0;
+      } catch (e) { }
+      if (!name) name = 'Ordner_' + nidIndex(nid);
+      var f = {
+        nid: nid, name: name, path: path ? path + '/' + name : name,
+        children: [], messageNids: [], count: count
+      };
+      var base = nid - (nid % 32);
+      /* Inhalt */
+      var cn = pst.nbt.get((base + NT_CONTENTS_TABLE) >>> 0);
+      if (cn) {
+        try {
+          var tc = readTC(openNode(pst, cn));
+          for (var i = 0; i < tc.rows.length; i++) {
+            var mid = tc.rows[i].get('rowId') >>> 0;
+            if (pst.nbt.has(mid)) f.messageNids.push(mid);
+          }
+        } catch (e) { }
+      }
+      /* Unterordner */
+      var hn = pst.nbt.get((base + NT_HIERARCHY_TABLE) >>> 0);
+      if (hn) {
+        try {
+          var th = readTC(openNode(pst, hn));
+          for (var j = 0; j < th.rows.length; j++) {
+            var cid = th.rows[j].get('rowId') >>> 0;
+            if (nidType(cid) === NT_NORMAL_FOLDER || nidType(cid) === NT_SEARCH_FOLDER) {
+              var c = build(cid, f.path, depth + 1);
+              if (c) f.children.push(c);
+            }
+          }
+        } catch (e) { }
+      }
+      f.count = f.messageNids.length;
+      return f;
+    }
+    var storeName = '';
+    try {
+      var sn0 = pst.nbt.get(NID_MESSAGE_STORE);
+      if (sn0) storeName = ps(readPC(openNode(pst, sn0)), P.DISPLAY_NAME);
+    } catch (e) { }
+    var root = build(NID_ROOT_FOLDER, '', 0);
+    if (root && storeName) { root.name = storeName; root.path = storeName; (function fix(f, base) { f.children.forEach(function (c) { c.path = base + '/' + c.name; fix(c, c.path); }); })(root, storeName); }
+    if (!root) throw new Error('Wurzelordner (NID 0x122) nicht gefunden.');
+    /* Fallback: verwaiste Nachrichten einsammeln */
+    var claimed = new Set();
+    (function mark(f) { f.messageNids.forEach(function (n) { claimed.add(n); }); f.children.forEach(mark); })(root);
+    var orphans = [];
+    pst.nbt.forEach(function (n, nid) {
+      if (nidType(nid) === NT_NORMAL_MESSAGE && !claimed.has(nid >>> 0)) orphans.push(nid >>> 0);
+    });
+    if (orphans.length) {
+      root.children.push({
+        nid: -1, name: 'Nicht zugeordnet', path: (root.path || 'Root') + '/Nicht zugeordnet',
+        children: [], messageNids: orphans, count: orphans.length
+      });
+    }
+    return root;
+  }
+
+  /* ===================================================================
+   * MIME / mbox
+   * =================================================================== */
+  var _te = new TextEncoder();
+  function utf8(s) { return _te.encode(s); }
+  var B64C = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+  function base64(bytes, lineLen) {
+    var out = '', i, n = bytes.length, col = 0, chunk = [];
+    function push(s) {
+      for (var k = 0; k < s.length; k++) {
+        chunk.push(s[k]);
+        if (lineLen && ++col === lineLen) { chunk.push('\n'); col = 0; }
+      }
+      if (chunk.length > 8192) { out += chunk.join(''); chunk = []; }
+    }
+    for (i = 0; i + 2 < n; i += 3) {
+      var v = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+      push(B64C[(v >> 18) & 63] + B64C[(v >> 12) & 63] + B64C[(v >> 6) & 63] + B64C[v & 63]);
+    }
+    var rem = n - i;
+    if (rem === 1) push(B64C[bytes[i] >> 2] + B64C[(bytes[i] & 3) << 4] + '==');
+    else if (rem === 2) push(B64C[bytes[i] >> 2] + B64C[((bytes[i] & 3) << 4) | (bytes[i + 1] >> 4)] + B64C[(bytes[i + 1] & 15) << 2] + '=');
+    out += chunk.join('');
+    if (lineLen && col !== 0) out += '\n';
+    return out;
+  }
+
+  function hex2(b) { return '=' + '0123456789ABCDEF'[b >> 4] + '0123456789ABCDEF'[b & 15]; }
+
+  function qpEncode(str) {
+    var bytes = utf8(String(str).replace(/\r\n/g, '\n').replace(/\r/g, '\n'));
+    var lines = [], line = '', i, b, t;
+    for (i = 0; i < bytes.length; i++) {
+      b = bytes[i];
+      if (b === 10) { lines.push(line); line = ''; continue; }
+      var atEol = (i + 1 >= bytes.length || bytes[i + 1] === 10);
+      if (b === 61) t = '=3D';
+      else if ((b === 32 || b === 9) && atEol) t = hex2(b);
+      else if (b === 32 || b === 9) t = String.fromCharCode(b);
+      else if (b >= 33 && b <= 126) t = String.fromCharCode(b);
+      else t = hex2(b);
+      /* "From " am Zeilenanfang maskieren, damit mbox nicht zerfaellt */
+      if (line.length === 0 && b === 70 && bytes[i + 1] === 114 && bytes[i + 2] === 111 &&
+          bytes[i + 3] === 109 && bytes[i + 4] === 32) t = '=46';
+      if (line.length + t.length > 75) { lines.push(line + '='); line = ''; }
+      line += t;
+    }
+    lines.push(line);
+    return lines.join('\n');
+  }
+
+  function needsEncoding(s) { return /[^\x20-\x7e]/.test(s); }
+
+  function encodeWord(s) {
+    if (!needsEncoding(s)) return s;
+    var parts = [], cur = '';
+    for (var i = 0; i < s.length; i++) {
+      cur += s[i];
+      if (utf8(cur).length > 30) { parts.push(cur); cur = ''; }
+    }
+    if (cur) parts.push(cur);
+    return parts.map(function (p) { return '=?UTF-8?B?' + base64(utf8(p), 0) + '?='; }).join('\n ');
+  }
+
+  function formatAddress(name, addr) {
+    name = (name || '').replace(/[\r\n]/g, ' ').trim();
+    addr = (addr || '').replace(/[\r\n\s]/g, '').trim();
+    if (!addr && !name) return '';
+    if (!addr) return encodeWord(name) + ' <>';
+    if (!name || name === addr) return addr;
+    var n = needsEncoding(name) ? encodeWord(name)
+      : (/[",:;<>@\[\]\\()]/.test(name) ? '"' + name.replace(/(["\\])/g, '\\$1') + '"' : name);
+    return n + ' <' + addr + '>';
+  }
+
+  var DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  var MONS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function rfcDate(d) {
+    return DAYS[d.getUTCDay()] + ', ' + d.getUTCDate() + ' ' + MONS[d.getUTCMonth()] + ' ' +
+      d.getUTCFullYear() + ' ' + pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' +
+      pad2(d.getUTCSeconds()) + ' +0000';
+  }
+  function asctime(d) {
+    var day = d.getUTCDate();
+    return DAYS[d.getUTCDay()] + ' ' + MONS[d.getUTCMonth()] + ' ' + (day < 10 ? ' ' : '') + day + ' ' +
+      pad2(d.getUTCHours()) + ':' + pad2(d.getUTCMinutes()) + ':' + pad2(d.getUTCSeconds()) + ' ' + d.getUTCFullYear();
+  }
+
+  function foldHeader(name, value) {
+    var v = String(value).replace(/[\r\n]+/g, ' ').trim();
+    var prefix = name + ': ';
+    if (prefix.length + v.length <= 78) return prefix + v;
+    var toks = v.split(/\s+/), lines = [], cur = prefix;
+    for (var i = 0; i < toks.length; i++) {
+      if (!toks[i]) continue;
+      if (cur !== prefix && cur !== ' ' && cur.length + toks[i].length + 1 > 76) { lines.push(cur); cur = ' '; }
+      cur += (/\s$/.test(cur) ? '' : ' ') + toks[i];
+    }
+    lines.push(cur);
+    return lines.join('\n');
+  }
+
+  function guessMime(fn) {
+    var e = (fn.match(/\.([A-Za-z0-9]+)$/) || [, ''])[1].toLowerCase();
+    var m = {
+      pdf: 'application/pdf', txt: 'text/plain', htm: 'text/html', html: 'text/html',
+      jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', bmp: 'image/bmp',
+      zip: 'application/zip', doc: 'application/msword', xls: 'application/vnd.ms-excel',
+      ppt: 'application/vnd.ms-powerpoint', rtf: 'application/rtf', csv: 'text/csv',
+      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      eml: 'message/rfc822', msg: 'application/vnd.ms-outlook', xml: 'text/xml', json: 'application/json'
+    };
+    return m[e] || 'application/octet-stream';
+  }
+
+  var _bcount = 0;
+  function boundary() { return '----=_Part_' + (++_bcount) + '_' + Math.floor(Math.random() * 1e9); }
+
+  /* Kopfzeilen aus den Original-Transportheadern uebernehmen (ohne MIME-Angaben) */
+  var DROP_HEADERS = /^(content-type|content-transfer-encoding|content-disposition|content-id|mime-version|content-length|status|x-status|x-mozilla-status\d*|x-mozilla-keys)$/i;
+  function parseHeaders(raw) {
+    var out = [], lines = String(raw).replace(/\r\n/g, '\n').split('\n'), cur = null;
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (/^[ \t]/.test(l) && cur) { cur[1] += '\n' + l; continue; }
+      var m = l.match(/^([!-9;-~]+):[ \t]?([\s\S]*)$/);
+      if (m) { cur = [m[1], m[2]]; out.push(cur); }
+    }
+    return out;
+  }
+
+  function buildMessage(msg, opts) {
+    opts = opts || {};
+    var parts = [];
+    var headerNames = new Set();
+    var hdr = [];
+    function add(name, value) {
+      if (value === null || value === undefined || value === '') return;
+      var k = name.toLowerCase();
+      if (headerNames.has(k)) return;
+      headerNames.add(k);
+      hdr.push(foldHeader(name, value));
+    }
+
+    /* 1) Originalheader falls vorhanden und gewuenscht */
+    if (opts.useOriginalHeaders !== false && msg.headers) {
+      var orig = parseHeaders(msg.headers);
+      for (var i = 0; i < orig.length; i++) {
+        var n = orig[i][0], v = orig[i][1];
+        if (DROP_HEADERS.test(n)) continue;
+        var k = n.toLowerCase();
+        if (headerNames.has(k) && /^(from|to|cc|subject|date|message-id)$/.test(k)) continue;
+        headerNames.add(k);
+        hdr.push(n + ': ' + v.replace(/\n(?![ \t])/g, '\n '));
+      }
+    }
+
+    /* 2) fehlende Kopfzeilen aus den Eigenschaften ergaenzen */
+    var from = formatAddress(msg.senderName, msg.senderAddr);
+    add('From', from || '<MAILER-DAEMON>');
+    var to = [], cc = [], bcc = [];
+    for (var r = 0; r < msg.recipients.length; r++) {
+      var rc = msg.recipients[r];
+      var a = formatAddress(rc.name, rc.addr);
+      if (!a) continue;
+      if (rc.type === 3) bcc.push(a); else if (rc.type === 2) cc.push(a); else to.push(a);
+    }
+    if (!to.length && msg.displayTo) to.push(encodeWord(msg.displayTo));
+    if (!cc.length && msg.displayCc) cc.push(encodeWord(msg.displayCc));
+    add('To', to.join(', ') || 'undisclosed-recipients:;');
+    add('Cc', cc.join(', '));
+    if (opts.includeBcc) add('Bcc', bcc.join(', '));
+    if (!headerNames.has('subject')) { headerNames.add('subject'); hdr.push(foldHeader('Subject', encodeWord(msg.subject || ''))); }
+    if (msg.date) add('Date', rfcDate(msg.date));
+    if (msg.messageId) add('Message-ID', msg.messageId);
+    if (msg.inReplyTo) add('In-Reply-To', msg.inReplyTo);
+    if (msg.references) add('References', msg.references);
+    if (opts.folderPath) hdr.push(foldHeader('X-PST-Folder', opts.folderPath));
+
+    /* 3) Koerper */
+    var textPart = null, htmlPart = null, extraParts = [];
+    if (msg.body) {
+      textPart = { headers: ['Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: quoted-printable'], body: utf8(qpEncode(msg.body)) };
+    }
+    if (msg.html) {
+      htmlPart = { headers: ['Content-Type: text/html; charset=UTF-8', 'Content-Transfer-Encoding: quoted-printable'], body: utf8(qpEncode(msg.html)) };
+    }
+    if (!textPart && !htmlPart && msg.rtf) {
+      extraParts.push({
+        headers: ['Content-Type: application/rtf; name="rtf-body.rtf"',
+                  'Content-Transfer-Encoding: base64',
+                  'Content-Disposition: attachment; filename="rtf-body.rtf"'],
+        body: utf8(base64(msg.rtf, 76))
+      });
+    }
+    if (!textPart && !htmlPart && !extraParts.length) {
+      textPart = { headers: ['Content-Type: text/plain; charset=UTF-8', 'Content-Transfer-Encoding: quoted-printable'], body: utf8('') };
+    }
+
+    /* Anhaenge */
+    var atts = [], inlineAtts = [];
+    if (opts.includeAttachments !== false) {
+      for (var a2 = 0; a2 < msg.attachments.length; a2++) {
+        var at = msg.attachments[a2];
+        var fn = String(at.filename || 'anhang.dat').replace(/[\r\n"]/g, '_');
+        var part;
+        if (at.embedded) {
+          part = {
+            headers: ['Content-Type: message/rfc822', 'Content-Disposition: attachment; filename="' +
+                      (fn.replace(/\.[^.]*$/, '') || 'nachricht') + '.eml"'],
+            body: buildMessage(at.embedded, { useOriginalHeaders: opts.useOriginalHeaders, includeAttachments: opts.includeAttachments })
+          };
+        } else if (at.data) {
+          var ct = at.mime || guessMime(fn);
+          var nameParam = needsEncoding(fn) ? '' : '; name="' + fn + '"';
+          var fnParam = needsEncoding(fn) ? "; filename*=UTF-8''" + encodeURIComponent(fn) : '; filename="' + fn + '"';
+          var isInline = !!at.cid;
+          part = {
+            headers: ['Content-Type: ' + ct + nameParam,
+                      'Content-Transfer-Encoding: base64',
+                      'Content-Disposition: ' + (isInline ? 'inline' : 'attachment') + fnParam]
+              .concat(at.cid ? ['Content-ID: <' + at.cid.replace(/[<>]/g, '') + '>'] : []),
+            body: utf8(base64(at.data, 76))
+          };
+          if (isInline) { inlineAtts.push(part); continue; }
+        } else continue;
+        atts.push(part);
+      }
+    }
+
+    /* MIME-Baum zusammensetzen */
+    function multipart(subtype, children, extraHdr) {
+      var b = boundary();
+      var chunks = [];
+      for (var i = 0; i < children.length; i++) {
+        chunks.push(utf8('--' + b + '\n' + children[i].headers.join('\n') + '\n\n'));
+        chunks.push(children[i].body);
+        chunks.push(utf8('\n'));
+      }
+      chunks.push(utf8('--' + b + '--\n'));
+      return {
+        headers: ['Content-Type: multipart/' + subtype + '; boundary="' + b + '"'].concat(extraHdr || []),
+        body: concatBytes(chunks)
+      };
+    }
+
+    var bodyPart;
+    if (textPart && htmlPart) bodyPart = multipart('alternative', [textPart, htmlPart]);
+    else bodyPart = textPart || htmlPart;
+    if (inlineAtts.length) bodyPart = multipart('related', [bodyPart].concat(inlineAtts));
+    var allAtts = atts.concat(extraParts);
+    var root = allAtts.length ? multipart('mixed', [bodyPart].concat(allAtts)) : bodyPart;
+
+    var head = hdr.slice();
+    head.push('MIME-Version: 1.0');
+    head = head.concat(root.headers);
+    return concatBytes([utf8(head.join('\n') + '\n\n'), root.body]);
+  }
+
+  /* mbox-Trennzeile im Stil von readpst */
+  function mboxFromLine(msg) {
+    var addr = String(msg.senderAddr || '').replace(/[\s<>"]/g, '');
+    if (addr.indexOf('@') < 0) addr = 'MAILER-DAEMON';
+    var d = msg.date || new Date(0);
+    return 'From "' + addr + '" ' + asctime(d) + '\n';
+  }
+
+  /* ===================================================================
+   * ZIP (nur "stored", keine Kompression)
+   * =================================================================== */
+  var CRC_TABLE = (function () {
+    var t = new Uint32Array(256);
+    for (var n = 0; n < 256; n++) {
+      var c = n;
+      for (var k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(buf) {
+    var c = 0xffffffff;
+    for (var i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function makeZip(files) {
+    var chunks = [], central = [], offset = 0;
+    var now = new Date();
+    var dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
+    var dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
+    for (var i = 0; i < files.length; i++) {
+      var name = utf8(files[i].name), data = files[i].data, crc = crc32(data);
+      var lh = new Uint8Array(30 + name.length);
+      var dv = new DataView(lh.buffer);
+      dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(6, 0x0800, true);
+      dv.setUint16(8, 0, true); dv.setUint16(10, dosTime, true); dv.setUint16(12, dosDate, true);
+      dv.setUint32(14, crc, true); dv.setUint32(18, data.length, true); dv.setUint32(22, data.length, true);
+      dv.setUint16(26, name.length, true); dv.setUint16(28, 0, true);
+      lh.set(name, 30);
+      chunks.push(lh, data);
+      var ch = new Uint8Array(46 + name.length), cv = new DataView(ch.buffer);
+      cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
+      cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true);
+      cv.setUint16(12, dosTime, true); cv.setUint16(14, dosDate, true);
+      cv.setUint32(16, crc, true); cv.setUint32(20, data.length, true); cv.setUint32(24, data.length, true);
+      cv.setUint16(28, name.length, true); cv.setUint32(42, offset, true);
+      ch.set(name, 46);
+      central.push(ch);
+      offset += lh.length + data.length;
+    }
+    var cdSize = 0;
+    for (i = 0; i < central.length; i++) cdSize += central[i].length;
+    var eocd = new Uint8Array(22), ev = new DataView(eocd.buffer);
+    ev.setUint32(0, 0x06054b50, true);
+    ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
+    ev.setUint32(12, cdSize, true); ev.setUint32(16, offset, true);
+    return concatBytes(chunks.concat(central).concat([eocd]));
+  }
+
+  return {
+    Pst: Pst, readFolders: readFolders, readMessage: readMessage,
+    buildMessage: buildMessage, mboxFromLine: mboxFromLine,
+    makeZip: makeZip, concatBytes: concatBytes, utf8: utf8,
+    nidType: nidType, NT_NORMAL_MESSAGE: NT_NORMAL_MESSAGE
+  };
+})();
+
+if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
+
+</script>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var pst = null, root = null, urls = [], fileName = '';
+
+  /* ---------- Datei entgegennehmen ---------- */
+  var drop = $('drop'), fileInput = $('file');
+  drop.addEventListener('click', function () { fileInput.click(); });
+  drop.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+  });
+  fileInput.addEventListener('change', function () { if (this.files[0]) load(this.files[0]); });
+  ['dragenter', 'dragover'].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (t) {
+    drop.addEventListener(t, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+  });
+
+  function showError(msg) {
+    $('err').textContent = msg;
+    $('err').classList.remove('hidden');
+    $('result').classList.add('hidden');
+  }
+
+  function load(file) {
+    $('err').classList.add('hidden');
+    $('result').classList.add('hidden');
+    $('out').classList.add('hidden');
+    fileName = file.name.replace(/\.(pst|ost)$/i, '') || 'archiv';
+    drop.querySelector('strong').textContent = file.name;
+    drop.querySelector('span').textContent = fmtSize(file.size) + ' — wird gelesen …';
+    if (file.size > 1600 * 1024 * 1024) {
+      showError('Die Datei ist ' + fmtSize(file.size) + ' groß. Browser können maximal etwa 1,5 GB ' +
+                'am Stück im Speicher halten; bitte das Archiv vorher in Outlook aufteilen.');
+      return;
+    }
+    file.arrayBuffer().then(function (buf) {
+      try {
+        pst = new PSTLIB.Pst(new Uint8Array(buf));
+        root = PSTLIB.readFolders(pst);
+      } catch (e) {
+        drop.querySelector('span').textContent = 'oder klicken zum Auswählen';
+        showError(e && e.message ? e.message : String(e));
+        return;
+      }
+      drop.querySelector('span').textContent = fmtSize(file.size);
+      renderReadout(file);
+      initSelection();
+      renderTree();
+      $('result').classList.remove('hidden');
+      $('bar').style.width = '0';
+    }).catch(function (e) {
+      showError('Datei konnte nicht gelesen werden: ' + e);
+    });
+  }
+
+  function fmtSize(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1048576) return (n / 1024).toFixed(1) + ' KB';
+    if (n < 1073741824) return (n / 1048576).toFixed(1) + ' MB';
+    return (n / 1073741824).toFixed(2) + ' GB';
+  }
+
+  function renderReadout(file) {
+    var crypt = ['keine', 'permutiert (compressible)', 'zyklisch (high)'][pst.crypt] || '?';
+    var total = 0;
+    (function w(f) { total += f.messageNids.length; f.children.forEach(w); })(root);
+    $('readout').innerHTML =
+      '<span><i>Format</i><b>' + (pst.unicode ? 'Unicode' : 'ANSI') + ' · wVer ' + pst.wVer + '</b></span>' +
+      '<span><i>Verschlüsselung</i><b>' + crypt + '</b></span>' +
+      '<span><i>Knoten</i><b>' + pst.nbt.size + '</b></span>' +
+      '<span><i>Blöcke</i><b>' + pst.bbt.size + '</b></span>' +
+      '<span><i>Nachrichten</i><b class="ok">' + total + '</b></span>';
+  }
+
+  /* ---------- Ordnerbaum ---------- */
+  /* Vorauswahl: alles, was Nachrichten enthaelt */
+  function initSelection() {
+    (function w(f) { f._sel = f.messageNids.length > 0; f.children.forEach(w); })(root);
+  }
+
+  /* Sichtbare Zeilen samt Baumlinien - nur ueber tatsaechlich gezeigte Knoten */
+  function visibleRows(showEmpty) {
+    function keep(f) {
+      if (showEmpty || f.messageNids.length) return true;
+      for (var i = 0; i < f.children.length; i++) if (keep(f.children[i])) return true;
+      return false;
+    }
+    var out = [];
+    (function walk(f, prefix, isLast, isRoot) {
+      out.push({ f: f, glyph: isRoot ? '' : prefix + (isLast ? '\u2514\u2500 ' : '\u251c\u2500 ') });
+      var kids = f.children.filter(keep);
+      var cp = isRoot ? '' : prefix + (isLast ? '   ' : '\u2502  ');
+      for (var i = 0; i < kids.length; i++) walk(kids[i], cp, i === kids.length - 1, false);
+    })(root, '', true, true);
+    return out;
+  }
+
+  function renderTree() {
+    var host = $('tree');
+    host.textContent = '';
+    var rows = visibleRows($('showEmpty').checked);
+    rows.forEach(function (it) {
+      var n = it.f.messageNids.length;
+      var row = document.createElement('label');
+      row.className = 'row' + (n ? '' : ' empty');
+      var cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = !!it.f._sel; cb.disabled = !n;
+      cb.addEventListener('change', function () { toggleSubtree(it.f, cb.checked); });
+      var g = document.createElement('span'); g.className = 'glyph'; g.textContent = it.glyph;
+      var nm = document.createElement('span'); nm.className = 'name'; nm.textContent = it.f.name;
+      nm.title = it.f.path;
+      var ct = document.createElement('span'); ct.className = 'n'; ct.textContent = n ? n : '\u2013';
+      row.appendChild(cb); row.appendChild(g); row.appendChild(nm); row.appendChild(ct);
+      host.appendChild(row);
+    });
+    updateStatus();
+  }
+
+  function toggleSubtree(f, on) {
+    (function w(x) { if (x.messageNids.length) x._sel = on; x.children.forEach(w); })(f);
+    renderTree();
+  }
+
+  function eachFolder(fn) { (function w(f) { fn(f); f.children.forEach(w); })(root); }
+
+  $('showEmpty').addEventListener('change', renderTree);
+  $('selAll').addEventListener('click', function () { eachFolder(function (f) { if (f.messageNids.length) f._sel = true; }); renderTree(); });
+  $('selNone').addEventListener('click', function () { eachFolder(function (f) { f._sel = false; }); renderTree(); });
+  $('selFull').addEventListener('click', function () { eachFolder(function (f) { f._sel = f.messageNids.length > 0; }); renderTree(); });
+
+  function selected() { var o = []; eachFolder(function (f) { if (f._sel && f.messageNids.length) o.push(f); }); return o; }
+
+  function updateStatus() {
+    var s = selected(), n = 0;
+    s.forEach(function (f) { n += f.messageNids.length; });
+    $('status').textContent = s.length
+      ? s.length + ' Ordner, ' + n + ' Nachrichten ausgewählt'
+      : 'Kein Ordner ausgewählt';
+    $('run').disabled = !s.length;
+  }
+
+  /* ---------- Konvertierung ---------- */
+  function sanitize(s) {
+    return String(s).replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').replace(/^\.+|\.+$/g, '_').trim() || 'Ordner';
+  }
+  function sleep() { return new Promise(function (r) { setTimeout(r, 0); }); }
+
+  $('run').addEventListener('click', function () { convert(); });
+
+  async function convert() {
+    var sel = selected();
+    var opts = {
+      includeAttachments: $('oAtt').checked,
+      useOriginalHeaders: $('oHdr').checked,
+      includeBcc: $('oBcc').checked
+    };
+    var onlyMail = $('oMail').checked;
+    var asZip = $('oZip').checked;
+
+    urls.forEach(URL.revokeObjectURL); urls = [];
+    $('out').classList.add('hidden');
+    $('warn').classList.add('hidden');
+    $('files').textContent = '';
+    $('run').disabled = true;
+
+    var total = 0;
+    sel.forEach(function (f) { total += f.messageNids.length; });
+    var done = 0, failed = 0, skipped = 0;
+    var zipFiles = [], allChunks = [];
+
+    for (var s = 0; s < sel.length; s++) {
+      var folder = sel[s];
+      var chunks = asZip ? [] : allChunks;
+      for (var m = 0; m < folder.messageNids.length; m++) {
+        var nid = folder.messageNids[m];
+        try {
+          var node = pst.nbt.get(nid);
+          var msg = PSTLIB.readMessage(pst, node);
+          if (onlyMail && msg.msgClass && msg.msgClass.indexOf('IPM.Note') !== 0) { skipped++; }
+          else {
+            var o = Object.create(opts); o.folderPath = folder.path;
+            chunks.push(PSTLIB.utf8(PSTLIB.mboxFromLine(msg)));
+            chunks.push(PSTLIB.buildMessage(msg, o));
+            chunks.push(PSTLIB.utf8('\n'));
+          }
+        } catch (e) { failed++; }
+        done++;
+        if (done % 40 === 0) {
+          $('bar').style.width = (done / total * 100).toFixed(1) + '%';
+          $('status').textContent = done + ' / ' + total + ' Nachrichten';
+          await sleep();
+        }
+      }
+      if (asZip && chunks.length) {
+        var parts = folder.path.split('/').map(sanitize);
+        var name = parts.pop();
+        zipFiles.push({ name: parts.concat(name + '.mbox').join('/'), data: PSTLIB.concatBytes(chunks) });
+      }
+    }
+
+    $('bar').style.width = '100%';
+    $('status').textContent = done + ' Nachrichten verarbeitet';
+
+    var results = [];
+    if (asZip) {
+      if (!zipFiles.length) { $('run').disabled = false; showWarn('Keine Nachrichten zum Schreiben — Auswahl oder Filter prüfen.'); return; }
+      results.push({ name: sanitize(fileName) + '-mbox.zip', blob: new Blob([PSTLIB.makeZip(zipFiles)], { type: 'application/zip' }) });
+    } else {
+      if (!allChunks.length) { $('run').disabled = false; showWarn('Keine Nachrichten zum Schreiben \u2014 Auswahl oder Filter pr\u00fcfen.'); return; }
+      results.push({ name: sanitize(fileName) + '.mbox', blob: new Blob(allChunks, { type: 'application/mbox' }) });
+    }
+
+    var host = $('files');
+    results.forEach(function (r) {
+      var url = URL.createObjectURL(r.blob); urls.push(url);
+      var row = document.createElement('div'); row.className = 'file';
+      var fn = document.createElement('span'); fn.className = 'fn'; fn.textContent = r.name;
+      var sz = document.createElement('span'); sz.className = 'sz'; sz.textContent = fmtSize(r.blob.size);
+      var a = document.createElement('a'); a.href = url; a.download = r.name; a.textContent = 'Speichern';
+      row.appendChild(fn); row.appendChild(sz); row.appendChild(a);
+      host.appendChild(row);
+    });
+    if (asZip && zipFiles.length > 1) {
+      var info = document.createElement('div'); info.className = 'file';
+      info.innerHTML = '<span class="fn" style="color:var(--muted)">enthält ' + zipFiles.length + ' mbox-Dateien</span>';
+      host.appendChild(info);
+    }
+    $('out').classList.remove('hidden');
+    $('run').disabled = false;
+
+    var msgs = [];
+    if (skipped) msgs.push(skipped + ' Einträge übersprungen (keine E-Mail).');
+    if (failed) msgs.push(failed + ' Nachrichten konnten nicht gelesen werden und fehlen in der Ausgabe.');
+    if (msgs.length) showWarn(msgs.join(' '));
+  }
+
+  function showWarn(t) { $('warn').textContent = t; $('warn').classList.remove('hidden'); }
+})();
+</script>
+</body>
+</html>
