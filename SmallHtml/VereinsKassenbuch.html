@@ -83,6 +83,9 @@ td.num,th.num{text-align:right;font-family:var(--font-num);white-space:nowrap;fo
 td.mono{font-family:var(--font-num);font-size:13px;white-space:nowrap}
 tr.negativ td{background:var(--warn-bg)}
 tr.dublette td{opacity:.5}
+tr.verdacht td{background:#F9F0DA}
+tr.verdacht:hover td{background:#F3E6C6}
+.warnzeichen{color:var(--warn);font-weight:600;cursor:help}
 tr.summe td{font-weight:600;border-top:1.5px solid var(--tinte-2);border-bottom:0;background:transparent}
 tr.summe:hover td{background:transparent}
 .tabellenrahmen{overflow-x:auto;margin-top:4px}
@@ -471,6 +474,25 @@ function regelTreffer(b){
   return "";
 }
 
+// Weiche Prüfung: gibt es schon eine Buchung mit gleichem Betrag, gleicher
+// Richtung und Datum in der Nähe? Trifft vor allem handgetippte Kontovorgänge.
+const TAGE_FENSTER=3;
+function aehnlicheBuchung(b){
+  const ziel=Date.parse(b.datum);
+  if(isNaN(ziel)) return null;
+  for(const x of zustand.buchungen){
+    if(x.bankref && x.bankref===b.bankref) continue;      // echte Dublette, separat gemeldet
+    if(Math.abs(Math.abs(x.betrag)-b.betrag)>0.005) continue;
+    const k=kat(x.kategorie); if(!k) continue;
+    if((k.art==="einnahme")!==(b.richtung==="CRDT")) continue;
+    const d=Date.parse(x.datum); if(isNaN(d)) continue;
+    if(Math.abs(d-ziel)/86400000>TAGE_FENSTER) continue;
+    const wie = x.bankref ? "bereits importiert" : "von Hand erfasst";
+    return `${x.datum}, Beleg ${x.beleg||"—"}: ${kuerze(x.text,60)} (${wie})`;
+  }
+  return null;
+}
+
 async function camtEinlesen(dateien){
   const roh=[]; const namen=[];
   for(const d of dateien){
@@ -487,7 +509,8 @@ async function camtEinlesen(dateien){
   for(const b of roh){
     const dub = bekannt.has(b.bankref) || gesehen.has(b.bankref);
     gesehen.add(b.bankref);
-    puffer.push({...b, kategorie:regelTreffer(b), dublette:dub, uebernehmen:!dub});
+    puffer.push({...b, kategorie:regelTreffer(b), dublette:dub,
+                 verdacht: dub ? null : aehnlicheBuchung(b), uebernehmen:!dub});
   }
   puffer.sort((a,b)=>(a.datum||"").localeCompare(b.datum||""));
   zustand.puffer=puffer;
@@ -495,6 +518,7 @@ async function camtEinlesen(dateien){
   zustand.pufferInfo={
     dateien:namen.length, gefunden:roh.length,
     dubletten:puffer.filter(p=>p.dublette).length,
+    verdacht:puffer.filter(p=>p.verdacht).length,
     format,
     von:puffer.length?puffer[0].datum:"", bis:puffer.length?puffer[puffer.length-1].datum:"",
     sammel:roh.filter(b=>b.teile>1).length
@@ -604,13 +628,14 @@ function ansichtBank(){
         Alle wurden übernommen oder verworfen.</div>`:""}
       <h3>Was der Import kann</h3>
       <p class="hinweis">Er versteht camt.052 und camt.053 in allen Versionen, überspringt Vormerkposten und erkennt bereits übernommene Buchungen an der Bankreferenz. Zusammengehörige Textbausteine des Verwendungszwecks werden zusammengefügt — die Sparkasse verteilt lange Texte auf bis zu zwölf Einzelfelder.</p>
+      <p class="hinweis">Schon übernommene Buchungen werden an der Bankreferenz erkannt und automatisch abgewählt. Zusätzlich warnt die Vorschau bei Zeilen, die einer vorhandenen Buchung ähneln — gleicher Betrag, gleiche Richtung, Datum höchstens drei Tage daneben. Diese Zeilen bleiben ausgewählt, sind aber gelb hinterlegt; sie fangen vor allem Kontovorgänge ab, die jemand von Hand eingetippt hat.</p>
       <p class="hinweis">Was er nicht kann und nicht können soll: die Kategorie für dich entscheiden. Jede Zeile bekommt einen Vorschlag aus deinen Regeln, bestätigen musst du selbst.</p>`;
   }
 
   const offen=p.filter(x=>x.uebernehmen&&!x.kategorie).length;
   const gewaehlt=p.filter(x=>x.uebernehmen).length;
 
-  const zeilen=p.map((x,i)=>`<tr class="${x.dublette?"dublette":""}">
+  const zeilen=p.map((x,i)=>`<tr class="${x.dublette?"dublette":x.verdacht?"verdacht":""}">
     <td class="nichtdrucken"><input type="checkbox" data-uebernehmen="${i}" ${x.uebernehmen?"checked":""} aria-label="übernehmen"></td>
     <td class="mono">${esc(x.datum)}</td>
     <td class="num">${x.richtung==="CRDT"?"+":"−"}${eur.format(x.betrag)}</td>
@@ -621,7 +646,9 @@ function ansichtBank(){
         .map(k=>`<option value="${k.key}"${k.key===x.kategorie?" selected":""}>${esc(kuerze(k.text,46))}</option>`).join("")}
     </select>
     ${x.kategorie?`<button class="zeilentat nichtdrucken" data-regel="${i}" title="Regel für ähnliche Buchungen merken">＋Regel</button>`:""}</td>
-    <td class="mini">${x.dublette?"schon gebucht":""}</td>
+    <td class="mini">${x.dublette?"schon gebucht"
+      :x.verdacht?`<span class="warnzeichen" title="Ähnliche Buchung: ${esc(x.verdacht)}">⚠ ähnliche vorhanden</span><br><span class="mini">${esc(kuerze(x.verdacht,52))}</span>`
+      :""}</td>
   </tr>`).join("");
 
   return `
@@ -632,9 +659,14 @@ function ansichtBank(){
       <div class="kachel"><div class="titel">Zeitraum</div><div class="wert" style="font-size:15px">${esc(info.von)}<br>bis ${esc(info.bis)}</div><div class="fuss">nach Buchungsdatum</div></div>
       <div class="kachel ${info.dubletten?"":"gruen"}"><div class="titel">Schon gebucht</div><div class="wert">${info.dubletten}</div>
         <div class="fuss">an der Bankreferenz erkannt</div></div>
+      <div class="kachel ${info.verdacht?"":"gruen"}"><div class="titel">Verdacht auf Doppelung</div><div class="wert">${info.verdacht}</div>
+        <div class="fuss">gleicher Betrag in der Nähe</div></div>
       <div class="kachel ${offen?"rot":"gruen"}"><div class="titel">Kategorie offen</div><div class="wert">${offen}</div>
         <div class="fuss">von ${gewaehlt} ausgewählten</div></div>
     </div>
+
+    ${info.verdacht?`<div class="merker"><strong>${info.verdacht} Buchungen sehen aus wie etwas, das schon im Kassenbuch steht.</strong>
+      Gleicher Betrag, gleiche Richtung, Datum höchstens drei Tage daneben — aber eine andere Bankreferenz. Das trifft meist handgetippte Kontovorgänge. Sie bleiben ausgewählt, weil es auch echte Wiederholungen gibt, etwa gleich hohe Beiträge oder eine monatliche Miete. Schau die gelb hinterlegten Zeilen einmal an und nimm das Häkchen raus, wo es dieselbe Zahlung ist.</div>`:""}
 
     ${info.sammel?`<div class="merker ruhig"><strong>${info.sammel} Sammelbuchungen enthalten mehrere Einzelposten.</strong>
       Übernommen wird die Buchung als Ganzes. Für die Aufteilung, etwa bei einem Lastschrifteinzug der Mitgliedsbeiträge, brauchst du eine eigene Aufstellung als Beleg.</div>`:""}
