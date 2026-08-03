@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Wizard of Wor &mdash; HTML-Nachbau</title>
+<style>
+  html,body{margin:0;padding:0;background:#000;color:#9AD284;
+    font-family:ui-monospace,"Courier New",monospace;height:100%;overflow:hidden}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;
+    height:100%;gap:10px}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;
+    background:#000;border:2px solid #352879;box-shadow:0 0 40px #35287966}
+  #hint{font-size:12px;color:#6C6C6C;letter-spacing:1px;text-align:center;line-height:1.6}
+  #hint b{color:#B8C76F;font-weight:normal}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="hint">
+    <b>P1</b> Pfeiltasten + Leertaste &nbsp;&middot;&nbsp; <b>P2</b> WASD + Shift/Q &nbsp;&middot;&nbsp;
+    <b>1</b>/<b>2</b> Spiel starten<br>
+    <b>P</b> Pause &nbsp;&middot;&nbsp; <b>M</b> Ton &nbsp;&middot;&nbsp; <b>V</b> Sprachausgabe
+  </div>
+</div>
+<script>
+"use strict";
+/* =========================================================================
+   Wizard of Wor -- eigenstaendiger HTML/JS-Nachbau
+   Einzeldatei, keine Abhaengigkeiten. Alle Grafiken und Klaenge sind hier
+   erzeugt; es werden keine Daten aus dem Original-ROM verwendet.
+   Spielregeln nach dem C64-Disassembly von Jeff Bruettes Fassung:
+     - Spielfeld 11 x 6 Zellen a 3x3 Zeichen (24x24 px), horizontal gespiegelt
+     - Burwor 100 / Garwor 200 / Thorwor 500 / Worrior 1000 / Worluk 1000 /
+       Wizard 2500 Punkte
+     - Garwor kommt nach, sobald dungeon >= verbleibende Burwors
+     - Garwor wird immer durch Thorwor ersetzt, Thorwor nie
+     - Kein Worluk am Ende des ersten Dungeons
+   ========================================================================= */
+
+/* ------------------------------------------------------------------ Palette
+   C64-Farben nach Pepto. */
+const PAL = {
+  black:'#000000', white:'#FFFFFF', red:'#68372B', cyan:'#70A4B2',
+  purple:'#6F3D86', green:'#588D43', blue:'#352879', yellow:'#B8C76F',
+  orange:'#6F4F25', brown:'#433900', lred:'#9A6759', dgrey:'#444444',
+  grey:'#6C6C6C', lgreen:'#9AD284', lblue:'#6C5EB5', lgrey:'#959595'
+};
+
+/* ------------------------------------------------------------- Geometrie */
+const VW = 320, VH = 200;          // virtuelle Aufloesung (C64-Format)
+const COLS = 11, ROWS = 6, CELL = 24;
+const MAZE_W = COLS * CELL, MAZE_H = ROWS * CELL;   // 264 x 144
+const MX = (VW - MAZE_W) >> 1;     // 28
+const MY = 12;
+const DOOR_ROW = 2;                // Warp-Tueren: in allen 25 Layouts Zeile 2
+const CAGE_ROW = ROWS - 1;         // Kaefige haengen unter den unteren Eckzellen
+const CAGE_COL = [0, COLS - 1];    // Zeichenspalten 3-5 bzw. 33-35
+const CAGE_H = 18;                 // Zeichenzeilen 18-20
+const RAD_CELL = 6;
+const RAD_W = COLS * RAD_CELL, RAD_H = ROWS * RAD_CELL;
+const RAD_X = (VW - RAD_W) >> 1, RAD_Y = MY + MAZE_H + 2;
+const LIVES_Y = MY + MAZE_H + 24;
+
+/* ---- Spielbalance, zum Nachjustieren an einer Stelle ------------------- */
+const SHOOT_CHANCE   = 0.5;   // 50-Prozent-Chance je Pruefung (wie im Original)
+const SHOOT_INTERVAL = 8;     // Frames zwischen zwei Pruefungen je Monster
+const CHASE_BASE     = 0.45;  // Grundneigung, auf den Spieler zuzulaufen
+const CHASE_STEP     = 0.035; // Zuwachs je Dungeon
+
+const ACT = 16;                    // Sprite-Kantenlaenge
+const HALF = ACT >> 1;
+const LIMIT = (CELL >> 1) - HALF;  // 4 px: Anschlag vor einer Wand
+const SNAP = 5;                    // Toleranz zum Abbiegen
+
+const N = 0, E = 1, S = 2, W = 3;
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+const WN = ['n', 'e', 's', 'w'];
+const OPP = [2, 3, 0, 1];
+
+/* -------------------------------------------------------------- 8x8-Font
+   Zeichensatz im Stil des C64-ROMs, ein Byte pro Pixelzeile. */
+const FONT = {
+  ' ':'0000000000000000','A':'183C667E66666600','B':'7C66667C66667C00',
+  'C':'3C66606060663C00','D':'786C6666666C7800','E':'7E60607860607E00',
+  'F':'7E60607860606000','G':'3C66606E66663C00','H':'6666667E66666600',
+  'I':'3C18181818183C00','J':'1E0C0C0C0C6C3800','K':'666C7870786C6600',
+  'L':'6060606060607E00','M':'63777F6B63636300','N':'66767E7E6E666600',
+  'O':'3C66666666663C00','P':'7C66667C60606000','Q':'3C666666663C0E00',
+  'R':'7C66667C786C6600','S':'3C66603C06663C00','T':'7E18181818181800',
+  'U':'6666666666663C00','V':'66666666663C1800','W':'6363636B7F776300',
+  'X':'66663C183C666600','Y':'6666663C18181800','Z':'7E060C1830607E00',
+  '0':'3C666E7666663C00','1':'1818381818187E00','2':'3C66060C30607E00',
+  '3':'3C66061C06663C00','4':'060E1E667F060600','5':'7E607C0606663C00',
+  '6':'3C66607C66663C00','7':'7E660C1818181800','8':'3C66663C66663C00',
+  '9':'3C66663E06663C00','.':'0000000000181800',',':'0000000000181830',
+  ':':'0000180000180000','-':'0000007E00000000','!':'1818181800001800',
+  '?':'3C66060C18001800','(':'0E18303030180E00',')':'70180C0C0C187000',
+  '/':'00060C1830600000','*':'00663CFF3C660000','+':'0018187E18180000',
+  '=':'00007E007E000000','<':'0C18306030180C00','>':'30180C060C183000',
+  "'":'1818000000000000','_':'000000000000007E'
+};
+
+/* ------------------------------------------------------------- Sprite-Daten
+   '.' transparent, 'A' Hauptfarbe, 'B' Nebenfarbe, 'C' Highlight. */
+const SPR = {
+  /* Wolfsartiges Monster, frontal, mit Ohren, Augen und Zahnreihe.
+     Burwor, Garwor und Thorwor teilen sich diese Form -- wie im Original
+     unterscheiden sie sich nur durch die Farbe. */
+  mon0: [
+    '................',
+    '..AA........AA..',
+    '..AAA......AAA..',
+    '..AAAA....AAAA..',
+    '..AAAAAAAAAAAA..',
+    '.AAAAAAAAAAAAAA.',
+    '.AACCAAAAAACCAA.',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '..AAAAAAAAAAAA..',
+    '..ACACACACACAA..',
+    '..AAAAAAAAAAAA..',
+    '...AA......AA...',
+    '...AA......AA...',
+    '..AAA......AAA..',
+    '................'],
+  mon1: [
+    '................',
+    '..AA........AA..',
+    '..AAA......AAA..',
+    '..AAAA....AAAA..',
+    '..AAAAAAAAAAAA..',
+    '.AAAAAAAAAAAAAA.',
+    '.AACCAAAAAACCAA.',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '..AAAAAAAAAAAA..',
+    '..ACACACACACAA..',
+    '..AAAAAAAAAAAA..',
+    '..AA........AA..',
+    '.AAA........AAA.',
+    '.AA..........AA.',
+    '................'],
+
+  /* Worrior (Spielerfigur), Seitenansicht nach rechts */
+  plR0: [
+    '................',
+    '.....AAAA.......',
+    '....AAAAAA......',
+    '....AACCAA......',
+    '....AAAAAA......',
+    '.....AAAA.......',
+    '...AAAAAAA......',
+    '..AAAAAAAAAA....',
+    '..AAAAAAAAAABBB.',
+    '..AAAAAAAAAA....',
+    '...AAAAAAA......',
+    '....AAAAAA......',
+    '....AA.AAA......',
+    '....AA..AA......',
+    '...AAA..AAA.....',
+    '................'],
+  plR1: [
+    '................',
+    '.....AAAA.......',
+    '....AAAAAA......',
+    '....AACCAA......',
+    '....AAAAAA......',
+    '.....AAAA.......',
+    '...AAAAAAA......',
+    '..AAAAAAAAAA....',
+    '..AAAAAAAAAABBB.',
+    '..AAAAAAAAAA....',
+    '...AAAAAAA......',
+    '....AAAAAA......',
+    '....AAAAAA......',
+    '...AA....AA.....',
+    '..AAA....AAA....',
+    '................'],
+
+  /* Worrior von hinten (Bewegung nach oben) */
+  plU0: [
+    '................',
+    '.......BB.......',
+    '.......BB.......',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AA....AA....',
+    '....AA....AA....',
+    '...AAA....AAA...',
+    '................'],
+  plU1: [
+    '................',
+    '.......BB.......',
+    '.......BB.......',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '...AA......AA...',
+    '...AA......AA...',
+    '..AAA......AAA..',
+    '................'],
+
+  /* Worrior von vorn (Bewegung nach unten) */
+  plD0: [
+    '................',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '....ACCAACCA....',
+    '....AAAAAAAA....',
+    '.....AAAAAA.....',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AA....AA....',
+    '....AA....AA....',
+    '...AAA.BB.AAA...',
+    '.......BB.......'],
+  plD1: [
+    '................',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '....ACCAACCA....',
+    '....AAAAAAAA....',
+    '.....AAAAAA.....',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '....AAAAAAAA....',
+    '...AA......AA...',
+    '...AA......AA...',
+    '..AAA.BB...AAA..',
+    '......BB........'],
+
+  /* Worluk -- gefluegelt, sehr schnell */
+  wor0: [
+    '................',
+    '.AA..........AA.',
+    '.AAA...AA...AAA.',
+    '..AAA.AAAA.AAA..',
+    '...AAAAAAAAAA...',
+    '..AAAACCCCAAAA..',
+    '.AAAAACCCCAAAAA.',
+    'AAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAA',
+    '.AAAAAAAAAAAAAA.',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '.....AA..AA.....',
+    '....AA....AA....',
+    '................'],
+  wor1: [
+    '................',
+    '................',
+    '.AA....AA....AA.',
+    '.AAAA.AAAA.AAAA.',
+    '...AAAAAAAAAA...',
+    '..AAAACCCCAAAA..',
+    '.AAAAACCCCAAAAA.',
+    'AAAAAAAAAAAAAAAA',
+    'AAAAAAAAAAAAAAAA',
+    '.AAAAAAAAAAAAAA.',
+    '..AAAAAAAAAAAA..',
+    '...AAAAAAAAAA...',
+    '....AAAAAAAA....',
+    '....AA....AA....',
+    '...AA......AA...',
+    '................'],
+
+  /* Wizard of Wor -- Kapuzengestalt mit gluehenden Augen */
+  wiz0: [
+    '.......AA.......',
+    '......AAAA......',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '...AAAAAAAAAA...',
+    '..AAAAAAAAAAAA..',
+    '...AACCAACCAA...',
+    '...AACCAACCAA...',
+    '....AAAAAAAA....',
+    '...AAAAAAAAAA...',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '................'],
+  wiz1: [
+    '.......AA.......',
+    '......AAAA......',
+    '.....AAAAAA.....',
+    '....AAAAAAAA....',
+    '...AAAAAAAAAA...',
+    '..AAAAAAAAAAAA..',
+    '...AABBAABBAA...',
+    '...AABBAABBAA...',
+    '....AAAAAAAA....',
+    '...AAAAAAAAAA...',
+    '..AAAAAAAAAAAA..',
+    '..AAAAAAAAAAAA..',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '.AAAAAAAAAAAAAA.',
+    '................']
+};
+
+/* -------------------------------------------------- Sprite-Vorberechnung */
+const spriteCache = new Map();
+function sprite(name, a, b, c, flip) {
+  const key = name + '|' + a + b + c + (flip ? 'F' : '');
+  let s = spriteCache.get(key);
+  if (s) return s;
+  const rows = SPR[name];
+  const cv = document.createElement('canvas');
+  cv.width = ACT; cv.height = ACT;
+  const g = cv.getContext('2d');
+  for (let y = 0; y < ACT; y++) {
+    const line = rows[y];
+    for (let x = 0; x < ACT; x++) {
+      const ch = line[flip ? ACT - 1 - x : x];
+      if (ch === '.') continue;
+      g.fillStyle = ch === 'A' ? a : ch === 'B' ? b : c;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  spriteCache.set(key, cv);
+  return cv;
+}
+
+/* ------------------------------------------------------------ Textausgabe */
+function glyph(ctx, ch, x, y, col, sc) {
+  const d = FONT[ch];
+  if (!d) return;
+  ctx.fillStyle = col;
+  for (let r = 0; r < 8; r++) {
+    const bits = parseInt(d.substr(r * 2, 2), 16);
+    if (!bits) continue;
+    for (let b = 0; b < 8; b++) {
+      if (bits & (0x80 >> b)) ctx.fillRect(x + b * sc, y + r * sc, sc, sc);
+    }
+  }
+}
+function text(ctx, str, x, y, col, sc) {
+  sc = sc || 1;
+  str = String(str).toUpperCase();
+  for (let i = 0; i < str.length; i++) glyph(ctx, str[i], x + i * 8 * sc, y, col, sc);
+}
+function textC(ctx, str, y, col, sc) {
+  sc = sc || 1;
+  text(ctx, str, (VW - String(str).length * 8 * sc) >> 1, y, col, sc);
+}
+
+/* ================================================================= Sound
+   Kleine WebAudio-Engine: Herzschlag-Bass, Schuesse, Explosionen. */
+const Sound = {
+  ctx: null, on: true, master: null,
+  init() {
+    if (this.ctx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain();
+    this.master.gain.value = 0.28;
+    this.master.connect(this.ctx.destination);
+  },
+  resume() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); },
+  tone(freq, dur, type, vol, slide) {
+    if (!this.on || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + dur);
+    g.gain.setValueAtTime(vol == null ? 0.3 : vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(this.master);
+    o.start(t); o.stop(t + dur + 0.02);
+  },
+  noise(dur, vol, filt) {
+    if (!this.on || !this.ctx) return;
+    const t = this.ctx.currentTime;
+    const len = Math.floor(this.ctx.sampleRate * dur);
+    const buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = this.ctx.createBufferSource(); src.buffer = buf;
+    const g = this.ctx.createGain(); g.gain.value = vol == null ? 0.35 : vol;
+    if (filt) {
+      const f = this.ctx.createBiquadFilter();
+      f.type = 'lowpass'; f.frequency.value = filt;
+      src.connect(f); f.connect(g);
+    } else src.connect(g);
+    g.connect(this.master);
+    src.start(t);
+  },
+  /* Der pulsierende Bass -- das akustische Markenzeichen des Spiels. */
+  beat(step) {
+    this.tone(step ? 62 : 49, 0.11, 'square', 0.5, step ? 44 : 36);
+  },
+  shootPlayer() { this.tone(880, 0.09, 'square', 0.22, 180); },
+  shootMonster() { this.tone(300, 0.12, 'sawtooth', 0.18, 90); },
+  explode() { this.noise(0.45, 0.5, 1400); this.tone(150, 0.4, 'sawtooth', 0.2, 30); },
+  hitWall() { this.tone(200, 0.04, 'square', 0.1, 120); },
+  warp() { this.tone(220, 0.25, 'sine', 0.25, 1400); },
+  launch() { this.tone(160, 0.35, 'square', 0.28, 640); },
+  extraLife() {
+    [523, 659, 784, 1046].forEach((f, i) =>
+      setTimeout(() => this.tone(f, 0.16, 'square', 0.28), i * 90));
+  },
+  worlukIn() { this.tone(180, 0.6, 'sawtooth', 0.3, 900); },
+  wizardIn() { this.tone(900, 0.7, 'sine', 0.28, 90); }
+};
+
+/* Sprachausgabe als Anspielung auf die Magic-Voice-Kassette. */
+const Voice = {
+  on: true, ok: 'speechSynthesis' in window,
+  say(s) {
+    if (!this.on || !this.ok) return;
+    try {
+      speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(s);
+      u.rate = 0.8; u.pitch = 0.35; u.volume = 0.85; u.lang = 'en-US';
+      speechSynthesis.speak(u);
+    } catch (e) { /* Sprachausgabe optional */ }
+  }
+};
+
+/* ================================================================== Maze
+   Die 25 Original-Layouts aus dem Disassembly (dungeon_layouts, Z. 1468).
+   18 Bytes je Layout = 36 Nibbles = 6x6 Bloecke; die rechte Haelfte entsteht
+   durch Spiegelung, daher 11x6 Zellen auf dem Schirm.
+   Ein Nibble ist ein Bitfeld: 1 = West, 2 = Nord, 4 = Ost, 8 = Sued.
+   Belegt durch dungeon_block_mirror_pair_tbl, die genau Bit 0 und Bit 2
+   vertauscht -- und dadurch, dass so alle 25 Layouts widerspruchsfrei sind
+   (jede Ostwand deckt sich mit der Westwand des Nachbarn). */
+const LAYOUTS = [
+  '363a2a51c30a80241a3455125510c598c9a8',
+  '3a63a25380a08430653845551a0c109a8acd',
+  '3a63a21a002082c5553c3c101ac3459aac98',
+  '3a63a25308a0041a651c538053806598ac98',
+  '3aa22a1a2c1a8243823c143053c14598ac98',
+  '3aa63253a8458432803451a85100a298c9a8',
+  '3a22a253843884300a3845921a41289a8c9a',
+  '3a632a1a459286102838c51a1a200a9ac98a',
+  '3222225555558049453492005161c59c98a8',
+  '363a2a5143828c5965328a455122089c9c9a',
+  '363a2a51c30a80241a3455125510c598c9a8',
+  '363a2a510a0a84169234943851208298c9a8',
+  '3a63a21a84388220023c55551a04909ac9a8',
+  '3a22a253843884300a3845921a41289a8c9a',
+  '3a632a1a459286102838c51a1a200a9a8c9a',
+  '3222a21c9065063c9059063016980098aa88',
+  '322222514510451455145145104510988888',
+  '3a22a2169028006902100690141065988888',
+  '3a222a12841a41280251820818241a9a888a',
+  '3a22221618c50c5320128c10143200988888',
+  '3a22221690c500653010c5901c30659a8888',
+  '322222590c10061245184945530610988888',
+  '3222a2100c3000c3001c30c5120c30988a88',
+  '322222100000000000100000100000988888',
+  '3a2aa21ac3200a200016908851202a9c9c9a'
+];
+
+let grid;
+
+function blankGrid() {
+  grid = [];
+  for (let r = 0; r < ROWS; r++) {
+    const row = [];
+    for (let c = 0; c < COLS; c++) row.push({ n: true, e: true, s: true, w: true });
+    grid.push(row);
+  }
+}
+
+function setCell(r, c, nib) {
+  const g = grid[r][c];
+  g.w = !!(nib & 1); g.n = !!(nib & 2); g.e = !!(nib & 4); g.s = !!(nib & 8);
+}
+
+function loadLayout(idx) {
+  blankGrid();
+  const s = LAYOUTS[idx];
+  for (let x = 0; x < 36; x++) {
+    const nib = parseInt(s[x], 16);
+    const r = (x / 6) | 0, c = x % 6;
+    setCell(r, c, nib);
+    // gespiegelte Haelfte: West und Ost tauschen
+    setCell(r, COLS - 1 - c,
+      (nib & 2) | (nib & 8) | ((nib & 4) ? 1 : 0) | ((nib & 1) ? 4 : 0));
+  }
+  G.layout = idx;
+}
+
+/* select_dungeon_layout, Z. 1618 (current_dungeon ist 0-basiert):
+     == 3           -> Layout 24, die Arena
+     <  7           -> zufaellig 0-14
+     >= 7, mod 6==0 -> Layout 23, The Pit
+     sonst          -> zufaellig 15-22
+   Ein Layout wird nie zweimal hintereinander benutzt. */
+function selectLayout() {
+  const c = G.dungeon - 1;
+  if (c === 3) return 24;
+  if (c >= 7 && c % 6 === 0) return 23;
+  let idx;
+  do {
+    idx = c < 7 ? (Math.random() * 15) | 0 : 15 + ((Math.random() * 8) | 0);
+  } while (idx === G.prevLayout);
+  return idx;
+}
+
+function dungeonKind() {
+  return G.layout === 24 ? 'arena' : G.layout === 23 ? 'pit' : 'normal';
+}
+
+function cellCX(c) { return MX + c * CELL + CELL / 2; }
+function cellCY(r) { return MY + r * CELL + CELL / 2; }
+function colOf(x) { return Math.max(0, Math.min(COLS - 1, Math.floor((x - MX) / CELL))); }
+function rowOf(y) { return Math.max(0, Math.min(ROWS - 1, Math.floor((y - MY) / CELL))); }
+function wallAt(r, c, d) {
+  if (d === W && c === 0 && r === DOOR_ROW) return !G.doorsOpen;
+  if (d === E && c === COLS - 1 && r === DOOR_ROW) return !G.doorsOpen;
+  return grid[r][c][WN[d]];
+}
+
+/* ================================================================ Akteure */
+const TYPE = {
+  p1:      { score: 1000, col: PAL.yellow,  spr: 'pl' },
+  p2:      { score: 1000, col: PAL.cyan,    spr: 'pl' },
+  burwor:  { score: 100,  col: PAL.lblue,   spr: 'mon', sp: 1.00, invis: false },
+  garwor:  { score: 200,  col: PAL.yellow,  spr: 'mon', sp: 1.12, invis: true  },
+  thorwor: { score: 500,  col: PAL.lred,    spr: 'mon', sp: 1.28, invis: true  },
+  worluk:  { score: 1000, col: PAL.lgreen,  spr: 'wor', sp: 2.10, invis: false },
+  wizard:  { score: 2500, col: PAL.purple,  spr: 'wiz', sp: 1.55, invis: false }
+};
+
+class Actor {
+  constructor(type, r, c) {
+    this.type = type;
+    this.isPlayer = (type === 'p1' || type === 'p2');
+    this.x = cellCX(c); this.y = cellCY(r);
+    this.dir = this.isPlayer ? N : (Math.random() < 0.5 ? E : W);
+    this.want = -1;
+    this.face = E;
+    this.alive = true; this.dying = 0;
+    this.visible = true;
+    this.invisT = 300 + ((Math.random() * 400) | 0);
+    this.anim = 0;
+    this.bullet = null;
+    this.inCage = this.isPlayer;
+    this.rising = false;
+    this.launchT = 270;              // launch_counters = $09
+    this.spawnGuard = 0;
+    this.slot = 0;             // fester Monsterplatz 0-5 wie im Original
+    this.escaped = false;
+    this.decidedCell = -1;
+  }
+  get col() { return colOf(this.x); }
+  get row() { return rowOf(this.y); }
+
+  speed() {
+    if (this.isPlayer) return 1.20;
+    const t = TYPE[this.type];
+    let s = G.monsterBase * t.sp;
+    if (!this.visible) s += 0.28;              // unsichtbare Monster sind schneller
+    if (this.type === 'worluk' || this.type === 'wizard') s = t.sp;
+    return s;
+  }
+
+  atCenterX() { return Math.abs(this.x - cellCX(this.col)) <= SNAP; }
+  atCenterY() { return Math.abs(this.y - cellCY(this.row)) <= SNAP; }
+
+  canTurn(d) {
+    const r = this.row, c = this.col;
+    if (d === N || d === S) { if (!this.atCenterX()) return false; }
+    else { if (!this.atCenterY()) return false; }
+    return !wallAt(r, c, d);
+  }
+
+  move() {
+    const sp = this.speed();
+    if (this.want >= 0 && this.want !== this.dir) {
+      if (this.want === OPP[this.dir]) {
+        this.dir = this.want;
+      } else if (this.canTurn(this.want)) {
+        if (this.want === N || this.want === S) this.x = cellCX(this.col);
+        else this.y = cellCY(this.row);
+        this.dir = this.want;
+      }
+    }
+    const d = this.dir;
+    // Invariante: quer zur Laufrichtung sitzt ein Akteur immer exakt auf der
+    // Gangmitte. Sonst laufen Sprite und Geschossbahn auseinander.
+    if (d === E || d === W) this.y = cellCY(this.row);
+    else this.x = cellCX(this.col);
+    let nx = this.x + DX[d] * sp, ny = this.y + DY[d] * sp;
+    const r = this.row, c = this.col;
+    const cx = cellCX(c), cy = cellCY(r);
+
+    if (d === E) {
+      if (wallAt(r, c, E) && nx > cx + LIMIT) nx = cx + LIMIT;
+      else if (!wallAt(r, c, E) && c === COLS - 1 && nx > MX + MAZE_W + 10) {
+        if (this.type === 'worluk') { this.escaped = true; nx = MX + MAZE_W + 10; }
+        else { nx = MX - 10; Sound.warp(); }
+      }
+    } else if (d === W) {
+      if (wallAt(r, c, W) && nx < cx - LIMIT) nx = cx - LIMIT;
+      else if (!wallAt(r, c, W) && c === 0 && nx < MX - 10) {
+        if (this.type === 'worluk') { this.escaped = true; nx = MX - 10; }
+        else { nx = MX + MAZE_W + 10; Sound.warp(); }
+      }
+    } else if (d === S) {
+      if (wallAt(r, c, S) && ny > cy + LIMIT) ny = cy + LIMIT;
+    } else {
+      if (wallAt(r, c, N) && ny < cy - LIMIT) ny = cy - LIMIT;
+    }
+    const moved = (nx !== this.x || ny !== this.y);
+    this.x = nx; this.y = ny;
+    if (moved) this.anim += sp;
+    if (d === E || d === W) this.face = d;
+    return moved;
+  }
+
+  frame() { return ((this.anim / 6) | 0) & 1; }
+
+  draw(ctx) {
+    if (this.dying > 0) { drawBoom(ctx, this.x, this.y, this.dying); return; }
+    if (!this.alive) return;
+    const t = TYPE[this.type];
+    if (!this.visible) return;
+    const f = this.frame();
+    let img;
+    if (this.isPlayer) {
+      const c1 = t.col, c2 = PAL.lgrey, c3 = PAL.white;
+      if (this.dir === N) img = sprite('plU' + f, c1, c2, c3, false);
+      else if (this.dir === S) img = sprite('plD' + f, c1, c2, c3, false);
+      else img = sprite('plR' + f, c1, c2, c3, this.dir === W);
+    } else if (this.type === 'worluk') {
+      img = sprite('wor' + f, PAL.lgreen, PAL.green, PAL.yellow, this.face === W);
+    } else if (this.type === 'wizard') {
+      img = sprite('wiz' + f, PAL.purple, PAL.blue, PAL.white, this.face === W);
+    } else {
+      img = sprite('mon' + f, t.col, PAL.black, PAL.white, this.face === W);
+    }
+    ctx.drawImage(img, Math.round(this.x - HALF), Math.round(this.y - HALF));
+  }
+}
+
+/* ------------------------------------------------------------ Explosionen */
+function drawBoom(ctx, x, y, t) {
+  const age = 30 - t;
+  const rad = 2 + age * 0.7;
+  const cols = [PAL.white, PAL.yellow, PAL.lred, PAL.red];
+  for (let i = 0; i < 22; i++) {
+    const a = (i / 22) * Math.PI * 2 + age * 0.12;
+    const rr = rad * (0.4 + ((i * 37) % 100) / 100 * 0.9);
+    const px = Math.round(x + Math.cos(a) * rr);
+    const py = Math.round(y + Math.sin(a) * rr);
+    ctx.fillStyle = cols[Math.min(3, (age / 8) | 0)];
+    ctx.fillRect(px, py, 2, 2);
+  }
+}
+
+/* --------------------------------------------------------------- Geschosse */
+class Bullet {
+  constructor(owner) {
+    this.owner = owner;
+    this.dir = owner.dir;
+    this.x = owner.x; this.y = owner.y;
+    if (this.dir === N || this.dir === S) this.x = cellCX(owner.col);
+    else this.y = cellCY(owner.row);
+    this.alive = true;
+    // Original: Spieler- und Wizard-Schuesse alle 2 Frames, sonst alle 4.
+    this.period = (owner.isPlayer || owner.type === 'wizard') ? 2 : 4;
+    this.t = 0;
+  }
+  step() {
+    if (++this.t < this.period) return;
+    this.t = 0;
+    const oc = colOf(this.x), or_ = rowOf(this.y);
+    if (wallAt(or_, oc, this.dir)) {
+      const cx = cellCX(oc), cy = cellCY(or_);
+      const past = this.dir === E ? this.x >= cx : this.dir === W ? this.x <= cx
+        : this.dir === S ? this.y >= cy : this.y <= cy;
+      if (past) { this.alive = false; Sound.hitWall(); return; }
+    }
+    this.x += DX[this.dir] * 8;
+    this.y += DY[this.dir] * 8;
+    if (this.x < MX - 4 || this.x > MX + MAZE_W + 4 ||
+        this.y < MY - 4 || this.y > MY + MAZE_H + 4) this.alive = false;
+  }
+  draw(ctx) {
+    ctx.fillStyle = this.owner.isPlayer ? PAL.white : PAL.lgreen;
+    if (this.dir === N || this.dir === S) ctx.fillRect(this.x - 1, this.y - 4, 2, 8);
+    else ctx.fillRect(this.x - 4, this.y - 1, 8, 2);
+  }
+}
+
+/* =============================================================== Spielstand */
+const G = {
+  state: 'title', t: 0, players: 1,
+  score: [0, 0], lives: [0, 0], hi: 0,
+  dungeon: 1, doubleScore: false, worlord: false,
+  actors: [], bullets: [], monsters: [],
+  burworsAlive: 0, monstersLeft: 0,
+  doorsOpen: false, doorT: 600,
+  monsterBase: 0.62,
+  beatT: 0, beatStep: 0, beatInt: 46,
+  msg: '', msgT: 0, msgBig: false,
+  flash: 0, arenaBonus: false, pitBonus: false,
+  wizardT: 0, worlukDoor: 0, radarOn: true,
+  titleT: 0, titlePage: 0, endT: 0,
+  paused: false, worlukKilled: false,
+  layout: 0, prevLayout: -1, cageOpen: [false, false]
+};
+
+function player(i) { return G.actors[i]; }
+
+/* --------------------------------------------------------- Dungeon-Aufbau */
+function startDungeon() {
+  const idx = selectLayout();
+  G.prevLayout = idx;
+  loadLayout(idx);
+  const kind = dungeonKind();
+
+  // reset_per_dungeon_stuff, Z. 3433: Tempo steigt bis Dungeon 8, dann Maximum
+  G.worlord = G.dungeon >= 9;
+  G.monsterBase = 0.58 + 0.052 * Math.min(G.dungeon - 1, 7);
+  G.doorsOpen = false; G.doorT = 600;
+  G.bullets.length = 0;
+  G.radarOn = true;
+  G.cageOpen = [false, false];
+
+  G.actors = [];
+  for (let i = 0; i < 2; i++) {
+    const a = new Actor(i === 0 ? 'p1' : 'p2', CAGE_ROW, CAGE_COL[i]);
+    a.alive = G.lives[i] > 0 && (i === 0 || G.players === 2);
+    putInCage(a, i);
+    G.actors.push(a);
+  }
+
+  // Die Burwors starten immer auf denselben Positionen -- fuer jedes Layout.
+  G.monsters = [];
+  BURWOR_START.forEach(([r, c], i) => {
+    const m = new Actor('burwor', r, c);
+    m.slot = i;                       // Monsterplaetze 0-5 = Aktor 2-7
+    G.monsters.push(m);
+  });
+  G.burworsAlive = 6;
+  G.monstersLeft = 6;
+
+  if (kind === 'arena' && !G.arenaBonus) { G.arenaBonus = true; grantLife(); }
+  if (kind === 'pit' && !G.pitBonus) { G.pitBonus = true; grantLife(); }
+
+  G.state = 'ready'; G.t = 0;
+  G.msg = 'get ready'; G.msgT = 999; G.msgBig = true;
+  Voice.say(kind === 'arena' ? 'The Arena!' : kind === 'pit' ? 'The Pit!'
+          : G.worlord ? 'Worlord dungeon.' : 'Get ready.');
+}
+
+/* Startpositionen der sechs Burwors -- im Original fest verdrahtet.
+   Ich habe die Tabelle im Disassembly nicht gefunden, daher symmetrisch
+   ueber die obere Haelfte verteilt. */
+const BURWOR_START = [[0, 2], [0, 5], [0, 8], [1, 3], [1, 7], [2, 5]];
+
+function putInCage(a, i) {
+  a.x = cellCX(CAGE_COL[i]);
+  a.y = MY + MAZE_H + CAGE_H / 2;
+  a.dir = N; a.want = -1;
+  a.inCage = true; a.rising = false;
+  a.launchT = 270;
+  a.bullet = null;
+  G.cageOpen[i] = false;
+}
+
+function grantLife() {
+  for (let i = 0; i < G.players; i++) if (G.lives[i] > 0) G.lives[i]++;
+  Sound.extraLife();
+}
+
+/* spawn_monster, Z. 5553: acht feste X- und acht feste Y-Kandidaten.
+   Verworfen wird eine Position, die in X *oder* Y naeher als $16 = 22 Pixel
+   an einem der beiden Spieler liegt. */
+const SPAWN_COL = [2, 3, 4, 5, 5, 6, 7, 8];
+const SPAWN_ROW = [0, 1, 2, 3, 4, 5, 0, 4];
+
+function spawnPos() {
+  for (let t = 0; t < 100; t++) {
+    const c = SPAWN_COL[(Math.random() * 8) | 0];
+    const r = SPAWN_ROW[(Math.random() * 8) | 0];
+    const x = cellCX(c), y = cellCY(r);
+    let ok = true;
+    for (const p of G.actors) {
+      if (!p.alive || p.inCage) continue;
+      if (Math.abs(p.x - x) < 22 || Math.abs(p.y - y) < 22) { ok = false; break; }
+    }
+    if (ok) return [r, c];
+  }
+  return [SPAWN_ROW[(Math.random() * 8) | 0], SPAWN_COL[(Math.random() * 8) | 0]];
+}
+
+/* Nachschub-Regel aus dem Disassembly (Zeile 5353):
+   Burwor -> Garwor, sobald dungeon >= verbleibende Burwors.
+   Garwor -> immer Thorwor. Thorwor -> nie. */
+function monsterKilled(m) {
+  const was = m.type;
+  let replacement = null;
+  if (was === 'burwor') {
+    G.burworsAlive--;
+    if (G.dungeon >= G.burworsAlive) replacement = 'garwor';
+  } else if (was === 'garwor') {
+    replacement = 'thorwor';
+  }
+  const i = G.monsters.indexOf(m);
+  if (i >= 0) G.monsters.splice(i, 1);
+
+  if (replacement) {
+    const [r, c] = spawnPos();
+    const n = new Actor(replacement, r, c);
+    n.slot = m.slot;                  // Ersatzmonster erbt den Platz
+    n.spawnGuard = 40;
+    G.monsters.push(n);
+  } else {
+    G.monstersLeft--;
+  }
+  if (G.monstersLeft <= 0 && G.monsters.length === 0) enterWorluk();
+}
+
+function enterWorluk() {
+  // Im Original erscheint am Ende des ersten Dungeons kein Worluk.
+  if (G.dungeon === 1) { finishDungeon(false); return; }
+  G.state = 'worluk'; G.t = 0;
+  G.radarOn = false;
+  G.doorsOpen = false; G.doorT = 240;   // 4 Sekunden nach Worluk-Auftritt
+  G.worlukDoor = Math.random() < 0.5 ? 0 : 1;
+  const [r, c] = spawnPos();
+  const w = new Actor('worluk', r, c);
+  w.spawnGuard = 30;
+  G.monsters = [w];
+  Sound.worlukIn();
+  Voice.say('The Worluk!');
+  G.msg = 'worluk'; G.msgT = 100; G.msgBig = true;
+}
+
+function enterWizard(killed) {
+  G.worlukKilled = killed;
+  const chance = killed ? 0.25 : 0.125;
+  if (Math.random() >= chance) { finishDungeon(killed); return; }
+  G.state = 'wizard'; G.t = 0;
+  G.radarOn = false;
+  G.doorsOpen = true; G.doorT = 60;
+  const [r, c] = spawnPos();
+  const w = new Actor('wizard', r, c);
+  w.spawnGuard = 40;
+  G.monsters = [w];
+  G.wizardT = 160;
+  Sound.wizardIn();
+  Voice.say('I am the Wizard of Wor!');
+  G.msg = 'wizard of wor'; G.msgT = 110; G.msgBig = true;
+}
+
+function finishDungeon(worlukKilled) {
+  G.doubleScore = !!worlukKilled;
+  G.state = 'clear'; G.t = 0;
+  G.flash = 60;
+  G.monsters = []; G.bullets.length = 0;
+}
+
+/* ------------------------------------------------------------- Kollision */
+function boxHit(a, bx, by, bw, bh) {
+  return Math.abs(a.x - bx) < (10 + bw / 2) && Math.abs(a.y - by) < (10 + bh / 2);
+}
+
+function killPlayer(p) {
+  if (!p.alive || p.dying) return;
+  p.dying = 30;
+  if (p.bullet) { p.bullet.alive = false; p.bullet = null; }
+  Sound.explode();
+}
+
+function killMonster(m, byPlayerIndex) {
+  if (m.dying) return;
+  m.dying = 30;
+  let pts = TYPE[m.type].score;
+  if (G.doubleScore) pts *= 2;
+  if (byPlayerIndex >= 0) addScore(byPlayerIndex, pts);
+  Sound.explode();
+}
+
+function addScore(i, pts) {
+  G.score[i] += pts;
+  if (G.score[i] > G.hi) G.hi = G.score[i];
+}
+
+/* ============================================================== Eingaben */
+const keys = Object.create(null);
+addEventListener('keydown', e => {
+  if (!keys[e.code]) keyPressed(e.code);
+  keys[e.code] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space','Tab'].includes(e.code))
+    e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+function keyPressed(code) {
+  Sound.init(); Sound.resume();
+  if (code === 'KeyM') { Sound.on = !Sound.on; return; }
+  if (code === 'KeyV') { Voice.on = !Voice.on; if (!Voice.on && Voice.ok) speechSynthesis.cancel(); return; }
+  if (code === 'KeyP' && (G.state !== 'title')) { G.paused = !G.paused; return; }
+  if (G.state === 'title') {
+    if (code === 'Digit1' || code === 'Numpad1') newGame(1);
+    if (code === 'Digit2' || code === 'Numpad2') newGame(2);
+  }
+  if (G.state === 'gameover' && G.endT <= 0) {
+    if (code === 'Space' || code === 'Enter') G.state = 'title';
+  }
+}
+
+function newGame(np) {
+  G.players = np;
+  G.score = [0, 0];
+  G.lives = [3, np === 2 ? 3 : 0];
+  G.dungeon = 1;
+  G.doubleScore = false;
+  G.arenaBonus = false; G.pitBonus = false;
+  startDungeon();
+}
+
+function inputFor(i) {
+  if (i === 0) {
+    let d = -1;
+    if (keys['ArrowUp']) d = N; else if (keys['ArrowRight']) d = E;
+    else if (keys['ArrowDown']) d = S; else if (keys['ArrowLeft']) d = W;
+    return { dir: d, fire: !!(keys['Space'] || keys['ControlRight']) };
+  }
+  let d = -1;
+  if (keys['KeyW']) d = N; else if (keys['KeyD']) d = E;
+  else if (keys['KeyS']) d = S; else if (keys['KeyA']) d = W;
+  return { dir: d, fire: !!(keys['ShiftLeft'] || keys['KeyQ'] || keys['Tab']) };
+}
+
+/* ================================================================= Logik */
+function updatePlayers() {
+  for (let i = 0; i < 2; i++) {
+    const p = G.actors[i];
+    if (p.dying > 0) {
+      if (--p.dying === 0) {
+        p.alive = false;
+        G.lives[i]--;
+        if (G.lives[i] > 0) respawn(i);
+        else checkGameOver();
+      }
+      continue;
+    }
+    if (!p.alive) continue;
+    const inp = inputFor(i);
+
+    // Kaefig: Countdown laeuft, dann steigt der Worrior nach oben ins
+    // Labyrinth (im Original DEC VIC_S0Y bis Sprite-Y $AD), Kaefig schliesst.
+    if (p.inCage) {
+      if (p.rising) {
+        p.y -= 1;
+        if (p.y <= cellCY(CAGE_ROW)) {
+          p.y = cellCY(CAGE_ROW);
+          p.inCage = false; p.rising = false;
+          G.cageOpen[i] = false;
+        }
+      } else if (--p.launchT <= 0 || inp.fire || inp.dir === N) {
+        p.rising = true; G.cageOpen[i] = true; Sound.launch();
+      }
+      continue;
+    }
+
+    p.want = inp.dir;
+    if (inp.dir >= 0) p.move();
+    if (inp.fire && !p.bullet) {
+      const b = new Bullet(p);
+      p.bullet = b; G.bullets.push(b);
+      Sound.shootPlayer();
+    }
+    if (p.bullet && !p.bullet.alive) p.bullet = null;
+  }
+}
+
+function respawn(i) {
+  const p = G.actors[i];
+  p.alive = true; p.dying = 0;
+  putInCage(p, i);
+}
+
+function checkGameOver() {
+  let any = false;
+  for (let i = 0; i < G.players; i++) if (G.lives[i] > 0) any = true;
+  if (!any) {
+    G.state = 'gameover'; G.endT = 120;
+    Voice.say('Game over.');
+    G.monsters = []; G.bullets.length = 0;
+  }
+}
+
+function nearestPlayer(m) {
+  let best = null, bd = 1e9;
+  for (const p of G.actors) {
+    if (!p.alive || p.dying) continue;
+    const d = Math.abs(p.x - m.x) + Math.abs(p.y - m.y);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
+
+function updateMonsters() {
+  for (let k = G.monsters.length - 1; k >= 0; k--) {
+    const m = G.monsters[k];
+    if (m.dying > 0) {
+      if (--m.dying === 0) {
+        m.alive = false;
+        // Diese Uebergaenge ersetzen G.monsters komplett -- danach sofort raus.
+        if (m.type === 'worluk') { G.monsters.splice(k, 1); enterWizard(true); return; }
+        if (m.type === 'wizard') { G.monsters.splice(k, 1); finishDungeon(G.worlukKilled); return; }
+        monsterKilled(m);
+        if (G.state !== 'play') return;
+      }
+      continue;
+    }
+    if (!m.alive) continue;
+    if (m.spawnGuard > 0) m.spawnGuard--;
+
+    // Unsichtbarkeit von Garwor und Thorwor
+    if (TYPE[m.type].invis) {
+      if (m.visible) {
+        if (--m.invisT <= 0) { m.visible = false; m.invisT = 600; }
+      } else {
+        // wieder sichtbar, sobald ein Spieler in derselben Reihe oder Spalte steht
+        for (const p of G.actors) {
+          if (p.alive && !p.dying && (p.row === m.row || p.col === m.col)) {
+            m.visible = true; m.invisT = 600; break;
+          }
+        }
+      }
+    }
+
+    if (m.type === 'wizard') {
+      if (--G.wizardT <= 0) {
+        G.wizardT = 160;
+        const [r, c] = spawnPos();
+        m.x = cellCX(c); m.y = cellCY(r);
+        Sound.warp();
+      }
+    }
+
+    chooseDir(m);
+    if (!m.move()) m.decidedCell = -1;   // festgefahren -> neu entscheiden
+
+    // Worluk entkommt durch eine offene Warp-Tuer
+    if (m.type === 'worluk' && m.escaped) {
+      G.monsters.splice(k, 1);
+      Voice.say('The Worluk escapes!');
+      enterWizard(false);
+      return;
+    }
+
+    maybeShoot(m);
+    if (m.bullet && !m.bullet.alive) m.bullet = null;
+  }
+}
+
+function chooseDir(m) {
+  const atX = m.atCenterX(), atY = m.atCenterY();
+  const vertical = (m.dir === N || m.dir === S);
+  if (vertical ? !atY : !atX) return;         // nur an Zellmitten entscheiden
+
+  const r = m.row, c = m.col;
+  // pro Zelle nur einmal entscheiden, sonst zittert das Monster in der Mitte
+  const key = r * COLS + c;
+  if (m.decidedCell === key) return;
+  m.decidedCell = key;
+  const open = [];
+  for (let d = 0; d < 4; d++) if (!wallAt(r, c, d)) open.push(d);
+  if (!open.length) return;
+
+  const target = m.type === 'worluk' ? null : nearestPlayer(m);
+  let pref = open.filter(d => d !== OPP[m.dir]);
+  if (!pref.length) pref = open;
+
+  // Worluk laeuft zielstrebig auf die gewaehlte Warp-Tuer zu
+  if (m.type === 'worluk') {
+    const tx = G.worlukDoor === 0 ? MX : MX + MAZE_W;
+    const ty = cellCY(DOOR_ROW);
+    m.want = bestToward(pref, m, tx, ty);
+    return;
+  }
+
+  const chase = CHASE_BASE + Math.min(G.dungeon, 8) * CHASE_STEP + (m.visible ? 0 : 0.15);
+  if (target && Math.random() < chase) {
+    m.want = bestToward(pref, m, target.x, target.y);
+  } else {
+    m.want = pref[(Math.random() * pref.length) | 0];
+  }
+}
+
+function bestToward(dirs, m, tx, ty) {
+  let best = dirs[0], bd = 1e9;
+  for (const d of dirs) {
+    const nx = m.x + DX[d] * CELL, ny = m.y + DY[d] * CELL;
+    const dd = Math.abs(nx - tx) + Math.abs(ny - ty);
+    if (dd < bd) { bd = dd; best = d; }
+  }
+  return best;
+}
+
+function lineClear(a, b) {
+  if (a.row === b.row) {
+    const r = a.row;
+    const c0 = Math.min(a.col, b.col), c1 = Math.max(a.col, b.col);
+    for (let c = c0; c < c1; c++) if (wallAt(r, c, E)) return false;
+    return true;
+  }
+  if (a.col === b.col) {
+    const c = a.col;
+    const r0 = Math.min(a.row, b.row), r1 = Math.max(a.row, b.row);
+    for (let r = r0; r < r1; r++) if (wallAt(r, c, S)) return false;
+    return true;
+  }
+  return false;
+}
+
+const AIM = 4;   // Toleranz zur Gangmitte in Pixeln
+
+/* Zielwahl nach Aktor-Index. Im Original ist Aktor 0 = Spieler 2,
+   Aktor 1 = Spieler 1, die Monster belegen Aktor 2-7. "Ungerade Monster
+   schiessen auf Spieler 1, gerade auf Spieler 2" heisst also schlicht:
+   gleiche Paritaet des Aktor-Index. Ein Rueckfall auf den anderen Spieler
+   existiert nicht -- im Einzelspielermodus steht Spieler 2 ausserhalb des
+   Schirms, folglich feuert nur die Haelfte der Monster auf dich. */
+function shootTarget(m) {
+  if (m.type === 'wizard') return nearestPlayer(m);
+  return G.actors[(m.slot & 1) ? 0 : 1];
+}
+
+function maybeShoot(m) {
+  if (m.bullet || m.type === 'worluk') return;
+  if (m.spawnGuard > 0) return;
+
+  // Die Schleife im Original besucht jeden Aktor einmal pro Durchlauf, nicht
+  // einmal pro Frame. Ohne diese Taktung wird die 50-Prozent-Chance jeden
+  // Frame neu gewuerfelt und ein ausgerichtetes Monster schiesst sofort.
+  if ((G.t + m.slot) % SHOOT_INTERVAL !== 0) return;
+
+  const p = shootTarget(m);
+  if (!p || !p.alive || p.dying || p.inCage) return;
+
+  // Geschosse laufen auf der Gangmitte -- also darf auch nur von dort
+  // geschossen werden.
+  let d = -1;
+  if (p.row === m.row &&
+      Math.abs(m.y - cellCY(m.row)) <= AIM &&
+      Math.abs(p.y - cellCY(p.row)) <= AIM) {
+    d = p.x > m.x ? E : W;
+  } else if (p.col === m.col &&
+             Math.abs(m.x - cellCX(m.col)) <= AIM &&
+             Math.abs(p.x - cellCX(p.col)) <= AIM) {
+    d = p.y > m.y ? S : N;
+  }
+  if (d < 0 || !lineClear(m, p)) return;
+  if (Math.random() >= SHOOT_CHANCE) return;
+
+  // wie eine regulaere Richtungsaenderung: erst einrasten, dann drehen
+  if (d === N || d === S) m.x = cellCX(m.col); else m.y = cellCY(m.row);
+  m.dir = d;
+  m.decidedCell = -1;
+  const b = new Bullet(m);
+  m.bullet = b; G.bullets.push(b);
+  Sound.shootMonster();
+}
+
+function updateBullets() {
+  for (let i = G.bullets.length - 1; i >= 0; i--) {
+    const b = G.bullets[i];
+    b.step();
+    if (!b.alive) { G.bullets.splice(i, 1); continue; }
+    const bw = (b.dir === N || b.dir === S) ? 2 : 8;
+    const bh = (b.dir === N || b.dir === S) ? 8 : 2;
+
+    if (b.owner.isPlayer) {
+      const pi = b.owner.type === 'p1' ? 0 : 1;
+      for (const m of G.monsters) {
+        if (!m.alive || m.dying || m.spawnGuard > 20) continue;
+        if (boxHit(m, b.x, b.y, bw, bh)) {
+          killMonster(m, pi); b.alive = false; break;
+        }
+      }
+      // Worrior gegen Worrior: 1000 Punkte
+      if (b.alive && G.players === 2) {
+        const other = G.actors[1 - pi];
+        if (other.alive && !other.dying && !other.inCage && boxHit(other, b.x, b.y, bw, bh)) {
+          killPlayer(other); addScore(pi, 1000); b.alive = false;
+        }
+      }
+    } else {
+      for (const p of G.actors) {
+        if (!p.alive || p.dying || p.inCage) continue;
+        if (boxHit(p, b.x, b.y, bw, bh)) { killPlayer(p); b.alive = false; break; }
+      }
+    }
+    if (!b.alive) G.bullets.splice(i, 1);
+  }
+}
+
+function updateTouch() {
+  for (const p of G.actors) {
+    if (!p.alive || p.dying || p.inCage) continue;
+    for (const m of G.monsters) {
+      if (!m.alive || m.dying || m.spawnGuard > 20) continue;
+      if (Math.abs(p.x - m.x) < 13 && Math.abs(p.y - m.y) < 13) { killPlayer(p); break; }
+    }
+  }
+}
+
+function updateDoors() {
+  if (--G.doorT <= 0) {
+    G.doorsOpen = !G.doorsOpen;
+    G.doorT = G.doorsOpen ? 300 : 600;   // 5 s offen, 10 s geschlossen
+    if (G.doorsOpen) Sound.warp();
+  }
+}
+
+function updateBeat() {
+  // Herzschlag: schneller bei wenigen Monstern, hoeherem Dungeon, offenen Tueren
+  const left = Math.max(1, G.monsters.length);
+  let iv = 34 + left * 4 - Math.min(G.dungeon, 8) * 1.6;
+  if (G.doorsOpen) iv *= 0.8;
+  if (G.state === 'worluk' || G.state === 'wizard') iv = 12;
+  G.beatInt = Math.max(9, iv);
+  if (--G.beatT <= 0) {
+    G.beatT = G.beatInt;
+    Sound.beat(G.beatStep);
+    G.beatStep ^= 1;
+  }
+}
+
+function tick() {
+  G.t++;
+  if (G.msgT > 0) G.msgT--;
+  if (G.flash > 0) G.flash--;
+
+  switch (G.state) {
+    case 'title':
+      G.titleT++;
+      if (G.titleT % 300 === 0) G.titlePage ^= 1;
+      break;
+
+    case 'ready':
+      if (G.t === 120) { G.msg = 'go'; G.msgT = 999; Voice.say('Go!'); }
+      if (G.t === 180) { G.msg = ''; G.msgT = 0; G.state = 'play'; G.t = 0; }
+      break;
+
+    case 'play':
+      updateDoors(); updateBeat();
+      updatePlayers(); updateMonsters(); updateBullets(); updateTouch();
+      break;
+
+    case 'worluk':
+    case 'wizard':
+      updateDoors(); updateBeat();
+      updatePlayers(); updateMonsters(); updateBullets(); updateTouch();
+      break;
+
+    case 'clear':
+      updatePlayers();
+      if (G.t > 90) {
+        G.dungeon++;
+        if (G.dungeon > 98) G.dungeon = 97;
+        startDungeon();
+      }
+      break;
+
+    case 'gameover':
+      if (G.endT > 0) G.endT--;
+      if (G.endT === 0 && G.t > 600) G.state = 'title';
+      break;
+  }
+}
+
+/* ================================================================ Zeichnen */
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+const back = document.createElement('canvas');
+back.width = VW; back.height = VH;
+const bx = back.getContext('2d');
+
+function wallColor() {
+  if (G.state === 'worluk') {
+    // Waende blinken rot/schwarz -- im Original ueber $D022/$D023
+    return ((G.t >> 2) & 1) ? PAL.red : PAL.lred;
+  }
+  if (G.flash > 0) return ((G.flash >> 2) & 1) ? PAL.white : PAL.lblue;
+  return PAL.lblue;
+}
+
+function drawMaze(g) {
+  const col = wallColor();
+  g.fillStyle = col;
+  const T = 2;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const x = MX + c * CELL, y = MY + r * CELL;
+      const cell = grid[r][c];
+      if (cell.n) g.fillRect(x, y - T / 2, CELL, T);
+      if (cell.w) g.fillRect(x - T / 2, y, T, CELL);
+      if (r === ROWS - 1 && cell.s) g.fillRect(x, y + CELL - T / 2, CELL, T);
+      if (c === COLS - 1 && cell.e) g.fillRect(x + CELL - T / 2, y, T, CELL);
+    }
+  }
+  // Warp-Tueren
+  const dy = MY + DOOR_ROW * CELL;
+  g.fillStyle = G.doorsOpen ? PAL.black : PAL.yellow;
+  g.fillRect(MX - 3, dy + 4, 3, CELL - 8);
+  g.fillRect(MX + MAZE_W, dy + 4, 3, CELL - 8);
+  if (G.doorsOpen) {
+    g.fillStyle = ((G.t >> 2) & 1) ? PAL.white : PAL.cyan;
+    g.fillRect(MX - 3, dy + 10, 3, 4);
+    g.fillRect(MX + MAZE_W, dy + 10, 3, 4);
+  }
+}
+
+/* Die beiden Kaefige haengen unter den unteren Eckzellen. */
+function drawCages(g) {
+  const col = wallColor();
+  for (let i = 0; i < 2; i++) {
+    if (i === 1 && G.players !== 2) continue;
+    const p = G.actors[i];
+    if (!p) continue;
+    const x = MX + CAGE_COL[i] * CELL, y = MY + MAZE_H;
+    g.fillStyle = col;
+    g.fillRect(x - 1, y, 2, CAGE_H);
+    g.fillRect(x + CELL - 1, y, 2, CAGE_H);
+    g.fillRect(x, y + CAGE_H - 2, CELL, 2);
+    if (G.cageOpen[i]) {                       // Tuer in der Labyrinthwand
+      g.fillStyle = PAL.black;
+      g.fillRect(x + 5, y - 2, CELL - 10, 4);
+    }
+    if (p.alive && p.inCage && !p.rising) {    // Startcountdown neben dem Kaefig
+      const n = Math.max(1, Math.ceil(p.launchT / 30));
+      const tx = i === 0 ? x - 10 : x + CELL + 2;
+      text(g, String(n), tx, y + 5, i === 0 ? PAL.yellow : PAL.cyan, 1);
+    }
+  }
+}
+
+function drawRadar(g) {
+  g.strokeStyle = PAL.dgrey;
+  g.lineWidth = 1;
+  g.strokeRect(RAD_X - 1.5, RAD_Y - 1.5, RAD_W + 3, RAD_H + 3);
+  if (!G.radarOn) {
+    text(g, 'radar off', RAD_X + 6, RAD_Y + 14, PAL.dgrey, 1);
+    return;
+  }
+  // leichtes Flimmern wie im Original (Radar wird asynchron neu gezeichnet)
+  if ((G.t % 8) === 0) return;
+  for (const m of G.monsters) {
+    if (!m.alive || m.dying) continue;
+    const px = RAD_X + m.col * RAD_CELL + 1;
+    const py = RAD_Y + m.row * RAD_CELL + 1;
+    g.fillStyle = TYPE[m.type].col;
+    g.fillRect(px, py, RAD_CELL - 2, RAD_CELL - 2);
+  }
+}
+
+function drawHUD(g) {
+  text(g, pad(G.score[0], 6), 4, 2, PAL.yellow, 1);
+  // print_radar_title, Z. 822: Arena und Pit haben eigene Titel
+  const k = dungeonKind();
+  let mid = k === 'arena' ? 'the arena' : k === 'pit' ? 'the pit'
+          : 'dungeon ' + G.dungeon;
+  if (G.doubleScore) mid = 'x2 ' + mid;
+  text(g, mid, (VW - mid.length * 8) >> 1, 2, G.doubleScore ? PAL.white : PAL.lgreen, 1);
+  if (G.players === 2) text(g, pad(G.score[1], 6), VW - 4 - 6 * 8, 2, PAL.cyan, 1);
+  else text(g, pad(G.hi, 6), VW - 4 - 6 * 8, 2, PAL.grey, 1);
+
+  // Leben als kleine Worrior-Symbole
+  for (let i = 0; i < 2; i++) {
+    if (i === 1 && G.players !== 2) break;
+    const n = Math.max(0, G.lives[i] - 1);
+    const img = sprite('plD0', i === 0 ? PAL.yellow : PAL.cyan, PAL.lgrey, PAL.white, false);
+    for (let k = 0; k < Math.min(n, 5); k++) {
+      const x = i === 0 ? 4 + k * 11 : VW - 14 - k * 11;
+      g.drawImage(img, 0, 0, ACT, ACT, x, LIVES_Y, 10, 10);
+    }
+  }
+}
+
+function pad(n, w) {
+  let s = String(n);
+  while (s.length < w) s = '0' + s;
+  return s;
+}
+
+function drawTitle(g) {
+  textC(g, 'wizard of wor', 22, PAL.lred, 2);
+  textC(g, 'html nachbau', 44, PAL.lblue, 1);
+  if (G.titlePage === 0) {
+    textC(g, 'burwor       100', 72, PAL.lblue, 1);
+    textC(g, 'garwor       200', 84, PAL.yellow, 1);
+    textC(g, 'thorwor      500', 96, PAL.lred, 1);
+    textC(g, 'worrior     1000', 108, PAL.cyan, 1);
+    textC(g, 'worluk      1000', 120, PAL.lgreen, 1);
+    textC(g, 'wizard      2500', 132, PAL.purple, 1);
+  } else {
+    textC(g, 'p1  pfeile + leer', 76, PAL.lgrey, 1);
+    textC(g, 'p2  wasd + shift', 90, PAL.lgrey, 1);
+    textC(g, 'p pause   m ton   v stimme', 108, PAL.grey, 1);
+    textC(g, 'hi score ' + pad(G.hi, 6), 130, PAL.white, 1);
+  }
+  if ((G.titleT >> 4) & 1) textC(g, 'druecke 1 oder 2', 160, PAL.white, 1);
+  textC(g, 'eigenstaendige reimplementierung', 182, PAL.dgrey, 1);
+}
+
+function render() {
+  bx.fillStyle = PAL.black;
+  bx.fillRect(0, 0, VW, VH);
+
+  if (G.state === 'title') { drawTitle(bx); blit(); return; }
+
+  drawMaze(bx);
+  drawCages(bx);
+  for (const b of G.bullets) b.draw(bx);
+  for (const m of G.monsters) m.draw(bx);
+  for (const p of G.actors) p.draw(bx);
+  drawRadar(bx);
+  drawHUD(bx);
+
+  if (G.worlord && G.state === 'ready') textC(bx, 'worlord', 60, PAL.lred, 1);
+  if (G.msgT > 0 && G.msg) {
+    const sc = G.msgBig ? 2 : 1;
+    const w = G.msg.length * 8 * sc;
+    const y = MY + MAZE_H / 2 - 8 * sc / 2;
+    bx.fillStyle = PAL.black;
+    bx.fillRect((VW - w) / 2 - 4, y - 3, w + 8, 8 * sc + 6);
+    textC(bx, G.msg, y, PAL.white, sc);
+  }
+  if (G.state === 'clear' && G.t > 30) {
+    textC(bx, G.doubleScore ? 'double score dungeon' : 'dungeon cleared',
+      MY + MAZE_H / 2 - 4, PAL.yellow, 1);
+  }
+  if (G.state === 'gameover') {
+    bx.fillStyle = PAL.black;
+    bx.fillRect(40, 80, VW - 80, 34);
+    textC(bx, 'game over', 86, PAL.lred, 2);
+    if (G.endT <= 0 && ((G.t >> 4) & 1)) textC(bx, 'leertaste', 104, PAL.lgrey, 1);
+  }
+  if (G.paused) {
+    bx.fillStyle = 'rgba(0,0,0,0.6)';
+    bx.fillRect(0, 0, VW, VH);
+    textC(bx, 'pause', 92, PAL.white, 2);
+  }
+  blit();
+}
+
+function blit() {
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(back, 0, 0, VW, VH, 0, 0, cv.width, cv.height);
+}
+
+/* ------------------------------------------------------------- Skalierung */
+function resize() {
+  const availW = innerWidth - 40, availH = innerHeight - 90;
+  let s = Math.max(1, Math.min(Math.floor(availW / VW), Math.floor(availH / VH)));
+  cv.width = VW * s; cv.height = VH * s;
+  ctx.imageSmoothingEnabled = false;
+}
+addEventListener('resize', resize);
+resize();
+
+/* ---------------------------------------------------------------- Schleife */
+let last = performance.now(), acc = 0;
+const STEP = 1000 / 60;
+function loop(now) {
+  requestAnimationFrame(loop);
+  acc += Math.min(100, now - last);
+  last = now;
+  while (acc >= STEP) {
+    if (!G.paused || G.state === 'title') tick();
+    acc -= STEP;
+  }
+  render();
+}
+loadLayout(0);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
