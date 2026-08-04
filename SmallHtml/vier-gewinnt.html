@@ -1,0 +1,628 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vier gewinnt</title>
+<style>
+:root{
+  --table:#1C2529;
+  --table-hi:#2C3A40;
+  --rack:#2F49B8;
+  --cavity:#0E1418;
+  --you:#E4453A;
+  --ai:#F0B429;
+  --bone:#EAE6DA;
+  --muted:#8A97A0;
+  --line:rgba(234,230,218,.14);
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:var(--sans);
+  color:var(--bone);
+  background:
+    radial-gradient(120% 90% at 50% -10%, var(--table-hi) 0%, var(--table) 55%, #141A1D 100%);
+  min-height:100%;
+  display:flex;
+  justify-content:center;
+  padding:clamp(16px,3vw,40px);
+}
+.app{
+  width:100%;
+  max-width:1000px;
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 268px;
+  grid-template-areas:"head head" "board panel";
+  gap:clamp(20px,3vw,38px);
+  align-content:start;
+}
+/* ---------- Kopf ---------- */
+header{grid-area:head;display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;
+  border-bottom:1px solid var(--line);padding-bottom:14px}
+h1{
+  margin:0;font-size:clamp(30px,6vw,46px);line-height:.95;font-weight:800;
+  letter-spacing:-.035em;text-transform:uppercase;
+}
+h1 em{font-style:normal;color:var(--ai)}
+.status{
+  font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+  display:flex;align-items:center;gap:9px;padding:7px 13px;border:1px solid var(--line);border-radius:999px;
+  white-space:nowrap;
+}
+.status .dot{width:9px;height:9px;border-radius:50%;background:var(--you);box-shadow:0 0 0 3px rgba(228,69,58,.18)}
+.status[data-turn="ai"] .dot{background:var(--ai);box-shadow:0 0 0 3px rgba(240,180,41,.18);animation:blink 1s infinite alternate}
+.status[data-turn="over"] .dot{background:var(--muted);box-shadow:none}
+@keyframes blink{to{opacity:.25}}
+/* ---------- Automat ---------- */
+.stage{grid-area:board;display:flex;justify-content:center;align-items:start}
+.machine{position:relative;width:min(560px,100%)}
+.stack{position:relative}
+.lane{position:relative;aspect-ratio:7/1;width:100%}
+.ghost{
+  position:absolute;top:50%;width:calc(100%/7*.8);aspect-ratio:1;border-radius:50%;
+  transform:translate(-50%,-50%);opacity:0;transition:left .13s ease,opacity .13s ease;
+  background:radial-gradient(circle at 34% 30%,#fff6,#0000 52%),var(--you);
+  box-shadow:inset 0 -4px 10px rgba(0,0,0,.35);
+  pointer-events:none;
+}
+.machine.hint .ghost{opacity:1}
+.slots{position:absolute;top:50%;left:0;right:0;transform:translateY(-50%);
+  display:grid;grid-template-columns:repeat(7,1fr);justify-items:center;
+  pointer-events:none;transition:opacity .13s}
+@media (hover:hover){.machine.hint .slots{opacity:0}}
+.slots i{width:0;height:0;border-left:7px solid transparent;border-right:7px solid transparent;
+  border-top:8px solid var(--bone);opacity:.15;transition:opacity .13s}
+.slots i.full{opacity:.04}
+.board{position:relative;width:100%;aspect-ratio:7/6;background:var(--cavity);border-radius:calc(100%/7*.26);overflow:hidden;
+  box-shadow:0 26px 50px -20px rgba(0,0,0,.85)}
+.discs{position:absolute;inset:0}
+.disc{
+  position:absolute;width:calc(100%/7*.8);aspect-ratio:1;border-radius:50%;
+  transform:translate(-50%,-50%);
+  left:calc((var(--c) + .5) * 100% / 7);
+  top:calc((var(--r) + .5) * 100% / 6);
+  background:radial-gradient(circle at 34% 30%,#ffffff55,#0000 52%),var(--fill);
+  box-shadow:inset 0 -5px 12px rgba(0,0,0,.4),inset 0 3px 6px #ffffff2e;
+  animation:drop calc(.2s + var(--r) * .035s) cubic-bezier(.4,.1,.7,.6);
+}
+@keyframes drop{
+  0%{transform:translate(-50%,calc(-50% - (var(--r) + 1.6) * 125%))}
+  70%{transform:translate(-50%,-50%)}
+  82%{transform:translate(-50%,-56%)}
+  100%{transform:translate(-50%,-50%)}
+}
+.disc.win{box-shadow:inset 0 -5px 12px rgba(0,0,0,.4),0 0 0 4px var(--bone),0 0 22px 2px var(--fill);z-index:2}
+.board.emptying{overflow:visible}
+.board.emptying .disc{animation:fallout .5s cubic-bezier(.5,0,.9,.4) forwards;animation-delay:calc(var(--c) * 30ms)}
+@keyframes fallout{to{transform:translate(-50%,320%);opacity:0}}
+.plate{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.cols{position:absolute;inset:0;display:grid;grid-template-columns:repeat(7,1fr)}
+.cols button{
+  border:0;background:transparent;cursor:pointer;padding:0;border-radius:6px;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;
+}
+.cols button:disabled{cursor:not-allowed}
+.cols button:focus-visible{outline:2px solid var(--bone);outline-offset:-4px}
+.rail{height:14px;margin:0 3%;border-radius:0 0 8px 8px;background:linear-gradient(#22348C,#16215c);
+  transition:transform .28s ease}
+.machine:has(.board.emptying) .rail{transform:translateX(18%)}
+.legs{display:flex;justify-content:space-between;padding:0 9%}
+.legs i{display:block;width:44px;height:16px;background:#16215c;
+  clip-path:polygon(0 0,100% 0,84% 100%,16% 100%);border-radius:0 0 4px 4px}
+/* ---------- Bedienfeld ---------- */
+.panel{grid-area:panel;display:flex;flex-direction:column;gap:22px}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);
+  margin:0 0 10px;display:flex;justify-content:space-between;align-items:baseline}
+.levels{display:flex;flex-direction:column;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.levels label{display:flex;align-items:center;gap:11px;padding:13px;background:#ffffff08;cursor:pointer;
+  font-size:15px;touch-action:manipulation;transition:background .12s}
+.levels label:hover{background:#ffffff12}
+.levels input{position:absolute;opacity:0;pointer-events:none}
+.levels .bar{display:flex;gap:3px}
+.levels .bar i{width:5px;height:14px;background:#ffffff14;border-radius:1px}
+.levels .bar i.on{background:#ffffff3d}
+.levels input:checked ~ .bar i.on{background:var(--ai)}
+.levels label:has(input:checked){background:#ffffff18;box-shadow:inset 3px 0 0 var(--ai)}
+.levels label:has(input:focus-visible){outline:2px solid var(--bone);outline-offset:-2px}
+.levels .name{flex:1}
+.starter{display:flex;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.starter label{flex:1;text-align:center;padding:12px 4px;background:#ffffff08;cursor:pointer;touch-action:manipulation;
+  font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+.starter input{position:absolute;opacity:0;pointer-events:none}
+.starter label:has(input:checked){background:#ffffff18;color:var(--ai)}
+.actions{display:flex;gap:10px}
+button.act{
+  flex:1;font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+  padding:12px 8px;border-radius:10px;border:1px solid var(--line);background:#ffffff08;color:var(--bone);
+  cursor:pointer;touch-action:manipulation;transition:background .12s,transform .06s}
+button.act:hover:not(:disabled){background:#ffffff18}
+button.act:active:not(:disabled){transform:translateY(1px)}
+button.act:disabled{opacity:.4;cursor:not-allowed}
+button.act.primary{background:var(--ai);color:#1B1405;border-color:transparent;font-weight:700}
+button.act.primary:hover{background:#ffc33f}
+.readout{font-family:var(--mono);font-size:12px;line-height:1.9;color:var(--muted)}
+.readout div{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dotted var(--line);padding-bottom:2px}
+.readout b{color:var(--bone);font-weight:500}
+.tally{display:flex;gap:8px}
+.tally div{flex:1;border:1px solid var(--line);border-radius:10px;padding:9px 6px;text-align:center}
+.tally span{display:block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.tally b{font-size:20px;font-weight:700}
+.hint-key{font-family:var(--mono);font-size:11px;color:var(--muted);line-height:1.7}
+kbd{font-family:var(--mono);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--bone)}
+@media (max-width:760px){
+  .app{grid-template-columns:1fr;grid-template-areas:"head" "board" "panel"}
+  .panel{max-width:560px;width:100%;margin:0 auto}
+}
+/* Flache Fenster (Handy im Querformat): nebeneinander statt untereinander,
+   Brettgroesse an die verfuegbare Hoehe gekoppelt. */
+@media (max-height:600px) and (min-width:560px){
+  body{padding:10px 14px}
+  .app{grid-template-columns:minmax(0,1fr) 240px;grid-template-areas:"head head" "board panel";gap:16px}
+  header{padding-bottom:8px}
+  h1{font-size:26px}
+  .machine{width:min(560px,100%,calc(94vh - 96px))}
+  .panel{gap:14px}
+  .eyebrow{margin-bottom:6px}
+  .levels label{padding:8px 11px;font-size:13px}
+  .starter label{padding:8px 4px}
+  button.act{padding:10px 6px}
+  .tally b{font-size:17px}
+  .readout{display:flex;gap:12px}
+  .readout div{flex:1;flex-direction:column;gap:0;border-bottom:0;text-align:center;line-height:1.4}
+}
+@media (pointer:coarse){ .hint-key{display:none} }
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.01ms !important;transition-duration:.01ms !important}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Vier <em>gewinnt</em></h1>
+    <div class="status" id="status" data-turn="you"><span class="dot"></span><span id="statusText">Du bist am Zug</span></div>
+  </header>
+
+  <div class="stage">
+    <div class="machine" id="machine">
+      <div class="stack">
+        <div class="lane"><div class="slots" id="slots"></div><div class="ghost" id="ghost"></div></div>
+        <div class="board" id="board">
+          <div class="discs" id="discs"></div>
+          <svg class="plate" id="plate" viewBox="0 0 700 600" aria-hidden="true"></svg>
+        </div>
+        <div class="cols" id="cols" role="group" aria-label="Spalte wählen"></div>
+      </div>
+      <div class="rail"></div>
+      <div class="legs"><i></i><i></i></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <section>
+      <p class="eyebrow"><span>Schwierigkeit</span><span id="depthTag">Tiefe 6</span></p>
+      <div class="levels" id="levels"></div>
+    </section>
+
+    <section>
+      <p class="eyebrow"><span>Anstoß</span></p>
+      <div class="starter" id="starter">
+        <label><input type="radio" name="start" value="you" checked>Du</label>
+        <label><input type="radio" name="start" value="ai">KI</label>
+        <label><input type="radio" name="start" value="alt">Wechsel</label>
+      </div>
+    </section>
+
+    <div class="actions">
+      <button class="act primary" id="newGame">Neues Spiel</button>
+      <button class="act" id="undo" disabled>Zug zurück</button>
+    </div>
+
+    <section>
+      <p class="eyebrow"><span>Rechenwerk</span></p>
+      <div class="readout">
+        <div><span>Stellungen</span><b id="rNodes">–</b></div>
+        <div><span>Rechenzeit</span><b id="rTime">–</b></div>
+        <div><span>Bewertung</span><b id="rScore">–</b></div>
+      </div>
+    </section>
+
+    <section>
+      <p class="eyebrow"><span>Bilanz</span></p>
+      <div class="tally">
+        <div><span>Du</span><b id="tYou">0</b></div>
+        <div><span>KI</span><b id="tAi">0</b></div>
+        <div><span>Remis</span><b id="tDraw">0</b></div>
+      </div>
+    </section>
+
+    <p class="hint-key">Tasten <kbd>1</kbd>…<kbd>7</kbd> werfen direkt in eine Spalte, <kbd>N</kbd> startet neu, <kbd>Z</kbd> nimmt zurück.</p>
+  </div>
+</div>
+
+<script id="engine">
+/* =========================================================================
+   Spiel-Engine — reines JavaScript, keine DOM-Zugriffe
+   Feldindex: i = c*6 + h   (c = Spalte 0..6, h = Höhe 0 = unterste Reihe)
+   Werte: 0 = leer, 1 = Mensch, 2 = KI
+   ========================================================================= */
+const COLS = 7, ROWS = 6, HUMAN = 1, AI = 2, WIN = 1e6;
+
+function createGame() {
+  return { cells: new Int8Array(COLS * ROWS), heights: new Int8Array(COLS), history: [], turn: HUMAN, over: null };
+}
+
+const idx = (c, h) => c * ROWS + h;
+const canPlay = (g, c) => g.heights[c] < ROWS;
+
+function play(g, c, p) {
+  const h = g.heights[c]++;
+  g.cells[idx(c, h)] = p;
+  g.history.push(c);
+  return h;
+}
+function unplay(g) {
+  const c = g.history.pop();
+  const h = --g.heights[c];
+  g.cells[idx(c, h)] = 0;
+  return c;
+}
+
+/* Gewinnprüfung ausgehend vom zuletzt gesetzten Stein */
+const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
+function winningLine(g, c, h, p) {
+  for (const [dc, dh] of DIRS) {
+    const line = [[c, h]];
+    for (const s of [1, -1]) {
+      let cc = c + dc * s, hh = h + dh * s;
+      while (cc >= 0 && cc < COLS && hh >= 0 && hh < ROWS && g.cells[idx(cc, hh)] === p) {
+        line.push([cc, hh]); cc += dc * s; hh += dh * s;
+      }
+    }
+    if (line.length >= 4) return line;
+  }
+  return null;
+}
+
+/* Alle 69 Vierer-Fenster einmalig vorberechnen */
+const WINDOWS = (() => {
+  const out = [];
+  for (let c = 0; c < COLS; c++) for (let h = 0; h < ROWS; h++) for (const [dc, dh] of DIRS) {
+    const ec = c + 3 * dc, eh = h + 3 * dh;
+    if (ec >= COLS || eh >= ROWS || eh < 0) continue;
+    out.push([idx(c, h), idx(c + dc, h + dh), idx(c + 2 * dc, h + 2 * dh), idx(ec, eh)]);
+  }
+  return out;
+})();
+
+const CENTER_BONUS = [1, 2, 3, 5, 3, 2, 1];
+const SHAPE = [0, 1, 9, 55, 0];
+
+/* Stellungsbewertung aus Sicht von `me` */
+function evaluate(g, me) {
+  const you = 3 - me, cells = g.cells;
+  let score = 0;
+  for (let w = 0; w < WINDOWS.length; w++) {
+    const win = WINDOWS[w];
+    let mine = 0, his = 0;
+    for (let k = 0; k < 4; k++) { const v = cells[win[k]]; if (v === me) mine++; else if (v === you) his++; }
+    if (mine && his) continue;
+    if (mine) score += SHAPE[mine]; else if (his) score -= SHAPE[his];
+  }
+  for (let c = 0; c < COLS; c++) for (let h = 0; h < g.heights[c]; h++) {
+    const v = cells[idx(c, h)];
+    if (v === me) score += CENTER_BONUS[c]; else if (v === you) score -= CENTER_BONUS[c];
+  }
+  return score;
+}
+
+const ORDER = [3, 2, 4, 1, 5, 0, 6];
+let nodes = 0;
+
+/* Gibt es fuer `p` einen Zug, der sofort gewinnt? Liefert Spalte oder -1. */
+function immediateWin(g, p) {
+  for (const c of ORDER) {
+    if (!canPlay(g, c)) continue;
+    const h = play(g, c, p);
+    const w = winningLine(g, c, h, p);
+    unplay(g);
+    if (w) return c;
+  }
+  return -1;
+}
+
+/* Negamax mit Alpha-Beta-Schnitt.
+   `me` ist am Zug. Sofortige Gewinne und erzwungene Abwehrzuege werden vor der
+   eigentlichen Suche erkannt — das schneidet den Baum drastisch zusammen. */
+function search(g, depth, alpha, beta, me) {
+  nodes++;
+  if (g.history.length === COLS * ROWS) return 0;
+  if (immediateWin(g, me) >= 0) return WIN - (g.history.length + 1);
+  if (depth <= 0) return evaluate(g, me);
+
+  const forced = immediateWin(g, 3 - me);
+  const moves = forced >= 0 ? [forced] : ORDER.filter(c => canPlay(g, c));
+
+  let best = -Infinity;
+  for (const c of moves) {
+    play(g, c, me);
+    const score = -search(g, depth - 1, -beta, -alpha, 3 - me);
+    unplay(g);
+    if (score > best) best = score;
+    if (best > alpha) alpha = best;
+    if (alpha >= beta) break;
+  }
+  return best;
+}
+
+const LEVELS = [
+  { id: 'easy',   name: 'Anfänger',        depth: 2, noise: 0.55, bars: 1 },
+  { id: 'medium', name: 'Fortgeschritten', depth: 4, noise: 0.15, bars: 2 },
+  { id: 'pro',    name: 'Profi',           depth: 6, noise: 0,    bars: 3 },
+  { id: 'master', name: 'Meister',         depth: 8, noise: 0,    bars: 4 }
+];
+
+/* Zugwahl der KI. Liefert Spalte, Bewertung, Knotenzahl und Dauer. */
+function chooseMove(g, level) {
+  const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  nodes = 0;
+  const legal = ORDER.filter(c => canPlay(g, c));
+  if (!legal.length) return null;
+
+  if (level.noise && Math.random() < level.noise) {
+    // Patzer — aber ein sofortiger Sieg wird trotzdem mitgenommen,
+    // und ein Zug, der den Gegner direkt gewinnen lässt, wird gemieden.
+    const safe = legal.filter(c => {
+      const h = play(g, c, AI);
+      const win = !!winningLine(g, c, h, AI);
+      let gift = false;
+      if (!win) for (const c2 of legal) if (canPlay(g, c2)) {
+        const h2 = play(g, c2, HUMAN);
+        if (winningLine(g, c2, h2, HUMAN)) gift = true;
+        unplay(g);
+        if (gift) break;
+      }
+      unplay(g);
+      if (win) return true;
+      return !gift;
+    });
+    const pool = safe.length ? safe : legal;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    return { col: pick, score: null, nodes: 0, ms: 0 };
+  }
+
+  // Die Wurzel wird bewusst mit vollem Fenster durchsucht: nur so sind die
+  // Bewertungen aller Zuege exakt und gleichwertige Zuege echte Alternativen.
+  let best = -Infinity, ties = [];
+  for (const c of legal) {
+    const h = play(g, c, AI);
+    let score;
+    if (winningLine(g, c, h, AI)) score = WIN - g.history.length;
+    else if (g.history.length === COLS * ROWS) score = 0;
+    else score = -search(g, level.depth - 1, -Infinity, Infinity, HUMAN);
+    unplay(g);
+    if (score > best) { best = score; ties = [c]; }
+    else if (score === best) ties.push(c);
+  }
+  const t1 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+  return { col: ties[Math.floor(Math.random() * ties.length)], score: best, nodes, ms: t1 - t0 };
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = { createGame, play, unplay, canPlay, winningLine, chooseMove, evaluate, LEVELS, COLS, ROWS, HUMAN, AI, WIN };
+}
+</script>
+
+<script>
+/* =========================================================================
+   Oberfläche
+   ========================================================================= */
+const $ = s => document.querySelector(s);
+const boardEl = $('#board'), discsEl = $('#discs'), plateEl = $('#plate'),
+      colsEl = $('#cols'), ghostEl = $('#ghost'), machineEl = $('#machine'),
+      statusEl = $('#status'), statusText = $('#statusText'),
+      levelsEl = $('#levels'), undoBtn = $('#undo'), slotsEl = $('#slots');
+
+let game = createGame();
+let level = LEVELS[2];
+let thinking = false;
+let starter = 'you';
+let nextStarter = HUMAN;
+let currentStarter = HUMAN;
+const discMap = new Map();
+const tally = { you: 0, ai: 0, draw: 0 };
+
+/* --- Frontplatte als SVG mit ausgestanzten Löchern --- */
+(function buildPlate() {
+  const holes = [];
+  const rings = [];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) {
+    const x = 50 + c * 100, y = 50 + r * 100;
+    holes.push(`<circle cx="${x}" cy="${y}" r="40" fill="#000"/>`);
+    rings.push(`<circle cx="${x}" cy="${y}" r="41" fill="none" stroke="#0b1030" stroke-opacity=".55" stroke-width="4"/>`);
+    rings.push(`<path d="M ${x - 38} ${y - 12} A 40 40 0 0 1 ${x + 12} ${y - 38}" fill="none" stroke="#8ea0ee" stroke-opacity=".45" stroke-width="3" stroke-linecap="round"/>`);
+  }
+  plateEl.innerHTML = `
+    <defs>
+      <mask id="holes"><rect width="700" height="600" rx="26" fill="#fff"/>${holes.join('')}</mask>
+      <linearGradient id="plastic" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#5069DA"/><stop offset=".4" stop-color="#2F49B8"/><stop offset="1" stop-color="#1F2F86"/>
+      </linearGradient>
+    </defs>
+    <rect width="700" height="600" rx="26" fill="url(#plastic)" mask="url(#holes)"/>
+    <g mask="url(#holes)" opacity="0"></g>
+    ${rings.join('')}`;
+})();
+
+/* --- Einwurfmarken und Spaltenschalter --- */
+for (let c = 0; c < COLS; c++) slotsEl.appendChild(document.createElement('i'));
+
+for (let c = 0; c < COLS; c++) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.dataset.col = c;
+  b.setAttribute('aria-label', `Spalte ${c + 1}`);
+  b.addEventListener('click', () => humanMove(c));
+  b.addEventListener('pointerenter', () => showGhost(c));
+  b.addEventListener('focus', () => showGhost(c));
+  colsEl.appendChild(b);
+}
+colsEl.addEventListener('pointerleave', hideGhost);
+colsEl.addEventListener('focusout', hideGhost);
+
+function showGhost(c) {
+  if (thinking || game.over || !canPlay(game, c)) return hideGhost();
+  ghostEl.style.left = `${(c + 0.5) * 100 / COLS}%`;
+  machineEl.classList.add('hint');
+}
+function hideGhost() { machineEl.classList.remove('hint'); }
+
+/* --- Schwierigkeitsgrade --- */
+LEVELS.forEach((lv, i) => {
+  const l = document.createElement('label');
+  l.innerHTML = `<input type="radio" name="level" value="${lv.id}" ${lv === level ? 'checked' : ''}>
+    <span class="name">${lv.name}</span>
+    <span class="bar">${[1, 2, 3, 4].map(n => `<i class="${n <= lv.bars ? 'on' : ''}"></i>`).join('')}</span>`;
+  l.querySelector('input').addEventListener('change', () => {
+    level = lv;
+    $('#depthTag').textContent = `Tiefe ${lv.depth}`;
+  });
+  levelsEl.appendChild(l);
+});
+$('#depthTag').textContent = `Tiefe ${level.depth}`;
+
+$('#starter').addEventListener('change', e => { starter = e.target.value; });
+$('#newGame').addEventListener('click', () => newGame());
+undoBtn.addEventListener('click', undoMove);
+document.addEventListener('keydown', e => {
+  if (e.key >= '1' && e.key <= '7') humanMove(+e.key - 1);
+  else if (e.key.toLowerCase() === 'n') newGame();
+  else if (e.key.toLowerCase() === 'z') undoMove();
+});
+
+/* --- Züge --- */
+function humanMove(c) {
+  if (thinking || game.over || !canPlay(game, c) || game.turn !== HUMAN) return;
+  commit(c, HUMAN);
+  if (!game.over) { game.turn = AI; render(); setTimeout(aiMove, 220); }
+}
+
+function aiMove() {
+  if (game.over) return;
+  thinking = true;
+  render();
+  setTimeout(() => {
+    const res = chooseMove(game, level);
+    thinking = false;
+    if (!res) return;
+    $('#rNodes').textContent = res.nodes ? res.nodes.toLocaleString('de-DE') : '– (Zufallszug)';
+    $('#rTime').textContent = res.nodes ? `${(res.ms / 1000).toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} s` : '–';
+    $('#rScore').textContent = res.score === null ? '–'
+      : Math.abs(res.score) > WIN / 2 ? (res.score > 0 ? 'KI erzwingt Sieg' : 'KI verliert erzwungen')
+      : (res.score > 0 ? '+' : '') + res.score;
+    commit(res.col, AI);
+    if (!game.over) game.turn = HUMAN;
+    render();
+  }, 20);
+}
+
+function commit(c, p) {
+  const h = play(game, c, p);
+  const line = winningLine(game, c, h, p);
+  if (line) {
+    game.over = { winner: p, line };
+    if (p === HUMAN) tally.you++; else tally.ai++;
+  } else if (game.history.length === COLS * ROWS) {
+    game.over = { winner: 0, line: [] };
+    tally.draw++;
+  }
+  render();
+}
+
+function lastPlayer(g) {
+  if (!g.history.length) return 0;
+  const c = g.history[g.history.length - 1];
+  return g.cells[c * ROWS + g.heights[c] - 1];
+}
+
+function undoMove() {
+  if (thinking || !game.history.length) return;
+  game.over = null;
+  if (lastPlayer(game) === AI) unplay(game);      // Antwort der KI
+  if (lastPlayer(game) === HUMAN) unplay(game);   // eigener Zug
+  game.turn = HUMAN;
+  render();
+  if (!game.history.length && currentStarter === AI) setTimeout(aiMove, 200);
+}
+
+function newGame() {
+  boardEl.classList.add('emptying');
+  const start = starter === 'you' ? HUMAN : starter === 'ai' ? AI : nextStarter;
+  if (starter === 'alt') nextStarter = 3 - nextStarter;
+  currentStarter = start;
+  setTimeout(() => {
+    boardEl.classList.remove('emptying');
+    game = createGame();
+    game.turn = start;
+    $('#rNodes').textContent = $('#rTime').textContent = $('#rScore').textContent = '–';
+    render();
+    if (start === AI) setTimeout(aiMove, 260);
+  }, game.history.length ? 560 : 0);
+}
+
+/* --- Darstellung --- */
+function render() {
+  const winSet = new Set((game.over?.line || []).map(([c, h]) => c + ':' + h));
+  const seen = new Set();
+  for (let c = 0; c < COLS; c++) for (let h = 0; h < game.heights[c]; h++) {
+    const key = c + ':' + h;
+    seen.add(key);
+    let el = discMap.get(key);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'disc';
+      el.style.setProperty('--c', c);
+      el.style.setProperty('--r', ROWS - 1 - h);
+      el.style.setProperty('--fill', game.cells[c * ROWS + h] === HUMAN ? 'var(--you)' : 'var(--ai)');
+      discMap.set(key, el);
+      discsEl.appendChild(el);
+    }
+    el.classList.toggle('win', winSet.has(key));
+  }
+  for (const [key, el] of discMap) if (!seen.has(key)) { el.remove(); discMap.delete(key); }
+
+  for (const b of colsEl.children) {
+    b.disabled = thinking || !!game.over || !canPlay(game, +b.dataset.col) || game.turn !== HUMAN;
+  }
+  for (let c = 0; c < COLS; c++) {
+    slotsEl.children[c].classList.toggle('full', !canPlay(game, c) || !!game.over);
+  }
+  undoBtn.disabled = thinking || !game.history.length;
+
+  if (game.over) {
+    statusEl.dataset.turn = 'over';
+    statusText.textContent = game.over.winner === HUMAN ? 'Du gewinnst' : game.over.winner === AI ? 'Die KI gewinnt' : 'Unentschieden';
+  } else if (thinking) {
+    statusEl.dataset.turn = 'ai';
+    statusText.textContent = 'KI rechnet …';
+  } else if (game.turn === AI) {
+    statusEl.dataset.turn = 'ai';
+    statusText.textContent = 'KI ist am Zug';
+  } else {
+    statusEl.dataset.turn = 'you';
+    statusText.textContent = 'Du bist am Zug';
+  }
+  $('#tYou').textContent = tally.you;
+  $('#tAi').textContent = tally.ai;
+  $('#tDraw').textContent = tally.draw;
+  if (game.over || thinking) hideGhost();
+}
+
+render();
+</script>
+</body>
+</html>
