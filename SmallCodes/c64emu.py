@@ -71,7 +71,7 @@ import zlib
 
 # Bump this when rendering/emulation behaviour changes, so it's easy to tell
 # which build is actually running.
-__version__ = "2026.07.29-cartridge"
+__version__ = "2026.08.05-cycle-drive"
 
 
 # =============================================================================
@@ -945,6 +945,11 @@ class Vic:
         self.mem = None                    # set by System after Memory exists
         self.raster = 0
         self._line_cycles = 0
+        # Phasenkorrektur fuer $D011/$D012-Lesungen im Batch-Modus. 0 = aus
+        # (historisches Verhalten, gegen das die Batch-Kompensationen
+        # kalibriert sind); enable_drive() setzt READ_PHASE, weil nur
+        # zyklusgezaehlte Fastloader die Korrektur wirklich brauchen.
+        self.read_phase = 0
         self.ba = True             # bus available to CPU (low on badlines)
         self._badline = False
         self.ba_debt = 0        # batch: cycles the CPU owes for badline DMA
@@ -990,14 +995,30 @@ class Vic:
     def irq_line(self):
         return (self.irq_status & self.irq_enable & 0x0F) != 0
 
+    READ_PHASE = 3      # LDA/CMP abs: der Buszugriff liegt im 4. Zyklus
+
+    def _raster_phased(self):
+        """Rasterzeile zum Zeitpunkt des echten Buszugriffs. Im Batch-Modus
+        wird der VIC erst NACH der Instruktion getickt — ohne Korrektur waere
+        ein $D012-Lesezugriff auf den ERSTEN Instruktionszyklus datiert und
+        liefert am Zeilenende den Wert von drei Zyklen zuvor. Zyklusgezaehlte
+        Loader (Starflight) entscheiden an genau dieser Kante, ob ein Byte
+        noch vor der naechsten Badline durchpasst. Das Gegenstueck zur
+        `phase`-Korrektur, die write_system_byte() beim Schreiben schon hat."""
+        if not self.read_phase or getattr(self, "_bl_defer", False):
+            return self.raster          # aus / Cycle-Modus stempelt exakt
+        if self._line_cycles + self.read_phase >= self.CYCLES_PER_LINE:
+            return (self.raster + 1) % self.LINES_PER_FRAME
+        return self.raster
+
     def read(self, offset):
         offset &= 0x3F
         if offset >= 0x2F:
             return 0xFF
         if offset == self.REG_RASTER_LINE:
-            return self.raster & 0xFF
+            return self._raster_phased() & 0xFF
         if offset == self.REG_CTRL1:
-            return (self.regs[offset] & 0x7F) | ((self.raster >> 1) & 0x80)
+            return (self.regs[offset] & 0x7F) | ((self._raster_phased() >> 1) & 0x80)
         if offset == self.REG_IRQ_STATUS:
             v = self.irq_status & 0x0F
             if v & self.irq_enable:
@@ -1105,7 +1126,18 @@ class Vic:
             return
         self._bl_estab = T
         r = self._bl_line
-        if T <= 14:
+        # Internal cycle 14 == Bauer cycle 15: the RC:=0 reset of Bauer
+        # cycle 14 has already passed, so on an IDLE line RC still carries
+        # 7 and cycle 58 consumes VCBASE — a crunch establish like T>14,
+        # offset +(55-T) = +41. Mayhem in Monsterland's AGSP sweep uses the
+        # full ring c14..c53 (40 positions); treating c14 as a delayed
+        # normal badline (-1) breaks ring continuity by 42 chars = 2 chars
+        # horizontally + one matrix ROW vertically wherever the camera rests
+        # on that position (sprites sink into / float over the map). The old
+        # -1 below remains for the NON-idle case (ref18's delayed fetch
+        # inside a regular row).
+        _crunch14 = (T == 14 and self.line_idle[r])
+        if T <= 14 and not _crunch14:
             if T == 14 and getattr(self, "_bl_defer", False):
                 # a condition arising only in cycle 14 misses the first
                 # c-access of the fetch window (cycle 15): the row fetch
@@ -1148,7 +1180,16 @@ class Vic:
                 self._bl_fetch_pend = row
         else:
             if getattr(self, "_bl_defer", False):
-                self._vc_offset += -(T - self.VSP_BASE)
+                # A mid-line badline (condition true only after cycle 14) does
+                # NOT reset RC — the sequencer still carries RC=7 from idle, so
+                # cycle 58 loads VCBASE from VC: the line consumes 55-T chars.
+                # The offset is therefore +(55-T), not -(T-15): both are equal
+                # mod 40 (same horizontal shift, which is all the dmadelay
+                # refs measure), but differ by one full matrix ROW. With
+                # -(T-15) every AGSP frame displays the map one text row too
+                # low — Mayhem in Monsterland's dino floats 8 px above the
+                # ground while the freshly drawn seam column sits correctly.
+                self._vc_offset += 40 - (T - self.VSP_BASE)
             else:
                 self.ba_debt += max(55 - T, 0)
                 # batch scheduler: pre-timeline semantics — ASSIGN the
@@ -1158,7 +1199,8 @@ class Vic:
                 if T > self.VSP_WINDOW_END:
                     self._bl_estab = None
                     return
-                self._vc_offset = -(T - self.VSP_BASE)
+                # +(55-T), same reasoning as the cycle path above.
+                self._vc_offset = 40 - (T - self.VSP_BASE)
             self._trigger_badline_now(r, self.regs[0x11])
 
     def _trigger_badline_now(self, r, val):
@@ -1212,9 +1254,14 @@ class Vic:
         self._latch_screen = bytes(self.line_screen[row * 40:row * 40 + 40])
         self._latch_color = bytes(self.line_color[row * 40:row * 40 + 40])
 
-    def write(self, offset, val):
+    def write(self, offset, val, phase=0):
         offset &= 0x3F
         val &= 0xFF
+        # Batch mode dates writes at the instruction's first cycle; `phase`
+        # carries the offset to the cycle the store really lands on. Cycle
+        # mode clocks the CPU per PHI2, so its stamps are already exact.
+        if getattr(self, "_bl_defer", False):
+            phase = 0
         if (offset in (0x22, 0x23)
                 and not getattr(self, "_bl_defer", False)
                 and self._line_cycles < 16):
@@ -1313,7 +1360,11 @@ class Vic:
             # leaves the line as it was. Our tick sampled the condition at
             # line start; honour early mid-line writes retroactively.
             r = self.raster
-            cyc = self._line_cycles
+            # 6502 stores write on their LAST cycle — that is when the VIC
+            # sees the new YSCROLL, and the AGSP VC offset is -(T - 15).
+            cyc = self._line_cycles + phase
+            if cyc >= self.CYCLES_PER_LINE:
+                cyc = self.CYCLES_PER_LINE - 1
             if cyc == 11:
                 self._bl_w11 = True
             if getattr(self, "_bl_line", None) == r:
@@ -1654,6 +1705,18 @@ class Vic:
                 self.row_mode_d018[row])
 
     def _foreground_bits_at(self, r, col0=0, col1=40):
+        """Foreground bitmask of raster line r WITH the XSCROLL ($D016 bits
+        0-2) pixel delay applied, i.e. the mask as the beam actually put it on
+        screen. The frame renderer applies the same delay, so sprite-data
+        collision ($D01F) and sprite priority keep agreeing with the picture
+        while a game fine-scrolls. Source data for VIC X `x` lives at `x - xs`,
+        so one extra character column is decoded on the left."""
+        xs = self.line_d016[r] & 7
+        if not xs:
+            return self._foreground_bits_raw(r, col0, col1)
+        return self._foreground_bits_raw(r, max(0, col0 - 1), col1) << xs
+
+    def _foreground_bits_raw(self, r, col0=0, col1=40):
         """Foreground (non-background) column bitmask (bit == VIC X) of the
         displayed graphics on raster line r, restricted to character columns
         [col0, col1) for speed. Handles character modes (hi-res + per-cell
@@ -2885,7 +2948,13 @@ class Memory:
         Hardware liegt hier der zuletzt vom VIC geholte Wert an."""
         return getattr(self.vic, "last_fetch", 0xFF) & 0xFF
 
-    def write_system_byte(self, addr, val):
+    def write_system_byte(self, addr, val, phase=0):
+        """`phase` = how many cycles into the current instruction this write
+        actually happens. In batch mode the VIC is only ticked AFTER a whole
+        instruction, so without it every register write is dated at the
+        instruction's FIRST cycle. For AGSP scrollers (Mayhem in Monsterland)
+        that error is fatal: the VC offset is derived from the $D011 write's
+        cycle, and one cycle == one character == 8 pixels."""
         addr &= 0xFFFF
         val &= 0xFF
         if addr == Config.ADDR_PROCESSOR_PORT_REG:
@@ -2895,7 +2964,7 @@ class Memory:
         if 0xD000 <= addr <= 0xDFFF:
             space = self.pla.address_space(addr)
             if space == AddressSpace.IO:
-                if   addr < 0xD400: self.vic.write(addr - 0xD000, val)
+                if   addr < 0xD400: self.vic.write(addr - 0xD000, val, phase)
                 elif addr < 0xD800: self.sid.write(addr - 0xD400, val)
                 elif addr < 0xDC00: self.color_ram.write(addr - 0xD800, val)
                 elif addr < 0xDD00: self.cia1.write(addr - 0xDC00, val)
@@ -3210,9 +3279,9 @@ class CPU:
 
     def _rmw(self, adr, fn, cycles):
         val = self.mem.read_system_byte(adr)
-        self.mem.write_system_byte(adr, val)
+        self.mem.write_system_byte(adr, val, cycles - 2)   # NMOS dummy write
         new = fn(val)
-        self.mem.write_system_byte(adr, new)
+        self.mem.write_system_byte(adr, new, cycles - 1)
         self.cycles += cycles
 
     # ---------- inc/dec ----------
@@ -3798,9 +3867,9 @@ class CPU:
     def _lda_from(self, a, c): self.a = self.mem.read_system_byte(a); self.update_nz(self.a); self._tick(c)
     def _ldx_from(self, a, c): self.x = self.mem.read_system_byte(a); self.update_nz(self.x); self._tick(c)
     def _ldy_from(self, a, c): self.y = self.mem.read_system_byte(a); self.update_nz(self.y); self._tick(c)
-    def _sta_at(self, a, c):   self.mem.write_system_byte(a, self.a); self._tick(c)
-    def _stx_at(self, a, c):   self.mem.write_system_byte(a, self.x); self._tick(c)
-    def _sty_at(self, a, c):   self.mem.write_system_byte(a, self.y); self._tick(c)
+    def _sta_at(self, a, c):   self.mem.write_system_byte(a, self.a, c - 1); self._tick(c)
+    def _stx_at(self, a, c):   self.mem.write_system_byte(a, self.x, c - 1); self._tick(c)
+    def _sty_at(self, a, c):   self.mem.write_system_byte(a, self.y, c - 1); self._tick(c)
     def _inx(self): self.x = (self.x + 1) & 0xFF; self.update_nz(self.x); self._tick(2)
     def _iny(self): self.y = (self.y + 1) & 0xFF; self.update_nz(self.y); self._tick(2)
     def _dex(self): self.x = (self.x - 1) & 0xFF; self.update_nz(self.x); self._tick(2)
@@ -4430,7 +4499,7 @@ class DriveMemory:
             return self.via2.read(addr)
         return self.ram[addr & 0x07FF]
 
-    def write_system_byte(self, addr, val):
+    def write_system_byte(self, addr, val, phase=0):
         addr &= 0xFFFF
         if addr >= 0x8000:
             return
@@ -5184,6 +5253,12 @@ class System:
         self.cpu._prev_nmi = cur_nmi
         self.cpu.irq_line = self.cia1.irq_line or self.vic.irq_line
         self.vic.clock()
+        if self.drive is not None and self.cpu.cycles >= self.drive.idle_until:
+            # Ohne diese Zeilen laeuft die 1541 im Cycle-Modus nur ueber die
+            # $DD00-Hooks mit — zyklusgezaehlte 2-Bit-Loader brauchen sie
+            # aber pro PHI2 (der Idle-Horizont haelt das Leerlauf-Tempo).
+            self.drive.sync_to(self.cpu.cycles)
+            self.iec.poll()
         self.cpu.clock(ba=self.vic.ba)
         self.cia1.clock()
         self.cia2.clock()
@@ -5262,6 +5337,7 @@ class System:
             print(f"1541: DOS-ROM hat {len(rom)} Bytes (erwartet 16384)")
             return False
         self.drive = Drive(rom)
+        self.vic.read_phase = Vic.READ_PHASE   # $D012-Phase: nur mit --drive
         self.iec = IecBus(self.cia2, self.drive.via1)
         # Sync-on-demand (M3): every $DD00 read or write first pulls the
         # drive up to the present C64 cycle, so cycle-counted fastloader
@@ -5292,6 +5368,30 @@ class System:
         else:
             print(f"1541: DOS-ROM geladen ({rom_src}), IEC-Bus verdrahtet (keine Diskette)")
         return True
+
+    def set_cycle_accurate(self, flag):
+        """Zwischen Batch- und zyklusgenauem Kern umschalten — auch mitten im
+        Lauf (Hotkey Shift+F11). Beim Verlassen des Cycle-Modus wird eine
+        angefangene Instruktion zu Ende getaktet, beim Betreten eine offene
+        Badline-Schuld des Batch-Modus verbrannt, damit beide Kerne auf einer
+        sauberen Instruktionsgrenze uebernehmen."""
+        flag = bool(flag)
+        if flag == self.cycle_accurate:
+            return flag
+        if flag:
+            d = self.vic.ba_debt
+            if d:
+                self.vic.ba_debt = 0
+                self.cpu.cycles += d
+                self.vic.tick(d)
+                self.cia1.tick(d)
+                self.cia2.tick(d)
+            self.vic._bl_defer = True
+        else:
+            _snap_settle(self)          # Instruktion des Cycle-Kerns beenden
+            self.vic._bl_defer = False
+        self.cycle_accurate = flag
+        return flag
 
     def run(self, n_cycles):
         if self.cycle_accurate:
@@ -6204,6 +6304,8 @@ class System:
         # (Symptom: nach F12 bleibt das Fenster schwarz).
         self.vic.mem = self.mem
         self.vic.color_ram = self.color_ram
+        if self.drive is not None:
+            self.vic.read_phase = Vic.READ_PHASE
         self.sid.__init__()
         self.sid._cpu = self.cpu
         self.cia1.__init__("CIA1")
@@ -7369,6 +7471,35 @@ class PygameFrontend:
                 prow = np.where(brow[:, None].astype(bool),
                                 np.zeros(3, np.uint8), bg).astype(np.uint8)
                 pixels[sy] = prow
+        # --- Horizontal fine scroll (XSCROLL, $D016 bits 0-2) ---
+        # The graphics sequencer delays the pixel stream by XSCROLL pixels, so
+        # the whole playfield sits 0..7 pixels further right. Smooth scrollers
+        # count XSCROLL 7..0 and only then shift screen RAM by one column; if
+        # the delay is ignored the picture moves in 8-pixel jumps once every
+        # eight frames instead of one pixel per frame (visible as heavy
+        # judder in e.g. Mayhem in Monsterland, Turrican, Katakis).
+        # The pixels shifted in on the left are not real character data; in
+        # 38-column mode — which every scroller selects for exactly this
+        # reason — they are covered by the side border below. Fill them with
+        # the line's background and mark them as non-foreground.
+        # Applied AFTER the badline/FLD remap (XSCROLL is a per-raster-line
+        # property) and BEFORE sprites, whose X coordinates are absolute and
+        # therefore unaffected by the delay.
+        l16 = vic.line_d016
+        sy = 0
+        while sy < 200:
+            xs = l16[sy + 51] & 7
+            end = sy + 1
+            while end < 200 and (l16[end + 51] & 7) == xs:
+                end += 1
+            if xs:
+                pixels[sy:end, xs:] = pixels[sy:end, :320 - xs].copy()
+                bitmap[sy:end, xs:] = bitmap[sy:end, :320 - xs].copy()
+                bitmap[sy:end, :xs] = 0
+                for y in range(sy, end):
+                    pixels[y, :xs] = self._palette[vic.line_d021[y + 51] & 0x0F]
+            sy = end
+
         # Keep the frame's foreground mask for verify_foreground(): the
         # enforcement tool that asserts renderer and collision agree.
         self._last_fg_bitmap = bitmap
@@ -7460,6 +7591,19 @@ class PygameFrontend:
             rr = sy + 51
             if vic.line_vborder[rr]:
                 pixels[sy] = self._palette[vic.line_d020[rr] & 0x0F]
+
+        # --- 38-column side border (CSEL, $D016 bit 3) ---
+        # With CSEL=0 the display window narrows to X 31..334: 7 pixels on the
+        # left and 9 on the right become border. Scrollers select 38 columns to
+        # hide the pixels that XSCROLL shifts in, so this belongs with the fine
+        # scroll above. The border covers graphics AND sprites, hence it runs
+        # after the sprite pass.
+        for sy in range(200):
+            rr = sy + 51
+            if not (vic.line_d016[rr] & 0x08) and not vic.line_vborder[rr]:
+                bcol = self._palette[vic.line_d020[rr] & 0x0F]
+                pixels[sy, :7] = bcol
+                pixels[sy, 311:] = bcol
 
         return pixels, border
 
@@ -7732,8 +7876,12 @@ class PygameFrontend:
             return (-1, -1)
         bad_lines = 0
         bad_pixels = 0
+        vis = ((1 << 320) - 1) << 24      # VIC X 24..343 == screen x 0..319
         for sy in range(200):
-            want = vic._foreground_bits_at(sy + 51, 0, 40)
+            # XSCROLL pushes the rightmost columns past the display window;
+            # the renderer's 320-pixel mask cannot hold them, so compare only
+            # the visible window.
+            want = vic._foreground_bits_at(sy + 51, 0, 40) & vis
             got = 0
             row = bm[sy]
             for x in range(320):
@@ -7970,8 +8118,20 @@ class PygameFrontend:
                 elif event.type == self.pygame.KEYDOWN:
                     # Host hotkeys (not passed to the C64)
                     if event.key == self.pygame.K_F11:
-                        self.warp = not self.warp
-                        print(f"Warp mode: {'ON' if self.warp else 'OFF'}")
+                        if (self.pygame.key.get_mods()
+                                & self.pygame.KMOD_SHIFT):
+                            # Shift+F11: Batch <-> zyklusgenau umschalten.
+                            # Cycle-Modus ist deutlich langsamer, aber fuer
+                            # zyklusgezaehlte Fastloader (--drive) noetig.
+                            on = self.system.set_cycle_accurate(
+                                not self.system.cycle_accurate)
+                            self._osd("Zyklusgenauer Kern "
+                                      f"{'AN' if on else 'AUS'}")
+                            print("Cycle-accurate core:"
+                                  f" {'ON' if on else 'OFF'}")
+                        else:
+                            self.warp = not self.warp
+                            print(f"Warp mode: {'ON' if self.warp else 'OFF'}")
                         continue
                     if event.key == self.pygame.K_F12:
                         print("Soft reset")
