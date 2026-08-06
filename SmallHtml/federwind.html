@@ -1,0 +1,2938 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>Federwind &ndash; Panorama-Jagd</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0b0f14;overflow:hidden;
+    font-family:Georgia,'Times New Roman',serif;color:#e8eef4;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+  canvas{display:block;image-rendering:auto;cursor:none;
+    box-shadow:0 0 60px rgba(0,0,0,.8);background:#000;touch-action:none;}
+  #hint{position:fixed;left:0;right:0;bottom:4px;text-align:center;font-size:11px;
+    color:#54636f;pointer-events:none;font-family:monospace;}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="800" height="600"></canvas></div>
+<div id="hint">Maus = zielen &middot; Links = Schuss &middot; Rechts/R = nachladen &middot; P/Esc = Pause &middot; M = Ton &middot; D = Debug</div>
+<script>
+"use strict";
+/* =====================================================================
+   FEDERWIND – Panorama-Rail-Shooter
+   Ein einziges HTML-File, keine externen Assets, keine Dependencies.
+   Alle Grafiken prozedural (Canvas 2D), alle Klänge per WebAudio synthetisiert.
+   ===================================================================== */
+
+/* ============================ CONFIG ================================ */
+const CONFIG = {
+  /* --- Runde / Zeit --- */
+  ROUND_TIME: 90,              // Sekunden pro Runde
+  COUNTDOWN: 3,                // 3-2-1
+  WARN_TIME: 10,               // ab hier roter, pulsierender Timer
+
+  /* --- Waffe --- */
+  MAG_SIZE: 8,
+  RELOAD_MS: 900,
+  FIRE_COOLDOWN_MS: 180,
+  AUTO_RELOAD_DELAY_MS: 300,
+  LIMITED_AMMO: false,         // true => endlicher Vorrat + Munikisten
+  AMMO_START: 60,
+  AMMO_BOX_AMOUNT: 16,
+  RECOIL_SHAKE_PX: 2,
+  RECOIL_SHAKE_MS: 80,
+  MUZZLE_MS: 60,
+
+  /* --- Welt / Kamera --- */
+  WORLD_W: 2400,               // Panoramabreite (3x Viewport)
+  VIEW_W: 800,
+  VIEW_H: 600,
+  GROUND_Y: 430,
+  SCROLL_MAX: 420,             // px/s bei voll ausgereizter Randzone
+  SCROLL_EDGE: 0.15,           // äußere 15% der Viewportbreite
+  SCROLL_KEYS: 340,            // px/s per Pfeiltaste
+  CAM_SMOOTH: 0.10,            // Sekunden Glättung (Lerp-Zeitkonstante)
+
+  /* --- Spawner --- */
+  SPAWN_INTERVAL_START: 1.20,  // s
+  SPAWN_INTERVAL_END: 0.45,    // s am Rundenende
+  MAX_BIRDS: 14,
+  SPAWN_MARGIN: 120,           // min. Abstand außerhalb des Sichtfensters
+
+  /* --- Vögel --- */
+  BIRD_SPEED_NEAR: 90,         // px/s bei d=0
+  BIRD_SPEED_FAR: 220,         // px/s bei d=1
+  BIRD_SCALE_NEAR: 1.00,
+  BIRD_SCALE_FAR: 0.35,
+  GRAVITY: 900,                // px/s^2 im Fall
+  FALL_DRAG_X: 0.40,           // horizontale Restgeschwindigkeit
+  HIT_POSE_MS: 120,
+  LANDED_MS: 600,
+  HITBOX_PADDING: 0.10,        // Trefferbox 10% größer
+  WING_FPS: 12,
+
+  /* --- Punkte --- */
+  SCORE_NEAR: 5,
+  SCORE_FAR: 100,
+  MISS_PENALTY: 5,
+  COMBO_STEPS: [ {hits:3,mult:2}, {hits:6,mult:3}, {hits:10,mult:4} ],
+  ACC_BONUS: [ {acc:0.90, pts:500}, {acc:0.80, pts:250} ],
+  PROP_COOLDOWN: 3.0,          // s Cooldown pro Deko-Objekt
+
+  /* --- Sonstiges --- */
+  STORAGE_KEY: 'federwind.hs.v1',
+  HISCORE_COUNT: 10,
+  NAME_MAX: 12,
+  DUSK_SECONDS: 8,             // Dauer des Dämmerungs-Effekts (Sonnentreffer)
+  DUSK_TINT: 0.55,             // Stärke der warmen Multiply-Tönung
+  DUSK_BLUE: 0.22,             // Stärke des blauen Abendschleiers
+
+  /* --- Farbpalette: Tag- und Dämmerungsvariante --- */
+  PALETTE: {
+    day: {
+      skyTop:'#3f8fd0', skyMid:'#79bfe6', skyBot:'#d8ecf7',
+      sun:'#fff6c2', sunGlow:'#ffe27a',
+      cloud:'#ffffff', cloudShade:'#d6e4ee',
+      mtnFar:'#88a9c4', mtnNear:'#628ba8', mtnSnow:'#e9f2f8',
+      hillFar:'#74995a',
+      treeFarL:'#6d9a63', treeFarD:'#4d7a4c',
+      treeL:'#5c9247', treeM:'#3f6f38', treeD:'#28492a',
+      trunk:'#6b4a2c', trunkD:'#4a3220',
+      grassL:'#86bb52', grassM:'#6ea141', grassD:'#4d7a30',
+      fgGrass:'#3f6b2c', fgGrassL:'#588f3a',
+      wood:'#9a6a3c', woodD:'#6d4826',
+      barn:'#a8463a', barnD:'#7d3129', roof:'#4b3b34',
+      cloth:'#c8b48a', shirt:'#8d6e8f',
+      zeppelin:'#c8ccd2', zeppelinD:'#9aa1a9',
+      haze:'#bcd8ea', hazeAmt:0.35,
+      hud:'#f4f8fb', hudDim:'#9fb3c2'
+    },
+    dusk: {
+      skyTop:'#2a2a5e', skyMid:'#a4538a', skyBot:'#f2a15e',
+      sun:'#ffd8a0', sunGlow:'#ff9d4d',
+      cloud:'#f0c0a0', cloudShade:'#b2758c',
+      mtnFar:'#6a5a86', mtnNear:'#4a3f63', mtnSnow:'#e2c3c8',
+      hillFar:'#5c5449',
+      treeFarL:'#4e4f52', treeFarD:'#37383f',
+      treeL:'#4a5238', treeM:'#343c2c', treeD:'#1f2620',
+      trunk:'#453220', trunkD:'#2c2016',
+      grassL:'#6a6b3f', grassM:'#535733', grassD:'#3a4028',
+      fgGrass:'#2b3220', fgGrassL:'#3d4a2a',
+      wood:'#6c4a2c', woodD:'#4a301c',
+      barn:'#75352f', barnD:'#4f221e', roof:'#332728',
+      cloth:'#a08b6a', shirt:'#6b5069',
+      zeppelin:'#9d8c92', zeppelinD:'#75666e',
+      haze:'#c58a7a', hazeAmt:0.45,
+      hud:'#fdf0e2', hudDim:'#c4a08e'
+    }
+  }
+};
+
+/* ============================ UTILS ================================= */
+const TAU = Math.PI * 2;
+const clamp = (v,a,b)=> v<a?a:(v>b?b:v);
+const lerp  = (a,b,t)=> a + (b-a)*t;
+const invlerp=(a,b,v)=> (v-a)/(b-a);
+const rnd   = (a,b)=> a + Math.random()*(b-a);
+const rndi  = (a,b)=> (a + Math.random()*(b-a+1))|0;
+const pick  = arr => arr[(Math.random()*arr.length)|0];
+
+/* deterministischer PRNG (mulberry32) – für reproduzierbare Sprite-Seeds */
+function mulberry32(a){
+  return function(){
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/* --- Farb-Hilfen (Hex <-> RGB, Interpolation, Cache) --- */
+const _hexCache = Object.create(null);
+function hex2rgb(h){
+  let c = _hexCache[h];
+  if (c) return c;
+  const n = parseInt(h.slice(1),16);
+  c = [ (n>>16)&255, (n>>8)&255, n&255 ];
+  _hexCache[h] = c;
+  return c;
+}
+function rgb2hex(r,g,b){
+  return '#' + (((1<<24) + ((r|0)<<16) + ((g|0)<<8) + (b|0)).toString(16).slice(1));
+}
+function mixHex(h1,h2,t){
+  const a = hex2rgb(h1), b = hex2rgb(h2);
+  return rgb2hex(a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t);
+}
+function shade(h, amt){ // amt<0 dunkler, >0 heller
+  const c = hex2rgb(h);
+  const t = amt < 0 ? 0 : 255, k = Math.abs(amt);
+  return rgb2hex(c[0]+(t-c[0])*k, c[1]+(t-c[1])*k, c[2]+(t-c[2])*k);
+}
+
+/* Offscreen-Canvas erzeugen */
+function makeCanvas(w,h){
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.ceil(w));
+  c.height = Math.max(1, Math.ceil(h));
+  return c;
+}
+
+/* Panorama-Wrap: Weltposition -> Bildschirmposition in [0, WORLD_W) */
+function wrapX(worldX, offset){
+  let x = (worldX - offset) % CONFIG.WORLD_W;
+  if (x < 0) x += CONFIG.WORLD_W;
+  return x;
+}
+/* kürzeste Distanz auf dem Ring (für Nähe-Abfragen) */
+function ringDelta(a,b){
+  let d = (b - a) % CONFIG.WORLD_W;
+  if (d >  CONFIG.WORLD_W/2) d -= CONFIG.WORLD_W;
+  if (d < -CONFIG.WORLD_W/2) d += CONFIG.WORLD_W;
+  return d;
+}
+
+/* 1D-Value-Noise, das über die Panoramabreite nahtlos schließt */
+function makeWrapNoise(seed, periods){
+  const rng = mulberry32(seed);
+  const vals = new Float32Array(periods);
+  for (let i=0;i<periods;i++) vals[i] = rng();
+  return function(t){ // t in [0,1)
+    const x = ((t % 1) + 1) % 1 * periods;
+    const i0 = Math.floor(x) % periods;
+    const i1 = (i0 + 1) % periods;
+    const f = x - Math.floor(x);
+    const s = f*f*(3-2*f);
+    return vals[i0] + (vals[i1]-vals[i0]) * s;
+  };
+}
+function fbmWrap(seed, octaves){
+  const layers = [];
+  let amp = 1, per = 3, total = 0;
+  for (let o=0;o<octaves;o++){
+    layers.push({ n: makeWrapNoise(seed + o*911, per), a: amp });
+    total += amp; amp *= 0.5; per *= 2;
+  }
+  return function(t){
+    let v = 0;
+    for (let i=0;i<layers.length;i++) v += layers[i].n(t) * layers[i].a;
+    return v / total;
+  };
+}
+
+/* =========================== ASSETS =================================
+   Alle Sprites werden einmalig beim Start in Offscreen-Canvases
+   gerendert und danach nur noch per drawImage benutzt.
+   ==================================================================== */
+const Assets = (function(){
+
+  const PD = CONFIG.PALETTE.day;      // Sprites werden in der Tagpalette gebacken
+  const D_LEVELS = 5;                 // Diskrete Stufen atmosphärischer Perspektive
+
+  /* --- Hilfsfunktion: Dunst/Blaustich auf ein Sprite legen --- */
+  function hazeCopy(src, amount){
+    if (amount <= 0.001) return src;
+    const c = makeCanvas(src.width, src.height);
+    const g = c.getContext('2d');
+    g.drawImage(src,0,0);
+    g.globalCompositeOperation = 'source-atop';
+    g.fillStyle = PD.haze;
+    g.globalAlpha = amount;
+    g.fillRect(0,0,c.width,c.height);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    return c;
+  }
+
+  /* ------------------------- VOGEL ------------------------------- */
+  const BW = 78, BH = 62, BCX = 39, BCY = 32;
+
+  const BIRD_COLORS = [
+    { body:'#4a3a2c', belly:'#c9a06a', wing:'#3a2c22', wingD:'#241a13', beak:'#e0a03a', eye:'#111111', crest:'#a8492e' },
+    { body:'#3c4a5a', belly:'#b9c6d2', wing:'#2c3745', wingD:'#1a222c', beak:'#d8c04a', eye:'#111111', crest:'#6a8fb0' },
+    { body:'#5a3a3a', belly:'#d8c0a0', wing:'#43292a', wingD:'#2a1818', beak:'#e8b050', eye:'#111111', crest:'#c98a4a' }
+  ];
+
+  /* Flügelspitzen-Winkel der vier Schlagphasen (Bogenmaß) */
+  const WING_PHASE = [-1.05, -0.25, 0.62, -0.25];
+
+  function wingPath(g, ang, len, col, colD, back){
+    g.save();
+    g.rotate(ang);
+    g.beginPath();
+    g.moveTo(0,0);
+    g.bezierCurveTo(-len*0.15, -len*0.30, -len*0.70, -len*0.42, -len, -len*0.05);
+    g.bezierCurveTo(-len*0.72,  len*0.20, -len*0.30,  len*0.26, 0, len*0.10);
+    g.closePath();
+    g.fillStyle = back ? colD : col;
+    g.fill();
+    // Schwungfedern andeuten
+    g.strokeStyle = back ? shade(colD,-0.25) : shade(col,-0.30);
+    g.lineWidth = 1;
+    for (let i=1;i<=3;i++){
+      const t = i/4;
+      g.beginPath();
+      g.moveTo(-len*t*0.95, -len*0.10*t);
+      g.lineTo(-len*t*0.62,  len*0.12);
+      g.stroke();
+    }
+    g.restore();
+  }
+
+  function drawBirdBody(g, c, squash, headDrop){
+    // Schwanz
+    g.beginPath();
+    g.moveTo(-16, 0);
+    g.lineTo(-30, -7);
+    g.lineTo(-33, 1);
+    g.lineTo(-28, 7);
+    g.closePath();
+    g.fillStyle = c.wing; g.fill();
+    // Körper
+    g.beginPath();
+    g.ellipse(0, 0, 19, 13*squash, 0, 0, TAU);
+    g.fillStyle = c.body; g.fill();
+    // Bauch
+    g.beginPath();
+    g.ellipse(1, 5*squash, 14, 7*squash, 0, 0, TAU);
+    g.fillStyle = c.belly; g.fill();
+    // Kopf
+    g.beginPath();
+    g.arc(17, -7 + headDrop, 9.5, 0, TAU);
+    g.fillStyle = c.body; g.fill();
+    // Federhaube
+    g.beginPath();
+    g.moveTo(14, -15 + headDrop);
+    g.quadraticCurveTo(10, -24 + headDrop, 18, -20 + headDrop);
+    g.quadraticCurveTo(22, -23 + headDrop, 22, -14 + headDrop);
+    g.closePath();
+    g.fillStyle = c.crest; g.fill();
+    // Schnabel
+    g.beginPath();
+    g.moveTo(25, -8 + headDrop);
+    g.lineTo(37, -4 + headDrop);
+    g.lineTo(25, -1 + headDrop);
+    g.closePath();
+    g.fillStyle = c.beak; g.fill();
+  }
+
+  function makeBird(colIdx, pose){
+    const c  = BIRD_COLORS[colIdx];
+    const cv = makeCanvas(BW,BH);
+    const g  = cv.getContext('2d');
+    g.translate(BCX,BCY);
+    g.lineJoin = 'round';
+
+    if (pose <= 3){                       // ---- Flugphasen ----
+      const ang = WING_PHASE[pose];
+      wingPath(g, ang*0.85 + 0.15, 30, c.wing, c.wingD, true);   // hinterer Flügel
+      drawBirdBody(g, c, 1, 0);
+      wingPath(g, ang, 34, c.wing, c.wingD, false);              // vorderer Flügel
+      g.beginPath(); g.arc(20,-9,1.9,0,TAU); g.fillStyle = c.eye; g.fill();
+      g.beginPath(); g.arc(20.6,-9.6,0.7,0,TAU); g.fillStyle='#ffffff'; g.fill();
+    } else if (pose === 4){               // ---- Trefferpose ----
+      wingPath(g, -1.9, 22, c.wingD, c.wingD, true);
+      drawBirdBody(g, c, 0.86, 3);
+      wingPath(g, 2.1, 24, c.wing, c.wingD, false);
+      // X-Augen
+      g.strokeStyle = '#101010'; g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(17,-8); g.lineTo(23,-2); g.moveTo(23,-8); g.lineTo(17,-2);
+      g.stroke();
+    } else {                              // ---- Fallpose ----
+      wingPath(g, -2.5, 26, c.wingD, c.wingD, true);
+      drawBirdBody(g, c, 0.80, 6);
+      wingPath(g, 2.6, 27, c.wing, c.wingD, false);
+      g.strokeStyle = '#101010'; g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(16,-4); g.lineTo(22,2); g.moveTo(22,-4); g.lineTo(16,2);
+      g.stroke();
+    }
+    return cv;
+  }
+
+  /* ------------------------- FEDER ------------------------------- */
+  function makeFeather(colIdx){
+    const cv = makeCanvas(16,26), g = cv.getContext('2d');
+    const c = BIRD_COLORS[colIdx];
+    g.translate(8,3);
+    g.beginPath();
+    g.moveTo(0,0);
+    g.bezierCurveTo(7,6, 7,16, 0,22);
+    g.bezierCurveTo(-7,16, -7,6, 0,0);
+    g.closePath();
+    g.fillStyle = c.belly; g.fill();
+    g.strokeStyle = shade(c.wing,-0.1); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0,0); g.lineTo(0,22); g.stroke();
+    return cv;
+  }
+
+  /* -------------------------- BAUM -------------------------------- */
+  function makeTree(seed, w, h, far){
+    const rng = mulberry32(seed);
+    const cv = makeCanvas(w,h), g = cv.getContext('2d');
+    const cx = w/2, base = h-1;
+    const trunkW = w*0.10 + rng()*w*0.04;
+    const trunkH = h*(far?0.30:0.38);
+
+    // Stamm als sich verjüngendes Polygon
+    const lean = (rng()-0.5) * w*0.06;
+    g.beginPath();
+    g.moveTo(cx - trunkW, base);
+    g.lineTo(cx - trunkW*0.42 + lean, base - trunkH);
+    g.lineTo(cx + trunkW*0.42 + lean, base - trunkH);
+    g.lineTo(cx + trunkW, base);
+    g.closePath();
+    g.fillStyle = far ? shade(PD.trunk,0.15) : PD.trunk; g.fill();
+    g.strokeStyle = PD.trunkD; g.lineWidth = 1; g.stroke();
+
+    // Krone: Cluster überlagerter Kreise mit Farbrauschen
+    const cLight = far ? PD.treeFarL : PD.treeL;
+    const cMid   = far ? PD.treeFarL : PD.treeM;
+    const cDark  = far ? PD.treeFarD : PD.treeD;
+    const crownY = base - trunkH - h*0.10;
+    const rBase  = w*0.30;
+    const blobs  = far ? 9 : 16;
+    for (let i=0;i<blobs;i++){
+      const a = rng()*TAU, rr = Math.pow(rng(),0.6);
+      const bx = cx + lean + Math.cos(a)*rr*w*0.34;
+      const by = crownY - Math.abs(Math.sin(a))*rr*h*0.20 - rng()*h*0.10;
+      const br = rBase*(0.55 + rng()*0.55);
+      const t  = clamp((by - (crownY - h*0.30)) / (h*0.35), 0, 1);
+      g.beginPath(); g.arc(bx,by,br,0,TAU);
+      g.fillStyle = mixHex(cLight, cDark, clamp(t*0.9 + rng()*0.25,0,1));
+      g.fill();
+    }
+    // Lichtkante oben links
+    for (let i=0;i<(far?3:6);i++){
+      const bx = cx + lean - rBase*0.5 + rng()*rBase*0.8;
+      const by = crownY - h*0.14 - rng()*h*0.10;
+      g.beginPath(); g.arc(bx,by,rBase*(0.25+rng()*0.25),0,TAU);
+      g.fillStyle = mixHex(cLight,'#ffffff',0.14); g.globalAlpha = 0.30; g.fill();
+      g.globalAlpha = 1;
+    }
+    // eine dunkle Basis für Kontrast
+    g.beginPath(); g.arc(cx+lean, crownY + h*0.06, rBase*0.9, 0, TAU);
+    g.fillStyle = cMid; g.globalAlpha = 0.55; g.fill(); g.globalAlpha = 1;
+    return cv;
+  }
+
+  /* -------------------------- BUSCH ------------------------------- */
+  function makeBush(seed,w,h){
+    const rng = mulberry32(seed);
+    const cv = makeCanvas(w,h), g = cv.getContext('2d');
+    for (let i=0;i<10;i++){
+      const bx = w*0.5 + (rng()-0.5)*w*0.7;
+      const by = h - rng()*h*0.7;
+      const br = w*(0.16+rng()*0.16);
+      g.beginPath(); g.arc(bx,by,br,0,TAU);
+      g.fillStyle = mixHex(PD.treeL,PD.treeD,rng());
+      g.fill();
+    }
+    return cv;
+  }
+
+  /* -------------------------- WOLKE ------------------------------- */
+  function makeCloud(seed,w,h){
+    const rng = mulberry32(seed);
+    // 1. Silhouette aus überlagerten Kreisen
+    const shape = makeCanvas(w,h), sg = shape.getContext('2d');
+    sg.fillStyle = '#ffffff';
+    const puffs = 7 + (rng()*5|0);
+    for (let i=0;i<puffs;i++){
+      const t = i/(puffs-1);
+      const px = w*0.13 + t*w*0.74 + (rng()-0.5)*w*0.05;
+      const py = h*0.68 - Math.sin(t*Math.PI)*h*0.30 - rng()*h*0.06;
+      const pr = h*(0.17 + Math.sin(t*Math.PI)*0.16 + rng()*0.09);
+      sg.beginPath(); sg.arc(px,py,pr,0,TAU); sg.fill();
+    }
+    sg.fillRect(w*0.15, h*0.56, w*0.70, h*0.13);   // flache Unterseite
+    // 2. weiche Kante + Farbverlauf
+    const cv = makeCanvas(w,h), g = cv.getContext('2d');
+    try { g.filter = 'blur(3px)'; } catch(e){}
+    g.drawImage(shape,0,0);
+    try { g.filter = 'none'; } catch(e){}
+    g.globalCompositeOperation = 'source-atop';
+    const grd = g.createLinearGradient(0, h*0.22, 0, h*0.80);
+    grd.addColorStop(0, PD.cloud);
+    grd.addColorStop(1, PD.cloudShade);
+    g.fillStyle = grd; g.fillRect(0,0,w,h);
+    g.globalCompositeOperation = 'source-over';
+    return cv;
+  }
+
+  /* ------------------------- BERGE -------------------------------- */
+  function makeMountains(){
+    const W = CONFIG.WORLD_W, H = 230;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    const far  = fbmWrap(1337, 4);
+    const near = fbmWrap(4242, 5);
+
+    // hintere Kette
+    g.beginPath(); g.moveTo(0,H);
+    for (let x=0;x<=W;x+=6){
+      const t = x/W;
+      const y = H*0.66 - far(t)*H*0.62;
+      g.lineTo(x,y);
+    }
+    g.lineTo(W,H); g.closePath();
+    g.fillStyle = PD.mtnFar; g.fill();
+
+    // Schneekappen der hinteren Kette
+    g.save(); g.clip();
+    g.fillStyle = PD.mtnSnow; g.globalAlpha = 0.8;
+    for (let x=0;x<=W;x+=6){
+      const t = x/W;
+      const y = H*0.66 - far(t)*H*0.62;
+      if (y < H*0.24) g.fillRect(x, y, 6, (H*0.24 - y)*0.95);
+    }
+    g.globalAlpha = 1; g.restore();
+
+    // vordere Kette
+    g.beginPath(); g.moveTo(0,H);
+    for (let x=0;x<=W;x+=5){
+      const t = x/W;
+      const y = H*0.84 - near(t)*H*0.46;
+      g.lineTo(x,y);
+    }
+    g.lineTo(W,H); g.closePath();
+    g.fillStyle = PD.mtnNear; g.fill();
+
+    // sanfte Hügel davor
+    const hill = fbmWrap(777, 2);
+    g.beginPath(); g.moveTo(0,H);
+    for (let x=0;x<=W;x+=8){
+      const t = x/W;
+      g.lineTo(x, H*0.94 - hill(t)*H*0.16);
+    }
+    g.lineTo(W,H); g.closePath();
+    g.fillStyle = PD.hillFar; g.fill();
+    return cv;
+  }
+
+  /* ------------------------- BODEN -------------------------------- */
+  function makeGround(){
+    const W = CONFIG.WORLD_W, H = CONFIG.VIEW_H - CONFIG.GROUND_Y + 4;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    const grd = g.createLinearGradient(0,0,0,H);
+    grd.addColorStop(0, PD.grassD);
+    grd.addColorStop(0.18, PD.grassM);
+    grd.addColorStop(1, PD.grassL);
+    g.fillStyle = grd; g.fillRect(0,0,W,H);
+
+    const rng = mulberry32(9091);
+    // Grasstriche
+    g.lineWidth = 1.4;
+    for (let i=0;i<2600;i++){
+      const x = rng()*W, y = rng()*H;
+      const depth = y/H;
+      const len = 3 + depth*9;
+      g.strokeStyle = mixHex(PD.grassD, PD.grassL, rng()*0.9);
+      g.globalAlpha = 0.35 + rng()*0.4;
+      g.beginPath();
+      g.moveTo(x,y);
+      g.lineTo(x + (rng()-0.5)*4, y - len);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+    // Blümchen
+    for (let i=0;i<180;i++){
+      const x = rng()*W, y = H*0.25 + rng()*H*0.75;
+      g.fillStyle = pick(['#f3e07a','#f0f0f0','#e8a0c0','#f5c05a']);
+      g.beginPath(); g.arc(x,y,1.3 + rng()*1.2,0,TAU); g.fill();
+    }
+    // Erdweg-Flecken – dreifach gezeichnet, damit die Naht bei x=0 verschwindet
+    g.fillStyle = mixHex(PD.grassD,'#8a7a4a',0.45);
+    g.globalAlpha = 0.16;
+    for (let i=0;i<22;i++){
+      const x = rng()*W, y = H*0.3 + rng()*H*0.6;
+      const rx = 18+rng()*38, ry = 4+rng()*7;
+      for (let k=-1;k<=1;k++){
+        g.beginPath(); g.ellipse(x + k*W, y, rx, ry, 0,0,TAU); g.fill();
+      }
+    }
+    g.globalAlpha = 1;
+    return cv;
+  }
+
+  /* ------------------------- ZAUN --------------------------------- */
+  function makeFence(){
+    const W = 120, H = 62;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.fillStyle = PD.wood;
+    g.strokeStyle = PD.woodD; g.lineWidth = 1;
+    // Riegel
+    for (const y of [H*0.34, H*0.62]){
+      g.fillRect(0, y, W, 6); g.strokeRect(0.5, y+0.5, W-1, 5);
+    }
+    // Pfosten
+    for (const x of [8, 68]){
+      g.fillStyle = shade(PD.wood,-0.12);
+      g.fillRect(x, H*0.16, 9, H*0.80);
+      g.strokeRect(x+0.5, H*0.16+0.5, 8, H*0.80-1);
+      g.beginPath(); g.moveTo(x-1,H*0.16); g.lineTo(x+4.5,H*0.16-7); g.lineTo(x+10,H*0.16);
+      g.closePath(); g.fillStyle = shade(PD.wood,-0.22); g.fill();
+      g.fillStyle = PD.wood;
+    }
+    return cv;
+  }
+
+  /* ------------------------ SCHEUNE ------------------------------- */
+  function makeBarn(){
+    const W = 230, H = 165;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    const bodyY = H*0.36;
+    g.fillStyle = PD.barn; g.fillRect(14, bodyY, W-28, H-bodyY-1);
+    g.fillStyle = PD.barnD;
+    for (let x=14;x<W-14;x+=26) g.fillRect(x, bodyY, 2, H-bodyY-1);
+    // Dach
+    g.beginPath();
+    g.moveTo(4,bodyY+3); g.lineTo(W/2, 8); g.lineTo(W-4, bodyY+3);
+    g.lineTo(W-14, bodyY+9); g.lineTo(W/2, 20); g.lineTo(14, bodyY+9);
+    g.closePath(); g.fillStyle = PD.roof; g.fill();
+    // Giebelfenster
+    g.fillStyle = '#2b2320';
+    g.beginPath(); g.arc(W/2, bodyY+22, 12, 0, TAU); g.fill();
+    g.strokeStyle = PD.cloth; g.lineWidth=2;
+    g.beginPath(); g.moveTo(W/2-12,bodyY+22); g.lineTo(W/2+12,bodyY+22);
+    g.moveTo(W/2,bodyY+10); g.lineTo(W/2,bodyY+34); g.stroke();
+    // Torrahmen
+    g.fillStyle = '#39221d';
+    g.fillRect(W/2-42, H-84, 84, 83);
+    return cv;
+  }
+  function makeBarnDoor(){
+    const W = 42, H = 83;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.fillStyle = PD.wood; g.fillRect(0,0,W,H);
+    g.strokeStyle = PD.woodD; g.lineWidth = 2;
+    g.strokeRect(1,1,W-2,H-2);
+    g.beginPath(); g.moveTo(0,0); g.lineTo(W,H*0.5); g.moveTo(0,H*0.5); g.lineTo(W,H);
+    g.stroke();
+    return cv;
+  }
+
+  /* ---------------------- VOGELSCHEUCHE ---------------------------- */
+  function makeScarecrow(){
+    const W = 74, H = 120;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    const cx = W/2;
+    g.strokeStyle = PD.woodD; g.lineWidth = 6; g.lineCap='round';
+    g.beginPath(); g.moveTo(cx,H-2); g.lineTo(cx,26); g.stroke();
+    g.beginPath(); g.moveTo(10,44); g.lineTo(W-10,44); g.stroke();
+    // Hemd
+    g.fillStyle = PD.shirt;
+    g.beginPath();
+    g.moveTo(cx-22,40); g.lineTo(cx+22,40); g.lineTo(cx+17,92);
+    g.lineTo(cx-17,92); g.closePath(); g.fill();
+    g.fillRect(8,40,W-16,11);
+    // Stroh
+    g.strokeStyle = '#d8bd6a'; g.lineWidth = 2;
+    for (let i=0;i<12;i++){
+      const a = -0.5 + i*0.09;
+      g.beginPath(); g.moveTo(cx-16+i*2.6, 92);
+      g.lineTo(cx-18+i*3 + Math.sin(a)*6, 104); g.stroke();
+    }
+    // Kopf (Sack)
+    g.fillStyle = PD.cloth;
+    g.beginPath(); g.ellipse(cx, 26, 15, 17, 0, 0, TAU); g.fill();
+    g.fillStyle = '#3a2c20';
+    g.beginPath(); g.arc(cx-5,23,2.4,0,TAU); g.fill();
+    g.beginPath(); g.arc(cx+5,23,2.4,0,TAU); g.fill();
+    g.strokeStyle='#3a2c20'; g.lineWidth=2;
+    g.beginPath(); g.arc(cx,30,6,0.15*Math.PI,0.85*Math.PI); g.stroke();
+    return cv;
+  }
+  function makeHat(){
+    const W = 46, H = 26;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.fillStyle = '#7a5a30';
+    g.beginPath(); g.ellipse(W/2, H-7, W/2-1, 6, 0, 0, TAU); g.fill();
+    g.beginPath(); g.ellipse(W/2, H-13, 12, 10, 0, 0, TAU); g.fill();
+    g.fillStyle = '#4a3520';
+    g.fillRect(W/2-12, H-13, 24, 4);
+    return cv;
+  }
+
+  /* -------------------------- SCHILD ------------------------------ */
+  function makeSignPost(){
+    const cv = makeCanvas(10,74), g = cv.getContext('2d');
+    g.fillStyle = PD.wood; g.fillRect(2,0,6,74);
+    g.strokeStyle = PD.woodD; g.strokeRect(2.5,0.5,5,73);
+    return cv;
+  }
+  function makeSignBoard(){
+    const W = 78, H = 24;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.fillStyle = shade(PD.wood,0.12);
+    g.beginPath();
+    g.moveTo(0,0); g.lineTo(W-14,0); g.lineTo(W,H/2); g.lineTo(W-14,H); g.lineTo(0,H);
+    g.closePath(); g.fill();
+    g.strokeStyle = PD.woodD; g.lineWidth = 2; g.stroke();
+    g.fillStyle = PD.woodD;
+    g.font = 'bold 12px Georgia,serif'; g.textBaseline='middle';
+    g.fillText('MOORWEG', 6, H/2+1);
+    return cv;
+  }
+
+  /* ------------------------- WINDMÜHLE ---------------------------- */
+  function makeMillBody(){
+    const W = 96, H = 150;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.beginPath();
+    g.moveTo(W*0.30, 40); g.lineTo(W*0.70, 40);
+    g.lineTo(W*0.86, H-1); g.lineTo(W*0.14, H-1);
+    g.closePath();
+    g.fillStyle = '#cfc2ad'; g.fill();
+    g.strokeStyle = '#a5977f'; g.lineWidth=1; g.stroke();
+    // Fensterchen
+    g.fillStyle='#4a3f34';
+    g.fillRect(W*0.44, 66, 11, 13);
+    g.fillRect(W*0.30, 104, 11, 13);
+    g.fillRect(W*0.60, 104, 11, 13);
+    // Dach
+    g.beginPath();
+    g.moveTo(W*0.24,42); g.lineTo(W*0.50,12); g.lineTo(W*0.76,42);
+    g.closePath(); g.fillStyle = PD.roof; g.fill();
+    return cv;
+  }
+  function makeMillBlade(){
+    const L = 78, W2 = 22;
+    const cv = makeCanvas(L, W2), g = cv.getContext('2d');
+    g.fillStyle = '#e2d8c4';
+    g.beginPath();
+    g.moveTo(0, W2/2 - 2); g.lineTo(L-2, 1); g.lineTo(L-2, W2-1); g.lineTo(0, W2/2 + 2);
+    g.closePath(); g.fill();
+    g.strokeStyle = PD.woodD; g.lineWidth = 1.2; g.stroke();
+    g.beginPath();
+    for (let i=1;i<5;i++){ const x = L*i/5; g.moveTo(x, 2); g.lineTo(x, W2-2); }
+    g.stroke();
+    return cv;
+  }
+
+  /* ------------------------- ZEPPELIN ----------------------------- */
+  function makeZeppelin(){
+    const W = 190, H = 66;
+    const cv = makeCanvas(W,H), g = cv.getContext('2d');
+    const grd = g.createLinearGradient(0,6,0,H-18);
+    grd.addColorStop(0, '#eef1f4');
+    grd.addColorStop(0.5, PD.zeppelin);
+    grd.addColorStop(1, PD.zeppelinD);
+    g.beginPath(); g.ellipse(W*0.48, H*0.42, W*0.45, H*0.30, 0,0,TAU);
+    g.fillStyle = grd; g.fill();
+    g.strokeStyle = '#8b929a'; g.lineWidth = 1; g.stroke();
+    // Leitwerk
+    g.fillStyle = '#b8452f';
+    g.beginPath(); g.moveTo(W*0.05,H*0.42); g.lineTo(W*0.00,H*0.10); g.lineTo(W*0.16,H*0.30);
+    g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(W*0.05,H*0.42); g.lineTo(W*0.00,H*0.74); g.lineTo(W*0.16,H*0.56);
+    g.closePath(); g.fill();
+    // Gondel
+    g.fillStyle = '#4d5158';
+    g.beginPath();
+    g.roundRect ? g.roundRect(W*0.38, H*0.68, W*0.22, H*0.20, 5)
+                : g.rect(W*0.38, H*0.68, W*0.22, H*0.20);
+    g.fill();
+    g.strokeStyle='#31353a'; g.lineWidth=1.5;
+    g.beginPath(); g.moveTo(W*0.42,H*0.68); g.lineTo(W*0.42,H*0.60);
+    g.moveTo(W*0.56,H*0.68); g.lineTo(W*0.56,H*0.60); g.stroke();
+    // Streifen
+    g.strokeStyle = 'rgba(80,90,100,.5)'; g.lineWidth = 1;
+    for (let i=1;i<5;i++){
+      const x = W*0.10 + i*W*0.16;
+      g.beginPath(); g.ellipse(x, H*0.42, 4, H*0.28*Math.sin(i/5*Math.PI)+6, 0, 0, TAU); g.stroke();
+    }
+    return cv;
+  }
+
+  /* ---------------------- GRAS / SCHILF --------------------------- */
+  function makeTuft(seed, w, h, reed){
+    const rng = mulberry32(seed);
+    const cv = makeCanvas(w,h), g = cv.getContext('2d');
+    const n = reed ? 7 : 11;
+    for (let i=0;i<n;i++){
+      const x0 = w*0.5 + (rng()-0.5)*w*0.7;
+      const hh = h*(reed ? (0.55+rng()*0.45) : (0.4+rng()*0.6));
+      const bend = (rng()-0.5)*w*0.5;
+      g.beginPath();
+      g.moveTo(x0-1.6, h);
+      g.quadraticCurveTo(x0 + bend*0.4, h-hh*0.55, x0 + bend, h-hh);
+      g.quadraticCurveTo(x0 + bend*0.5 + 1.8, h-hh*0.5, x0+1.6, h);
+      g.closePath();
+      g.fillStyle = mixHex(PD.fgGrass, PD.fgGrassL, rng());
+      g.fill();
+      if (reed && rng() > 0.4){    // Schilfkolben
+        g.beginPath();
+        g.ellipse(x0+bend, h-hh-3, 2.6, 7, bend*0.02, 0, TAU);
+        g.fillStyle = '#6d5a34'; g.fill();
+      }
+    }
+    return cv;
+  }
+
+  /* ---------------------- MUNITIONSKISTE -------------------------- */
+  function makeAmmoBox(){
+    const W=34,H=24, cv = makeCanvas(W,H), g = cv.getContext('2d');
+    g.fillStyle='#5a6a3a'; g.fillRect(0,4,W,H-4);
+    g.fillStyle='#71844a'; g.fillRect(0,0,W,6);
+    g.strokeStyle='#2f3a1e'; g.lineWidth=2; g.strokeRect(1,1,W-2,H-2);
+    g.fillStyle='#d8c86a'; g.font='bold 9px monospace'; g.fillText('AMMO',4,18);
+    return cv;
+  }
+
+  /* ------------------------- AUFBAU ------------------------------- */
+  const A = {
+    birds: [],        // [variant][pose][dLevel]
+    feathers: [],
+    trees: [], treesFar: [], bushes: [], clouds: [],
+    mountains: null, ground: null, fence: null,
+    barn: null, barnDoor: null, scarecrow: null, hat: null,
+    signPost: null, signBoard: null,
+    millBody: null, millBlade: null, zeppelin: null,
+    grass: [], reeds: [], ammoBox: null,
+    D_LEVELS, BW, BH, BCX, BCY,
+    hazeFor(d){ return clamp(Math.round(d*(D_LEVELS-1)),0,D_LEVELS-1); }
+  };
+
+  A.build = function(){
+    for (let v=0; v<BIRD_COLORS.length; v++){
+      const poses = [];
+      for (let p=0;p<6;p++){
+        const base = makeBird(v,p);
+        const levels = [];
+        for (let d=0; d<D_LEVELS; d++)
+          levels.push(hazeCopy(base, (d/(D_LEVELS-1)) * PD.hazeAmt));
+        poses.push(levels);
+      }
+      A.birds.push(poses);
+      A.feathers.push(makeFeather(v));
+    }
+    for (let i=0;i<8;i++)  A.trees.push(makeTree(100+i*37, 130, 175, false));
+    for (let i=0;i<6;i++)  A.treesFar.push(hazeCopy(makeTree(500+i*53, 86, 108, true), 0.22));
+    for (let i=0;i<4;i++)  A.bushes.push(makeBush(900+i*17, 70, 40));
+    for (let i=0;i<5;i++)  A.clouds.push(makeCloud(1500+i*29, 210+i*26, 88));
+    A.mountains = makeMountains();
+    A.ground    = makeGround();
+    A.fence     = makeFence();
+    A.barn      = makeBarn();
+    A.barnDoor  = makeBarnDoor();
+    A.scarecrow = makeScarecrow();
+    A.hat       = makeHat();
+    A.signPost  = makeSignPost();
+    A.signBoard = makeSignBoard();
+    A.millBody  = makeMillBody();
+    A.millBlade = makeMillBlade();
+    A.zeppelin  = makeZeppelin();
+    for (let i=0;i<6;i++) A.grass.push(makeTuft(2000+i*13, 64, 40, false));
+    for (let i=0;i<5;i++) A.reeds.push(makeTuft(3000+i*19, 74, 96, true));
+    A.ammoBox = makeAmmoBox();
+  };
+  return A;
+})();
+
+/* =========================== AUDIO ==================================
+   Alles synthetisiert – kein einziges Sample. AudioContext wird erst
+   bei der ersten Nutzerinteraktion erzeugt (Autoplay-Policy).
+   ==================================================================== */
+const AudioSys = (function(){
+  let ctx = null, master = null, windGain = null, noiseBuf = null, started = false;
+  let muted = false;
+
+  function ensure(){
+    if (ctx) return true;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    try { ctx = new AC(); } catch(e){ return false; }
+    master = ctx.createGain();
+    master.gain.value = muted ? 0 : 0.9;
+    master.connect(ctx.destination);
+    // 2 s weißes Rauschen als wiederverwendbarer Puffer
+    const len = ctx.sampleRate * 2;
+    noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i=0;i<len;i++) d[i] = Math.random()*2 - 1;
+    return true;
+  }
+
+  function now(){ return ctx.currentTime; }
+
+  function noiseSource(){
+    const s = ctx.createBufferSource();
+    s.buffer = noiseBuf;
+    s.loop = true;
+    s.playbackRate.value = 0.8 + Math.random()*0.4;
+    return s;
+  }
+
+  /* --- Schuss: Rauschimpuls durch Tiefpass + Bandpass-Knall --- */
+  function shot(){
+    if (!ensure()) return;
+    const t = now();
+    const src = noiseSource();
+    const lp = ctx.createBiquadFilter();
+    lp.type='lowpass'; lp.frequency.setValueAtTime(2600,t);
+    lp.frequency.exponentialRampToValueAtTime(300, t+0.09);
+    const bp = ctx.createBiquadFilter();
+    bp.type='bandpass'; bp.frequency.value = 180; bp.Q.value = 1.2;
+    const g1 = ctx.createGain(), g2 = ctx.createGain();
+    g1.gain.setValueAtTime(0.75,t);
+    g1.gain.exponentialRampToValueAtTime(0.0008, t+0.11);
+    g2.gain.setValueAtTime(0.9,t);
+    g2.gain.exponentialRampToValueAtTime(0.0008, t+0.22);
+    src.connect(lp); lp.connect(g1); g1.connect(master);
+    src.connect(bp); bp.connect(g2); g2.connect(master);
+    src.start(t); src.stop(t+0.25);
+  }
+
+  /* --- kurzer Klick-Transient (Nachladen, Klappern) --- */
+  function click(delay, freq, vol){
+    if (!ensure()) return;
+    const t = now() + (delay||0);
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type='square'; o.frequency.setValueAtTime(freq||420, t);
+    o.frequency.exponentialRampToValueAtTime((freq||420)*0.45, t+0.05);
+    g.gain.setValueAtTime(vol||0.25, t);
+    g.gain.exponentialRampToValueAtTime(0.0005, t+0.06);
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t+0.08);
+  }
+
+  function reload(){ click(0, 520, 0.22); click(0.35, 380, 0.24); }
+  function clatter(){ for (let i=0;i<5;i++) click(i*0.055, 700 - i*70, 0.12); }
+
+  /* --- Treffer: gefiltertes Rauschen mit fallender Tonhöhe --- */
+  function hit(){
+    if (!ensure()) return;
+    const t = now();
+    const src = noiseSource();
+    const bp = ctx.createBiquadFilter();
+    bp.type='bandpass'; bp.Q.value = 3.2;
+    bp.frequency.setValueAtTime(1600 + Math.random()*500, t);
+    bp.frequency.exponentialRampToValueAtTime(240, t+0.20);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.5,t);
+    g.gain.exponentialRampToValueAtTime(0.0008, t+0.24);
+    src.connect(bp); bp.connect(g); g.connect(master);
+    src.start(t); src.stop(t+0.26);
+  }
+
+  /* --- Vogelruf: einfache FM-Synthese --- */
+  function birdCall(pitch){
+    if (!ensure()) return;
+    const t = now();
+    const base = (900 + Math.random()*500) * (pitch||1) * (0.85 + Math.random()*0.30);
+    const car = ctx.createOscillator(), mod = ctx.createOscillator();
+    const mg = ctx.createGain(), g = ctx.createGain();
+    car.type='sine'; mod.type='sine';
+    car.frequency.setValueAtTime(base, t);
+    car.frequency.exponentialRampToValueAtTime(base*1.45, t+0.06);
+    car.frequency.exponentialRampToValueAtTime(base*0.80, t+0.20);
+    mod.frequency.value = base*1.8;
+    mg.gain.value = base*0.55;
+    mod.connect(mg); mg.connect(car.frequency);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(0.18, t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0004, t+0.24);
+    car.connect(g); g.connect(master);
+    car.start(t); mod.start(t); car.stop(t+0.26); mod.stop(t+0.26);
+  }
+
+  /* --- Timer-Warnpiep --- */
+  function beep(freq, dur, vol){
+    if (!ensure()) return;
+    const t = now();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type='sine'; o.frequency.value = freq||880;
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(vol||0.22, t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0004, t+(dur||0.08));
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t+(dur||0.08)+0.02);
+  }
+
+  /* --- Motor-Stottern (Zeppelin) --- */
+  function engineStutter(){
+    if (!ensure()) return;
+    const t = now();
+    for (let i=0;i<7;i++){
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type='sawtooth';
+      o.frequency.setValueAtTime(70 + Math.random()*35, t+i*0.09);
+      const lp = ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value=380;
+      g.gain.setValueAtTime(0.0001, t+i*0.09);
+      g.gain.exponentialRampToValueAtTime(0.16, t+i*0.09+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0004, t+i*0.09+0.08);
+      o.connect(lp); lp.connect(g); g.connect(master);
+      o.start(t+i*0.09); o.stop(t+i*0.09+0.10);
+    }
+  }
+
+  /* --- Rascheln (Schilf) --- */
+  function rustle(){
+    if (!ensure()) return;
+    const t = now();
+    const src = noiseSource();
+    const hp = ctx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=2400;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.linearRampToValueAtTime(0.10, t+0.03);
+    g.gain.exponentialRampToValueAtTime(0.0005, t+0.30);
+    src.connect(hp); hp.connect(g); g.connect(master);
+    src.start(t); src.stop(t+0.32);
+  }
+
+  /* --- Windschleife: gefiltertes Rauschen mit langsamer LFO --- */
+  function startAmbient(){
+    if (!ensure() || started) return;
+    started = true;
+    const src = noiseSource();
+    const lp = ctx.createBiquadFilter(); lp.type='lowpass'; lp.frequency.value = 520;
+    const bp = ctx.createBiquadFilter(); bp.type='bandpass'; bp.frequency.value = 340; bp.Q.value=0.6;
+    windGain = ctx.createGain(); windGain.gain.value = 0.045;
+    const lfo = ctx.createOscillator(), lfoG = ctx.createGain();
+    lfo.frequency.value = 0.09; lfoG.gain.value = 0.030;
+    lfo.connect(lfoG); lfoG.connect(windGain.gain);
+    const lfo2 = ctx.createOscillator(), lfo2G = ctx.createGain();
+    lfo2.frequency.value = 0.037; lfo2G.gain.value = 180;
+    lfo2.connect(lfo2G); lfo2G.connect(lp.frequency);
+    src.connect(lp); lp.connect(bp); bp.connect(windGain); windGain.connect(master);
+    src.start(); lfo.start(); lfo2.start();
+  }
+
+  return {
+    unlock(){ if (ensure() && ctx.state === 'suspended') ctx.resume(); startAmbient(); },
+    toggleMute(){
+      muted = !muted;
+      if (master) master.gain.value = muted ? 0 : 0.9;
+      return muted;
+    },
+    isMuted(){ return muted; },
+    shot, reload, hit, birdCall, beep, click, clatter, engineStutter, rustle
+  };
+})();
+
+/* =========================== INPUT ================================== */
+const Input = (function(){
+  const st = {
+    mx: CONFIG.VIEW_W/2, my: CONFIG.VIEW_H/2,
+    inside: false,
+    left: false, right: false,
+    keys: Object.create(null)
+  };
+  const listeners = { shoot:[], reload:[], key:[], click:[] };
+  let canvas = null;
+
+  function toLocal(e){
+    const r = canvas.getBoundingClientRect();
+    const sx = CONFIG.VIEW_W / r.width, sy = CONFIG.VIEW_H / r.height;
+    st.mx = clamp((e.clientX - r.left) * sx, 0, CONFIG.VIEW_W);
+    st.my = clamp((e.clientY - r.top ) * sy, 0, CONFIG.VIEW_H);
+  }
+
+  function on(evt, fn){ listeners[evt].push(fn); }
+  function emit(evt, a){ const l = listeners[evt]; for (let i=0;i<l.length;i++) l[i](a); }
+
+  function attach(cv){
+    canvas = cv;
+    cv.addEventListener('mousemove', e => { toLocal(e); st.inside = true; });
+    cv.addEventListener('mouseenter', e => { toLocal(e); st.inside = true; });
+    cv.addEventListener('mouseleave', () => { st.inside = false; });
+    cv.addEventListener('contextmenu', e => e.preventDefault());
+    cv.addEventListener('mousedown', e => {
+      e.preventDefault();
+      AudioSys.unlock();
+      toLocal(e);
+      if (e.button === 0){ st.left = true; emit('click', {x:st.mx,y:st.my}); emit('shoot'); }
+      else if (e.button === 2){ st.right = true; emit('reload'); }
+    });
+    window.addEventListener('mouseup', e => {
+      if (e.button === 0) st.left = false;
+      if (e.button === 2) st.right = false;
+    });
+    // Touch: tippen = zielen + schießen
+    cv.addEventListener('touchstart', e => {
+      e.preventDefault(); AudioSys.unlock();
+      const t = e.changedTouches[0];
+      toLocal(t); st.inside = true;
+      emit('click', {x:st.mx,y:st.my}); emit('shoot');
+    }, {passive:false});
+    cv.addEventListener('touchmove', e => {
+      e.preventDefault(); toLocal(e.changedTouches[0]);
+    }, {passive:false});
+
+    window.addEventListener('keydown', e => {
+      st.keys[e.code] = true;
+      AudioSys.unlock();
+      if (['ArrowLeft','ArrowRight','Space','KeyP','Escape','KeyR','KeyM','KeyD'].indexOf(e.code) >= 0)
+        e.preventDefault();
+      emit('key', e);
+    });
+    window.addEventListener('keyup',   e => { st.keys[e.code] = false; });
+    window.addEventListener('blur',    () => { for (const k in st.keys) st.keys[k] = false; });
+  }
+
+  return { st, on, attach, down(code){ return !!st.keys[code]; } };
+})();
+
+/* ========================= ENTITIES ================================= */
+
+/* Bird-Zustände */
+const S_FLY=0, S_PERCH=1, S_HIT=2, S_FALL=3, S_LANDED=4, S_EXIT=5, S_DEAD=6;
+/* Bahntypen */
+const P_STRAIGHT=0, P_ARC=1, P_STARTLE=2, P_FAST=3;
+
+/* Basis-Trefferbox eines Vogels in Sprite-Einheiten */
+const BIRD_BOX = { ox: 1, oy: -3, w: 70, h: 44 };
+
+function Bird(){
+  this.active=false; this.state=S_DEAD;
+  this.x=0; this.y=0; this.vx=0; this.vy=0;
+  this.d=0; this.scale=1; this.variant=0; this.dir=1;
+  this.path=P_STRAIGHT; this.t=0; this.amp=0; this.freq=1; this.baseY=0;
+  this.frame=0; this.frameT=0; this.rot=0; this.rotV=0;
+  this.timer=0; this.travelled=0; this.range=0;
+  this.points=0; this.landY=0; this.hazeLvl=0; this.depth=0;
+}
+
+/* Tiefe für die Sortierung "vorne gewinnt" (klein = vorne) */
+function birdDepth(d){
+  if (d < 0.28) return 0.10 + d * (0.18/0.28);
+  if (d < 0.72) return 0.35 + (d-0.28) * (0.22/0.44);
+  return 0.65 + (d-0.72) * (0.10/0.28);
+}
+
+function Particle(){
+  this.active=false; this.kind=0; // 0 Feder, 1 Wolkenfetzen, 2 Hut, 3 Staub
+  this.x=0; this.y=0; this.vx=0; this.vy=0; this.rot=0; this.rotV=0;
+  this.life=0; this.maxLife=1; this.size=1; this.sprite=null;
+  this.layer=1; this.col='#fff';
+}
+
+function Popup(){
+  this.active=false; this.x=0; this.y=0; this.life=0; this.text=''; this.col='#fff'; this.big=false;
+}
+
+/* generischer Pool ohne Allokation im Hot Path */
+function Pool(Ctor, n){
+  this.items = new Array(n);
+  for (let i=0;i<n;i++) this.items[i] = new Ctor();
+  this.count = n;
+}
+Pool.prototype.get = function(){
+  const it = this.items;
+  for (let i=0;i<this.count;i++) if (!it[i].active) { it[i].active = true; return it[i]; }
+  return null;
+};
+Pool.prototype.countActive = function(){
+  let n=0; const it=this.items;
+  for (let i=0;i<this.count;i++) if (it[i].active) n++;
+  return n;
+};
+
+/* =========================== WORLD ================================== */
+const World = (function(){
+  const W = CONFIG.WORLD_W, GY = CONFIG.GROUND_Y;
+  const A = Assets;
+
+  const LAYER = { sky:0.15, mtn:0.30, mid:0.60, game:1.00, fg:1.35 };
+
+  const w = {
+    cam: 0, camVel: 0, camVelTarget: 0,
+    time: 0,
+    duskT: 0, duskTimer: 0,
+    windPhase: 0,
+    props: [],
+    birds: new Pool(Bird, 40),
+    parts: new Pool(Particle, 320),
+    pops:  new Pool(Popup, 48),
+    ammoBoxes: [],
+    LAYER
+  };
+
+  /* --- Palette interpolieren (Tag <-> Dämmerung) --- */
+  const PD = CONFIG.PALETTE.day, PN = CONFIG.PALETTE.dusk;
+  const _pcache = Object.create(null);
+  let _pkey = -1;
+  function P(key){
+    const q = Math.round(w.duskT*20);
+    if (q !== _pkey){ for (const k in _pcache) delete _pcache[k]; _pkey = q; }
+    let v = _pcache[key];
+    if (v === undefined){
+      v = (typeof PD[key] === 'number')
+        ? lerp(PD[key], PN[key], q/20)
+        : mixHex(PD[key], PN[key], q/20);
+      _pcache[key] = v;
+    }
+    return v;
+  }
+  w.P = P;
+
+  /* --------------------- Prop-Definitionen ----------------------- */
+  function prop(o){
+    o.cd = 0; o.hittable = (o.hittable !== false);
+    w.props.push(o); return o;
+  }
+
+  function buildProps(){
+    w.props.length = 0;
+
+    /* --- Himmelsebene (0.15) --- */
+    prop({ type:'sun', layer:LAYER.sky, x: 520, y: 96, r: 44, depth: 0.90 });
+    for (let i=0;i<6;i++){
+      prop({ type:'cloud', layer:LAYER.sky, x: 120 + i*400 + rnd(-90,90),
+             y: 40 + rnd(0,110), spr: A.clouds[i % A.clouds.length],
+             vx: rnd(3,9), depth: 0.85, alive:true, respawn:0, sc: rnd(0.7,1.25) });
+    }
+
+    /* --- Mittelebene (0.60): Windmühle, ferne Bäume, Zeppelin --- */
+    prop({ type:'mill', layer:LAYER.mid, x: 760, y: GY + 4, depth: 0.62,
+           spin: 0.55, boost: 0, ang: 0 });
+    for (let i=0;i<10;i++){
+      prop({ type:'ftree', layer:LAYER.mid, x: i*236 + rnd(-70,70), y: GY + 4,
+             spr: A.treesFar[i % A.treesFar.length], depth: 0.63, hittable:false });
+    }
+    prop({ type:'zeppelin', layer:LAYER.mid, x: -300, y: 120, depth: 0.60,
+           active:false, next: rnd(8,16), vx: 46, sink: 0, stut: 0 });
+
+    /* --- Spielebene (1.00) --- */
+    // Zäune (kachelbar) – dienen auch als Sitzplätze
+    prop({ type:'fence', layer:LAYER.game, x: 130, y: GY + 12, len: 6, depth:0.30, hittable:false });
+    prop({ type:'fence', layer:LAYER.game, x: 1460, y: GY + 12, len: 5, depth:0.30, hittable:false });
+
+    // Bäume mit anschreckbaren Ästen
+    const treeX = [70, 300, 640, 900, 1300, 1620, 1960, 2210];
+    for (let i=0;i<treeX.length;i++){
+      prop({ type:'tree', layer:LAYER.game, x: treeX[i], y: GY + 14,
+             spr: A.trees[i % A.trees.length], depth: 0.30, sway: rnd(0,TAU) });
+    }
+    for (let i=0;i<10;i++){
+      prop({ type:'bush', layer:LAYER.game, x: rnd(0,W), y: GY + 16,
+             spr: A.bushes[i % A.bushes.length], depth:0.30, hittable:false });
+    }
+    prop({ type:'barn', layer:LAYER.game, x: 1040, y: GY + 16, depth: 0.30, door: 0, doorOpen:false });
+    prop({ type:'scarecrow', layer:LAYER.game, x: 470, y: GY + 14, depth: 0.30, hat: true, wob:0 });
+    prop({ type:'sign', layer:LAYER.game, x: 1830, y: GY + 12, depth: 0.30, spin: 0 });
+
+    /* --- Vordergrund (1.35): Gras & Schilf --- */
+    for (let i=0;i<26;i++){
+      prop({ type:'grass', layer:LAYER.fg, x: (i*92 + rnd(-30,30) + W) % W,
+             y: CONFIG.VIEW_H - rnd(0,60), spr: A.grass[i % A.grass.length],
+             depth: 0.05, ph: rnd(0,TAU), hittable:false });
+    }
+    for (let i=0;i<14;i++){
+      prop({ type:'reed', layer:LAYER.fg, x: (i*171 + rnd(-40,40) + W) % W,
+             y: CONFIG.VIEW_H - rnd(0,28), spr: A.reeds[i % A.reeds.length],
+             depth: 0.04, ph: rnd(0,TAU) });
+    }
+  }
+
+  /* Sitzplätze (Zaunpfosten & Äste) für Aufschrecker */
+  function perchSpots(out){
+    out.length = 0;
+    for (let i=0;i<w.props.length;i++){
+      const p = w.props[i];
+      if (p.type === 'fence'){
+        for (let s=0;s<p.len;s++)
+          out.push({ x: p.x + s*120 + 60, y: p.y - 52, prop:p });
+      } else if (p.type === 'tree'){
+        out.push({ x: p.x - 26, y: p.y - 118, prop:p });
+        out.push({ x: p.x + 24, y: p.y - 132, prop:p });
+      }
+    }
+    return out;
+  }
+
+  /* --------------------------- Update ---------------------------- */
+  w.update = function(dt){
+    w.time += dt;
+    w.windPhase += dt * 1.15;
+
+    if (w.duskTimer > 0){
+      w.duskTimer -= dt;
+      w.duskT = Math.min(1, w.duskT + dt*2.2);
+    } else {
+      w.duskT = Math.max(0, w.duskT - dt*0.8);
+    }
+
+    for (let i=0;i<w.props.length;i++){
+      const p = w.props[i];
+      if (p.cd > 0) p.cd -= dt;
+      switch(p.type){
+        case 'cloud':
+          p.x = (p.x + p.vx*dt) % W;
+          if (!p.alive){
+            p.respawn -= dt;
+            if (p.respawn <= 0){ p.alive = true; p.x = (p.x + rnd(400,900)) % W; }
+          }
+          break;
+        case 'mill':
+          if (p.boost > 0) p.boost -= dt;
+          p.ang += (p.boost > 0 ? p.spin*3.2 : p.spin) * dt;
+          break;
+        case 'sign':
+          if (p.spin > 0) p.spin = Math.max(0, p.spin - dt*3.2);
+          break;
+        case 'scarecrow':
+          if (p.wob > 0) p.wob = Math.max(0, p.wob - dt*2.5);
+          break;
+        case 'barn':
+          if (p.doorOpen && p.cd <= 0) p.doorOpen = false;
+          if (p.doorOpen){ p.door = Math.min(1, p.door + dt*2.2); }
+          else if (p.door > 0){ p.door = Math.max(0, p.door - dt*1.2); }
+          break;
+        case 'zeppelin':
+          if (!p.active){
+            p.next -= dt;
+            if (p.next <= 0){
+              p.active = true; p.sink = 0; p.stut = 0;
+              p.x = (w.cam*LAYER.mid - 260 + W) % W;
+              p.y = rnd(70,150);
+              p.vx = rnd(40,58);
+            }
+          } else {
+            p.x = (p.x + p.vx*dt) % W;
+            p.travel = (p.travel||0) + p.vx*dt;
+            if (p.sink > 0){ p.y += 16*dt; }
+            if (p.stut > 0) p.stut -= dt;
+            if (p.travel > W*0.92){
+              p.active = false; p.travel = 0; p.next = rnd(25,40);
+            }
+          }
+          break;
+      }
+    }
+  };
+
+  /* ------------------------ Kamera ------------------------------- */
+  w.updateCamera = function(dt, allowInput){
+    let target = 0;
+    if (allowInput){
+      const edge = CONFIG.VIEW_W * CONFIG.SCROLL_EDGE;
+      if (Input.st.inside){
+        if (Input.st.mx < edge)
+          target = -CONFIG.SCROLL_MAX * (1 - Input.st.mx/edge);
+        else if (Input.st.mx > CONFIG.VIEW_W - edge)
+          target =  CONFIG.SCROLL_MAX * (1 - (CONFIG.VIEW_W - Input.st.mx)/edge);
+      }
+      if (Input.down('ArrowLeft'))  target = -CONFIG.SCROLL_KEYS;
+      if (Input.down('ArrowRight')) target =  CONFIG.SCROLL_KEYS;
+    }
+    w.camVelTarget = target;
+    const k = 1 - Math.exp(-dt / CONFIG.CAM_SMOOTH);
+    w.camVel += (w.camVelTarget - w.camVel) * k;
+    w.cam = (w.cam + w.camVel*dt) % W;
+    if (w.cam < 0) w.cam += W;
+  };
+
+  w.reset = function(){
+    w.cam = 0; w.camVel = 0; w.time = 0; w.duskT = 0; w.duskTimer = 0;
+    buildProps();
+    const bi = w.birds.items;  for (let i=0;i<bi.length;i++){ bi[i].active=false; bi[i].state=S_DEAD; }
+    const pi = w.parts.items;  for (let i=0;i<pi.length;i++) pi[i].active=false;
+    const oi = w.pops.items;   for (let i=0;i<oi.length;i++) oi[i].active=false;
+    w.ammoBoxes.length = 0;
+    if (CONFIG.LIMITED_AMMO){
+      for (let i=0;i<5;i++)
+        w.ammoBoxes.push({ x: rnd(0,W), y: GY + 26, taken:false, respawn:0 });
+    }
+  };
+
+  w.perchSpots = perchSpots;
+  w.buildProps = buildProps;
+  return w;
+})();
+
+/* ========================= PARTIKEL-HELFER ========================== */
+function spawnFeathers(x, y, variant, n, scale){
+  for (let i=0;i<n;i++){
+    const p = World.parts.get();
+    if (!p) return;
+    p.kind = 0;
+    p.x = x + rnd(-8,8)*scale; p.y = y + rnd(-8,8)*scale;
+    p.vx = rnd(-70,70); p.vy = rnd(-90,-10);
+    p.rot = rnd(0,TAU); p.rotV = rnd(-3,3);
+    p.life = 0; p.maxLife = rnd(1.1,2.0);
+    p.size = scale * rnd(0.5,0.9);
+    p.sprite = Assets.feathers[variant];
+    p.layer = 1; p.col = null;
+  }
+}
+function spawnShreds(x, y, n, spr){
+  for (let i=0;i<n;i++){
+    const p = World.parts.get();
+    if (!p) return;
+    p.kind = 1;
+    p.x = x + rnd(-40,40); p.y = y + rnd(-16,16);
+    p.vx = rnd(-40,40); p.vy = rnd(-14,10);
+    p.rot = 0; p.rotV = rnd(-0.4,0.4);
+    p.life = 0; p.maxLife = rnd(0.9,1.6);
+    p.size = rnd(0.3,0.6);
+    p.sprite = spr; p.layer = World.LAYER.sky; p.col = null;
+  }
+}
+function spawnHat(x,y){
+  const p = World.parts.get();
+  if (!p) return;
+  p.kind = 2;
+  p.x = x; p.y = y;
+  p.vx = rnd(30,80); p.vy = -80;
+  p.rot = 0; p.rotV = rnd(1.5,3.5);
+  p.life = 0; p.maxLife = 3.2;
+  p.size = 1; p.sprite = Assets.hat; p.layer = 1; p.col=null;
+}
+function spawnDust(x,y,n){
+  for (let i=0;i<n;i++){
+    const p = World.parts.get();
+    if (!p) return;
+    p.kind = 3;
+    p.x = x + rnd(-6,6); p.y = y + rnd(-4,4);
+    p.vx = rnd(-24,24); p.vy = rnd(-30,-4);
+    p.rot = 0; p.rotV = 0;
+    p.life = 0; p.maxLife = rnd(0.35,0.7);
+    p.size = rnd(1.5,4); p.sprite = null; p.layer = 1;
+    p.col = 'rgba(230,225,205,';
+  }
+}
+function spawnPopup(x,y,text,col,big){
+  const p = World.pops.get();
+  if (!p) return;
+  p.x = x; p.y = y; p.life = 0; p.text = text; p.col = col || '#fff8d0';
+  p.big = !!big;
+}
+
+function updateParticles(dt){
+  const it = World.parts.items;
+  for (let i=0;i<it.length;i++){
+    const p = it[i];
+    if (!p.active) continue;
+    p.life += dt;
+    if (p.life >= p.maxLife){ p.active = false; continue; }
+    if (p.kind === 0){                 // Feder: Luftwiderstand + Taumeln
+      p.vy += 120*dt;
+      p.vy *= (1 - 1.9*dt);
+      p.vx *= (1 - 1.2*dt);
+      p.vx += Math.sin(p.life*4 + p.rot)*26*dt;
+      p.rot += p.rotV*dt;
+    } else if (p.kind === 1){          // Wolkenfetzen
+      p.vy += 6*dt; p.vx *= (1-0.5*dt); p.rot += p.rotV*dt;
+    } else if (p.kind === 2){          // Hut segelt
+      p.vy += 150*dt; p.vy *= (1-2.4*dt);
+      p.vx *= (1-0.8*dt);
+      p.vx += Math.sin(p.life*3)*40*dt;
+      p.rot += p.rotV*dt;
+      if (p.y > CONFIG.GROUND_Y + 40){ p.vy = 0; p.vx *= 0.8; p.rotV *= 0.9; }
+    } else {                           // Staub
+      p.vy += 40*dt; p.vx *= (1-2*dt);
+    }
+    p.x += p.vx*dt; p.y += p.vy*dt;
+  }
+  const po = World.pops.items;
+  for (let i=0;i<po.length;i++){
+    const q = po[i];
+    if (!q.active) continue;
+    q.life += dt;
+    if (q.life >= 0.8) q.active = false;
+  }
+}
+
+/* =========================== SPAWNER ================================ */
+const Spawner = (function(){
+  const spots = [];
+  let acc = 0, interval = CONFIG.SPAWN_INTERVAL_START;
+
+  function reset(){
+    acc = 0; interval = CONFIG.SPAWN_INTERVAL_START;
+    World.perchSpots(spots);
+  }
+
+  /* Grundbesatz, damit das Panorama nicht leer beginnt */
+  function seed(nFly, nPerch){
+    for (let i=0;i<nFly;i++){
+      const b = spawnFlying();
+      if (b) b.travelled = rnd(0, 400);
+    }
+    for (let i=0;i<nPerch && spots.length;i++)
+      spawnPerched(spots[(Math.random()*spots.length)|0]);
+  }
+
+  /* Weltposition außerhalb des Sichtfensters wählen */
+  function offscreenX(){
+    const lo = CONFIG.VIEW_W + CONFIG.SPAWN_MARGIN;
+    const hi = CONFIG.WORLD_W - CONFIG.SPAWN_MARGIN;
+    return (World.cam + rnd(lo, hi)) % CONFIG.WORLD_W;
+  }
+
+  function configureBird(b, d, path){
+    b.active = true;
+    b.d = d;
+    b.hazeLvl = Assets.hazeFor(d);
+    b.scale = lerp(CONFIG.BIRD_SCALE_NEAR, CONFIG.BIRD_SCALE_FAR, d);
+    b.depth = birdDepth(d);
+    b.variant = rndi(0,2);
+    b.frame = rndi(0,3); b.frameT = rnd(0,0.08);
+    b.rot = 0; b.rotV = 0; b.timer = 0; b.travelled = 0;
+    b.path = path;
+    b.points = Math.round(lerp(CONFIG.SCORE_NEAR, CONFIG.SCORE_FAR, d)/5)*5;
+    b.landY = CONFIG.GROUND_Y + lerp(64, 6, d);
+    b.range = rnd(1400, 2300);
+  }
+
+  function spawnFlying(){
+    const b = World.birds.get();
+    if (!b) return null;
+    const roll = Math.random();
+    let path, d;
+    if (roll < 0.46)      { path = P_STRAIGHT; d = rnd(0.05,0.75); }
+    else if (roll < 0.76) { path = P_ARC;      d = rnd(0.10,0.70); }
+    else                  { path = P_FAST;     d = rnd(0.70,1.00); }
+
+    configureBird(b, d, path);
+    b.dir = Math.random() < 0.5 ? -1 : 1;
+    const speed = lerp(CONFIG.BIRD_SPEED_NEAR, CONFIG.BIRD_SPEED_FAR, d)
+                * (path === P_FAST ? 1.45 : 1);
+    b.x = offscreenX();
+    b.baseY = rnd(lerp(120,330,d), lerp(370,415,d));
+    b.y = b.baseY;
+    b.vx = speed * b.dir;
+    b.vy = 0;
+    b.amp = rnd(8,18);
+    b.freq = rnd(0.9,1.8);
+    b.t = rnd(0,TAU);
+    if (path === P_ARC){
+      b.vy = -rnd(95,150);      // steigt an, kippt am Scheitel, sinkt wieder
+      b.baseY = b.y;
+    }
+    b.state = S_FLY;
+    if (Math.random() < 0.35) AudioSys.birdCall(lerp(1.0,1.35,d));
+    return b;
+  }
+
+  function spawnPerched(spot){
+    const b = World.birds.get();
+    if (!b) return null;
+    const d = rnd(0.05, 0.30);
+    configureBird(b, d, P_STARTLE);
+    b.x = spot.x; b.y = spot.y;
+    b.dir = Math.random() < 0.5 ? -1 : 1;
+    b.vx = 0; b.vy = 0;
+    b.baseY = b.y;
+    b.timer = rnd(3,9);
+    b.state = S_PERCH;
+    return b;
+  }
+
+  /* Vogel direkt an einer Weltposition starten lassen (Scheune, Baum) */
+  function burst(x, y, n, d0, d1){
+    // Ereignis-Schwärme dürfen MAX_BIRDS kurzzeitig überschreiten, aber gedeckelt
+    const cap = CONFIG.MAX_BIRDS + 5;
+    const it0 = World.birds.items;
+    let live = 0;
+    for (let i=0;i<it0.length;i++) if (it0[i].active) live++;
+    for (let i=0;i<n && live < cap;i++, live++){
+      const b = World.birds.get();
+      if (!b) break;
+      configureBird(b, rnd(d0,d1), P_STARTLE);
+      b.x = x + rnd(-24,24);
+      b.y = y + rnd(-14,14);
+      b.dir = Math.random() < 0.5 ? -1 : 1;
+      b.vx = rnd(40,110)*b.dir;
+      b.vy = -rnd(140,230);
+      b.baseY = b.y;
+      b.amp = rnd(6,14); b.freq = rnd(1.2,2.2); b.t = rnd(0,TAU);
+      b.state = S_FLY;
+    }
+    AudioSys.birdCall(1.15);
+  }
+
+  function update(dt, progress){
+    interval = lerp(CONFIG.SPAWN_INTERVAL_START, CONFIG.SPAWN_INTERVAL_END, progress);
+    acc += dt;
+    if (acc >= interval){
+      acc -= interval;
+      let n = 0;
+      const it = World.birds.items;
+      for (let i=0;i<it.length;i++) if (it[i].active) n++;
+      if (n < CONFIG.MAX_BIRDS){
+        // gelegentlich einen Sitzer setzen statt eines Fliegers
+        if (spots.length && Math.random() < 0.16){
+          const s = spots[(Math.random()*spots.length)|0];
+          // nicht direkt vor der Nase des Spielers aufsetzen
+          const sx = wrapX(s.x, World.cam);
+          if (sx > CONFIG.VIEW_W + 60) spawnPerched(s); else spawnFlying();
+        } else spawnFlying();
+      }
+    }
+  }
+
+  return { reset, seed, update, spawnFlying, spawnPerched, burst, spots };
+})();
+
+/* ====================== VOGEL-ZUSTANDSAUTOMAT ======================= */
+function updateBirds(dt){
+  const it = World.birds.items;
+  const wf = 1 / CONFIG.WING_FPS;
+  for (let i=0;i<it.length;i++){
+    const b = it[i];
+    if (!b.active) continue;
+
+    switch(b.state){
+      case S_FLY: {
+        b.frameT += dt;
+        while (b.frameT >= wf){ b.frameT -= wf; b.frame = (b.frame+1) & 3; }
+        b.t += dt;
+        if (b.path === P_ARC){
+          b.vy += 58*dt;                        // Parabel
+          b.y  += b.vy*dt;
+          if (b.y > CONFIG.GROUND_Y - 40 && b.vy > 0){ b.state = S_EXIT; b.vy = -60; }
+        } else if (b.path === P_STARTLE){
+          b.vy += 70*dt;                        // steigt aus, flacht ab
+          b.y  += b.vy*dt;
+          if (b.y < 60){ b.state = S_EXIT; }
+        } else {
+          b.y = b.baseY + Math.sin(b.t*b.freq*TAU*0.5) * b.amp;
+        }
+        b.x = (b.x + b.vx*dt) % CONFIG.WORLD_W;
+        if (b.x < 0) b.x += CONFIG.WORLD_W;
+        b.travelled += Math.abs(b.vx)*dt;
+        if (b.travelled > b.range){ b.state = S_EXIT; b.vy = -rnd(60,120); }
+        break;
+      }
+      case S_PERCH: {
+        b.frame = 0;
+        b.timer -= dt;
+        if (b.timer <= 0) startle(b);
+        break;
+      }
+      case S_HIT: {
+        b.timer -= dt;
+        b.x += b.vx*dt*0.3;
+        if (b.timer <= 0){
+          b.state = S_FALL;
+          b.vx *= CONFIG.FALL_DRAG_X;
+          b.vy = -40;
+          b.rotV = rnd(-3.2,3.2);
+        }
+        break;
+      }
+      case S_FALL: {
+        b.vy += CONFIG.GRAVITY*dt;
+        b.x = (b.x + b.vx*dt) % CONFIG.WORLD_W;
+        if (b.x < 0) b.x += CONFIG.WORLD_W;
+        b.y += b.vy*dt;
+        b.rot += b.rotV*dt;
+        if (b.rot >  0.70) { b.rot =  0.70; b.rotV = -Math.abs(b.rotV); }
+        if (b.rot < -0.70) { b.rot = -0.70; b.rotV =  Math.abs(b.rotV); }
+        if (b.y >= b.landY){
+          b.y = b.landY; b.state = S_LANDED; b.timer = CONFIG.LANDED_MS/1000;
+          b.rot = 1.35;
+          spawnDust(b.x, b.y, 6);
+        }
+        break;
+      }
+      case S_LANDED: {
+        b.timer -= dt;
+        if (b.timer <= 0){ b.active = false; b.state = S_DEAD; }
+        break;
+      }
+      case S_EXIT: {
+        b.frameT += dt;
+        while (b.frameT >= wf){ b.frameT -= wf; b.frame = (b.frame+1) & 3; }
+        b.vy -= 40*dt;
+        b.y += b.vy*dt;
+        b.x = (b.x + b.vx*dt) % CONFIG.WORLD_W;
+        if (b.x < 0) b.x += CONFIG.WORLD_W;
+        b.travelled += Math.abs(b.vx)*dt;
+        if (b.y < -90 || b.travelled > b.range + 900){ b.active = false; b.state = S_DEAD; }
+        break;
+      }
+    }
+  }
+}
+
+/* Sitzenden Vogel aufschrecken */
+function startle(b){
+  if (b.state !== S_PERCH) return;
+  b.state = S_FLY;
+  b.path  = P_STARTLE;
+  b.vx = rnd(30,90) * b.dir;
+  b.vy = -rnd(170,250);
+  b.amp = 0; b.t = 0;
+  AudioSys.birdCall(1.1);
+  spawnFeathers(b.x, b.y, b.variant, 3, b.scale);
+}
+
+/* ========================== RENDERER ================================
+   Zeichnet Parallax-Ebenen von hinten nach vorn. Alle Objekte werden
+   über wrapX() zweimal geprüft (x und x-WORLD_W), damit der Übergang
+   am Panoramarand nahtlos ist.
+   ==================================================================== */
+const Renderer = (function(){
+  const VW = CONFIG.VIEW_W, VH = CONFIG.VIEW_H, GY = CONFIG.GROUND_Y;
+  const WW = CONFIG.WORLD_W;
+  const A = Assets;
+  const DUSK_MUL = CONFIG.DUSK_TINT, DUSK_BLUE = CONFIG.DUSK_BLUE;
+
+  const _xs = [0,0];
+  function visX(sx, halfW){
+    let n = 0;
+    if (sx + halfW > 0 && sx - halfW < VW) _xs[n++] = sx;
+    const s2 = sx - WW;
+    if (s2 + halfW > 0 && s2 - halfW < VW) _xs[n++] = s2;
+    return n;
+  }
+
+  /* Sky-Gradient wird nur bei Palettenwechsel neu erzeugt */
+  let skyGrad = null, skyKey = -1;
+  function sky(g){
+    const q = Math.round(World.duskT*20);
+    if (q !== skyKey || !skyGrad){
+      skyKey = q;
+      skyGrad = g.createLinearGradient(0,0,0,GY+10);
+      skyGrad.addColorStop(0,   World.P('skyTop'));
+      skyGrad.addColorStop(0.55,World.P('skyMid'));
+      skyGrad.addColorStop(1,   World.P('skyBot'));
+    }
+    g.fillStyle = skyGrad;
+    g.fillRect(0,0,VW,GY+10);
+  }
+
+  /* ------------------------ Ebene 1: Himmel --------------------- */
+  function drawSky(g){
+    sky(g);
+    const props = World.props;
+    // Sonne / Mond
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (p.type !== 'sun') continue;
+      const sx = wrapX(p.x, World.cam*p.layer);
+      const n = visX(sx, p.r+70);
+      for (let k=0;k<n;k++){
+        const x = _xs[k];
+        const grd = g.createRadialGradient(x,p.y,p.r*0.4, x,p.y,p.r*2.6);
+        grd.addColorStop(0, World.P('sunGlow'));
+        grd.addColorStop(1, 'rgba(255,220,120,0)');
+        g.globalAlpha = 0.55; g.fillStyle = grd;
+        g.beginPath(); g.arc(x,p.y,p.r*2.6,0,TAU); g.fill();
+        g.globalAlpha = 1;
+        g.fillStyle = World.P('sun');
+        g.beginPath(); g.arc(x,p.y,p.r,0,TAU); g.fill();
+      }
+    }
+    // Wolken
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (p.type !== 'cloud' || !p.alive) continue;
+      const w2 = p.spr.width*p.sc*0.5, h2 = p.spr.height*p.sc;
+      const sx = wrapX(p.x, World.cam*p.layer);
+      const n = visX(sx, w2+10);
+      for (let k=0;k<n;k++)
+        g.drawImage(p.spr, _xs[k]-w2, p.y, p.spr.width*p.sc, h2);
+    }
+    // Wolkenfetzen
+    drawParticles(g, 1);
+  }
+
+  /* ------------------------ Ebene 2: Berge ---------------------- */
+  function drawMountains(g){
+    const sx = wrapX(0, World.cam*World.LAYER.mtn);
+    const y  = GY - A.mountains.height + 26;
+    g.drawImage(A.mountains, sx - WW, y);
+    g.drawImage(A.mountains, sx, y);
+    // Dunstband am Horizont
+    const grd = g.createLinearGradient(0, GY-52, 0, GY+6);
+    grd.addColorStop(0,'rgba(255,255,255,0)');
+    grd.addColorStop(1, World.P('haze'));
+    g.globalAlpha = 0.42; g.fillStyle = grd; g.fillRect(0,GY-52,VW,60);
+    g.globalAlpha = 1;
+  }
+
+  /* ------------------- Ebene 3: mittlere Objekte ---------------- */
+  function drawMid(g){
+    const props = World.props;
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (p.type === 'ftree'){
+        const w2 = p.spr.width*0.5;
+        const sx = wrapX(p.x, World.cam*p.layer);
+        const n = visX(sx, w2+4);
+        for (let k=0;k<n;k++) g.drawImage(p.spr, _xs[k]-w2, p.y - p.spr.height);
+      }
+    }
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (p.type === 'mill'){
+        const sx = wrapX(p.x, World.cam*p.layer);
+        const n = visX(sx, 110);
+        for (let k=0;k<n;k++){
+          const x = _xs[k];
+          g.drawImage(A.millBody, x - A.millBody.width/2, p.y - A.millBody.height);
+          const hx = x, hy = p.y - A.millBody.height + 30;
+          for (let b=0;b<4;b++){
+            g.save();
+            g.translate(hx,hy);
+            g.rotate(p.ang + b*Math.PI/2);
+            g.drawImage(A.millBlade, 6, -A.millBlade.height/2);
+            g.restore();
+          }
+          g.fillStyle='#5a4a38';
+          g.beginPath(); g.arc(hx,hy,5,0,TAU); g.fill();
+        }
+      } else if (p.type === 'zeppelin' && p.active){
+        const w2 = A.zeppelin.width*0.5;
+        const sx = wrapX(p.x, World.cam*p.layer);
+        const n = visX(sx, w2+6);
+        for (let k=0;k<n;k++){
+          const x = _xs[k];
+          g.drawImage(A.zeppelin, x-w2, p.y);
+          if (p.stut > 0){
+            g.globalAlpha = 0.5*Math.random();
+            g.fillStyle = '#4a4a4a';
+            g.beginPath(); g.arc(x-w2+A.zeppelin.width*0.5+rnd(-8,8), p.y+A.zeppelin.height*0.9, rnd(3,9),0,TAU); g.fill();
+            g.globalAlpha = 1;
+          }
+        }
+      }
+    }
+  }
+
+  /* ------------------------- Boden ------------------------------ */
+  function drawGround(g){
+    const sx = wrapX(0, World.cam);
+    const y = GY - 4;
+    g.drawImage(A.ground, sx - WW, y);
+    g.drawImage(A.ground, sx, y);
+  }
+
+  /* -------------------- Ebene 4: Spielebene --------------------- */
+  function drawGamePlane(g){
+    const props = World.props;
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      const sx = wrapX(p.x, World.cam);
+      switch(p.type){
+        case 'fence': {
+          const total = p.len*120;
+          const n = visX(sx + total/2, total/2 + 10);
+          for (let k=0;k<n;k++){
+            const x0 = _xs[k] - total/2;
+            for (let s=0;s<p.len;s++){
+              const xx = x0 + s*120;
+              if (xx > VW || xx+120 < 0) continue;
+              g.drawImage(A.fence, xx, p.y - A.fence.height);
+            }
+          }
+          break;
+        }
+        case 'bush': {
+          const w2 = p.spr.width*0.5;
+          const n = visX(sx, w2+4);
+          for (let k=0;k<n;k++) g.drawImage(p.spr, _xs[k]-w2, p.y - p.spr.height);
+          break;
+        }
+        case 'tree': {
+          const w2 = p.spr.width*0.5;
+          const n = visX(sx, w2+10);
+          const sway = Math.sin(World.windPhase*0.6 + p.sway)*0.012;
+          for (let k=0;k<n;k++){
+            g.save();
+            g.translate(_xs[k], p.y);
+            g.rotate(sway);
+            g.drawImage(p.spr, -w2, -p.spr.height);
+            g.restore();
+          }
+          break;
+        }
+        case 'barn': {
+          const w2 = A.barn.width*0.5;
+          const n = visX(sx, w2+8);
+          for (let k=0;k<n;k++){
+            const x = _xs[k];
+            g.drawImage(A.barn, x-w2, p.y - A.barn.height);
+            // Torflügel öffnen sich nach außen
+            const dy = p.y - 83;
+            const ow = Math.cos(p.door*1.35);
+            g.save();
+            g.translate(x-42, dy); g.scale(ow,1);
+            g.drawImage(A.barnDoor, 0, 0); g.restore();
+            g.save();
+            g.translate(x+42, dy); g.scale(-ow,1);
+            g.drawImage(A.barnDoor, 0, 0); g.restore();
+          }
+          break;
+        }
+        case 'scarecrow': {
+          const w2 = A.scarecrow.width*0.5;
+          const n = visX(sx, w2+16);
+          for (let k=0;k<n;k++){
+            const x = _xs[k];
+            g.save();
+            g.translate(x, p.y);
+            g.rotate(Math.sin(World.time*14)*0.06*p.wob);
+            g.drawImage(A.scarecrow, -w2, -A.scarecrow.height);
+            if (p.hat) g.drawImage(A.hat, -A.hat.width/2, -A.scarecrow.height - 14);
+            g.restore();
+          }
+          break;
+        }
+        case 'sign': {
+          const n = visX(sx, 60);
+          for (let k=0;k<n;k++){
+            const x = _xs[k];
+            g.drawImage(A.signPost, x-5, p.y - A.signPost.height);
+            g.save();
+            g.translate(x, p.y - A.signPost.height + 12);
+            g.scale(Math.cos(p.spin*7), 1);
+            g.drawImage(A.signBoard, -4, -A.signBoard.height/2);
+            g.restore();
+          }
+          break;
+        }
+      }
+    }
+    // Munitionskisten
+    if (CONFIG.LIMITED_AMMO){
+      for (let i=0;i<World.ammoBoxes.length;i++){
+        const b = World.ammoBoxes[i];
+        if (b.taken) continue;
+        const sx = wrapX(b.x, World.cam);
+        const n = visX(sx, 24);
+        for (let k=0;k<n;k++)
+          g.drawImage(A.ammoBox, _xs[k]-17, b.y - A.ammoBox.height);
+      }
+    }
+  }
+
+  /* ------------------------- Vögel ------------------------------ */
+  function birdSprite(b){
+    const poses = A.birds[b.variant];
+    let pose;
+    if (b.state === S_HIT) pose = 4;
+    else if (b.state === S_FALL || b.state === S_LANDED) pose = 5;
+    else if (b.state === S_PERCH) pose = 0;
+    else pose = b.frame;
+    return poses[pose][b.hazeLvl];
+  }
+
+  function drawBirds(g, dMin, dMax){
+    const it = World.birds.items;
+    for (let i=0;i<it.length;i++){
+      const b = it[i];
+      if (!b.active) continue;
+      if (b.d < dMin || b.d >= dMax) continue;
+      const spr = birdSprite(b);
+      const half = A.BW*b.scale*0.6;
+      const sx = wrapX(b.x, World.cam);
+      const n = visX(sx, half+10);
+      for (let k=0;k<n;k++){
+        g.save();
+        g.translate(_xs[k], b.y);
+        if (b.rot) g.rotate(b.rot);
+        g.scale(b.dir*b.scale, b.scale);
+        g.drawImage(spr, -A.BCX, -A.BCY);
+        g.restore();
+      }
+    }
+  }
+
+  /* ------------------------ Partikel ---------------------------- */
+  function drawParticles(g, wantKindCloud){
+    const it = World.parts.items;
+    for (let i=0;i<it.length;i++){
+      const p = it[i];
+      if (!p.active) continue;
+      const isCloud = (p.kind === 1);
+      if (wantKindCloud === 1 && !isCloud) continue;
+      if (wantKindCloud === 0 && isCloud) continue;
+      const fade = 1 - Math.max(0, (p.life - p.maxLife*0.65) / (p.maxLife*0.35));
+      const sx = wrapX(p.x, World.cam*(isCloud ? World.LAYER.sky : 1));
+      const n = visX(sx, 60);
+      for (let k=0;k<n;k++){
+        const x = _xs[k];
+        g.globalAlpha = clamp(fade,0,1);
+        if (p.sprite){
+          g.save();
+          g.translate(x, p.y);
+          g.rotate(p.rot);
+          g.scale(p.size, p.size);
+          g.drawImage(p.sprite, -p.sprite.width/2, -p.sprite.height/2);
+          g.restore();
+        } else {
+          g.fillStyle = p.col + clamp(fade,0,1).toFixed(2) + ')';
+          g.beginPath(); g.arc(x, p.y, p.size, 0, TAU); g.fill();
+        }
+        g.globalAlpha = 1;
+      }
+    }
+  }
+
+  /* ---------------------- Punkte-Popups ------------------------- */
+  function drawPopups(g){
+    const it = World.pops.items;
+    g.textAlign = 'center';
+    for (let i=0;i<it.length;i++){
+      const q = it[i];
+      if (!q.active) continue;
+      const t = q.life/0.8;
+      const sx = wrapX(q.x, World.cam);
+      const n = visX(sx, 90);
+      for (let k=0;k<n;k++){
+        g.globalAlpha = clamp(1 - t*t, 0, 1);
+        g.font = (q.big ? 'bold 26px ' : 'bold 20px ') + 'Georgia,serif';
+        g.lineWidth = 3; g.strokeStyle = 'rgba(0,0,0,.55)';
+        g.strokeText(q.text, _xs[k], q.y - t*40);
+        g.fillStyle = q.col;
+        g.fillText(q.text, _xs[k], q.y - t*40);
+        g.globalAlpha = 1;
+      }
+    }
+    g.textAlign = 'left';
+  }
+
+  /* -------------------- Ebene 5: Vordergrund -------------------- */
+  function drawForeground(g){
+    const props = World.props;
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (p.type !== 'grass' && p.type !== 'reed') continue;
+      const w2 = p.spr.width*0.5;
+      const sx = wrapX(p.x, World.cam*p.layer);
+      const n = visX(sx, w2+12);
+      const sway = Math.sin(World.windPhase + p.ph)*0.045 + (p.shake ? Math.sin(World.time*40)*0.08*p.shake : 0);
+      for (let k=0;k<n;k++){
+        g.save();
+        g.translate(_xs[k], p.y);
+        g.transform(1, 0, sway, 1, 0, 0);
+        g.drawImage(p.spr, -w2, -p.spr.height);
+        g.restore();
+      }
+      if (p.shake) p.shake = Math.max(0, p.shake - 0.03);
+    }
+  }
+
+  /* ---------------------- Dämmerungs-Tönung --------------------- */
+  function duskTint(g){
+    const t = World.duskT;
+    if (t <= 0.002) return;
+    g.globalCompositeOperation = 'multiply';
+    g.fillStyle = mixHex('#ffffff', CONFIG.PALETTE.dusk.sunGlow, t*DUSK_MUL);
+    g.fillRect(0,0,VW,VH);
+    g.globalCompositeOperation = 'source-over';
+    g.globalAlpha = t*DUSK_BLUE;
+    g.fillStyle = CONFIG.PALETTE.dusk.skyTop;
+    g.fillRect(0,0,VW,VH);
+    g.globalAlpha = 1;
+  }
+
+  /* --------------------------- Welt ----------------------------- */
+  function drawWorld(g){
+    drawSky(g);
+    drawMountains(g);
+    drawBirds(g, 0.72, 1.01);      // ferne Vögel hinter Ebene 3
+    drawMid(g);
+    drawGround(g);
+    drawBirds(g, 0.28, 0.72);      // mittlere Vögel hinter Ebene 4
+    drawGamePlane(g);
+    drawBirds(g, -0.01, 0.28);     // nahe Vögel davor
+    drawParticles(g, 0);
+    drawPopups(g);
+    drawForeground(g);
+    duskTint(g);
+  }
+
+  return { drawWorld, visX, _xs, drawParticles };
+})();
+
+/* ====================== TREFFERERKENNUNG ============================
+   Punkt-in-Box gegen alle Kandidaten; es gewinnt der kleinste
+   depth-Wert, also das vorderste Ziel.
+   ==================================================================== */
+const Hit = (function(){
+  const A = Assets;
+  const box = { x0:0, y0:0, x1:0, y1:0 };
+  const result = { kind:'', ref:null, sx:0 };
+
+  function propBox(p, sx){
+    switch(p.type){
+      case 'sun':
+        box.x0=sx-p.r; box.x1=sx+p.r; box.y0=p.y-p.r; box.y1=p.y+p.r; return true;
+      case 'cloud': {
+        if (!p.alive) return false;
+        const w = p.spr.width*p.sc, h = p.spr.height*p.sc;
+        box.x0=sx-w*0.42; box.x1=sx+w*0.42; box.y0=p.y+h*0.15; box.y1=p.y+h*0.80; return true;
+      }
+      case 'mill':
+        box.x0=sx-86; box.x1=sx+86; box.y0=p.y-A.millBody.height-34; box.y1=p.y-6; return true;
+      case 'zeppelin':
+        if (!p.active) return false;
+        box.x0=sx-A.zeppelin.width*0.46; box.x1=sx+A.zeppelin.width*0.46;
+        box.y0=p.y+6; box.y1=p.y+A.zeppelin.height*0.82; return true;
+      case 'tree': {
+        const w = p.spr.width, h = p.spr.height;
+        box.x0=sx-w*0.42; box.x1=sx+w*0.42; box.y0=p.y-h; box.y1=p.y-h*0.38; return true;
+      }
+      case 'barn':
+        box.x0=sx-42; box.x1=sx+42; box.y0=p.y-83; box.y1=p.y; return true;
+      case 'scarecrow':
+        box.x0=sx-26; box.x1=sx+26;
+        box.y0=p.y-A.scarecrow.height-16; box.y1=p.y; return true;
+      case 'sign':
+        box.x0=sx-8; box.x1=sx+74; box.y0=p.y-78; box.y1=p.y-46; return true;
+      case 'reed': {
+        const w = p.spr.width, h = p.spr.height;
+        box.x0=sx-w*0.38; box.x1=sx+w*0.38; box.y0=p.y-h*0.95; box.y1=p.y; return true;
+      }
+    }
+    return false;
+  }
+
+  function birdBox(b, sx){
+    const s = b.scale, pad = 1 + CONFIG.HITBOX_PADDING;
+    const w = BIRD_BOX.w*s*pad, h = BIRD_BOX.h*s*pad;
+    const cx = sx + BIRD_BOX.ox*s*b.dir;
+    const cy = b.y + BIRD_BOX.oy*s;
+    box.x0=cx-w/2; box.x1=cx+w/2; box.y0=cy-h/2; box.y1=cy+h/2;
+    return true;
+  }
+
+  function inside(mx,my){
+    return mx >= box.x0 && mx <= box.x1 && my >= box.y0 && my <= box.y1;
+  }
+
+  function pick(mx,my){
+    let bestD = Infinity;
+    result.kind = ''; result.ref = null;
+
+    // Vögel
+    const it = World.birds.items;
+    for (let i=0;i<it.length;i++){
+      const b = it[i];
+      if (!b.active) continue;
+      if (b.state !== S_FLY && b.state !== S_PERCH && b.state !== S_EXIT) continue;
+      if (b.depth >= bestD) continue;
+      const sx = wrapX(b.x, World.cam);
+      const n = Renderer.visX(sx, A.BW*b.scale);
+      for (let k=0;k<n;k++){
+        birdBox(b, Renderer._xs[k]);
+        if (inside(mx,my)){
+          bestD = b.depth; result.kind='bird'; result.ref=b; result.sx=Renderer._xs[k];
+          break;
+        }
+      }
+    }
+    // Deko-Objekte
+    const props = World.props;
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (!p.hittable || p.depth >= bestD) continue;
+      const sx = wrapX(p.x, World.cam*p.layer);
+      const n = Renderer.visX(sx, 260);
+      for (let k=0;k<n;k++){
+        if (!propBox(p, Renderer._xs[k])) break;
+        if (inside(mx,my)){
+          bestD = p.depth; result.kind='prop'; result.ref=p; result.sx=Renderer._xs[k];
+          break;
+        }
+      }
+    }
+    // Munitionskisten
+    if (CONFIG.LIMITED_AMMO){
+      for (let i=0;i<World.ammoBoxes.length;i++){
+        const bx = World.ammoBoxes[i];
+        if (bx.taken || 0.29 >= bestD) continue;
+        const sx = wrapX(bx.x, World.cam);
+        const n = Renderer.visX(sx, 30);
+        for (let k=0;k<n;k++){
+          const x = Renderer._xs[k];
+          box.x0=x-17; box.x1=x+17; box.y0=bx.y-24; box.y1=bx.y;
+          if (inside(mx,my)){ bestD=0.29; result.kind='ammo'; result.ref=bx; result.sx=x; break; }
+        }
+      }
+    }
+    return result.kind ? result : null;
+  }
+
+  return { pick, propBox, birdBox, box };
+})();
+
+/* ============================ HUD =================================== */
+const HUD = (function(){
+  const VW = CONFIG.VIEW_W, VH = CONFIG.VIEW_H;
+
+  function bullet(g, x, y, used){
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x, y, 9, 22, 3); else g.rect(x, y, 9, 22);
+    g.fillStyle = used ? 'rgba(90,100,110,.55)' : '#d8b45a';
+    g.fill();
+    g.fillStyle = used ? 'rgba(70,80,90,.55)' : '#b8863a';
+    g.fillRect(x, y, 9, 7);
+  }
+
+  function draw(g, G){
+    g.save();
+    g.globalAlpha = 0.75;
+
+    /* --- Punkte oben links --- */
+    g.save();
+    g.translate(20, 42);
+    g.scale(G.scorePulse, G.scorePulse);
+    g.font = 'bold 34px Georgia,serif';
+    g.textAlign = 'left'; g.textBaseline='alphabetic';
+    g.lineWidth = 4; g.strokeStyle = 'rgba(0,0,0,.6)';
+    g.strokeText(String(G.score), 0, 0);
+    g.fillStyle = '#f7e9a0'; g.fillText(String(G.score), 0, 0);
+    g.restore();
+    g.font = '12px Georgia,serif'; g.fillStyle = 'rgba(255,255,255,.7)';
+    g.fillText('PUNKTE', 21, 58);
+
+    /* --- Timer oben Mitte --- */
+    const bw = 240, bx = (VW-bw)/2, by = 20;
+    const frac = clamp(G.timeLeft / CONFIG.ROUND_TIME, 0, 1);
+    const warn = G.timeLeft <= CONFIG.WARN_TIME && G.timeLeft > 0;
+    const pulse = warn ? (0.55 + 0.45*Math.abs(Math.sin(G.clock*6))) : 1;
+    g.fillStyle = 'rgba(0,0,0,.42)';
+    g.fillRect(bx-2, by-2, bw+4, 16);
+    g.fillStyle = warn ? 'rgba(230,70,50,' + pulse.toFixed(2) + ')' : '#8fd06a';
+    g.fillRect(bx, by, bw*frac, 12);
+    g.strokeStyle = 'rgba(255,255,255,.55)'; g.lineWidth = 1;
+    g.strokeRect(bx-2.5, by-2.5, bw+5, 17);
+    const m = Math.floor(Math.max(0,G.timeLeft)/60);
+    const s = Math.floor(Math.max(0,G.timeLeft)%60);
+    g.font = 'bold 18px monospace'; g.textAlign='center';
+    g.fillStyle = warn ? '#ff8a72' : '#eef6ff';
+    g.fillText((m<10?'0':'')+m+':'+(s<10?'0':'')+s, VW/2, by+34);
+
+    /* --- Kombo oben rechts --- */
+    if (G.mult >= 2){
+      g.textAlign='right';
+      g.font = 'bold 26px Georgia,serif';
+      g.fillStyle = '#ffd06a';
+      g.lineWidth = 4; g.strokeStyle='rgba(0,0,0,.6)';
+      g.strokeText('x'+G.mult, VW-20, 44);
+      g.fillText('x'+G.mult, VW-20, 44);
+      g.font = '12px Georgia,serif'; g.fillStyle='rgba(255,255,255,.7)';
+      g.fillText('KOMBO', VW-21, 58);
+    }
+
+    /* --- Magazin unten links --- */
+    const by2 = VH - 40;
+    for (let i=0;i<CONFIG.MAG_SIZE;i++)
+      bullet(g, 20 + i*13, by2, i >= G.mag);
+    if (CONFIG.LIMITED_AMMO){
+      g.textAlign='left'; g.font='12px monospace'; g.fillStyle='#e8dfc0';
+      g.fillText('VORRAT ' + G.ammo, 20, by2 - 8);
+    }
+    if (G.reloading){
+      const p = 1 - G.reloadT/(CONFIG.RELOAD_MS/1000);
+      g.fillStyle='rgba(0,0,0,.5)'; g.fillRect(20, by2+27, CONFIG.MAG_SIZE*13-4, 6);
+      g.fillStyle='#f0c860';        g.fillRect(20, by2+27, (CONFIG.MAG_SIZE*13-4)*p, 6);
+      g.font='11px Georgia,serif'; g.fillStyle='#ffe9a0'; g.textAlign='left';
+      g.fillText('NACHLADEN', 20, by2 - 8);
+    }
+
+    /* --- Trefferquote unten rechts --- */
+    g.textAlign='right'; g.font='bold 20px monospace';
+    g.fillStyle = '#dfe9f2';
+    const acc = G.shots ? Math.round(G.hits/G.shots*100) : 0;
+    g.fillText(acc + '%', VW-20, VH-24);
+    g.font='11px Georgia,serif'; g.fillStyle='rgba(255,255,255,.7)';
+    g.fillText('TREFFERQUOTE', VW-20, VH-10);
+
+    g.restore();
+    g.textAlign='left'; g.globalAlpha = 1;
+  }
+
+  return { draw };
+})();
+
+/* =========================== HIGHSCORES ============================= */
+const Scores = (function(){
+  function load(){
+    try {
+      const raw = localStorage.getItem(CONFIG.STORAGE_KEY);
+      if (!raw) return [];
+      const a = JSON.parse(raw);
+      return Array.isArray(a) ? a.slice(0, CONFIG.HISCORE_COUNT) : [];
+    } catch(e){ return []; }               // Storage blockiert -> still degradieren
+  }
+  function save(list){
+    try { localStorage.setItem(CONFIG.STORAGE_KEY, JSON.stringify(list)); }
+    catch(e){ /* ignorieren */ }
+  }
+  function qualifies(pts){
+    const l = load();
+    return pts > 0 && (l.length < CONFIG.HISCORE_COUNT || pts > l[l.length-1].p);
+  }
+  function add(name, pts){
+    const l = load();
+    l.push({ n: (name||'???').slice(0,CONFIG.NAME_MAX), p: pts });
+    l.sort((a,b)=> b.p - a.p);
+    l.length = Math.min(l.length, CONFIG.HISCORE_COUNT);
+    save(l);
+    return l;
+  }
+  return { load, add, qualifies };
+})();
+
+/* ============================ GAME ================================== */
+const Game = (function(){
+  const VW = CONFIG.VIEW_W, VH = CONFIG.VIEW_H;
+  const STEP = 1/60;
+
+  const G = {
+    state: 'TITLE', paused: false, debug: false,
+    clock: 0, timeLeft: CONFIG.ROUND_TIME, countT: 0, lastBeep: -1,
+    score: 0, shots: 0, hits: 0, comboHits: 0, mult: 1, bestCombo: 1, bestStreak: 0,
+    bonus: 0, scorePulse: 1, entryChecked: false,
+    mag: CONFIG.MAG_SIZE, ammo: CONFIG.AMMO_START,
+    reloading: false, reloadT: 0, cooldownT: 0, autoT: 0,
+    muzzleT: 0, shakeT: 0, endT: 0, revealT: 0, revealN: 0,
+    name: '', caret: 0, lines: [], scoreList: [], fps: 60
+  };
+
+  /* --------------------------- Screens -------------------------- */
+  const BTN = {
+    title:  [ {id:'start',  x:300, y:392, w:200, h:46, label:'Runde starten'},
+              {id:'scores', x:300, y:448, w:200, h:38, label:'Bestenliste'} ],
+    results:[ {id:'again',  x:236, y:498, w:150, h:40, label:'Nochmal'},
+              {id:'title',  x:414, y:498, w:150, h:40, label:'Titel'} ],
+    scores: [ {id:'title',  x:325, y:500, w:150, h:40, label:'Zurück'} ],
+    entry:  [ {id:'ok',     x:325, y:410, w:150, h:42, label:'Eintragen'} ]
+  };
+  function buttonsFor(state){
+    if (state==='TITLE')   return BTN.title;
+    if (state==='RESULTS') return BTN.results;
+    if (state==='SCORES')  return BTN.scores;
+    if (state==='ENTRY')   return BTN.entry;
+    return null;
+  }
+  function btnAt(x,y){
+    const list = buttonsFor(G.state);
+    if (!list) return null;
+    for (let i=0;i<list.length;i++){
+      const b = list[i];
+      if (x>=b.x && x<=b.x+b.w && y>=b.y && y<=b.y+b.h) return b;
+    }
+    return null;
+  }
+
+  /* ------------------------ Rundenverwaltung -------------------- */
+  function startRound(){
+    World.reset();
+    Spawner.reset();
+    Spawner.seed(7, 3);
+    G.entryChecked = false;
+    G.score=0; G.shots=0; G.hits=0; G.comboHits=0; G.mult=1; G.bestCombo=1; G.bestStreak=0;
+    G.bonus=0; G.scorePulse=1;
+    G.mag=CONFIG.MAG_SIZE; G.ammo=CONFIG.AMMO_START;
+    G.reloading=false; G.reloadT=0; G.cooldownT=0; G.autoT=0;
+    G.timeLeft = CONFIG.ROUND_TIME;
+    G.countT = CONFIG.COUNTDOWN + 0.999;
+    G.lastBeep = -1;
+    G.paused = false;
+    G.state = 'COUNT';
+  }
+
+  function endRound(){
+    G.state = 'ENDING';
+    G.endT = 0;
+  }
+
+  function buildResults(){
+    const acc = G.shots ? G.hits/G.shots : 0;
+    G.bonus = 0;
+    for (let i=0;i<CONFIG.ACC_BONUS.length;i++){
+      if (acc >= CONFIG.ACC_BONUS[i].acc){ G.bonus = CONFIG.ACC_BONUS[i].pts; break; }
+    }
+    G.score += G.bonus;
+    G.lines = [
+      ['Treffer',        String(G.hits)],
+      ['Schüsse',        String(G.shots)],
+      ['Trefferquote',   Math.round(acc*100) + ' %'],
+      ['Beste Kombo',    'x' + G.bestCombo + '  (' + G.bestStreak + ' in Folge)'],
+      ['Genauigkeitsbonus', G.bonus ? '+' + G.bonus : '—'],
+      ['Endpunktzahl',   String(G.score)]
+    ];
+    G.revealT = 0; G.revealN = 0;
+    G.state = 'RESULTS';
+  }
+
+  /* ---------------------------- Waffe --------------------------- */
+  function startReload(){
+    if (G.reloading || G.mag === CONFIG.MAG_SIZE) return;
+    if (CONFIG.LIMITED_AMMO && G.ammo <= 0) return;
+    G.reloading = true;
+    G.reloadT = CONFIG.RELOAD_MS/1000;
+    AudioSys.reload();
+  }
+
+  function fire(){
+    if (G.state !== 'PLAY' || G.paused) return;
+    if (G.reloading || G.cooldownT > 0) return;
+    if (G.mag <= 0){ G.autoT = 0; startReload(); return; }
+    if (CONFIG.LIMITED_AMMO && G.ammo <= 0 && G.mag <= 0) return;
+
+    G.mag--; G.shots++;
+    G.cooldownT = CONFIG.FIRE_COOLDOWN_MS/1000;
+    G.muzzleT   = CONFIG.MUZZLE_MS/1000;
+    G.shakeT    = CONFIG.RECOIL_SHAKE_MS/1000;
+    AudioSys.shot();
+
+    const mx = Input.st.mx, my = Input.st.my;
+    const t = Hit.pick(mx,my);
+
+    // Schuss in der Nähe schreckt sitzende Vögel auf
+    const it = World.birds.items;
+    for (let i=0;i<it.length;i++){
+      const b = it[i];
+      if (!b.active || b.state !== S_PERCH) continue;
+      const sx = wrapX(b.x, World.cam);
+      const dx = Math.min(Math.abs(sx-mx), Math.abs(sx-CONFIG.WORLD_W-mx));
+      if (dx < 110 && Math.abs(b.y - my) < 130) startle(b);
+    }
+
+    if (!t){ miss(); return; }
+
+    if (t.kind === 'bird'){
+      hitBird(t.ref);
+    } else if (t.kind === 'ammo'){
+      t.ref.taken = true;
+      G.ammo += CONFIG.AMMO_BOX_AMOUNT;
+      spawnPopup(World.cam + t.sx, t.ref.y - 30, '+' + CONFIG.AMMO_BOX_AMOUNT + ' Schuss', '#cfe89a');
+      AudioSys.click(0, 900, 0.2);
+    } else {
+      hitProp(t.ref, t.sx);
+    }
+  }
+
+  function miss(){
+    G.score = Math.max(0, G.score - CONFIG.MISS_PENALTY);
+    G.comboHits = 0; G.mult = 1;
+    spawnDust(World.cam + Input.st.mx, Input.st.my, 4);
+    spawnPopup(World.cam + Input.st.mx, Input.st.my - 10, '-' + CONFIG.MISS_PENALTY, '#ff9a8a');
+  }
+
+  function currentMult(){
+    let m = 1;
+    for (let i=0;i<CONFIG.COMBO_STEPS.length;i++)
+      if (G.comboHits >= CONFIG.COMBO_STEPS[i].hits) m = CONFIG.COMBO_STEPS[i].mult;
+    return m;
+  }
+
+  function hitBird(b){
+    G.hits++;
+    G.comboHits++;
+    G.mult = currentMult();
+    if (G.mult > G.bestCombo)      G.bestCombo  = G.mult;
+    if (G.comboHits > G.bestStreak) G.bestStreak = G.comboHits;
+    const pts = b.points * G.mult;
+    G.score += pts;
+    G.scorePulse = 1.35;
+    spawnPopup(b.x, b.y - 14*b.scale, '+' + pts, G.mult>1 ? '#ffd86a' : '#fff8d0', G.mult>1);
+    spawnFeathers(b.x, b.y, b.variant, rndi(8,12), b.scale);
+    AudioSys.hit();
+    AudioSys.birdCall(1.5);
+    b.state = S_HIT;
+    b.timer = CONFIG.HIT_POSE_MS/1000;
+    b.rot = 0; b.rotV = 0;
+  }
+
+  /* Deko-Treffer: keine Fehlschüsse, brechen die Kombo nicht */
+  function hitProp(p, sx){
+    const worldX = World.cam + sx;
+    if (p.cd > 0){ AudioSys.click(0, 260, 0.1); return; }
+    let pts = 0;
+    switch(p.type){
+      case 'mill':
+        p.boost = 5; pts = 25; AudioSys.clatter(); break;
+      case 'sign':
+        p.spin = 1; pts = 25; AudioSys.clatter(); break;
+      case 'scarecrow':
+        p.wob = 1;
+        if (p.hat){
+          p.hat = false; pts = 50;
+          spawnHat(p.x, p.y - Assets.scarecrow.height - 14);
+        }
+        AudioSys.click(0,300,0.2);
+        break;
+      case 'zeppelin':
+        p.sink = 1; p.stut = 1.4; pts = 100; AudioSys.engineStutter(); break;
+      case 'sun':
+        World.duskTimer = CONFIG.DUSK_SECONDS; pts = 75; AudioSys.beep(320,0.45,0.16); break;
+      case 'cloud':
+        p.alive = false; p.respawn = rnd(10,18); pts = 10;
+        spawnShreds(p.x, p.y + p.spr.height*0.4, 7, p.spr);
+        AudioSys.rustle(); break;
+      case 'barn':
+        p.doorOpen = true;
+        Spawner.burst(p.x, p.y - 96, 5, 0.10, 0.40);
+        AudioSys.clatter();
+        break;
+      case 'tree': {
+        // sitzende Vögel im Baum aufschrecken, sonst welche starten lassen
+        let n = 0;
+        const it = World.birds.items;
+        for (let i=0;i<it.length;i++){
+          const b = it[i];
+          if (b.active && b.state === S_PERCH && Math.abs(ringDelta(p.x, b.x)) < 90){
+            startle(b); n++;
+          }
+        }
+        if (n === 0) Spawner.burst(p.x, p.y - 130, rndi(1,3), 0.08, 0.30);
+        AudioSys.rustle();
+        break;
+      }
+      case 'reed':
+        p.shake = 1; AudioSys.rustle(); break;
+    }
+    if (pts > 0){
+      G.score += pts;
+      G.scorePulse = 1.2;
+      spawnPopup(worldX, p.type==='cloud' ? p.y + 40 : p.y - 40, '+' + pts, '#bfe8ff');
+    }
+    p.cd = CONFIG.PROP_COOLDOWN;
+  }
+
+  /* --------------------------- Update --------------------------- */
+  function update(dt){
+    G.clock += dt;
+    G.scorePulse += (1 - G.scorePulse) * Math.min(1, dt*8);
+
+    if (G.muzzleT > 0) G.muzzleT -= dt;
+    if (G.shakeT  > 0) G.shakeT  -= dt;
+
+    if (G.state === 'TITLE'){
+      World.cam = (World.cam + 26*dt) % CONFIG.WORLD_W;
+      World.update(dt);
+      Spawner.update(dt, 0);
+      updateBirds(dt);
+      updateParticles(dt);
+      return;
+    }
+    if (G.paused) return;
+
+    if (G.state === 'COUNT'){
+      World.update(dt);
+      World.updateCamera(dt, true);
+      updateBirds(dt);
+      updateParticles(dt);
+      const before = Math.ceil(G.countT);
+      G.countT -= dt;
+      const after = Math.ceil(G.countT);
+      if (after !== before && after >= 0) AudioSys.beep(after===0?1320:660, 0.14, 0.24);
+      if (G.countT <= 0) G.state = 'PLAY';
+      return;
+    }
+
+    if (G.state === 'PLAY'){
+      // Waffe
+      if (G.cooldownT > 0) G.cooldownT -= dt;
+      if (G.reloading){
+        G.reloadT -= dt;
+        if (G.reloadT <= 0){
+          G.reloading = false;
+          let need = CONFIG.MAG_SIZE - G.mag;
+          if (CONFIG.LIMITED_AMMO){ need = Math.min(need, G.ammo); G.ammo -= need; }
+          G.mag += need;
+        }
+      } else if (G.mag <= 0){
+        G.autoT += dt;
+        if (G.autoT >= CONFIG.AUTO_RELOAD_DELAY_MS/1000){ G.autoT = 0; startReload(); }
+      }
+
+      const prev = Math.ceil(G.timeLeft);
+      G.timeLeft -= dt;
+      const now = Math.ceil(G.timeLeft);
+      if (now !== prev && now <= CONFIG.WARN_TIME && now > 0) AudioSys.beep(880, 0.08, 0.2);
+
+      World.update(dt);
+      World.updateCamera(dt, true);
+      Spawner.update(dt, clamp(1 - G.timeLeft/CONFIG.ROUND_TIME, 0, 1));
+      updateBirds(dt);
+      updateParticles(dt);
+
+      if (G.timeLeft <= 0){ G.timeLeft = 0; endRound(); }
+      return;
+    }
+
+    if (G.state === 'ENDING'){
+      G.endT += dt;
+      World.update(dt);
+      World.updateCamera(dt, false);
+      updateBirds(dt);
+      updateParticles(dt);
+      // warten bis alle Treffer/Fälle ausanimiert sind (max. 3,5 s)
+      let busy = false;
+      const it = World.birds.items;
+      for (let i=0;i<it.length;i++){
+        const b = it[i];
+        if (b.active && (b.state===S_HIT || b.state===S_FALL || b.state===S_LANDED)) { busy = true; break; }
+      }
+      if (!busy || G.endT > 3.5) buildResults();
+      return;
+    }
+
+    if (G.state === 'RESULTS'){
+      World.cam = (World.cam + 12*dt) % CONFIG.WORLD_W;
+      World.update(dt); updateBirds(dt); updateParticles(dt);
+      G.revealT += dt;
+      const want = Math.min(G.lines.length, Math.floor(G.revealT/0.25));
+      if (want > G.revealN){ G.revealN = want; AudioSys.click(0, 700, 0.1); }
+      if (G.revealN >= G.lines.length && !G.entryChecked){
+        G.entryChecked = true;
+        if (Scores.qualifies(G.score)){ G.name = ''; G.state = 'ENTRY'; }
+      }
+      return;
+    }
+
+    if (G.state === 'ENTRY' || G.state === 'SCORES'){
+      World.cam = (World.cam + 10*dt) % CONFIG.WORLD_W;
+      World.update(dt); updateBirds(dt); updateParticles(dt);
+      G.caret += dt;
+      return;
+    }
+  }
+
+  /* ---------------------------- Render -------------------------- */
+  function panel(g, x, y, w, h){
+    g.fillStyle = 'rgba(12,18,26,.78)';
+    g.beginPath();
+    if (g.roundRect) g.roundRect(x,y,w,h,14); else g.rect(x,y,w,h);
+    g.fill();
+    g.strokeStyle = 'rgba(230,220,180,.35)'; g.lineWidth = 2; g.stroke();
+  }
+  function drawButton(g, b){
+    const hov = Input.st.mx>=b.x && Input.st.mx<=b.x+b.w && Input.st.my>=b.y && Input.st.my<=b.y+b.h;
+    g.fillStyle = hov ? 'rgba(240,205,110,.92)' : 'rgba(40,52,64,.9)';
+    g.beginPath();
+    if (g.roundRect) g.roundRect(b.x,b.y,b.w,b.h,9); else g.rect(b.x,b.y,b.w,b.h);
+    g.fill();
+    g.strokeStyle = hov ? '#fff3c0' : 'rgba(230,220,180,.5)'; g.lineWidth = 2; g.stroke();
+    g.fillStyle = hov ? '#23180a' : '#eee6cf';
+    g.font = 'bold 18px Georgia,serif'; g.textAlign='center'; g.textBaseline='middle';
+    g.fillText(b.label, b.x+b.w/2, b.y+b.h/2+1);
+    g.textAlign='left'; g.textBaseline='alphabetic';
+  }
+  function drawButtons(g){
+    const list = buttonsFor(G.state);
+    if (!list) return;
+    for (let i=0;i<list.length;i++) drawButton(g, list[i]);
+  }
+
+  function crosshair(g){
+    if (G.state === 'ENDING') return;
+    let x = Input.st.mx, y = Input.st.my;
+    if (G.reloading){
+      const p = 1 - G.reloadT/(CONFIG.RELOAD_MS/1000);
+      y += Math.sin(p*Math.PI) * 14;
+    }
+    if (G.muzzleT > 0){
+      const a = G.muzzleT/(CONFIG.MUZZLE_MS/1000);
+      const grd = g.createRadialGradient(x,y,2,x,y,46);
+      grd.addColorStop(0,'rgba(255,244,190,'+(0.9*a).toFixed(2)+')');
+      grd.addColorStop(1,'rgba(255,180,60,0)');
+      g.fillStyle = grd;
+      g.beginPath(); g.arc(x,y,46,0,TAU); g.fill();
+    }
+    g.save();
+    g.strokeStyle = 'rgba(20,24,28,.85)'; g.lineWidth = 4;
+    ring(g,x,y); g.stroke();
+    g.strokeStyle = '#f5f7fa'; g.lineWidth = 2;
+    ring(g,x,y); g.stroke();
+    g.fillStyle = '#f5f7fa';
+    g.beginPath(); g.arc(x,y,1.6,0,TAU); g.fill();
+    g.restore();
+  }
+  function ring(g,x,y){
+    g.beginPath();
+    g.arc(x,y,16,0,TAU);
+    g.moveTo(x-24,y); g.lineTo(x-6,y);
+    g.moveTo(x+6, y); g.lineTo(x+24,y);
+    g.moveTo(x,y-24); g.lineTo(x,y-6);
+    g.moveTo(x,y+6);  g.lineTo(x,y+24);
+  }
+
+  function drawDebug(g){
+    g.save();
+    g.font = '11px monospace'; g.textAlign='left';
+    // Hitboxen der Vögel
+    const it = World.birds.items;
+    for (let i=0;i<it.length;i++){
+      const b = it[i];
+      if (!b.active) continue;
+      const sx = wrapX(b.x, World.cam);
+      const n = Renderer.visX(sx, Assets.BW*b.scale);
+      for (let k=0;k<n;k++){
+        Hit.birdBox(b, Renderer._xs[k]);
+        g.strokeStyle = (b.state===S_FLY||b.state===S_PERCH||b.state===S_EXIT) ? '#4dff88' : '#ff5555';
+        g.lineWidth = 1;
+        g.strokeRect(Hit.box.x0, Hit.box.y0, Hit.box.x1-Hit.box.x0, Hit.box.y1-Hit.box.y0);
+        g.fillStyle = '#c8ffdd';
+        g.fillText('d=' + b.d.toFixed(2) + ' z=' + b.depth.toFixed(2), Hit.box.x0, Hit.box.y0-2);
+      }
+    }
+    // Hitboxen der Deko
+    const props = World.props;
+    for (let i=0;i<props.length;i++){
+      const p = props[i];
+      if (!p.hittable) continue;
+      const sx = wrapX(p.x, World.cam*p.layer);
+      const n = Renderer.visX(sx, 260);
+      for (let k=0;k<n;k++){
+        if (!Hit.propBox(p, Renderer._xs[k])) break;
+        g.strokeStyle = p.cd>0 ? 'rgba(255,160,60,.8)' : 'rgba(120,190,255,.8)';
+        g.strokeRect(Hit.box.x0, Hit.box.y0, Hit.box.x1-Hit.box.x0, Hit.box.y1-Hit.box.y0);
+        g.fillStyle='rgba(190,225,255,.9)';
+        g.fillText(p.type+' z='+p.depth.toFixed(2), Hit.box.x0+2, Hit.box.y0+10);
+      }
+    }
+    let active = 0;
+    for (let i=0;i<it.length;i++) if (it[i].active) active++;
+    g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(VW-146, VH-74, 138, 62);
+    g.fillStyle = '#9dffb0';
+    g.fillText('fps      ' + G.fps.toFixed(1), VW-138, VH-58);
+    g.fillText('birds    ' + active,           VW-138, VH-44);
+    g.fillText('parts    ' + World.parts.countActive(), VW-138, VH-30);
+    g.fillText('cam      ' + World.cam.toFixed(0), VW-138, VH-16);
+    g.restore();
+  }
+
+  function drawTitle(g){
+    panel(g, 170, 130, 460, 380);
+    g.textAlign='center';
+    g.fillStyle = '#f3e2a8';
+    g.font = 'bold 52px Georgia,serif';
+    g.fillText('FEDERWIND', VW/2, 200);
+    g.font = 'italic 17px Georgia,serif'; g.fillStyle='#cfd8e0';
+    g.fillText('Panorama-Jagd in 90 Sekunden', VW/2, 228);
+    g.font = '14px Georgia,serif'; g.fillStyle='#b6c3cf';
+    const rows = [
+      'Maus bewegen — zielen. Rand des Bildes — Panorama drehen.',
+      'Linksklick — Schuss.  Rechtsklick oder R — nachladen.',
+      'P / Esc — Pause    M — Ton    D — Debug    ← → — scrollen',
+      '',
+      'Nicht nur die Vögel reagieren auf Blei.'
+    ];
+    for (let i=0;i<rows.length;i++) g.fillText(rows[i], VW/2, 274 + i*24);
+    g.textAlign='left';
+    drawButtons(g);
+  }
+
+  function drawCountdown(g){
+    const n = Math.ceil(G.countT);
+    const f = 1 - (G.countT - Math.floor(G.countT));
+    g.save();
+    g.textAlign='center'; g.textBaseline='middle';
+    g.globalAlpha = clamp(1.2 - f*0.9, 0, 1);
+    g.font = 'bold ' + (110 + f*46) + 'px Georgia,serif';
+    g.lineWidth = 8; g.strokeStyle='rgba(0,0,0,.5)';
+    const txt = n > 0 ? String(n) : 'LOS!';
+    g.strokeText(txt, VW/2, VH/2 - 40);
+    g.fillStyle = n>0 ? '#ffe9a0' : '#a8f08a';
+    g.fillText(txt, VW/2, VH/2 - 40);
+    g.restore();
+    g.textAlign='left'; g.textBaseline='alphabetic';
+  }
+
+  function drawPause(g){
+    g.fillStyle='rgba(6,10,16,.62)'; g.fillRect(0,0,VW,VH);
+    panel(g, 260, 220, 280, 150);
+    g.textAlign='center';
+    g.fillStyle='#f3e2a8'; g.font='bold 38px Georgia,serif';
+    g.fillText('PAUSE', VW/2, 278);
+    g.fillStyle='#c3cdd6'; g.font='15px Georgia,serif';
+    g.fillText('P oder Esc — weiter', VW/2, 316);
+    g.fillText('Ton: ' + (AudioSys.isMuted()?'aus':'an') + '  (M)', VW/2, 342);
+    g.textAlign='left';
+  }
+
+  function drawResults(g){
+    g.fillStyle='rgba(6,10,16,.55)'; g.fillRect(0,0,VW,VH);
+    panel(g, 190, 96, 420, 380);
+    g.textAlign='center';
+    g.fillStyle='#f3e2a8'; g.font='bold 32px Georgia,serif';
+    g.fillText('Auswertung', VW/2, 146);
+    g.font='18px Georgia,serif';
+    for (let i=0;i<G.revealN;i++){
+      const last = (i === G.lines.length-1);
+      g.textAlign='left';
+      g.fillStyle = last ? '#ffe08a' : '#cfd8e0';
+      g.font = (last?'bold 24px ':'18px ') + 'Georgia,serif';
+      g.fillText(G.lines[i][0], 230, 196 + i*42);
+      g.textAlign='right';
+      g.fillText(G.lines[i][1], 570, 196 + i*42);
+    }
+    g.textAlign='center'; g.fillStyle='#93a3b1'; g.font='13px Georgia,serif';
+    g.fillText('Enter — nochmal    Esc — Titel', VW/2, 470);
+    g.textAlign='left';
+    if (G.revealN >= G.lines.length) drawButtons(g);
+  }
+
+  function drawEntry(g){
+    g.fillStyle='rgba(6,10,16,.6)'; g.fillRect(0,0,VW,VH);
+    panel(g, 210, 210, 380, 260);
+    g.textAlign='center';
+    g.fillStyle='#f3e2a8'; g.font='bold 26px Georgia,serif';
+    g.fillText('Bestenliste!', VW/2, 260);
+    g.fillStyle='#cfd8e0'; g.font='16px Georgia,serif';
+    g.fillText(G.score + ' Punkte — Name eingeben:', VW/2, 292);
+    g.fillStyle='rgba(255,255,255,.10)'; g.fillRect(275, 312, 250, 44);
+    g.strokeStyle='rgba(240,225,170,.6)'; g.lineWidth=2; g.strokeRect(275,312,250,44);
+    g.fillStyle='#fff3c8'; g.font='bold 22px monospace';
+    const car = (Math.floor(G.caret*2)%2) ? '_' : ' ';
+    g.fillText(G.name + car, VW/2, 342);
+    g.fillStyle='#93a3b1'; g.font='12px Georgia,serif';
+    g.fillText('max. ' + CONFIG.NAME_MAX + ' Zeichen — Enter bestätigt', VW/2, 380);
+    g.textAlign='left';
+    drawButtons(g);
+  }
+
+  function drawScores(g){
+    g.fillStyle='rgba(6,10,16,.6)'; g.fillRect(0,0,VW,VH);
+    panel(g, 210, 70, 380, 470);
+    g.textAlign='center';
+    g.fillStyle='#f3e2a8'; g.font='bold 28px Georgia,serif';
+    g.fillText('Bestenliste', VW/2, 118);
+    const l = G.scoreList;
+    g.font='17px monospace';
+    if (!l.length){
+      g.fillStyle='#93a3b1'; g.font='15px Georgia,serif';
+      g.fillText('Noch keine Einträge.', VW/2, 200);
+    }
+    for (let i=0;i<l.length;i++){
+      g.textAlign='left';  g.fillStyle = i===0 ? '#ffe08a' : '#cfd8e0';
+      g.fillText((i+1)+'.', 246, 164 + i*33);
+      g.fillText(l[i].n,    282, 164 + i*33);
+      g.textAlign='right';
+      g.fillText(String(l[i].p), 554, 164 + i*33);
+    }
+    g.textAlign='left';
+    drawButtons(g);
+  }
+
+  function render(g){
+    const sh = G.shakeT > 0 ? CONFIG.RECOIL_SHAKE_PX * (G.shakeT/(CONFIG.RECOIL_SHAKE_MS/1000)) : 0;
+    g.save();
+    if (sh) g.translate(rnd(-sh,sh), rnd(-sh,sh));
+    Renderer.drawWorld(g);
+    g.restore();
+
+    if (G.state==='PLAY' || G.state==='COUNT' || G.state==='ENDING') HUD.draw(g, G);
+    if (G.debug) drawDebug(g);
+
+    switch(G.state){
+      case 'TITLE':   drawTitle(g); break;
+      case 'COUNT':   drawCountdown(g); break;
+      case 'RESULTS': drawResults(g); break;
+      case 'ENTRY':   drawEntry(g); break;
+      case 'SCORES':  drawScores(g); break;
+    }
+    if (G.paused && G.state!=='TITLE') drawPause(g);
+    crosshair(g);
+  }
+
+  /* ------------------------- Eingaben --------------------------- */
+  function onClick(pt){
+    const b = btnAt(pt.x, pt.y);
+    if (b){
+      if (b.id==='start'){ startRound(); }
+      else if (b.id==='scores'){ G.scoreList = Scores.load(); G.state='SCORES'; }
+      else if (b.id==='title'){ G.state='TITLE'; G.entryChecked=false; }
+      else if (b.id==='again'){ startRound(); G.entryChecked=false; }
+      else if (b.id==='ok'){ submitName(); }
+      return true;
+    }
+    return false;
+  }
+
+  function submitName(){
+    G.scoreList = Scores.add(G.name.trim() || 'Jäger', G.score);
+    G.state = 'SCORES';
+  }
+
+  function onKey(e){
+    const c = e.code;
+    if (G.state === 'ENTRY'){
+      if (c === 'Enter'){ submitName(); return; }
+      if (c === 'Backspace'){ G.name = G.name.slice(0,-1); return; }
+      if (e.key && e.key.length === 1 && G.name.length < CONFIG.NAME_MAX)
+        G.name += e.key;
+      return;
+    }
+    if (c === 'KeyM'){ AudioSys.toggleMute(); return; }
+    if (c === 'KeyD'){ G.debug = !G.debug; return; }
+    if (c === 'KeyP' || c === 'Escape'){
+      if (G.state === 'PLAY' || G.state === 'COUNT') G.paused = !G.paused;
+      else if (G.state === 'RESULTS' || G.state === 'SCORES' || G.state === 'ENTRY'){
+        G.state = 'TITLE'; G.entryChecked = false;
+      }
+      return;
+    }
+    if (c === 'KeyR'){ if (G.state==='PLAY' && !G.paused) startReload(); return; }
+    if (c === 'Enter' || c === 'Space'){
+      if (G.state === 'TITLE'){ startRound(); }
+      else if (G.state === 'RESULTS'){ startRound(); G.entryChecked = false; }
+      else if (G.state === 'SCORES'){ G.state='TITLE'; G.entryChecked=false; }
+      return;
+    }
+  }
+
+  return {
+    G, update, render, onClick, onKey, fire,
+    reload(){ if (G.state==='PLAY' && !G.paused) startReload(); },
+    STEP
+  };
+})();
+
+/* ============================ MAIN ================================== */
+(function main(){
+  const canvas = document.getElementById('cv');
+  const g = canvas.getContext('2d', { alpha:false });
+  g.imageSmoothingEnabled = true;
+
+  Assets.build();
+  World.reset();
+  Spawner.reset();
+  Spawner.seed(6, 2);           // Attract-Demo startet belebt
+  Input.attach(canvas);
+
+  Input.on('shoot',  () => Game.fire());
+  Input.on('reload', () => Game.reload());
+  Input.on('click',  pt => Game.onClick(pt));
+  Input.on('key',    e  => Game.onKey(e));
+
+  /* --- Letterboxing: internes 800x600 auf das Fenster skalieren --- */
+  function fit(){
+    const ar = CONFIG.VIEW_W / CONFIG.VIEW_H;
+    let w = window.innerWidth - 4, h = window.innerHeight - 26;
+    if (w/h > ar) w = h*ar; else h = w/ar;
+    canvas.style.width  = Math.floor(w) + 'px';
+    canvas.style.height = Math.floor(h) + 'px';
+  }
+  window.addEventListener('resize', fit);
+  fit();
+
+  /* --- Feste Logikschrittweite mit Akkumulator --- */
+  const STEP = Game.STEP;
+  let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0;
+
+  function frame(now){
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.25) dt = 0.25;          // Tab-Wechsel abfangen
+    acc += dt;
+    let guard = 0;
+    while (acc >= STEP && guard++ < 8){ Game.update(STEP); acc -= STEP; }
+    if (acc > STEP) acc = 0;
+
+    fpsAcc += dt; fpsN++;
+    if (fpsAcc >= 0.4){ Game.G.fps = fpsN/fpsAcc; fpsAcc = 0; fpsN = 0; }
+
+    Game.render(g);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
