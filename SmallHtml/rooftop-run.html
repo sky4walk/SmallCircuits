@@ -1,0 +1,1620 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>ROOFTOP RUN</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0d0f13;
+    overflow: hidden;
+    touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+  }
+  #wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  canvas {
+    display: block;
+    image-rendering: auto;
+    box-shadow: 0 0 60px rgba(0,0,0,.8);
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+<script>
+(() => {
+'use strict';
+
+// ---------------------------------------------------------------- Konstanten
+const W = 960, H = 540;
+const PX = 250;              // feste Bildschirm-X-Position des Läufers
+const JUMP_V   = 700;        // Absprunggeschwindigkeit
+const G_HOLD   = 1200;       // Schwerkraft solange Taste gehalten & Aufstieg
+const G_FALL   = 2600;       // Schwerkraft sonst
+const VX_START = 330;
+const VX_MAX   = 940;
+const VX_ACC   = 32;         // px/s pro Sekunde (Vollgas nach ~19 s)
+const COYOTE   = 0.10;       // Gnadenfrist nach Kantenverlassen
+const BUFFER   = 0.13;       // Sprungpuffer vor Landung
+const PPM      = 12;         // Pixel pro "Meter"
+
+const BG_PAR  = 0.45;        // Parallaxfaktor der Zerstörungsebene
+const BG_BASE = 505;         // Standhöhe der Mechs / Türme in dieser Ebene
+
+// Fensterpassage: eigenes Hochhaus, Lücke davor und dahinter.
+// 255 ist bewusst gewählt: die maximale Sprunghöhe ist 204 px, plus 44 px
+// Körperhöhe = 248. Bei 255 passt der Läufer bei JEDER Sprunghöhe durchs
+// Fenster und die Decke kappt keinen Absprung. Kleiner wäre unfair.
+const ROOM_H   = 255;        // Korridor- und Fensterhöhe
+const ROOM_TOP = 335;        // Gesamthöhe des Hauses über dem Korridorboden
+const ROOM_CHANCE = 0.30;
+const ROOM_DROP   = [90, 170];   // Korridor liegt so viel tiefer als das Vordach
+const ROOM_GAP_F  = 0.45;        // Lückenfaktor davor (aus der Trefferanalyse)
+
+// Raketeneinschläge: reißen ein Loch ins Dach, über das man springen muss
+const STRIKE_GAP  = [5, 11];   // Sekunden zwischen Einschlägen
+const LONG_CHANCE  = 0.36;     // Anteil extra langer Dächer (Ziele für Raketen)
+const DUD_CHANCE   = 0.45;     // Anteil Raketen, die stecken bleiben statt zu zünden
+const CRANE_CHANCE = 0.16;     // Anteil Kranausleger statt Dach
+const STRIKE_REACT = 0.80;     // garantierte Reaktionszeit NACH dem Einschlag
+const STRIKE_LEADMAX = 2.20;   // Obergrenze der Vorwarnung
+const STRIKE_FALL = 0.45;      // davon die letzten: sichtbare Rakete
+
+// Einsturzhäuser: sacken ab, sobald man sie betritt
+const SINK_CHANCE = 0.16;
+const MAX_SINK    = 130;     // maximale Absackhöhe
+const SINK_DELAY  = 0.16;    // Gnadenfrist nach dem Betreten
+const SINK_ACC    = 700;
+const SINK_VMAX   = 420;
+
+const COL = {
+  skyTop:  '#c3c9d4',
+  skyBot:  '#8e96a4',
+  far:     '#a9b1bd',
+  mid:     '#7c8593',
+  tower:   '#5d6573',
+  mech:    '#4d5563',
+  smoke:   '#9aa3af',
+  bld:     '#23272e',
+  bldEdge: '#333941',
+  room:    '#272d38',
+  roomLit: '#3c434e',
+  win:     '#2f3540',
+  winLit:  '#e6d29b',
+  ink:     '#12151a',
+  crate:   '#333940',
+  crack:   '#7d6a4e'
+};
+
+// ---------------------------------------------------------------- Canvas
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d', { alpha: false });
+ctx.imageSmoothingEnabled = true;
+
+function fit() {
+  const s = Math.min(window.innerWidth / W, window.innerHeight / H);
+  cv.style.width  = Math.round(W * s) + 'px';
+  cv.style.height = Math.round(H * s) + 'px';
+}
+window.addEventListener('resize', fit);
+fit();
+
+// ---------------------------------------------------------------- Helfer
+const rnd   = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+
+function hash(n) {                       // deterministisches Pseudo-Rauschen
+  // Math.imul hält die Multiplikation in int32. Die naive Variante
+  // n*(n*n*15731+789221) erreicht ~8e30, verliert dort jede Genauigkeit
+  // und liefert nach & 0x7fffffff für jede Eingabe über ~3000 exakt 0.
+  n = Math.imul(n ^ (n >>> 15), 0x2c1b3c6d);
+  n ^= n >>> 12;
+  n = Math.imul(n, 0x297a2d39);
+  n ^= n >>> 15;
+  return (n >>> 0) / 4294967296;
+}
+
+// Exakte maximale Sprungweite per Simulation (nur bei der Levelerzeugung)
+// rise > 0  =>  Zieldach liegt höher
+function maxJump(vx, rise) {
+  let y = 0, vy = -JUMP_V, x = 0, t = 0;
+  const dt = 1 / 240;
+  while (t < 3) {
+    vy += (vy < 0 ? G_HOLD : G_FALL) * dt;
+    y  += vy * dt;
+    x  += vx * dt;
+    t  += dt;
+    if (vy > 0 && y >= -rise) return x;
+  }
+  return -1;                              // unerreichbar
+}
+
+// ---------------------------------------------------------------- Klang
+// Alles synthetisiert, keine Audiodateien. Der AudioContext darf erst nach
+// einer Nutzeraktion starten, deshalb wird init() aus press() aufgerufen.
+const A = { ctx: null, master: null, buf: null, windF: null, windG: null, on: true, ready: false };
+
+A.init = function () {
+  if (this.ctx) { if (this.ctx.state === 'suspended') this.ctx.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  try { this.ctx = new AC(); } catch (e) { return; }
+
+  const comp = this.ctx.createDynamicsCompressor();   // fängt Überlagerungen ab
+  comp.threshold.value = -14; comp.ratio.value = 8;
+  this.master = this.ctx.createGain();
+  this.master.gain.value = this.on ? 0.55 : 0;
+  this.master.connect(comp); comp.connect(this.ctx.destination);
+
+  const n = Math.floor(this.ctx.sampleRate * 2);      // Rauschpuffer, einmalig
+  this.buf = this.ctx.createBuffer(1, n, this.ctx.sampleRate);
+  const d = this.buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+
+  // --- Unheimliche Drohne -------------------------------------------------
+  // Grundton, minimal verstimmter Zwilling (langsame Schwebung) und ein
+  // Tritonus darüber. Zwei sehr langsame LFOs lassen Filter und Lautstärke
+  // wabern, ein dritter zieht die Tonhöhe über eine Minute leicht hin und her.
+  this.drone = this.ctx.createGain();
+  this.drone.gain.value = 0;
+  this.drone.connect(this.master);
+
+  const dFilt = this.ctx.createBiquadFilter();
+  dFilt.type = 'lowpass';
+  dFilt.frequency.value = 250;
+  dFilt.Q.value = 5;
+
+  const dAmp = this.ctx.createGain();
+  dAmp.gain.value = 0.55;
+  dFilt.connect(dAmp); dAmp.connect(this.drone);
+
+  const detune = this.ctx.createGain();              // gemeinsame Tonhöhendrift
+  detune.gain.value = 55;
+  const slow = this.ctx.createOscillator();
+  slow.frequency.value = 0.017;                      // ~60 s Periode
+  slow.connect(detune); slow.start();
+
+  [[55, 'sawtooth', 0.50], [55.4, 'sawtooth', 0.44],
+   [77.8, 'triangle', 0.20], [110.3, 'sine', 0.12]].forEach(v => {
+    const o = this.ctx.createOscillator();
+    o.type = v[1];
+    o.frequency.value = v[0];
+    detune.connect(o.detune);
+    const g = this.ctx.createGain();
+    g.gain.value = v[2];
+    o.connect(g); g.connect(dFilt);
+    o.start();
+  });
+
+  const lfoF = this.ctx.createOscillator();          // Filter wabert
+  lfoF.frequency.value = 0.068;
+  const lfoFG = this.ctx.createGain();
+  lfoFG.gain.value = 165;
+  lfoF.connect(lfoFG); lfoFG.connect(dFilt.frequency); lfoF.start();
+
+  const lfoA = this.ctx.createOscillator();          // Lautstärke atmet
+  lfoA.frequency.value = 0.145;
+  const lfoAG = this.ctx.createGain();
+  lfoAG.gain.value = 0.30;
+  lfoA.connect(lfoAG); lfoAG.connect(dAmp.gain); lfoA.start();
+
+  this.windF = this.ctx.createBiquadFilter();         // Fahrtwind, dauerhaft
+  this.windF.type = 'bandpass';
+  this.windF.frequency.value = 400; this.windF.Q.value = 0.7;
+  this.windG = this.ctx.createGain(); this.windG.gain.value = 0;
+  const s = this.ctx.createBufferSource();
+  s.buffer = this.buf; s.loop = true;
+  s.connect(this.windF); this.windF.connect(this.windG); this.windG.connect(this.master);
+  s.start();
+
+  this.ready = true;
+};
+
+// Zielknoten inklusive optionaler Stereo-Position (-1 links … +1 rechts)
+function out(o) {
+  if (o.pan === undefined || !A.ctx.createStereoPanner) return A.master;
+  const sp = A.ctx.createStereoPanner();
+  sp.pan.value = clamp(o.pan, -1, 1);
+  sp.connect(A.master);
+  return sp;
+}
+
+// Bildschirmposition eines Hintergrundereignisses als Panoramawert
+function panOf(lx, par) {
+  return clamp(((lx - camX * par) / W) * 2 - 1, -1, 1);
+}
+
+function env(g, t, atk, peak, dur) {
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.linearRampToValueAtTime(peak, t + atk);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+}
+
+function nz(o) {                       // gefilterter Rauschimpuls
+  if (!A.ready || !A.on) return;
+  const c = A.ctx, t = c.currentTime + (o.delay || 0);
+  const s = c.createBufferSource();
+  s.buffer = A.buf; s.loop = true;
+  s.playbackRate.value = o.rate || 1;
+  const f = c.createBiquadFilter();
+  f.type = o.type || 'bandpass';
+  f.frequency.setValueAtTime(o.freq, t);
+  f.Q.value = o.q || 1;
+  if (o.sweep) f.frequency.exponentialRampToValueAtTime(o.sweep, t + o.dur);
+  const g = c.createGain();
+  env(g, t, o.atk || 0.003, o.vol, o.dur);
+  s.connect(f); f.connect(g); g.connect(out(o));
+  s.start(t); s.stop(t + o.dur + 0.05);
+}
+
+function tn(o) {                       // Oszillator mit Tonhöhenverlauf
+  if (!A.ready || !A.on) return;
+  const c = A.ctx, t = c.currentTime + (o.delay || 0);
+  const osc = c.createOscillator();
+  osc.type = o.wave || 'sine';
+  osc.frequency.setValueAtTime(o.f0, t);
+  if (o.f1) osc.frequency.exponentialRampToValueAtTime(o.f1, t + o.dur);
+  const g = c.createGain();
+  env(g, t, o.atk || 0.004, o.vol, o.dur);
+  osc.connect(g); g.connect(out(o));
+  osc.start(t); osc.stop(t + o.dur + 0.05);
+}
+
+const sfx = {
+  step()   { nz({ freq: rnd(850, 1500), q: 1.5, vol: 0.030, dur: 0.05 }); },
+
+  jump()   { tn({ wave: 'square', f0: 200, f1: 640, dur: 0.10, vol: 0.045 });
+             nz({ freq: 800, sweep: 2600, q: 0.8, vol: 0.030, dur: 0.15 }); },
+
+  land()   { tn({ f0: 155, f1: 52, dur: 0.14, vol: 0.085 });
+             nz({ type: 'lowpass', freq: 700, vol: 0.045, dur: 0.10 }); },
+
+  crate()  { nz({ freq: 540, sweep: 170, q: 0.9, vol: 0.120, dur: 0.30 });
+             tn({ wave: 'triangle', f0: 115, f1: 42, dur: 0.22, vol: 0.095 }); },
+
+  glass()  { if (!A.ready || !A.on) return;
+             nz({ type: 'highpass', freq: 2800, vol: 0.095, dur: 0.50 });
+             for (let i = 0; i < 8; i++) {
+               const d = i * rnd(0.012, 0.075);
+               tn({ f0: rnd(1900, 5400), f1: rnd(1400, 3000), dur: rnd(0.05, 0.18),
+                    vol: 0.030, atk: 0.002, delay: d });
+             } },
+
+  bonk()   { tn({ wave: 'triangle', f0: 270, f1: 95, dur: 0.09, vol: 0.055 }); },
+
+  flap()   { for (let i = 0; i < 4; i++)
+               nz({ freq: rnd(300, 700), q: 1.1, vol: 0.022, dur: 0.07, delay: i * 0.085 }); },
+
+  thud()   { tn({ f0: 190, f1: 48, dur: 0.24, vol: 0.13 });
+             nz({ type: 'lowpass', freq: 620, sweep: 140, vol: 0.10, dur: 0.35 }); },
+
+  clang()  { tn({ wave: 'square', f0: 620, f1: 180, dur: 0.22, vol: 0.07 });
+             tn({ f0: 1450, f1: 700, dur: 0.30, vol: 0.045 });
+             nz({ type: 'bandpass', freq: 2400, q: 2.2, vol: 0.075, dur: 0.35 }); },
+
+  incoming(d) { tn({ wave: 'sawtooth', f0: 1500, f1: 240, dur: d, vol: 0.045, atk: 0.02 }); },
+
+  impact() { nz({ type: 'lowpass', freq: 900, sweep: 90, q: 0.7, vol: 0.20, dur: 0.85, atk: 0.004 });
+             tn({ f0: 130, f1: 32, dur: 0.55, vol: 0.16 });
+             nz({ type: 'highpass', freq: 2200, vol: 0.07, dur: 0.30 }); },
+
+  die()    { tn({ wave: 'sawtooth', f0: 430, f1: 42, dur: 0.75, vol: 0.100 });
+             nz({ type: 'lowpass', freq: 1900, sweep: 190, vol: 0.090, dur: 0.75 }); },
+
+  // Ferner Bombeneinschlag: dumpf, weil die Höhen über die Distanz wegfallen
+  boom(v, pan) {
+    nz({ type: 'lowpass', freq: 300, sweep: 65, q: 0.6, vol: 0.075 * v, dur: 1.05, atk: 0.025, pan });
+    tn({ f0: 76, f1: 26, dur: 0.75, vol: 0.070 * v, atk: 0.02, pan });
+  },
+
+  // Einsturz eines Hochhauses: länger, tiefer, mit nachrieselndem Schutt
+  rumble(v, pan) {
+    nz({ type: 'lowpass', freq: 220, sweep: 45, q: 0.5, vol: 0.085 * v, dur: 2.1, atk: 0.16, pan });
+    tn({ f0: 48, f1: 19, dur: 1.7, vol: 0.075 * v, atk: 0.12, pan });
+    for (let i = 0; i < 5; i++) {
+      nz({ type: 'bandpass', freq: rnd(700, 1900), q: 1.6,
+           vol: 0.020 * v, dur: rnd(0.2, 0.5), delay: 0.25 + i * rnd(0.12, 0.34), pan });
+    }
+  },
+
+  stomp(v, pan) {
+    tn({ f0: 58, f1: 25, dur: 0.30, vol: 0.065 * v, atk: 0.008, pan });
+    nz({ type: 'lowpass', freq: 175, vol: 0.026 * v, dur: 0.26, pan });
+  }
+};
+
+function muteToggle() {
+  A.on = !A.on;
+  if (A.master) A.master.gain.value = A.on ? 0.55 : 0;
+}
+
+// ---------------------------------------------------------------- Zustand
+let state = 'title';       // 'title' | 'play' | 'falling' | 'over'
+let buildings, crates, parts, camX, shake, bid, best = 0;
+let p, hold = false, coyote = 0, buffered = -1, deadT = 0, dustT = 0, flash = 0, finalM = 0;
+
+// Hintergrund-Ebene
+let mechs = [], towers = [], bombs = [], blasts = [], strikes = [], birds = [];
+let strikeT = 6;
+let towerX = 0, mechT = 2, bombT = 3, tid = 0;
+
+function reset() {
+  buildings = []; crates = []; parts = []; birds = [];
+  camX = 0; shake = 0; bid = 0; deadT = 0; flash = 0;
+  coyote = 0; buffered = -1; dustT = 0;
+
+  buildings.push({ id: bid++, x: -400, w: 1500, top: 380 });
+  p = { x: 0, y: 380, vy: 0, vx: VX_START, ph: 0, ground: true, ang: 0, step: 0 };
+  camX = p.x - PX;
+
+  while (buildings[buildings.length - 1].x + buildings[buildings.length - 1].w < camX + W + 1700) genNext();
+
+  mechs = []; towers = []; bombs = []; blasts = []; strikes = []; strikeT = rnd(5, 9);
+  towerX = camX * BG_PAR - 400; mechT = rnd(1, 4); bombT = rnd(2, 5); tid = 0;
+  fillTowers();
+}
+
+// ---------------------------------------------------------------- Levelbau
+function genNext() {
+  const last = buildings[buildings.length - 1];
+  const vx   = Math.max(p ? p.vx : VX_START, VX_START);
+  const diff = clamp(((p ? p.vx : VX_START) - VX_START) / (VX_MAX - VX_START), 0, 1);
+
+  // Bei einem Einsturzhaus als Vorgänger vom vollständig abgesackten Dach
+  // ausgehen – sonst wird die nächste Lücke unerreichbar, wenn man zögert.
+  const fromTop = last.top + (last.sink ? MAX_SINK : 0);
+
+  const wantRoom = !last.room && !last.sink && bid > 2 &&
+                   fromTop <= 380 && Math.random() < ROOM_CHANCE;
+
+  let top = fromTop, gap = 140;
+
+  if (wantRoom) {
+    // Der Korridor liegt tiefer: man fällt ins Fenster statt hineinzuspringen.
+    // Das ist die mit Abstand tolerantestse Variante (Absprungfenster 190–360 px).
+    top = clamp(fromTop + rnd(ROOM_DROP[0], ROOM_DROP[1]), 300, 470);
+    gap = clamp(maxJump(vx, fromTop - top) * ROOM_GAP_F, 90, 520);
+  } else {
+    for (let tries = 0; tries < 14; tries++) {
+      // Ohne Rückstellterm driftet die Skyline an den unteren Anschlag:
+      // 53 % aller Dächer landeten auf y=470. Der Term zieht sanft zur Mitte.
+      const wish = clamp(rnd(-160, 115 * (1 - 0.25 * diff)) + (fromTop - 300) * 0.65, -200, 150);
+      const t    = clamp(fromTop - wish, 150, 470);
+      const rise = fromTop - t;
+      const md   = maxJump(vx, rise);
+      if (md < 0) continue;
+
+      let f = 0.34 + Math.random() * 0.30 + 0.16 * diff;
+      let g = md * Math.min(f, 0.80);
+
+      if (Math.random() < 0.13 && Math.abs(rise) < 45 && !last.room) g = 0;
+      else g = clamp(g, 75, 520);
+
+      // Aus einem Korridor kann man an der Decke hängend austreten, ohne
+      // springen zu können. Die Lücke danach muss auch das noch verzeihen.
+      if (last.room) g = Math.min(g, exitReach(vx, rise) * 0.85);
+
+      top = t; gap = g;
+      break;
+    }
+  }
+
+  const b = { id: bid++, x: last.x + last.w + gap, w: rnd(230, 640), top };
+
+  // Gelegentlich ein extra langes Dach. Das sind die Ziele für Raketen:
+  // nur dort bleibt hinter dem Loch genug Landefläche für einen kurzen Sprung.
+  if (!wantRoom && Math.random() < LONG_CHANCE) b.w = rnd(720, 1040);
+
+  // Kranausleger statt Dach – nur in luftiger Höhe, damit es lesbar bleibt
+  if (!wantRoom && b.top >= 150 && b.top <= 340 && Math.random() < CRANE_CHANCE) {
+    b.crane = true;
+    b.w = rnd(320, 580);
+    b.mast = rnd(0.28, 0.46);      // Position des Turms auf dem Ausleger
+    b.hook = rnd(0.62, 0.88);      // Position der Hakenkatze
+  }
+
+  if (wantRoom) {
+    b.w    = rnd(280, 450);
+    b.room = { x1: b.x, x2: b.x + b.w, glass: [true, true] };
+  } else if (!last.room && !b.crane && b.w > 300 && top <= 350 &&
+             bid > 3 && Math.random() < SINK_CHANCE) {
+    b.sink = { on: false, t: 0, v: 0, total: 0, d: 0, puffT: 0, rumbleT: 0 };
+  }
+
+  buildings.push(b);
+
+  // Kisten – nie direkt an den Kanten, damit jede Lücke fair bleibt
+  if (b.room) {
+    if (Math.random() < 0.5) {
+      crates.push({ x: rnd(b.x + 110, b.x + b.w - 80), y: b.top,
+                    w: 34, h: rnd(26, 42), alive: true });
+    }
+  } else if (!b.sink && !b.crane && b.w > 320 && Math.random() < 0.55) {
+    const n = Math.random() < 0.28 ? 2 : 1;
+    for (let i = 0; i < n; i++) {
+      crates.push({
+        x: b.x + rnd(150, b.w - 110), y: b.top,
+        w: 34, h: rnd(26, 46), alive: true
+      });
+    }
+  }
+
+  // Tauben auf dem Dach
+  if (!b.room && Math.random() < 0.55) {
+    const n = 1 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < n; i++) {
+      birds.push({ x: b.x + rnd(40, b.w - 40), y: b.top - 5,
+                   vx: 0, vy: 0, ph: Math.random() * 6.28, fly: false });
+    }
+  }
+}
+
+// Reichweite im schlimmsten Ausstiegsfall: an der Korridordecke hängend,
+// ohne Sprung aus dem Fenster getragen.
+function exitReach(vx, rise) {
+  let y = -(ROOM_H - 44), vy = 30, x = 0, t = 0;
+  const dt = 1 / 240;
+  while (t < 3) {
+    vy += G_FALL * dt; y += vy * dt; x += vx * dt; t += dt;
+    if (y >= -rise) return x;
+  }
+  return 0;
+}
+
+// Raketeneinschlag anfordern. Das Ziel liegt weit genug voraus, dass das
+// Loch entsteht, bevor man dort ist, und nicht so nah an einer Dachkante,
+// dass daraus eine unspringbare Doppellücke wird.
+function trySpawnStrike() {
+  const hw   = clamp(maxJump(p.vx, 0) * 0.20, 80, 150);
+  // Landefläche mit dem Tempo skalieren: bei 330 px/s trägt ein Tippsprung
+  // nur 178 px, da wären feste 150 px unverhältnismäßig.
+  const strip = clamp(p.vx * 0.20, 80, 160);
+  // Der Zielpunkt darf anfangs außerhalb des Bildes liegen und hereinscrollen.
+  // 1,15 · vx minus 0,75 s Vorwarnung lässt garantiert 0,4 s Reaktionszeit
+  // NACH dem Einschlag – bei Vollgas sieht man nur 0,74 s weit.
+  const lo = p.x + Math.max(620, p.vx * 1.35);
+  const hi = p.x + Math.max(1100, p.vx * 2.50);
+
+  const cand = [];
+  for (let i = 0; i < buildings.length - 1; i++) {
+    const b = buildings[i], nx = buildings[i + 1];
+    if (b.room || b.sink || b.crane || nx.room || b.w < 470) continue;
+
+    const gapAfter = nx.x - (b.x + b.w);
+    const reach    = maxJump(p.vx, b.top - nx.top) * 0.90;
+    if (reach < 0) continue;
+
+    // Zwei Bedingungen halten die Lage lösbar:
+    // links  – vom Lochrand aus muss ein Sprung bis zum nächsten Haus reichen,
+    // rechts – hinter dem Loch bleibt tempoabhängige Landefläche.
+    const rimMin = Math.max(b.x + 90, b.x + b.w + gapAfter - reach);
+    const rimMax = b.x + b.w - hw - strip;
+    if (rimMax <= rimMin) continue;
+
+    const a0 = Math.max(rimMin + hw / 2, lo);
+    const a1 = Math.min(rimMax + hw / 2, hi);
+    if (a1 > a0) cand.push([a0, a1]);
+  }
+  if (!cand.length) return false;
+
+  const c  = cand[Math.floor(Math.random() * cand.length)];
+  const ix = rnd(c[0], c[1]);
+  const b  = buildingAt(ix);
+  if (!b) return false;
+
+  // Die Vorwarnung ergibt sich aus der Entfernung: der Einschlag fällt immer
+  // genau STRIKE_REACT vor der Ankunft. Dadurch bleibt die Reaktionszeit
+  // konstant, egal wie weit voraus das Ziel liegt.
+  const dur = clamp((ix - p.x) / Math.max(p.vx, 1) - STRIKE_REACT, STRIKE_FALL + 0.05, STRIKE_LEADMAX);
+
+  strikes.push({ x: ix, y: -80, top: b.top, hw, t: 0, q: -1, dur, whistle: false });
+  return true;
+}
+
+function strikeHit(s) {
+  const b = buildingAt(s.x);
+
+  // Blindgänger: die Rakete bohrt sich ins Dach und bleibt als Hindernis
+  // stecken. Nicht tödlich, aber sie kostet die Hälfte des Tempos.
+  if (b && !b.room && !b.sink && Math.random() < DUD_CHANCE) {
+    crates.push({ x: s.x - 17, y: b.top, w: 34, h: rnd(74, 96),
+                  alive: true, dud: true, tilt: rnd(-0.34, 0.34) });
+    blast(s.x, b.top - 14, 60, 1);
+    shake += 13;
+    sfx.thud();
+    puff(s.x, b.top, 20, 190, '#cfd6e0', 7, { drift: 0, g: [180, 600], life: [0.4, 1.0] });
+    puff(s.x, b.top - 20, 10, 90, COL.smoke, 9, { drift: 0, g: [-70, 10], life: [0.8, 1.8] });
+    return;
+  }
+
+  if (b && !b.room && !b.sink &&
+      s.x - b.x > s.hw / 2 + 30 && b.x + b.w - s.x > s.hw / 2 + 30) {
+    const i = buildings.indexOf(b);
+    const l = { id: bid++, x: b.x,             w: (s.x - s.hw / 2) - b.x,          top: b.top };
+    const r = { id: bid++, x: s.x + s.hw / 2,  w: (b.x + b.w) - (s.x + s.hw / 2),  top: b.top };
+    buildings.splice(i, 1, l, r);
+    for (let k = crates.length - 1; k >= 0; k--) {
+      const c = crates[k];
+      if (c.x + c.w > l.x + l.w && c.x < r.x) crates.splice(k, 1);
+    }
+    for (let k = birds.length - 1; k >= 0; k--) {
+      if (birds[k].x > l.x + l.w && birds[k].x < r.x) birds.splice(k, 1);
+    }
+  }
+  blast(s.x, s.top - 20, 135, 1);
+  flash = Math.max(flash, 0.30);
+  shake += 24;
+  sfx.impact();
+  puff(s.x, s.top,      46, 350, '#cfd6e0', 9,  { drift: 0, g: [200, 700], life: [0.5, 1.4] });
+  puff(s.x, s.top - 30, 26, 150, COL.smoke, 11, { drift: 0, g: [-90, 20],  life: [1.0, 2.4] });
+}
+
+// Tauben stieben auf, wenn man durchläuft
+function updateBirds(dt) {
+  for (let i = birds.length - 1; i >= 0; i--) {
+    const q = birds[i];
+    q.ph += dt * (q.fly ? 17 : 2.2);
+    if (!q.fly) {
+      if (state === 'play' && q.x - p.x < 145 && q.x - p.x > -40) {
+        q.fly = true;
+        q.vx = rnd(-40, 130);
+        q.vy = -rnd(130, 250);
+        if (Math.random() < 0.34) sfx.flap();
+      }
+    } else {
+      q.vy += 130 * dt;                 // trudelt nach oben aus
+      q.x  += q.vx * dt;
+      q.y  += q.vy * dt;
+    }
+    if (q.x < camX - 200 || q.y < -80) birds.splice(i, 1);
+  }
+  if (birds.length > 40) birds.splice(0, birds.length - 40);
+}
+
+function updateStrikes(dt) {
+  strikeT -= dt;
+  if (strikeT <= 0) {
+    // Bei Fehlschlag bald neu versuchen statt die volle Pause zu verstreichen
+    strikeT = trySpawnStrike() ? rnd(STRIKE_GAP[0], STRIKE_GAP[1]) : 0.7;
+  }
+  for (let i = strikes.length - 1; i >= 0; i--) {
+    const s = strikes[i];
+    s.t += dt;
+    s.q = (s.t - (s.dur - STRIKE_FALL)) / STRIKE_FALL;
+
+    if (s.q >= 0) {
+      if (!s.whistle) { s.whistle = true; sfx.incoming(STRIKE_FALL); }
+      s.y = -80 + (s.top + 80) * Math.min(s.q, 1);
+      if (Math.random() < 0.55) {
+        puff(s.x + rnd(-5, 5), s.y - 18, 1, 30, '#cdd4de', 5,
+             { drift: 0, g: [-20, 50], life: [0.3, 0.9] });
+      }
+    }
+    if (s.t >= s.dur) { strikeHit(s); strikes.splice(i, 1); }
+  }
+}
+
+// Einsturzhäuser absacken lassen und den Spieler mitnehmen
+function updateSink(dt) {
+  for (const b of buildings) {
+    const s = b.sink;
+    if (!s || !s.on) continue;
+    s.d = 0;
+    s.t += dt;
+    if (s.t < SINK_DELAY || s.total >= MAX_SINK) continue;
+
+    s.v = Math.min(s.v + SINK_ACC * dt, SINK_VMAX);
+    let d = s.v * dt;
+    if (s.total + d > MAX_SINK) d = MAX_SINK - s.total;
+    s.total += d; s.d = d; b.top += d;
+
+    // Der Spieler sackt mit ab, statt frei zu fallen – sonst ruckelt es
+    if (p.ground && p.x >= b.x && p.x <= b.x + b.w) p.y += d;
+
+    if (shake < 7) shake = 7;
+    s.puffT -= dt;
+    if (s.puffT <= 0) {
+      s.puffT = 0.045;
+      puff(b.x + rnd(0, b.w), b.top, 2, 70, COL.smoke, 7,
+           { drift: 0, g: [-50, 70], life: [0.5, 1.5] });
+    }
+    s.rumbleT -= dt;
+    if (s.rumbleT <= 0) { s.rumbleT = 0.20; sfx.boom(0.4); }
+  }
+}
+
+function buildingAt(x) {
+  for (let i = 0; i < buildings.length; i++) {
+    const b = buildings[i];
+    if (x >= b.x && x <= b.x + b.w) return b;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- Partikel
+function puff(x, y, n, spread, col, sz, o) {
+  o = o || {};
+  const par   = o.par   === undefined ? 1 : o.par;
+  const drift = o.drift === undefined ? -p.vx * 0.18 : o.drift;
+  const gr    = o.g     || [0, 260];
+  const lf    = o.life  || [0.3, 0.8];
+  for (let i = 0; i < n; i++) {
+    parts.push({
+      x, y, par,
+      vx: rnd(-spread, spread) + drift,
+      vy: rnd(-spread, spread * 0.4),
+      life: 0, max: rnd(lf[0], lf[1]),
+      s: rnd(sz * 0.5, sz), col: col || '#b9c0cb', g: rnd(gr[0], gr[1])
+    });
+  }
+  if (parts.length > 700) parts.splice(0, parts.length - 700);
+}
+
+function blast(x, y, r, par) {
+  blasts.push({ x, y, par, max: r, life: 0, dur: rnd(0.35, 0.55) });
+}
+
+// ------------------------------------------------- Hintergrund: Weltuntergang
+function pushTower(lx) {
+  towers.push({
+    id: tid++, lx, w: rnd(48, 104), h: rnd(150, 340),
+    ang: 0, av: 0, dir: 1, down: false
+  });
+}
+
+function fillTowers() {
+  const off = camX * BG_PAR;
+  while (towerX < off + W + 700) { towerX += rnd(230, 820); pushTower(towerX); }
+
+  // Nachschub, falls die Mechs die Ebene leergeräumt haben – immer außerhalb
+  // des Sichtfelds, damit nie ein Turm sichtbar "aufpoppt".
+  for (let g = 0; towers.length < 5 && g < 6; g++) {
+    const x = off + W + rnd(60, 800);
+    if (!towers.some(t => Math.abs(t.lx - x) < 190)) pushTower(x);
+  }
+}
+
+function topple(t, dir) {
+  if (t.down) return;
+  t.down = true;
+  t.dir  = dir;
+  t.av   = rnd(0.25, 0.6);
+  blast(t.lx + t.w / 2, BG_BASE - t.h * rnd(0.3, 0.8), rnd(50, 90), BG_PAR);
+  sfx.boom(onScreen(t.lx) ? 0.5 : 0.2, panOf(t.lx, BG_PAR));
+  puff(t.lx + t.w / 2, BG_BASE - t.h * 0.6, 16, 70, COL.smoke, 9,
+       { par: BG_PAR, drift: 0, g: [-40, 30], life: [1.0, 2.4] });
+  if (onScreen(t.lx)) shake += 5;
+}
+
+function onScreen(lx) {
+  const x = lx - camX * BG_PAR;
+  return x > -260 && x < W + 260;
+}
+
+function spawnMech() {
+  const dir = Math.random() < 0.75 ? 1 : -1;
+  const h   = rnd(300, 440);
+  mechs.push({
+    lx: camX * BG_PAR + W + rnd(150, 700),
+    h, dir,
+    spd: rnd(55, 120) * dir,
+    ph: Math.random() * 6.28,
+    step: -99
+  });
+}
+
+function updateBG(dt) {
+  const off = camX * BG_PAR;
+  fillTowers();
+
+  // --- Mechs
+  mechT -= dt;
+  if (mechT <= 0) { mechT = rnd(6, 15); if (mechs.length < 2) spawnMech(); }
+
+  for (let i = mechs.length - 1; i >= 0; i--) {
+    const m = mechs[i];
+    m.lx += m.spd * dt;
+    m.ph += dt * (2.2 + Math.abs(m.spd) / 260);
+
+    // Fußaufsatz -> Staub + kurzer Ruck
+    const st = Math.floor(m.ph / Math.PI);
+    if (st !== m.step) {
+      if (m.step !== -99 && onScreen(m.lx)) {
+        puff(m.lx + rnd(-m.h * 0.2, m.h * 0.2), BG_BASE, 9, 45, COL.smoke, 8,
+             { par: BG_PAR, drift: 0, g: [-30, 20], life: [0.7, 1.6] });
+        shake += 2.5;
+        sfx.stomp(1, panOf(m.lx, BG_PAR));
+      }
+      m.step = st;
+    }
+
+    // Türme im Weg umtreten
+    for (const t of towers) {
+      if (t.down) continue;
+      const c = t.lx + t.w / 2;
+      if (Math.abs(c - m.lx) < m.h * 0.30) topple(t, m.dir);
+    }
+
+    if (m.lx - off < -900 || m.lx - off > W + 1400) mechs.splice(i, 1);
+  }
+
+  // --- Türme
+  for (let i = towers.length - 1; i >= 0; i--) {
+    const t = towers[i];
+    if (t.down) {
+      t.av  += 2.4 * dt;
+      t.ang += t.av * dt;
+      if (t.ang > 1.35) {
+        const ix = t.lx + t.w / 2 + t.dir * t.h * 0.5;
+        puff(ix, BG_BASE, 26, 120, COL.smoke, 11,
+             { par: BG_PAR, drift: 0, g: [-70, 40], life: [1.4, 3.2] });
+        if (onScreen(t.lx)) shake += 6;
+        sfx.rumble(onScreen(t.lx) ? 1 : 0.4, panOf(t.lx, BG_PAR));
+        towers.splice(i, 1);
+        continue;
+      }
+    }
+    if (t.lx - off < -700) towers.splice(i, 1);
+  }
+
+  // --- Bomben
+  bombT -= dt;
+  if (bombT <= 0) {
+    bombT = rnd(2.5, 7);
+    bombs.push({
+      lx: off + rnd(-150, W + 250), y: -70,
+      vx: rnd(-50, 50), vy: rnd(230, 400)
+    });
+  }
+
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    const b = bombs[i];
+    b.lx += b.vx * dt;
+    b.vy += 260 * dt;
+    b.y  += b.vy * dt;
+
+    let hit = b.y >= BG_BASE, tgt = null;
+    for (const t of towers) {
+      if (t.down) continue;
+      if (b.lx > t.lx && b.lx < t.lx + t.w && b.y >= BG_BASE - t.h) { hit = true; tgt = t; break; }
+    }
+
+    if (hit) {
+      blast(b.lx, b.y, rnd(45, 95), BG_PAR);
+      puff(b.lx, b.y, 14, 90, COL.smoke, 8,
+           { par: BG_PAR, drift: 0, g: [-60, 30], life: [0.9, 2.2] });
+      if (onScreen(b.lx)) shake += 3.5;
+      sfx.boom(onScreen(b.lx) ? 0.85 : 0.35, panOf(b.lx, BG_PAR));
+      if (tgt) topple(tgt, Math.random() < 0.5 ? 1 : -1);
+      bombs.splice(i, 1);
+    } else if (b.y > H + 200) bombs.splice(i, 1);
+  }
+
+  // --- Explosionsringe
+  for (let i = blasts.length - 1; i >= 0; i--) {
+    blasts[i].life += dt;
+    if (blasts[i].life >= blasts[i].dur) blasts.splice(i, 1);
+  }
+}
+
+// ---------------------------------------------------------------- Eingabe
+function jump() {
+  if (state !== 'play') return;
+  if (p.ground || coyote > 0) {
+    p.vy = -JUMP_V; p.ground = false; coyote = 0; buffered = -1;
+    sfx.jump();
+    puff(p.x, p.y, 7, 90, '#c6ccd6', 6);
+  } else {
+    buffered = BUFFER;
+  }
+}
+
+const RETRY = 0.6;           // Sperrfrist, damit der Todes-Tastendruck nicht sofort neu startet
+
+function press() {
+  A.init();
+  hold = true;
+  if (state === 'title') {
+    reset(); state = 'play';
+  } else if (state === 'over' || state === 'falling') {
+    if (deadT > RETRY) { reset(); state = 'play'; }
+  } else {
+    jump();
+  }
+}
+function release() { hold = false; }
+
+addEventListener('keydown', e => {
+  if (e.code === 'KeyM') { e.preventDefault(); if (!e.repeat) muteToggle(); return; }
+  if (e.code === 'KeyR') {
+    e.preventDefault();
+    if (!e.repeat && state !== 'title') { reset(); state = 'play'; }
+    return;
+  }
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyX') {
+    e.preventDefault();
+    if (!e.repeat) press();
+  }
+});
+addEventListener('keyup', e => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyX') release();
+});
+cv.addEventListener('mousedown', e => { e.preventDefault(); press(); });
+addEventListener('mouseup', release);
+cv.addEventListener('touchstart', e => { e.preventDefault(); press(); }, { passive: false });
+addEventListener('touchend', e => { e.preventDefault(); release(); }, { passive: false });
+
+// ---------------------------------------------------------------- Logik
+function die(crash) {
+  state = 'falling';
+  deadT = 0;
+  finalM = Math.max(0, Math.floor(p.x / PPM));   // Ergebnis sofort festschreiben
+  best   = Math.max(best, finalM);
+  sfx.die();
+  flash = crash ? 1 : 0.35;
+  shake += crash ? 24 : 8;
+  if (crash) { p.vx = -140; p.vy = -340; }
+  else       { p.vx *= 0.35; p.vy = Math.min(p.vy, -120); }
+  puff(p.x, p.y - 20, 22, 220, '#cfd5df', 8);
+}
+
+function update(dt) {
+  shake *= Math.pow(0.0015, dt);
+  shake  = Math.min(shake, 30);
+  flash  = Math.max(0, flash - dt * 2.2);
+
+  updateBG(dt);
+
+  // Fahrtwind folgt dem Tempo – macht das Beschleunigen hörbar
+  if (A.ready) {
+    const tgt = (state === 'play') ? clamp((p.vx - VX_START) / (VX_MAX - VX_START), 0, 1) : 0;
+    const g   = A.windG.gain;
+    g.value += (tgt * 0.075 - g.value) * Math.min(1, dt * 2.5);
+    A.windF.frequency.value = 360 + tgt * 950;
+
+    // Drohne: im Spiel etwas präsenter als im Menü
+    const dl = (state === 'play') ? 0.055 : 0.032;
+    A.drone.gain.value += (dl - A.drone.gain.value) * Math.min(1, dt * 0.5);
+  }
+
+  // Muss auch im Zustand 'over' weiterlaufen, sonst friert die Neustart-Abfrage ein.
+  if (state === 'over') deadT += dt;
+
+  if (state === 'play' || state === 'falling') {
+    const alive = state === 'play';
+
+    if (alive) {
+      updateStrikes(dt);
+      updateSink(dt);
+      updateBirds(dt);
+      p.vx = Math.min(VX_MAX, p.vx + VX_ACC * dt);
+      if (buffered > 0) buffered -= dt;
+      if (coyote  > 0) coyote  -= dt;
+    } else {
+      deadT += dt;
+      p.ang += dt * (p.vx < 0 ? -7 : 7);
+    }
+
+    const px0 = p.x, py0 = p.y;
+    p.x += p.vx * dt;
+    p.vy += ((p.vy < 0 && hold && alive) ? G_HOLD : G_FALL) * dt;
+    p.y += p.vy * dt;
+    p.ph += p.vx * dt / 26;
+
+    if (alive) {
+      const b     = buildingAt(p.x);
+      const bPrev = buildingAt(px0);
+      let ground  = false;
+
+      if (b) {
+        if (p.y >= b.top) {
+          if (py0 <= b.top + 0.5) {              // Landung auf dem Dach
+            if (!p.ground && p.vy > 400) { sfx.land(); puff(p.x, b.top, 9, 70, '#c6ccd6', 6); shake += 4; }
+            p.y = b.top; p.vy = 0; ground = true;
+            if (buffered > 0) { buffered = -1; p.vy = -JUMP_V; ground = false; puff(p.x, p.y, 6, 80, '#c6ccd6', 5); }
+          } else if (b.crane) {
+            // Ein Ausleger hat keine Fassade – wer zu tief ankommt, fällt
+            // einfach darunter durch, statt an einer unsichtbaren Wand zu sterben.
+          } else if (bPrev !== b) {              // seitlich in die Wand
+            p.x = b.x - 6; die(true);
+          } else {
+            p.y = b.top; p.vy = 0; ground = true;
+          }
+        }
+      }
+
+      if (p.ground && !ground) coyote = COYOTE;
+      p.ground = ground;
+
+      // Kisten
+      for (const c of crates) {
+        if (!c.alive) continue;
+        if (p.x + 11 > c.x && p.x - 11 < c.x + c.w &&
+            p.y > c.y - c.h && p.y - 44 < c.y) {
+          c.alive = false;
+          if (c.dud) {
+            p.vx = Math.max(300, p.vx * 0.50);
+            sfx.clang(); shake += 20;
+            puff(c.x + c.w / 2, c.y - c.h / 2, 26, 260, '#6a7180', 7);
+            puff(c.x + c.w / 2, c.y - c.h / 2, 8, 150, COL.winLit, 4);
+          } else {
+            p.vx = Math.max(300, p.vx * 0.62);
+            sfx.crate(); shake += 13;
+            puff(c.x + c.w / 2, c.y - c.h / 2, 20, 200, COL.crate, 7);
+          }
+        }
+      }
+
+      // Einsturzhaus auslösen, sobald man draufsteht
+      if (b && b.sink && !b.sink.on && p.ground) b.sink.on = true;
+
+      // Fensterpassage. Beim Ausstieg steht man bereits über der Lücke,
+      // buildingAt(p.x) ist dann leer – deshalb auch die vorige Position prüfen.
+      const rb = (b && b.room) ? b : ((bPrev && bPrev.room) ? bPrev : null);
+      if (rb) {
+        const r = rb.room, lim = rb.top - ROOM_H;   // Fensteroberkante = Korridordecke
+        for (let k = 0; k < 2; k++) {
+          const wx = k === 0 ? r.x1 : r.x2;
+          if (px0 < wx && p.x >= wx) {
+            if (p.y - 44 < lim) {                 // zu hoch: Aufprall an der Fassade
+              p.x = wx - 10; die(true); break;
+            }
+            if (r.glass[k]) {                     // Scheibe durchbrochen
+              r.glass[k] = false;
+              sfx.glass(); shake += 9;
+              puff(wx, rb.top - ROOM_H * 0.55, 30, 210, '#dfe8f2', 6, { life: [0.4, 1.2] });
+            }
+          }
+        }
+        // Die Decke begrenzt die Sprunghöhe im Korridor. Dadurch ist das
+        // Ausstiegsfenster von innen immer erreichbar – man kann sich nicht
+        // selbst einsperren.
+        if (state === 'play' && p.x > r.x1 && p.x < r.x2 && p.y - 44 < lim) {
+          p.y = lim + 44;
+          if (p.vy < 0) { p.vy = 30; sfx.bonk(); shake += 3; puff(p.x, lim, 5, 50, '#9aa3af', 4); }
+        }
+      }
+
+      // Schritte – der Takt kommt direkt aus der Laufanimation
+      if (p.ground) {
+        const st = Math.floor(p.ph / Math.PI);
+        if (st !== p.step) { p.step = st; sfx.step(); puff(p.x - 8, p.y, 2, 30, '#b4bcc7', 4); }
+      }
+
+      if (p.y > H + 260) die(false);
+    }
+
+    camX = p.x - PX;
+
+    while (buildings[buildings.length - 1].x + buildings[buildings.length - 1].w < camX + W + 1700) genNext();
+    while (buildings.length && buildings[0].x + buildings[0].w < camX - 300) buildings.shift();
+    for (let i = crates.length - 1; i >= 0; i--) if (crates[i].x < camX - 300) crates.splice(i, 1);
+
+    if (state === 'falling' && (deadT > 1.5 || p.y > H + 400)) {
+      state = 'over';
+    }
+  }
+
+  // Partikel
+  for (let i = parts.length - 1; i >= 0; i--) {
+    const q = parts[i];
+    q.life += dt;
+    if (q.life >= q.max) { parts.splice(i, 1); continue; }
+    q.vy += q.g * dt;
+    q.x += q.vx * dt;
+    q.y += q.vy * dt;
+  }
+}
+
+// ---------------------------------------------------------------- Zeichnen
+function skyline(off, colFill, base, hMin, hMax, step, seed) {
+  ctx.fillStyle = colFill;
+  const start = Math.floor(off / step) * step;
+  for (let i = -2; i < W / step + 4; i++) {
+    const wx = start + i * step;
+    const k  = Math.floor(wx / step) + seed;
+    const h  = hMin + hash(k) * (hMax - hMin);
+    const w  = step * (0.55 + hash(k * 7 + 3) * 0.5);
+    ctx.fillRect(Math.round(wx - off), Math.round(base - h), Math.ceil(w), h + 200);
+  }
+}
+
+function drawBuilding(b) {
+  if (b.crane) return drawCrane(b);
+  const x = Math.round(b.x - camX), y = Math.round(b.top), w = Math.round(b.w);
+  ctx.fillStyle = COL.bld;
+  ctx.fillRect(x, y, w, H - y + 120);
+  ctx.fillStyle = b.sink ? COL.crack : COL.bldEdge;
+  ctx.fillRect(x, y, w, 3);
+
+  // Fenster
+  const cols = Math.floor((w - 24) / 30);
+  const rows = Math.floor((H - y - 20) / 40) + 2;
+  for (let cx = 0; cx < cols; cx++) {
+    for (let ry = 0; ry < rows; ry++) {
+      const k = b.id * 977 + cx * 31 + ry * 7;
+      const v = hash(k);
+      if (v < 0.18) continue;
+      ctx.fillStyle = v > 0.93 ? COL.winLit : COL.win;
+      ctx.fillRect(x + 14 + cx * 30, y + 22 + ry * 40, 14, 20);
+    }
+  }
+
+  if (b.sink) drawCracks(b);
+  if (b.room) drawRoom(b);
+}
+
+function drawRoom(b) {
+  const r  = b.room;
+  const x1 = Math.round(r.x1 - camX), x2 = Math.round(r.x2 - camX);
+  if (x2 < -140 || x1 > W + 140) return;
+
+  const floor = Math.round(b.top);
+  const ceil  = floor - ROOM_H;
+  const top   = floor - ROOM_TOP;
+  const bw    = x2 - x1;
+
+  // Baukörper über dem Korridor
+  ctx.fillStyle = COL.bld;
+  ctx.fillRect(x1, top, bw, ROOM_TOP - ROOM_H);
+  ctx.fillStyle = COL.bldEdge;
+  ctx.fillRect(x1, top, bw, 3);
+
+  const cols = Math.floor((bw - 20) / 30);
+  for (let cx = 0; cx < cols; cx++) {
+    const v = hash(b.id * 331 + cx * 17);
+    if (v < 0.30) continue;
+    ctx.fillStyle = v > 0.90 ? COL.winLit : COL.win;
+    ctx.fillRect(x1 + 12 + cx * 30, top + 24, 14, 20);
+  }
+
+  // Der durchlaufbare Korridor über die volle Hausbreite
+  ctx.fillStyle = COL.room;
+  ctx.fillRect(x1, ceil, bw, ROOM_H);
+  ctx.fillStyle = COL.roomLit;
+  ctx.fillRect(x1, ceil, bw, 4);
+  ctx.fillRect(x1, floor - 3, bw, 3);
+  ctx.fillRect(x1, ceil + Math.round(ROOM_H * 0.52), bw, 2);   // Zwischengeschossband
+
+  // Deckenlampen mit Lichtkegel
+  const lamps = Math.max(2, Math.round(bw / 115));
+  for (let i = 0; i < lamps; i++) {
+    const lx = x1 + (i + 0.5) * bw / lamps;
+    ctx.fillStyle = COL.winLit;
+    ctx.fillRect(lx - 9, ceil + 4, 18, 4);
+    const gr = ctx.createLinearGradient(0, ceil, 0, floor);
+    gr.addColorStop(0, 'rgba(230,210,155,.20)');
+    gr.addColorStop(1, 'rgba(230,210,155,0)');
+    ctx.fillStyle = gr;
+    ctx.beginPath();
+    ctx.moveTo(lx - 13, ceil + 8); ctx.lineTo(lx + 13, ceil + 8);
+    ctx.lineTo(lx + 58, floor);    ctx.lineTo(lx - 58, floor);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Ein paar Stützen als Tiefenhinweis
+  ctx.fillStyle = 'rgba(60,67,78,.55)';
+  for (let i = 1; i < lamps; i++) {
+    const cxp = x1 + i * bw / lamps;
+    ctx.fillRect(cxp - 3, ceil + 6, 6, ROOM_H - 10);
+  }
+
+  // Ein- und Ausstiegsfenster
+  for (let k = 0; k < 2; k++) {
+    const wx = k === 0 ? x1 : x2;
+    if (r.glass[k]) {
+      ctx.fillStyle = 'rgba(198,224,246,.45)';
+      ctx.fillRect(wx - 4, ceil + 4, 8, ROOM_H - 8);
+      ctx.fillStyle = 'rgba(255,255,255,.5)';
+      ctx.fillRect(wx - 2, ceil + 14, 4, 44);
+    }
+    ctx.fillStyle = COL.bldEdge;
+    ctx.fillRect(wx - 4, ceil, 8, 5);
+    ctx.fillRect(wx - 4, floor - 5, 8, 5);
+  }
+}
+
+// Einsturzhaus: sichtbare Risse als Warnung, damit der Einsturz nicht
+// aus dem Nichts kommt, sondern lesbar ist.
+function drawCracks(b) {
+  const x = Math.round(b.x - camX), y = Math.round(b.top), w = Math.round(b.w);
+  if (x + w < -60 || x > W + 60) return;
+  ctx.strokeStyle = COL.crack;
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 3; i++) {
+    const sx = x + 40 + hash(b.id * 71 + i * 13) * (w - 80);
+    ctx.beginPath();
+    ctx.moveTo(sx, y + 4);
+    let cy = y + 4, cx2 = sx;
+    for (let j = 0; j < 5; j++) {
+      cx2 += (hash(b.id * 17 + i * 7 + j) - 0.5) * 44;
+      cy  += 26;
+      ctx.lineTo(cx2, cy);
+    }
+    ctx.stroke();
+  }
+  // schräge Antenne
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(x + w * 0.7, y);
+  ctx.lineTo(x + w * 0.7 + 13, y - 34);
+  ctx.stroke();
+}
+
+function drawTower(t, off) {
+  const x = t.lx - off;
+  if (x + t.w < -260 || x > W + 260) return;
+
+  ctx.save();
+  ctx.translate(x + (t.dir > 0 ? t.w : 0), BG_BASE);
+  ctx.rotate(t.ang * t.dir);
+  const dx = t.dir > 0 ? -t.w : 0;
+
+  ctx.fillStyle = COL.tower;
+  ctx.fillRect(dx, -t.h, t.w, t.h + 90);
+
+  const cols = Math.max(1, Math.floor((t.w - 14) / 20));
+  const rows = Math.floor(t.h / 30);
+  for (let cx = 0; cx < cols; cx++) {
+    for (let ry = 0; ry < rows; ry++) {
+      const v = hash(t.id * 613 + cx * 29 + ry * 5);
+      if (v < 0.42) continue;
+      ctx.fillStyle = v > 0.94 ? '#c9b787' : '#4a5260';
+      ctx.fillRect(dx + 8 + cx * 20, -t.h + 14 + ry * 30, 8, 13);
+    }
+  }
+  ctx.restore();
+}
+
+function drawMech(m, off) {
+  const x = m.lx - off;
+  if (x < -420 || x > W + 420) return;
+
+  const h = m.h;
+  ctx.save();
+  ctx.translate(x, BG_BASE);
+  ctx.scale(m.dir, 1);
+  ctx.fillStyle = COL.mech;
+  ctx.strokeStyle = COL.mech;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const hipY = -h * 0.44;
+
+  // Beine: kräftig genug, um zum Rumpf zu passen, mit Fußplatten
+  for (const s of [Math.PI, 0]) {
+    const a  = m.ph + s;
+    const th = Math.PI / 2 + Math.sin(a) * 0.38;
+    const kn = th + 0.24 + Math.max(0, Math.sin(a + 1.5)) * 0.62;
+    const l1 = h * 0.235, l2 = h * 0.225;
+    const kx = Math.cos(th) * l1,        ky = hipY + Math.sin(th) * l1;
+    const fx = kx + Math.cos(kn) * l2,   fy = ky   + Math.sin(kn) * l2;
+    ctx.lineWidth = h * 0.105;
+    ctx.beginPath();
+    ctx.moveTo(0, hipY); ctx.lineTo(kx, ky); ctx.lineTo(fx, fy);
+    ctx.stroke();
+    ctx.fillRect(fx - h * 0.06, fy - h * 0.028, h * 0.14, h * 0.056);
+  }
+
+  // Hüfte, Rumpf, Kopf
+  ctx.fillRect(-h * 0.12, hipY - h * 0.06, h * 0.24, h * 0.12);
+  ctx.fillRect(-h * 0.14, -h * 0.80, h * 0.28, h * 0.37);
+  ctx.fillRect(-h * 0.20, -h * 0.79, h * 0.40, h * 0.09);   // Schultern
+  ctx.fillRect(-h * 0.07, -h * 0.92, h * 0.15, h * 0.13);   // Kopf
+
+  // Arm / Kanone
+  ctx.lineWidth = h * 0.055;
+  const sw = Math.sin(m.ph) * 0.25;
+  limb(h * 0.17, -h * 0.74, 1.35 + sw, h * 0.19, 0.95 + sw, h * 0.17);
+  ctx.lineWidth = h * 0.05;
+  limb(-h * 0.17, -h * 0.74, 1.75 - sw, h * 0.18, 2.15 - sw, h * 0.16);
+
+  // Cockpit-Auge
+  ctx.fillStyle = COL.winLit;
+  ctx.fillRect(h * 0.02, -h * 0.885, h * 0.055, h * 0.035);
+  ctx.restore();
+}
+
+function drawBomb(b, off) {
+  const x = b.lx - off;
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, b.y); ctx.lineTo(x - b.vx * 0.05, b.y - 26); ctx.stroke();
+  ctx.fillStyle = '#3c434f';
+  ctx.fillRect(x - 3, b.y - 9, 6, 12);
+  ctx.fillStyle = COL.winLit;
+  ctx.fillRect(x - 2, b.y + 2, 4, 4);
+}
+
+function drawBlasts() {
+  for (const f of blasts) {
+    const k = f.life / f.dur;
+    const x = f.x - camX * f.par;
+    if (x < -200 || x > W + 200) continue;
+    ctx.globalAlpha = (1 - k) * 0.9;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 3 * (1 - k) + 1;
+    ctx.beginPath(); ctx.arc(x, f.y, f.max * k, 0, 6.284); ctx.stroke();
+    if (k < 0.3) {
+      ctx.globalAlpha = (0.3 - k) * 3.2;
+      ctx.fillStyle = '#fff4d8';
+      ctx.beginPath(); ctx.arc(x, f.y, f.max * 0.4 * (1 - k * 2.5), 0, 6.284); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Gitterträger: zwei Gurte mit Diagonalstreben. Der zweite Gurt wird über die
+// Normale versetzt, nicht über Y – sonst fällt er bei senkrechten Trägern mit
+// dem ersten zusammen.
+function lattice(x1, y1, x2, y2, th, step) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len = Math.hypot(dx, dy) || 1;
+  const nx = -dy / len * th, ny = dx / len * th;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);           ctx.lineTo(x2, y2);
+  ctx.moveTo(x1 + nx, y1 + ny); ctx.lineTo(x2 + nx, y2 + ny);
+  const n = Math.max(2, Math.round(len / step));
+  for (let i = 0; i < n; i++) {
+    const t0 = i / n, t1 = (i + 1) / n;
+    const ax = x1 + dx * t0, ay = y1 + dy * t0;
+    const bx = x1 + dx * t1, by = y1 + dy * t1;
+    if (i % 2) { ctx.moveTo(ax + nx, ay + ny); ctx.lineTo(bx, by); }
+    else       { ctx.moveTo(ax, ay);           ctx.lineTo(bx + nx, by + ny); }
+  }
+  ctx.stroke();
+}
+
+function drawCrane(b) {
+  const x  = Math.round(b.x - camX), w = Math.round(b.w), y = Math.round(b.top);
+  if (x + w < -140 || x > W + 140) return;
+
+  ctx.strokeStyle = COL.bld;
+  ctx.fillStyle   = COL.bld;
+  ctx.lineCap = 'butt';
+
+  const mx = x + w * b.mast;          // Turm
+  lattice(mx + 17, y + 26, mx + 17, H + 120, 34, 46);
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.moveTo(mx - 17, y + 26); ctx.lineTo(mx + 17, y + 26);
+  ctx.stroke();
+
+  // Ausleger: die Oberkante ist exakt die Lauffläche
+  ctx.fillRect(x, y - 3, w, 5);
+  lattice(x, y + 2, x + w, y + 2, 22, 40);
+
+  // Gegengewicht am hinteren Ende
+  ctx.fillRect(x - 4, y + 4, 34, 30);
+
+  // Katze mit Haken
+  const hx = x + w * b.hook;
+  const sway = Math.sin(camX * 0.004 + b.id) * 12;
+  ctx.fillRect(hx - 11, y + 22, 22, 9);
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(hx, y + 31); ctx.lineTo(hx + sway, y + 108);
+  ctx.stroke();
+  ctx.fillRect(hx + sway - 8, y + 108, 16, 13);
+
+  // Führerhaus und Warnlicht
+  ctx.fillRect(mx + 17, y + 6, 26, 22);
+  ctx.fillStyle = COL.winLit;
+  ctx.fillRect(mx - 5, y + 14, 10, 8);
+}
+
+function drawBirds() {
+  for (const q of birds) {
+    const x = Math.round(q.x - camX), y = Math.round(q.y);
+    if (x < -30 || x > W + 30) continue;
+    ctx.fillStyle   = COL.ink;
+    ctx.strokeStyle = COL.ink;
+    if (!q.fly) {
+      const bob = Math.sin(q.ph) * 0.8;
+      ctx.beginPath();
+      ctx.ellipse(x, y + bob, 5, 3.6, -0.25, 0, 6.284);
+      ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 4, y - 3 + bob, 2.4, 0, 6.284); ctx.fill();
+      ctx.fillRect(x - 1, y + 3 + bob, 1.6, 3);
+      ctx.fillRect(x + 2, y + 3 + bob, 1.6, 3);
+    } else {
+      const f = Math.sin(q.ph) * 8;
+      ctx.beginPath(); ctx.ellipse(x, y, 4.4, 3, 0, 0, 6.284); ctx.fill();
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+      ctx.moveTo(x - 2, y); ctx.lineTo(x - 9, y - f);
+      ctx.moveTo(x + 2, y); ctx.lineTo(x + 9, y - f);
+      ctx.stroke();
+    }
+  }
+}
+
+// Steckengebliebene Rakete: schräg im Dach, mit aufgeworfenem Rand
+function drawDud(c) {
+  const x = Math.round(c.x + c.w / 2 - camX), y = Math.round(c.y);
+  if (x < -60 || x > W + 60) return;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(c.tilt);
+  ctx.fillStyle = '#3a414c';
+  ctx.fillRect(-9, -c.h, 18, c.h);            // Rumpf
+  ctx.fillStyle = COL.bldEdge;
+  ctx.fillRect(-16, -c.h + 8, 7, 22);         // Finnen
+  ctx.fillRect(9,  -c.h + 8, 7, 22);
+  ctx.fillStyle = '#4c545f';
+  ctx.fillRect(-9, -c.h + 4, 18, 4);
+  ctx.fillStyle = COL.winLit;
+  ctx.fillRect(-5, -c.h + 14, 10, 5);         // blinkender Zünder
+  ctx.restore();
+  ctx.fillStyle = COL.bldEdge;                // aufgeworfener Dachrand
+  ctx.fillRect(x - 21, y - 7, 42, 8);
+}
+
+function drawStrikes() {
+  for (const s of strikes) {
+    const x = Math.round(s.x - camX);
+    if (x < -100 || x > W + 100) continue;
+    const k = clamp(s.t / s.dur, 0, 1);
+    const r = s.hw / 2;
+
+    // Zielmarkierung auf dem Dach – blinkt, damit sie im Augenwinkel auffällt
+    const a = 0.40 + 0.45 * Math.abs(Math.sin(s.t * 24));
+    ctx.strokeStyle = 'rgba(255,232,168,' + a.toFixed(2) + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(x - r, s.top - 30); ctx.lineTo(x - r, s.top); ctx.lineTo(x - r + 20, s.top);
+    ctx.moveTo(x + r, s.top - 30); ctx.lineTo(x + r, s.top); ctx.lineTo(x + r - 20, s.top);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,232,168,' + (0.10 + 0.16 * k).toFixed(2) + ')';
+    ctx.fillRect(x - r, s.top - 4, r * 2, 4);
+
+    // Leitstrahl
+    ctx.strokeStyle = 'rgba(255,232,168,' + (0.08 + 0.18 * k).toFixed(2) + ')';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, Math.max(-10, s.y)); ctx.lineTo(x, s.top);
+    ctx.stroke();
+
+    if (s.q < 0) continue;          // Rakete erst in der Fallphase
+
+    // Rakete
+    ctx.fillStyle = COL.ink;
+    ctx.fillRect(x - 5, s.y - 30, 10, 30);
+    ctx.beginPath();
+    ctx.moveTo(x - 5, s.y); ctx.lineTo(x + 5, s.y); ctx.lineTo(x, s.y + 15);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(x - 11, s.y - 28, 6, 12);
+    ctx.fillRect(x + 5,  s.y - 28, 6, 12);
+    ctx.fillStyle = COL.winLit;
+    ctx.fillRect(x - 4, s.y - 36, 8, 7);
+  }
+}
+
+function drawCrate(c) {
+  if (c.dud) return drawDud(c);
+  const x = Math.round(c.x - camX), y = Math.round(c.y - c.h);
+  ctx.fillStyle = COL.crate;
+  ctx.fillRect(x, y, c.w, c.h);
+  ctx.strokeStyle = '#4a525c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(x + 2, y + 2); ctx.lineTo(x + c.w - 2, y + c.h - 2);
+  ctx.moveTo(x + c.w - 2, y + 2); ctx.lineTo(x + 2, y + c.h - 2);
+  ctx.stroke();
+  ctx.strokeRect(x + 1, y + 1, c.w - 2, c.h - 2);
+}
+
+function limb(x0, y0, a1, l1, a2, l2) {
+  const x1 = x0 + Math.cos(a1) * l1, y1 = y0 + Math.sin(a1) * l1;
+  const x2 = x1 + Math.cos(a2) * l2, y2 = y1 + Math.sin(a2) * l2;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2);
+  ctx.stroke();
+}
+
+function drawRunner(sx, sy) {
+  const air  = !p.ground;
+  const lean = clamp(0.10 + (p.vx - VX_START) / 4200, 0, 0.30);
+
+  ctx.save();
+  ctx.translate(sx, sy);
+  ctx.rotate(p.ang + (state === 'falling' ? 0 : -lean));
+  ctx.fillStyle = COL.ink;
+  ctx.strokeStyle = COL.ink;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const hip = -20, sh = -36;
+  const ph = p.ph;
+
+  // Beine
+  ctx.lineWidth = 8;
+  if (air) {
+    limb(0, hip, 1.05, 15, 0.35, 15);            // vorderes Bein angezogen
+    limb(0, hip, 2.35, 15, 2.05, 15);            // hinteres Bein gestreckt
+  } else {
+    for (const s of [0, Math.PI]) {
+      const a = ph + s;
+      const th = Math.PI / 2 + Math.sin(a) * 0.95;
+      const kn = th + 0.35 + Math.max(0, Math.sin(a + 1.5)) * 0.95;
+      limb(0, hip, th, 15, kn, 15);
+    }
+  }
+
+  // Rumpf
+  ctx.lineWidth = 13;
+  ctx.beginPath(); ctx.moveTo(0, hip); ctx.lineTo(0, sh); ctx.stroke();
+
+  // Arme
+  ctx.lineWidth = 6;
+  if (air) {
+    limb(0, sh + 2, -0.55, 12, -0.15, 12);
+    limb(0, sh + 2,  2.60, 12,  2.90, 12);
+  } else {
+    for (const s of [0, Math.PI]) {
+      const a  = ph + s + Math.PI;
+      const up = Math.PI / 2 + Math.sin(a) * 1.15;
+      limb(0, sh + 2, up, 12, up - 1.0, 12);
+    }
+  }
+
+  // Kopf
+  ctx.beginPath(); ctx.arc(1, sh - 9, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function text(s, x, y, size, align, col, weight) {
+  ctx.font = (weight || 'bold') + ' ' + size + 'px "Lucida Console", "DejaVu Sans Mono", Monaco, monospace';
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = col || '#eef1f5';
+  ctx.fillText(s, x, y);
+}
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // Himmel
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, COL.skyTop);
+  g.addColorStop(1, COL.skyBot);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  // Dunstsonne
+  const sun = ctx.createRadialGradient(760, 120, 8, 760, 120, 155);
+  sun.addColorStop(0,   'rgba(255,253,244,.50)');
+  sun.addColorStop(0.4, 'rgba(255,250,235,.16)');
+  sun.addColorStop(1,   'rgba(255,250,235,0)');
+  ctx.fillStyle = sun;
+  ctx.fillRect(605, -35, 310, 310);
+
+  const sh = shake;
+  ctx.translate(rnd(-sh, sh) * 0.5, rnd(-sh, sh) * 0.5);
+
+  // Parallax (hinten -> vorne)
+  skyline(camX * 0.16, COL.far, 430, 60, 210, 90, 11);
+  skyline(camX * 0.38, COL.mid, 470, 70, 240, 70, 77);
+
+  // Zerstörungsebene
+  const bgOff = camX * BG_PAR;
+  for (const t of towers) drawTower(t, bgOff);
+  for (const m of mechs)  drawMech(m, bgOff);
+  for (const b of bombs)  drawBomb(b, bgOff);
+  drawBlasts();
+
+  for (const q of parts) {
+    if (q.par === 1) continue;
+    ctx.globalAlpha = (1 - q.life / q.max) * 0.75;
+    ctx.fillStyle = q.col;
+    ctx.fillRect(q.x - camX * q.par, q.y, q.s, q.s);
+  }
+  ctx.globalAlpha = 1;
+
+  for (const b of buildings) drawBuilding(b);
+  for (const c of crates) if (c.alive) drawCrate(c);
+  drawBirds();
+  drawStrikes();
+
+  // Partikel im Vordergrund
+  for (const q of parts) {
+    if (q.par !== 1) continue;
+    ctx.globalAlpha = 1 - q.life / q.max;
+    ctx.fillStyle = q.col;
+    ctx.fillRect(q.x - camX, q.y, q.s, q.s);
+  }
+  ctx.globalAlpha = 1;
+
+  if (state !== 'title') drawRunner(p.x - camX, p.y);
+  else drawRunner(PX, buildings[0].top);
+
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  // Vignette
+  const v = ctx.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 1.0);
+  v.addColorStop(0, 'rgba(0,0,0,0)');
+  v.addColorStop(1, 'rgba(0,0,0,.38)');
+  ctx.fillStyle = v; ctx.fillRect(0, 0, W, H);
+
+  // HUD
+  if (state !== 'title') {
+    const m = (state === 'play') ? Math.max(0, Math.floor(p.x / PPM)) : finalM;
+    text(String(m).padStart(5, '0') + ' M', 30, 56, 34, 'left', 'rgba(255,255,255,.92)');
+    text('TEMPO ' + Math.round(Math.max(0, p.vx) / 10), 30, 84, 16, 'left', 'rgba(255,255,255,.55)');
+    if (best > 0) text('BEST ' + best + ' M', W - 30, 56, 20, 'right', 'rgba(255,255,255,.55)');
+    if (!A.on) text('TON AUS (M)', W - 30, 82, 14, 'right', 'rgba(255,255,255,.4)');
+
+    // Anflug außerhalb des Bildes: Pfeil am rechten Rand
+    for (const s of strikes) {
+      if (s.x - camX <= W + 30) continue;
+      const yy = clamp(s.top - 46, 60, H - 60);
+      ctx.fillStyle = 'rgba(255,232,168,' +
+        (0.45 + 0.40 * Math.abs(Math.sin(s.t * 13))).toFixed(2) + ')';
+      ctx.beginPath();
+      ctx.moveTo(W - 10, yy); ctx.lineTo(W - 38, yy - 16); ctx.lineTo(W - 38, yy + 16);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+
+  if (state === 'title') {
+    ctx.fillStyle = 'rgba(10,12,16,.55)'; ctx.fillRect(0, 0, W, H);
+    text('ROOFTOP RUN', W / 2, 232, 62, 'center', '#f2f5f9');
+    text('EINE TASTE. KEIN BREMSPEDAL.', W / 2, 268, 18, 'center', 'rgba(255,255,255,.6)');
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.45 + Math.sin(Date.now() / 300) * 0.35).toFixed(3) + ')';
+    text('LEERTASTE ODER KLICK ZUM STARTEN', W / 2, 340, 20, 'center', ctx.fillStyle);
+    text('HALTEN = HÖHER SPRINGEN   ·   KISTEN BREMSEN DICH AUS', W / 2, 372, 15, 'center', 'rgba(255,255,255,.45)');
+    text('SPRING IN DIE FENSTER  ·  RISSIGE DÄCHER SACKEN AB', W / 2, 396, 15, 'center', 'rgba(255,255,255,.45)');
+    text('RAKETEN REISSEN LÖCHER ODER BLEIBEN STECKEN', W / 2, 418, 15, 'center', 'rgba(255,255,255,.45)');
+    text('R NEUSTART   ·   M TON', W / 2, 444, 14, 'center', 'rgba(255,255,255,.35)');
+  }
+
+  if (state === 'over') {
+    ctx.fillStyle = 'rgba(10,12,16,.6)'; ctx.fillRect(0, 0, W, H);
+    text('ABGESTÜRZT', W / 2, 226, 48, 'center', '#f2f5f9');
+    text(finalM + ' METER', W / 2, 288, 40, 'center', '#e6d29b');
+    if (best > 0) {
+      const neu = finalM >= best && finalM > 0;
+      text(neu ? 'NEUE BESTMARKE' : 'BESTMARKE ' + best + ' M',
+           W / 2, 322, 18, 'center', neu ? '#e6d29b' : 'rgba(255,255,255,.55)');
+    }
+    if (deadT > RETRY) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.4 + Math.sin(Date.now() / 300) * 0.35).toFixed(3) + ')';
+      text('NOCHMAL: LEERTASTE, KLICK ODER TIPPEN', W / 2, 386, 20, 'center', ctx.fillStyle);
+    }
+  }
+
+  if (flash > 0) {
+    ctx.fillStyle = 'rgba(255,255,255,' + (flash * 0.5).toFixed(3) + ')';
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ---------------------------------------------------------------- Schleife
+let last = performance.now(), acc = 0;
+const STEP = 1 / 120;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  let dt = (now - last) / 1000;
+  last = now;
+  if (dt > 0.25) dt = 0.25;
+  acc += dt;
+  let guard = 0;
+  while (acc >= STEP && guard++ < 12) { update(STEP); acc -= STEP; }
+  draw();
+}
+
+reset();
+state = 'title';
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
