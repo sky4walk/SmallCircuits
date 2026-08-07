@@ -47,13 +47,16 @@ const BG_PAR  = 0.45;        // Parallaxfaktor der Zerstörungsebene
 const BG_BASE = 505;         // Standhöhe der Mechs / Türme in dieser Ebene
 
 // Fensterpassage: eigenes Hochhaus, Lücke davor und dahinter.
-// 255 ist bewusst gewählt: die maximale Sprunghöhe ist 204 px, plus 44 px
-// Körperhöhe = 248. Bei 255 passt der Läufer bei JEDER Sprunghöhe durchs
-// Fenster und die Decke kappt keinen Absprung. Kleiner wäre unfair.
-const ROOM_H   = 255;        // Korridor- und Fensterhöhe
-const ROOM_TOP = 335;        // Gesamthöhe des Hauses über dem Korridorboden
-const ROOM_CHANCE = 0.30;
-const ROOM_DROP   = [90, 170];   // Korridor liegt so viel tiefer als das Vordach
+// Die Fensterhöhe muss den schlimmsten Anflug verzeihen: wer die Lücke zu
+// spät sieht und am Dachrand voll abspringt, kommt am Fenster mit bis zu
+// 366 px über dem Korridorboden an (Sprungbogen + Fallhöhe + Körperhöhe,
+// per Simulation über alle Tempi bestimmt). 340 px Fenster plus 60 px
+// Streifzone decken das ab – vorher waren es 255 px und der Sprung war tödlich.
+const ROOM_H   = 340;        // Korridor- und Fensterhöhe
+const ROOM_TOP = 425;        // Gesamthöhe des Hauses über dem Korridorboden
+const ROOM_GRAZE = 60;       // darüber noch: durch den Rahmen krachen statt sterben
+const ROOM_CHANCE = 0.34;
+const ROOM_DROP   = [85, 125];   // Korridor liegt so viel tiefer als das Vordach
 const ROOM_GAP_F  = 0.45;        // Lückenfaktor davor (aus der Trefferanalyse)
 
 // Raketeneinschläge: reißen ein Loch ins Dach, über das man springen muss
@@ -61,7 +64,7 @@ const STRIKE_GAP  = [5, 11];   // Sekunden zwischen Einschlägen
 const LONG_CHANCE  = 0.36;     // Anteil extra langer Dächer (Ziele für Raketen)
 const DUD_CHANCE   = 0.45;     // Anteil Raketen, die stecken bleiben statt zu zünden
 const CRANE_CHANCE = 0.16;     // Anteil Kranausleger statt Dach
-const STRIKE_REACT = 0.80;     // garantierte Reaktionszeit NACH dem Einschlag
+const STRIKE_REACT = 1.05;     // garantierte Reaktionszeit NACH dem Einschlag
 const STRIKE_LEADMAX = 2.20;   // Obergrenze der Vorwarnung
 const STRIKE_FALL = 0.45;      // davon die letzten: sichtbare Rakete
 
@@ -88,6 +91,7 @@ const COL = {
   winLit:  '#e6d29b',
   ink:     '#12151a',
   crate:   '#333940',
+  furn:    '#454d59',
   crack:   '#7d6a4e'
 };
 
@@ -370,14 +374,16 @@ function genNext() {
   const fromTop = last.top + (last.sink ? MAX_SINK : 0);
 
   const wantRoom = !last.room && !last.sink && bid > 2 &&
-                   fromTop <= 380 && Math.random() < ROOM_CHANCE;
+                   fromTop >= 225 && fromTop <= 380 && Math.random() < ROOM_CHANCE;
 
   let top = fromTop, gap = 140;
 
   if (wantRoom) {
     // Der Korridor liegt tiefer: man fällt ins Fenster statt hineinzuspringen.
-    // Das ist die mit Abstand tolerantestse Variante (Absprungfenster 190–360 px).
-    top = clamp(fromTop + rnd(ROOM_DROP[0], ROOM_DROP[1]), 300, 470);
+    // Untergrenze 350: bei 340 px Fensterhöhe bliebe die Decke sonst über
+    // dem Bildrand. Zusammen mit fromTop >= 225 bleibt die echte Fallhöhe
+    // auch dann unter 125 px, wenn die Klammer greift.
+    top = clamp(fromTop + rnd(ROOM_DROP[0], ROOM_DROP[1]), 350, 470);
     gap = clamp(maxJump(vx, fromTop - top) * ROOM_GAP_F, 90, 520);
   } else {
     for (let tries = 0; tries < 14; tries++) {
@@ -407,8 +413,8 @@ function genNext() {
   const b = { id: bid++, x: last.x + last.w + gap, w: rnd(230, 640), top };
 
   // Gelegentlich ein extra langes Dach. Das sind die Ziele für Raketen:
-  // nur dort bleibt hinter dem Loch genug Landefläche für einen kurzen Sprung.
-  if (!wantRoom && Math.random() < LONG_CHANCE) b.w = rnd(720, 1040);
+  // nur dort passen Anlauf, Krater und Landefläche nebeneinander.
+  if (!wantRoom && Math.random() < LONG_CHANCE) b.w = rnd(900, 1400);
 
   // Kranausleger statt Dach – nur in luftiger Höhe, damit es lesbar bleibt
   if (!wantRoom && b.top >= 150 && b.top <= 340 && Math.random() < CRANE_CHANCE) {
@@ -419,7 +425,8 @@ function genNext() {
   }
 
   if (wantRoom) {
-    b.w    = rnd(280, 450);
+    // Gelegentlich ein langer Gang – man ist mehrere Sekunden drin.
+    b.w    = Math.random() < 0.35 ? rnd(560, 900) : rnd(280, 450);
     b.room = { x1: b.x, x2: b.x + b.w, glass: [true, true] };
   } else if (!last.room && !b.crane && b.w > 300 && top <= 350 &&
              bid > 3 && Math.random() < SINK_CHANCE) {
@@ -428,13 +435,25 @@ function genNext() {
 
   buildings.push(b);
 
-  // Kisten – nie direkt an den Kanten, damit jede Lücke fair bleibt
+  // Büromöbel im Gang – nicht tödlich, sie kosten nur Tempo. Beidseitig
+  // 120 px Abstand zu den Fenstern, damit man nie direkt beim Eintritt
+  // gegen etwas läuft.
   if (b.room) {
-    if (Math.random() < 0.5) {
-      crates.push({ x: rnd(b.x + 110, b.x + b.w - 80), y: b.top,
-                    w: 34, h: rnd(26, 42), alive: true });
+    const span = b.w - 240;
+    const n    = span > 0 ? Math.max(1, Math.round(span / 210)) : 0;
+    for (let i = 0; i < n; i++) {
+      if (Math.random() < 0.28) continue;
+      const cx = b.x + 120 + span * (i + 0.5) / n + rnd(-25, 25);
+      if (Math.random() < 0.5) {
+        crates.push({ x: cx - 29, y: b.top, w: 58, h: rnd(50, 56),
+                      alive: true, kind: 'desk',  slow: 0.68 });
+      } else {
+        crates.push({ x: cx - 14, y: b.top, w: 28, h: rnd(42, 50),
+                      alive: true, kind: 'chair', slow: 0.86 });
+      }
     }
   } else if (!b.sink && !b.crane && b.w > 320 && Math.random() < 0.55) {
+    // Kisten auf dem Dach – nie direkt an den Kanten, damit jede Lücke fair bleibt
     const n = Math.random() < 0.28 ? 2 : 1;
     for (let i = 0; i < n; i++) {
       crates.push({
@@ -477,6 +496,10 @@ function trySpawnStrike() {
   // Vollgas sind das 480 px statt 160 px – vorher blieben nach dem Loch
   // teils nur 0,17 s bis zum Absturz.
   const strip = clamp(p.vx * 0.55, 230, 480);
+  // Anlauf VOR dem Krater: nach der Landung auf dem Dach müssen noch ein
+  // paar Schritte bleiben, bevor das Loch kommt. Ohne das saß der Krater
+  // teils 90 px hinter der Dachkante – zwei Sprünge in 0,1 s.
+  const runup = clamp(p.vx * 0.40, 220, 400);
   // Der Zielpunkt darf anfangs außerhalb des Bildes liegen und hereinscrollen.
   // 1,15 · vx minus 0,75 s Vorwarnung lässt garantiert 0,4 s Reaktionszeit
   // NACH dem Einschlag – bei Vollgas sieht man nur 0,74 s weit.
@@ -486,7 +509,9 @@ function trySpawnStrike() {
   const cand = [];
   for (let i = 0; i < buildings.length - 1; i++) {
     const b = buildings[i], nx = buildings[i + 1];
-    if (b.room || b.sink || b.crane || nx.room || b.w < 560) continue;
+    // Das Dach muss Anlauf, Loch und Landefläche am Stück tragen.
+    if (b.room || b.sink || b.crane || nx.room ||
+        b.w < runup + hw + strip) continue;
 
     const gapAfter = nx.x - (b.x + b.w);
     const reach    = maxJump(p.vx, b.top - nx.top) * 0.90;
@@ -495,7 +520,7 @@ function trySpawnStrike() {
     // Zwei Bedingungen halten die Lage lösbar:
     // links  – vom Lochrand aus muss ein Sprung bis zum nächsten Haus reichen,
     // rechts – hinter dem Loch bleibt tempoabhängige Landefläche.
-    const rimMin = Math.max(b.x + 90, b.x + b.w + gapAfter - reach);
+    const rimMin = Math.max(b.x + runup, b.x + b.w + gapAfter - reach);
     // Zusätzlich hart gedeckelt: das Loch liegt nie hinter der Dachmitte,
     // damit die letzte Kante immer klar getrennt vom Krater bleibt.
     const rimMax = Math.min(b.x + b.w - hw - strip, b.x + b.w * 0.55);
@@ -948,9 +973,9 @@ function update(dt) {
             puff(c.x + c.w / 2, c.y - c.h / 2, 26, 260, '#6a7180', 7);
             puff(c.x + c.w / 2, c.y - c.h / 2, 8, 150, COL.winLit, 4);
           } else {
-            p.vx = Math.max(300, p.vx * 0.62);
-            sfx.crate(); shake += 13;
-            puff(c.x + c.w / 2, c.y - c.h / 2, 20, 200, COL.crate, 7);
+            p.vx = Math.max(300, p.vx * (c.slow || 0.62));
+            sfx.crate(); shake += c.kind ? 8 : 13;
+            puff(c.x + c.w / 2, c.y - c.h / 2, 20, 200, c.kind ? COL.furn : COL.crate, 7);
           }
         }
       }
@@ -966,8 +991,19 @@ function update(dt) {
         for (let k = 0; k < 2; k++) {
           const wx = k === 0 ? r.x1 : r.x2;
           if (px0 < wx && p.x >= wx) {
-            if (p.y - 44 < lim) {                 // zu hoch: Aufprall an der Fassade
-              p.x = wx - 10; die(true); break;
+            if (p.y - 44 < lim) {                 // zu hoch für den Korridor
+              if (p.y - 44 >= lim - ROOM_GRAZE) {
+                // Streifschuss: man kracht durch den oberen Rahmen und wird
+                // in den Korridor gedrückt. Kostet Tempo statt des Laufs.
+                p.y = lim + 44;
+                p.vy = Math.max(p.vy, 60);
+                p.vx = Math.max(300, p.vx * 0.70);
+                sfx.glass(); shake += 18;
+                puff(wx, lim + 20, 30, 240, '#dfe8f2', 8, { life: [0.4, 1.2] });
+                puff(wx, lim + 10, 12, 120, COL.smoke, 5);
+              } else {                            // deutlich zu hoch: Fassade
+                p.x = wx - 10; die(true); break;
+              }
             }
             if (r.glass[k]) {                     // Scheibe durchbrochen
               r.glass[k] = false;
@@ -1404,6 +1440,8 @@ function drawStrikes() {
 
 function drawCrate(c) {
   if (c.dud) return drawDud(c);
+  if (c.kind === 'desk')  return drawDesk(c);
+  if (c.kind === 'chair') return drawChair(c);
   const x = Math.round(c.x - camX), y = Math.round(c.y - c.h);
   ctx.fillStyle = COL.crate;
   ctx.fillRect(x, y, c.w, c.h);
@@ -1414,6 +1452,49 @@ function drawCrate(c) {
   ctx.moveTo(x + c.w - 2, y + 2); ctx.lineTo(x + 2, y + c.h - 2);
   ctx.stroke();
   ctx.strokeRect(x + 1, y + 1, c.w - 2, c.h - 2);
+}
+
+// Schreibtisch mit Monitor. Die Bauhöhe c.h schließt den Monitor ein,
+// damit die Trefferbox genau das abdeckt, was man sieht.
+function drawDesk(c) {
+  const x = Math.round(c.x - camX), fy = Math.round(c.y);
+  const w = Math.round(c.w), h = Math.round(c.h);
+  const tp = fy - h + 20;                       // Oberkante Tischplatte
+
+  ctx.fillStyle = COL.furn;
+  ctx.fillRect(x, tp, w, 5);                    // Platte
+  ctx.fillRect(x + 3, tp + 5, 4, fy - tp - 5);  // Bein vorn
+  ctx.fillRect(x + w - 24, tp + 5, 21, fy - tp - 5);   // Schubladenblock
+
+  ctx.strokeStyle = '#5a626e';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + w - 23.5, tp + 5.5, 20, fy - tp - 6);
+  ctx.beginPath();                              // Griffe
+  ctx.moveTo(x + w - 19, tp + 14); ctx.lineTo(x + w - 8, tp + 14);
+  ctx.moveTo(x + w - 19, tp + 23); ctx.lineTo(x + w - 8, tp + 23);
+  ctx.stroke();
+
+  ctx.fillStyle = COL.furn;                     // Monitor
+  ctx.fillRect(x + 15, tp - 4, 5, 4);
+  ctx.fillRect(x + 8, tp - 19, 19, 15);
+  ctx.fillStyle = COL.winLit;
+  ctx.fillRect(x + 10, tp - 17, 15, 11);
+}
+
+// Bürostuhl: Lehne, Sitz, Säule, Fußkreuz
+function drawChair(c) {
+  const x = Math.round(c.x - camX), fy = Math.round(c.y);
+  const w = Math.round(c.w), h = Math.round(c.h);
+  const seat = fy - Math.round(h * 0.45);
+
+  ctx.fillStyle = COL.furn;
+  ctx.fillRect(x + w - 7, fy - h, 6, seat - (fy - h) + 5);   // Lehne
+  ctx.fillRect(x, seat, w, 5);                               // Sitzfläche
+  ctx.fillRect(x + Math.round(w / 2) - 3, seat + 5, 6, fy - seat - 8);
+  ctx.fillRect(x + 2, fy - 3, w - 4, 3);                     // Fußkreuz
+  ctx.strokeStyle = '#5a626e';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(x + 0.5, seat + 0.5, w - 1, 4);
 }
 
 function limb(x0, y0, a1, l1, a2, l2) {
@@ -1468,6 +1549,25 @@ function drawRunner(sx, sy) {
       const up = Math.PI / 2 + Math.sin(a) * 1.15;
       limb(0, sh + 2, up, 12, up - 1.0, 12);
     }
+  }
+
+  // Haare. Sie wehen nach hinten (lokales -x), Länge und Ausschlag hängen
+  // am Tempo, die Neigung an p.vy: beim Fallen drückt der Fahrtwind sie
+  // hoch, beim Steigen nach unten. Vor dem Kopf gezeichnet, damit der
+  // gefüllte Kreis die Ansätze verdeckt.
+  const spd  = clamp((p.vx - VX_START) / (VX_MAX - VX_START), 0, 1);
+  const hL   = 11 + spd * 9;
+  const lift = clamp(p.vy * 0.012, -4, 5);
+  for (let k = 0; k < 3; k++) {
+    const wv = Math.sin(ph * 0.55 + k * 0.85) * (1.1 + spd * 1.9);
+    const y0 = sh - 14 + k * 3.5;                 // Ansatz am Hinterkopf
+    const l  = hL * (1 - k * 0.12);
+    ctx.lineWidth = 3.4 - k * 0.7;
+    ctx.beginPath();
+    ctx.moveTo(-4, y0);
+    ctx.quadraticCurveTo(-l * 0.55, y0 - 3 - k * 1.5 + wv - lift * 0.5,
+                         -l,        y0 - 2 - k * 2.5 + wv * 1.6 - lift);
+    ctx.stroke();
   }
 
   // Kopf
