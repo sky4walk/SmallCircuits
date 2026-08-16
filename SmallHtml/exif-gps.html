@@ -71,6 +71,46 @@
   .drop span.hint{font-size:13px;color:var(--ink-soft);font-family:var(--mono)}
   input[type=file]{display:none}
 
+  /* ---- URL-Eingabe ---- */
+  .sep{
+    display:flex;align-items:center;gap:12px;
+    margin:18px 0;font-family:var(--mono);font-size:11px;
+    letter-spacing:.2em;text-transform:uppercase;color:var(--ink-soft);
+  }
+  .sep::before, .sep::after{content:"";flex:1;height:1px;background:var(--rule)}
+
+  .urlrow{display:flex;gap:8px;flex-wrap:wrap}
+  input[type=url]{
+    flex:1 1 260px;min-width:0;
+    font-family:var(--mono);font-size:13.5px;color:var(--ink);
+    background:var(--paper-2);
+    border:1px solid var(--rule);
+    padding:10px 12px;
+  }
+  input[type=url]:focus{outline:2px solid var(--marker);outline-offset:-1px;border-color:var(--contour)}
+  input[type=url]::placeholder{color:#9AA69C}
+  .urlrow button{padding:10px 16px}
+  .opt{
+    display:flex;align-items:center;gap:8px;
+    font-family:var(--mono);font-size:12px;color:var(--ink-soft);
+    margin:10px 0 0;cursor:pointer;
+  }
+  .opt input{accent-color:var(--contour);margin:0}
+  .diag{font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);margin:2px 0 0;opacity:.85}
+  .probe{
+    font-family:var(--mono);font-size:12px;
+    border-top:1px solid var(--rule);margin-top:14px;padding-top:12px;
+  }
+  .probe div{
+    display:flex;gap:10px;padding:5px 0;border-bottom:1px dotted var(--rule);
+    align-items:baseline;flex-wrap:wrap;
+  }
+  .probe div:last-child{border-bottom:none}
+  .probe .who{flex:0 0 118px;font-weight:600;color:var(--ink)}
+  .probe .res{flex:1;min-width:0;color:var(--ink-soft);word-break:break-word}
+  .probe .ok{color:var(--contour);font-weight:600}
+  .probe .no{color:var(--marker)}
+
   /* ---- Ergebniskarten ---- */
   .cards{margin-top:28px;display:flex;flex-direction:column;gap:18px}
   .card{
@@ -81,6 +121,11 @@
   }
   .card.nogps{border-left-color:var(--rule)}
   .card.err{border-left-color:var(--marker)}
+  .card.pending{border-left-color:var(--rule);opacity:.75}
+  .thumb.blank{
+    background:
+      repeating-linear-gradient(45deg, var(--paper) 0 6px, var(--paper-2) 6px 12px);
+  }
   .head{display:flex;gap:14px;align-items:flex-start}
   .thumb{
     width:76px;height:76px;flex:0 0 76px;
@@ -148,7 +193,7 @@
 
   <p class="eyebrow">EXIF &rarr; Koordinaten</p>
   <h1>Standort aus Bild</h1>
-  <p class="lede">Bild ablegen, Position ablesen. Die Datei wird <b>ausschließlich lokal im Browser</b> gelesen — nichts wird hochgeladen.</p>
+  <p class="lede">Bild ablegen oder Adresse einfügen, Position ablesen. Ausgewertet wird <b>ausschließlich lokal im Browser</b> — eigene Dateien verlassen den Rechner nicht.</p>
 
   <div class="drop" id="drop" tabindex="0" role="button" aria-label="Bilder auswählen">
     <span class="crosshair" aria-hidden="true">＋</span>
@@ -157,9 +202,27 @@
     <input type="file" id="file" accept="image/jpeg,image/jpg,image/tiff,.jpg,.jpeg" multiple>
   </div>
 
+  <p class="sep">oder per Adresse</p>
+
+  <div class="urlrow">
+    <input type="url" id="url" spellcheck="false" autocomplete="off"
+           placeholder="https://example.org/bild.jpg"
+           aria-label="Bild-Adresse (URL)">
+    <button type="button" id="go">Auslesen</button>
+    <button type="button" id="diag">Diagnose</button>
+  </div>
+  <label class="opt"><input type="checkbox" id="autoproxy" checked>
+    Bei CORS-Sperre automatisch einen öffentlichen Proxy versuchen</label>
+  <p class="note">
+    Der Browser lädt die Datei direkt vom fremden Server und liest nur den Anfang
+    (max. 2 MB — EXIF steht am Dateibeginn). Mehrere Adressen dürfen durch Leerzeichen
+    oder Zeilenumbruch getrennt werden. Bei aktivem Proxy-Versuch wird die Adresse an
+    dessen Betreiber übertragen.
+  </p>
+
   <div class="cards" id="cards"></div>
 
-  <footer>Kein Upload · keine Bibliotheken · keine Netzwerkanfragen</footer>
+  <footer>Dateien bleiben lokal · Netzwerkzugriff nur für eingegebene Adressen · keine Bibliotheken</footer>
 </div>
 
 <script>
@@ -356,36 +419,76 @@ function kb(bytes){
   return bytes > 1048576 ? (bytes/1048576).toFixed(1)+" MB" : Math.round(bytes/1024)+" kB";
 }
 
-function cameraLine(exif, file){
+function cameraLine(exif, sizeLabel){
   const bits = [];
   const make  = exif && exif.ifd0 ? exif.ifd0[0x010F] : null;
   const model = exif && exif.ifd0 ? exif.ifd0[0x0110] : null;
   if(model) bits.push(make && !String(model).startsWith(make) ? make+" "+model : model);
   const when = exif && exif.exif ? (exif.exif[0x9003] || exif.exif[0x9004]) : null;
   if(when) bits.push(String(when).replace(/^(\d{4}):(\d{2}):(\d{2})/, "$1-$2-$3"));
-  bits.push(kb(file.size));
+  if(sizeLabel) bits.push(sizeLabel);
   return bits.join("  ·  ");
 }
 
-function renderCard(file, exif, pos, error){
+/* Platziert eine Karte: ersetzt eine Platzhalterkarte oder stellt sie voran. */
+function place(card, replaceNode){
+  if(replaceNode && replaceNode.isConnected) replaceNode.replaceWith(card);
+  else cards.prepend(card);
+}
+
+/* Platzhalterkarte, solange geladen wird */
+function pendingCard(name, origin){
+  const card = el("div", "card pending");
+  const head = el("div", "head");
+  head.appendChild(el("img", "thumb blank"));
+  const meta = el("div", "meta");
+  meta.appendChild(el("p", "fname", name));
+  meta.appendChild(el("p", "sub", (origin ? origin + "  ·  " : "") + "wird geladen …"));
+  head.appendChild(meta);
+  card.appendChild(head);
+  cards.prepend(card);
+  return card;
+}
+
+/* src: { name, sizeLabel?, thumb?, revoke?, origin?, hint?, retry? } */
+function renderCard(src, exif, pos, error, replaceNode){
   const card = el("div", "card" + (error ? " err" : pos ? "" : " nogps"));
 
   const head = el("div", "head");
   const img = el("img", "thumb");
   img.alt = "";
-  img.src = URL.createObjectURL(file);
-  img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once:true });
+  img.referrerPolicy = "no-referrer";
+  if(src.thumb){
+    img.src = src.thumb;
+    if(src.revoke) img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once:true });
+    img.addEventListener("error", () => img.classList.add("blank"), { once:true });
+  }else{
+    img.classList.add("blank");
+  }
   head.appendChild(img);
 
   const meta = el("div", "meta");
-  meta.appendChild(el("p", "fname", file.name));
-  meta.appendChild(el("p", "sub", error ? "Nicht lesbar" : cameraLine(exif, file)));
+  meta.appendChild(el("p", "fname", src.name));
+  meta.appendChild(el("p", "sub", error ? "Nicht lesbar" : cameraLine(exif, src.sizeLabel)));
+  if(src.origin) meta.appendChild(el("p", "sub", src.origin));
+  if(src.diag)   meta.appendChild(el("p", "diag", src.diag));
   head.appendChild(meta);
   card.appendChild(head);
 
+  // Zusatzversuche (Proxy, Originalgröße …) — gilt für Fehler- und Ohne-GPS-Karten
+  function retryBar(){
+    const list = src.tries || (src.retry ? [{ label: src.retryLabel || "Erneut versuchen", run: src.retry }] : []);
+    if(!list.length) return null;
+    const acts = el("div", "actions");
+    list.forEach(t => acts.appendChild(makeButton(t.label, b => { b.disabled = true; t.run(card); })));
+    return acts;
+  }
+
   if(error){
     card.appendChild(el("p", "note", error));
-    cards.prepend(card);
+    const bar = retryBar();
+    if(bar) card.appendChild(bar);
+    place(card, replaceNode);
     return;
   }
 
@@ -395,7 +498,10 @@ function renderCard(file, exif, pos, error){
                 + "das Bild kam über einen Messenger (WhatsApp, Signal und Instagram entfernen Metadaten), "
                 + "oder es wurde durch eine Bildbearbeitung neu gespeichert.";
     card.appendChild(n);
-    cards.prepend(card);
+    if(src.hint) card.appendChild(el("p", "note", src.hint));
+    const bar = retryBar();
+    if(bar) card.appendChild(bar);
+    place(card, replaceNode);
     return;
   }
 
@@ -433,8 +539,10 @@ function renderCard(file, exif, pos, error){
   osm.rel = "noopener noreferrer";
   acts.appendChild(osm);
 
+  if(src.href) acts.appendChild(makeButton("Bild-Adresse kopieren", b => copyText(src.href, b)));
+
   card.appendChild(acts);
-  cards.prepend(card);
+  place(card, replaceNode);
 }
 
 /* ============================================================
@@ -443,22 +551,362 @@ function renderCard(file, exif, pos, error){
 
 function handleFiles(list){
   [...list].forEach(file => {
+    const src = {
+      name: file.name,
+      sizeLabel: kb(file.size),
+      thumb: URL.createObjectURL(file),
+      revoke: true
+    };
     if(!/^image\//.test(file.type) && !/\.(jpe?g|tiff?)$/i.test(file.name)){
-      renderCard(file, null, null, "Kein Bildformat — bitte eine JPG-Datei wählen.");
+      renderCard(src, null, null, "Kein Bildformat — bitte eine JPG-Datei wählen.");
       return;
     }
     const r = new FileReader();
     r.onload = () => {
       try{
         const exif = parseJpeg(r.result);
-        renderCard(file, exif, extractPosition(exif), null);
+        renderCard(src, exif, extractPosition(exif), null);
       }catch(e){
-        renderCard(file, null, null, e.message);
+        renderCard(src, null, null, e.message);
       }
     };
-    r.onerror = () => renderCard(file, null, null, "Die Datei konnte nicht gelesen werden.");
+    r.onerror = () => renderCard(src, null, null, "Die Datei konnte nicht gelesen werden.");
     r.readAsArrayBuffer(file);
   });
+}
+
+/* ============================================================
+   Bild per Adresse (URL)
+   ============================================================ */
+
+const MAX_BYTES = 2 * 1024 * 1024;      // EXIF steht am Dateianfang — mehr ist unnötig
+
+// Nur Roh-Weiterleitungen — Dienste, die das Bild neu kodieren (wsrv.nl, images.weserv),
+// wären hier nutzlos: sie entfernen dabei genau die EXIF-Daten, die wir suchen.
+const PROXIES = [
+  { name: "allorigins.win", url: h => "https://api.allorigins.win/raw?url=" + encodeURIComponent(h) },
+  { name: "corsproxy.io",   url: h => "https://corsproxy.io/?url="        + encodeURIComponent(h) },
+  { name: "codetabs.com",   url: h => "https://api.codetabs.com/v1/proxy/?quest=" + encodeURIComponent(h) }
+];
+
+/* WordPress/Photon liefert mit Größen- oder strip-Parametern eine neu kodierte
+   Kopie ohne EXIF. Ohne diese Parameter kommt die Originaldatei. */
+function cleanImageUrl(u){
+  if(u.protocol !== "http:" && u.protocol !== "https:") return { url:u, note:null };
+  const v = new URL(u.href);
+  const wp = /(^|\.)(wp\.com|wordpress\.com)$/i.test(v.hostname);
+  const junk = ["strip","quality","resize","fit","zoom","crop","w","h","ssl"];
+  let hit = false;
+  junk.forEach(k => {
+    if(!v.searchParams.has(k)) return;
+    if(!wp && k !== "strip" && k !== "resize" && k !== "quality") return;  // sonst nur eindeutige Fälle
+    v.searchParams.delete(k);
+    hit = true;
+  });
+  if(!hit) return { url:u, note:null };
+  return { url:v, note:"Bildparameter entfernt (die lieferten eine neu kodierte Kopie ohne EXIF)" };
+}
+
+/* aus foto-1024x768.jpg wird foto.jpg — die Größenvarianten erzeugt WordPress
+   beim Hochladen neu, dabei gehen die Metadaten verloren. */
+function originalSizeUrl(u){
+  const m = u.pathname.match(/^(.*)-\d{2,5}x\d{2,5}(\.(?:jpe?g|tiff?|png))$/i);
+  if(!m) return null;
+  const v = new URL(u.href);
+  v.pathname = m[1] + m[2];
+  return v;
+}
+
+function normalizeUrl(raw){
+  const s = String(raw).trim().replace(/^["'<]+|["'>]+$/g, "");
+  if(!s) return null;
+  let u;
+  try{ u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : "https://" + s); }
+  catch(_){ return null; }
+  if(!/^(https?|data|blob):$/.test(u.protocol)) return null;
+  return u;
+}
+
+function nameFromUrl(u){
+  if(u.protocol !== "http:" && u.protocol !== "https:") return u.protocol + "…";
+  let last = u.pathname.split("/").filter(Boolean).pop() || u.hostname;
+  try{ last = decodeURIComponent(last); }catch(_){}
+  return last.length > 90 ? last.slice(0, 87) + "…" : last;
+}
+
+/* Liest nur den Kopf der Antwort und bricht den Rest ab. */
+async function fetchHead(target){
+  const opt = { redirect: "follow", referrerPolicy: "no-referrer", credentials: "omit" };
+  if(typeof AbortSignal !== "undefined" && AbortSignal.timeout) opt.signal = AbortSignal.timeout(25000);
+
+  const res = await fetch(target, opt);
+  if(!res.ok) throw new Error("Der Server antwortete mit " + res.status + " " + (res.statusText || "") + ".");
+
+  const type = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  const declared = parseInt(res.headers.get("content-length") || "", 10);
+
+  let bytes;
+  if(res.body && typeof res.body.getReader === "function"){
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    while(total < MAX_BYTES){
+      const { done, value } = await reader.read();
+      if(done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    try{ await reader.cancel(); }catch(_){}
+    bytes = new Uint8Array(total);
+    let o = 0;
+    for(const c of chunks){ bytes.set(c, o); o += c.length; }
+  }else{
+    bytes = new Uint8Array(await res.arrayBuffer());
+  }
+
+  const size = Number.isFinite(declared) && declared > 0 ? declared : bytes.length;
+  return { buffer: bytes.buffer, type, size, truncated: size > bytes.length, status: res.status };
+}
+
+/* Was liegt wirklich im Puffer? Content-Type lügt regelmäßig — Proxys setzen
+   text/html auf ihre eigenen Fehlerseiten, manche Server text/plain auf JPEGs. */
+function sniff(buffer){
+  const b = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 64));
+  const hex = (...v) => v.every((x,i) => b[i] === x);
+  const asc = (s, off=0) => [...s].every((c,i) => b[off+i] === c.charCodeAt(0));
+
+  if(hex(0xFF,0xD8,0xFF))                       return { kind:"jpeg" };
+  if(hex(0x49,0x49,0x2A,0x00) || hex(0x4D,0x4D,0x00,0x2A)) return { kind:"tiff" };
+  if(hex(0x89,0x50,0x4E,0x47))                  return { kind:"other", label:"PNG" };
+  if(asc("GIF8"))                               return { kind:"other", label:"GIF" };
+  if(asc("RIFF") && asc("WEBP", 8))             return { kind:"other", label:"WebP" };
+  if(asc("ftyp", 4))                            return { kind:"other", label:"HEIC/HEIF oder MP4" };
+  if(hex(0x42,0x4D))                            return { kind:"other", label:"BMP" };
+
+  // Text? Führende Leerzeichen überspringen
+  let i = 0;
+  while(i < b.length && (b[i] === 0x20 || b[i] === 0x09 || b[i] === 0x0A || b[i] === 0x0D || b[i] === 0xEF || b[i] === 0xBB || b[i] === 0xBF)) i++;
+  const c = b[i];
+  if(c === 0x3C) return { kind:"markup" };                    // '<'
+  if(c === 0x7B || c === 0x5B) return { kind:"json" };        // '{' oder '['
+  return { kind:"unknown" };
+}
+
+/* Kurzfassung dessen, was der Server statt des Bildes geschickt hat. */
+function textPreview(buffer){
+  let s;
+  try{
+    s = new TextDecoder("utf-8", { fatal:false }).decode(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 8192)));
+  }catch(_){ return null; }
+  const t = s.match(/<title[^>]*>([\s\S]{0,200}?)<\/title>/i);
+  let out = t ? t[1] : s.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<[^>]*>/g, " ");
+  out = out
+    .replace(/&#(\d+);/g,   (_,d) => String.fromCodePoint(+d))
+    .replace(/&#x([\da-f]+);/gi, (_,h) => String.fromCodePoint(parseInt(h,16)))
+    .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (_,n) =>
+      ({amp:"&", lt:"<", gt:">", quot:'"', apos:"'", nbsp:" "})[n.toLowerCase()])
+    .replace(/\s+/g, " ").trim();
+  if(!out) return null;
+  return out.length > 140 ? out.slice(0, 137) + "…" : out;
+}
+
+async function loadFromUrl(raw, proxyIdx, replaceNode){
+  const u0 = normalizeUrl(raw);
+  if(!u0){
+    renderCard({ name: String(raw).slice(0,90) }, null, null,
+      "Keine gültige Bild-Adresse. Erlaubt sind http:, https:, data: und blob:.", replaceNode);
+    return;
+  }
+
+  const cleaned = cleanImageUrl(u0);
+  const u = cleaned.url;
+
+  const proxy = proxyIdx >= 0 ? PROXIES[proxyIdx] : null;
+  const host  = (u.protocol === "http:" || u.protocol === "https:") ? u.host : u.protocol;
+  const origin = host + (proxy ? "  ·  über " + proxy.name : "  ·  direkt");
+  const node = replaceNode && replaceNode.isConnected ? replaceNode : pendingCard(nameFromUrl(u), origin);
+
+  const base = {
+    name: nameFromUrl(u),
+    thumb: u.href,
+    href: u.href,
+    origin
+  };
+  if(cleaned.note) base.hint = cleaned.note + ".";
+
+  try{
+    const r = await fetchHead(proxy ? proxy.url(u.href) : u.href);
+    const s = sniff(r.buffer);
+    base.diag = "HTTP " + r.status + "  ·  " + (r.type || "ohne Typangabe")
+              + "  ·  " + kb(r.size) + "  ·  Inhalt: " + (s.label || s.kind)
+              + (r.truncated ? "  ·  Anfang gelesen" : "");
+
+    if(s.kind === "markup" || s.kind === "json"){
+      const preview = textPreview(r.buffer);
+
+      // Fehlerseite eines Proxys? Dann lohnt der nächste in der Kette.
+      const nxt = proxyIdx + 1;
+      if(proxyIdx >= 0 && nxt < PROXIES.length && autoProxy()){
+        const sub = node.querySelector(".sub");
+        if(sub) sub.textContent = PROXIES[proxyIdx].name + " lieferte kein Bild — Versuch über " + PROXIES[nxt].name + " …";
+        return loadFromUrl(u.href, nxt, node);
+      }
+
+      const who = proxy ? "Der Proxy " + proxy.name : "Der Server";
+      let msg = who + " hat statt der Bilddatei " + (s.kind === "json" ? "eine JSON-Antwort" : "eine HTML-Seite") + " geliefert"
+              + (preview ? ": „" + preview + "“." : ".");
+      msg += proxy
+        ? " Entweder kam der Proxy selbst nicht an die Datei, oder unter der Adresse liegt tatsächlich kein Bild."
+        : " Unter der Adresse liegt kein Bild — häufig eine Fehlerseite (die Adresse stimmt nicht mehr) oder eine "
+        + "Beitragsseite statt der Datei. In der Seite Rechtsklick auf das Bild → „Grafikadresse kopieren“.";
+
+      if(nxt < PROXIES.length)
+        base.tries = [{ label: "Über " + PROXIES[nxt].name + " versuchen", run: n => loadFromUrl(u.href, nxt, n) }];
+      throw Object.assign(new Error(msg), { handled:true });
+    }
+
+    if(s.kind === "other"){
+      throw Object.assign(new Error("Die Datei ist ein " + s.label + ". Ausgelesen werden kann nur JPEG und TIFF — "
+        + "PNG und GIF speichern keine GPS-Daten, HEIC nutzt ein anderes Containerformat."), { handled:true });
+    }
+
+    if(s.kind === "unknown" && !/^image\//.test(r.type)){
+      throw Object.assign(new Error("Der Inhalt ist kein erkennbares Bildformat (Typangabe: "
+        + (r.type || "keine") + ")."), { handled:true });
+    }
+
+    const exif = parseJpeg(r.buffer);
+    const pos  = extractPosition(exif);
+    base.sizeLabel = kb(r.size);
+
+    if(!pos){
+      const tries = [];
+      const orig = originalSizeUrl(u);
+      if(orig) tries.push({ label: "Originaldatei ohne Größenzusatz probieren", run: n => loadFromUrl(orig.href, -1, n) });
+      if(tries.length) base.tries = tries;
+
+      const hints = [];
+      if(base.hint) hints.push(base.hint);
+      if(orig) hints.push("Der Dateiname endet auf eine Bildgröße — das ist eine von WordPress erzeugte Kopie, "
+                        + "und beim Verkleinern gehen die EXIF-Daten verloren. Die Originaldatei heißt genauso, nur ohne den Zusatz.");
+      else if(/wordpress\.com$|wp\.com$/i.test(host))
+        hints.push("Bei WordPress.com wird das Bild im Beitrag oft über den Bild-CDN ausgeliefert, der Metadaten entfernt. "
+                 + "Die Datei unter /wp-content/uploads/ sollte sie noch enthalten — falls nicht, hat schon der Upload sie verworfen.");
+      if(r.truncated) hints.push("Es wurden nur die ersten " + kb(MAX_BYTES) + " geladen; EXIF steht normalerweise am Dateianfang.");
+      base.hint = hints.join(" ") || null;
+    }
+
+    renderCard(base, exif, pos, null, node);
+
+  }catch(e){
+    const netFail = (e instanceof TypeError) || e.name === "TimeoutError" || e.name === "AbortError";
+    const next = proxyIdx + 1;
+
+    // Automatischer Weiterversuch über den nächsten Proxy, falls gewünscht
+    if(netFail && next < PROXIES.length && autoProxy()){
+      const sub = node.querySelector(".sub");
+      if(sub) sub.textContent = (proxy ? proxy.name : "Direktzugriff") + " blockiert — Versuch über " + PROXIES[next].name + " …";
+      return loadFromUrl(u.href, next, node);
+    }
+
+    let msg;
+    if(e.name === "TimeoutError" || e.name === "AbortError"){
+      msg = "Zeitüberschreitung — der Server hat nicht rechtzeitig geantwortet.";
+    }else if(netFail){
+      msg = "Der Abruf wurde vom Browser blockiert"
+          + (proxyIdx >= 0 ? " — auch über " + PROXIES.slice(0, proxyIdx+1).map(p=>p.name).join(", ") + "." : ".")
+          + " Meist erlaubt der Server keinen Zugriff aus fremder Herkunft (fehlende CORS-Kopfzeile); seltener ist die "
+          + "Adresse falsch oder der Server nicht erreichbar."
+          + (location.protocol === "file:" ? " Hinweis: Die Seite läuft als lokale Datei (file://) — über einen kleinen "
+            + "lokalen Webserver klappen solche Abrufe deutlich zuverlässiger." : "")
+          + " Sicherster Weg: das Bild speichern und die Datei hier ablegen.";
+    }else{
+      msg = e.message;
+    }
+
+    if(netFail && next < PROXIES.length){
+      base.tries = [{ label: "Über " + PROXIES[next].name + " versuchen", run: n => loadFromUrl(u.href, next, n) }];
+    }
+    renderCard(base, null, null, msg, node);
+  }
+}
+
+function handleUrlInput(text){
+  const parts = String(text).split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+  parts.forEach(p => loadFromUrl(p, -1, null));
+  return parts.length;
+}
+
+/* ============================================================
+   Diagnose: alle Wege einzeln durchprobieren und protokollieren
+   ============================================================ */
+
+async function probe(target){
+  try{
+    const r = await fetchHead(target);
+    const s = sniff(r.buffer);
+    const bytes = [...new Uint8Array(r.buffer, 0, Math.min(4, r.buffer.byteLength))]
+      .map(b => b.toString(16).padStart(2,"0").toUpperCase()).join(" ");
+    const ok = s.kind === "jpeg" || s.kind === "tiff";
+    let txt = "HTTP " + r.status + " · " + (r.type || "kein Typ") + " · " + kb(r.size)
+            + " · Bytes " + bytes + " → " + (s.label || s.kind);
+    if(!ok && (s.kind === "markup" || s.kind === "json")){
+      const p = textPreview(r.buffer);
+      if(p) txt += " · „" + p + "“";
+    }
+    if(ok){
+      const pos = extractPosition(parseJpeg(r.buffer));
+      txt += pos ? " · GPS gefunden" : " · gelesen, aber ohne GPS-Tags";
+      return { ok:true, txt };
+    }
+    return { ok:false, txt };
+  }catch(e){
+    if(e instanceof TypeError)  return { ok:false, txt:"vom Browser blockiert (CORS oder nicht erreichbar)" };
+    if(e.name === "TimeoutError" || e.name === "AbortError") return { ok:false, txt:"Zeitüberschreitung" };
+    return { ok:false, txt:e.message };
+  }
+}
+
+async function diagnose(raw){
+  const u0 = normalizeUrl(raw);
+  if(!u0){ renderCard({ name:String(raw).slice(0,90) }, null, null, "Keine gültige Adresse.", null); return; }
+  const u = cleanImageUrl(u0).url;
+
+  const card = el("div", "card");
+  const head = el("div", "head");
+  head.appendChild(el("img", "thumb blank"));
+  const meta = el("div", "meta");
+  meta.appendChild(el("p", "fname", "Diagnose · " + nameFromUrl(u)));
+  meta.appendChild(el("p", "sub", u.host));
+  head.appendChild(meta);
+  card.appendChild(head);
+
+  const box = el("div", "probe");
+  card.appendChild(box);
+  cards.prepend(card);
+
+  const targets = [{ name:"direkt", url:u.href }]
+    .concat(PROXIES.map(p => ({ name:p.name, url:p.url(u.href) })));
+
+  let anyOk = false;
+  for(const t of targets){
+    const row = el("div");
+    row.appendChild(el("span", "who", t.name));
+    const res = el("span", "res", "läuft …");
+    row.appendChild(res);
+    box.appendChild(row);
+
+    const r = await probe(t.url);
+    res.textContent = r.txt;
+    res.className = "res " + (r.ok ? "ok" : "no");
+    if(r.ok) anyOk = true;
+  }
+
+  const n = el("p", "note");
+  n.textContent = anyOk
+    ? "Mindestens ein Weg liefert echte Bilddaten — über „Auslesen“ wird dieser genutzt."
+    : "Kein Weg liefert Bilddaten. Zuverlässig bleibt: das Bild im Browser speichern und die Datei hier ablegen.";
+  card.appendChild(n);
 }
 
 const drop = document.getElementById("drop");
@@ -475,9 +923,18 @@ input.addEventListener("change", () => { handleFiles(input.files); input.value =
   drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("hot"); }));
 ["dragleave","drop"].forEach(t =>
   drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+/* Ein aus einem anderen Tab gezogenes Bild liefert keine Datei, sondern eine Adresse. */
+function handleDataTransfer(dt){
+  if(!dt) return;
+  if(dt.files && dt.files.length){ handleFiles(dt.files); return; }
+  const text = dt.getData("text/uri-list") || dt.getData("text/plain") || "";
+  const first = text.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith("#"))[0];
+  if(first && normalizeUrl(first)) loadFromUrl(first, -1, null);
+}
+
 drop.addEventListener("drop", e => {
   e.stopPropagation();                       // sonst greift der window-Listener nochmal zu
-  if(e.dataTransfer) handleFiles(e.dataTransfer.files);
+  handleDataTransfer(e.dataTransfer);
 });
 
 // Seitenweites Ablegen verhindert, dass der Browser das Bild einfach öffnet
@@ -485,13 +942,54 @@ window.addEventListener("dragover", e => e.preventDefault());
 window.addEventListener("drop", e => {
   e.preventDefault();
   if(drop.contains(e.target)) return;        // Ablagefeld hat es bereits erledigt
-  if(e.dataTransfer) handleFiles(e.dataTransfer.files);
+  handleDataTransfer(e.dataTransfer);
 });
 
-// Einfügen aus der Zwischenablage
+// Einfügen aus der Zwischenablage: Datei oder Adresse
 window.addEventListener("paste", e => {
-  if(e.clipboardData && e.clipboardData.files.length) handleFiles(e.clipboardData.files);
+  const cd = e.clipboardData;
+  if(!cd) return;
+  if(cd.files && cd.files.length){ handleFiles(cd.files); return; }
+  if(e.target === urlField) return;          // im Eingabefeld normal einfügen lassen
+  const text = (cd.getData("text/plain") || "").trim();
+  if(text && normalizeUrl(text)){
+    e.preventDefault();
+    urlField.value = text;
+    handleUrlInput(text);
+  }
 });
+
+/* ---- Adresszeile ---- */
+
+const urlField = document.getElementById("url");
+const goBtn    = document.getElementById("go");
+const autoBox  = document.getElementById("autoproxy");
+
+function autoProxy(){ return !!(autoBox && autoBox.checked); }
+
+function submitUrl(){
+  const v = urlField.value.trim();
+  if(!v){ urlField.focus(); return; }
+  if(handleUrlInput(v)) urlField.value = "";
+}
+
+goBtn.addEventListener("click", submitUrl);
+document.getElementById("diag").addEventListener("click", () => {
+  const v = urlField.value.trim();
+  if(v) diagnose(v); else urlField.focus();
+});
+urlField.addEventListener("keydown", e => {
+  if(e.key === "Enter"){ e.preventDefault(); submitUrl(); }
+});
+
+// Direktaufruf: exif-gps.html?url=https://…  (auch mehrfach)
+(function fromQuery(){
+  try{
+    const qs = new URLSearchParams(location.search);
+    const list = qs.getAll("url");
+    if(list.length) list.forEach(u => loadFromUrl(u, -1, null));
+  }catch(_){}
+})();
 </script>
 </body>
 </html>
