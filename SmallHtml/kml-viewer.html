@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>KML Track Viewer</title>
+<title>Track Viewer – KML &amp; GPX</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
 <style>
   :root{
@@ -182,7 +182,7 @@
       <circle cx="3" cy="18" r="1.6" fill="var(--accent-start)" stroke="none"/>
       <circle cx="22" cy="15" r="1.6" fill="var(--accent-end)" stroke="none"/>
     </svg>
-    <span class="brand-name">kml<b>•</b>viewer</span>
+    <span class="brand-name">track<b>•</b>viewer</span>
   </div>
   <select class="btn" id="basemapSelect" aria-label="Kartendienst wählen">
     <option value="voyager">CARTO Voyager (hell)</option>
@@ -205,7 +205,7 @@
   <div class="filebar">
     <span class="filename" id="filename"></span>
     <label class="btn" for="fileInputHeader" id="loadBtnHeader" style="display:none;">Andere Datei laden</label>
-    <input type="file" id="fileInputHeader" accept=".kml,application/vnd.google-earth.kml+xml">
+    <input type="file" id="fileInputHeader" accept=".kml,.gpx,application/vnd.google-earth.kml+xml,application/gpx+xml">
   </div>
 </header>
 
@@ -215,15 +215,16 @@
       <path d="M3 17c2-1 4-4 5-7s2-7 4-8 4 4 5 7 3 6 5 7"/>
       <circle cx="3" cy="17" r="1.4"/><circle cx="22" cy="17" r="1.4"/>
     </svg>
-    <h1>KML-Track laden</h1>
-    <p>Datei hier ablegen oder auswählen.<br>Unterstützt gx:Track-Punkte und Standard-KML-Koordinaten.</p>
+    <h1>Track laden – KML oder GPX</h1>
+    <p>Datei hier ablegen oder auswählen.<br>KML: gx:Track-Punkte und Standard-Koordinaten.<br>GPX: Track (trkpt), Route (rtept) und Wegpunkte.</p>
     <label class="btn primary" for="fileInput">Datei auswählen</label>
-    <input type="file" id="fileInput" accept=".kml,application/vnd.google-earth.kml+xml">
+    <input type="file" id="fileInput" accept=".kml,.gpx,application/vnd.google-earth.kml+xml,application/gpx+xml">
     <div id="errorBox"></div>
   </div>
 </div>
 
 <div class="stats" id="stats">
+  <div class="row"><span class="label">Format</span><span class="value" id="statFormat">–</span></div>
   <div class="row"><span class="label">Punkte</span><span class="value" id="statPoints">–</span></div>
   <div class="row"><span class="label">Distanz</span><span class="value track" id="statDistance">–</span></div>
   <div class="row" id="rowDuration"><span class="label">Dauer</span><span class="value" id="statDuration">–</span></div>
@@ -708,14 +709,97 @@
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   }
 
-  function parseKML(xmlText){
+  // --- Format detection + dispatch -------------------------------------------------
+  // Returns { points: [...], format: 'KML'|'GPX', detail: '...' }
+
+  function parseTrackFile(xmlText, fileName){
     var parser = new DOMParser();
     var xml = parser.parseFromString(xmlText, "application/xml");
     if (xml.getElementsByTagName('parsererror').length){
       throw new Error('Die Datei konnte nicht als XML gelesen werden.');
     }
 
+    var root = xml.documentElement;
+    var rootName = root ? (root.localName || root.nodeName).toLowerCase() : '';
+    var ext = (fileName || '').toLowerCase().replace(/^.*\./, '');
+
+    var isGpx = rootName === 'gpx' ||
+                (rootName !== 'kml' && (ext === 'gpx' ||
+                 xml.getElementsByTagNameNS('*','trkpt').length > 0 ||
+                 xml.getElementsByTagNameNS('*','rtept').length > 0 ||
+                 xml.getElementsByTagNameNS('*','wpt').length > 0));
+
+    return isGpx ? parseGPX(xml) : parseKML(xml);
+  }
+
+  // --- GPX ---------------------------------------------------------------------------
+  // <trk>/<trkseg>/<trkpt lat lon> mit optionalem <ele> und <time>.
+  // Fallback: <rte>/<rtept>, danach lose <wpt>.
+
+  function gpxPointsFrom(elements){
+    var pts = [];
+    for (var i=0; i<elements.length; i++){
+      var el = elements[i];
+      var lat = parseFloat(el.getAttribute('lat'));
+      var lon = parseFloat(el.getAttribute('lon'));
+      if (isNaN(lat) || isNaN(lon)) continue;
+
+      var eleEl = el.getElementsByTagNameNS('*','ele')[0];
+      var alt = null;
+      if (eleEl){
+        var e = parseFloat(eleEl.textContent);
+        if (!isNaN(e)) alt = e;
+      }
+
+      var timeEl = el.getElementsByTagNameNS('*','time')[0];
+      var time = timeEl ? timeEl.textContent.trim() : null;
+
+      pts.push({ lat: lat, lon: lon, alt: alt, time: time || null });
+    }
+    return pts;
+  }
+
+  function parseGPX(xml){
     var points = [];
+    var detail = null;
+
+    // 1) Tracks: alle Segmente aller Tracks in Dokumentreihenfolge aneinanderhängen.
+    var trkpts = xml.getElementsByTagNameNS('*','trkpt');
+    if (trkpts.length >= 2){
+      points = gpxPointsFrom(trkpts);
+      var segCount = xml.getElementsByTagNameNS('*','trkseg').length;
+      var trkCount = xml.getElementsByTagNameNS('*','trk').length;
+      detail = 'Track';
+      if (trkCount > 1) detail += ' ×' + trkCount;
+      if (segCount > 1) detail += ', ' + segCount + ' Segmente';
+    }
+
+    // 2) Fallback: Route
+    if (points.length < 2){
+      var rtepts = xml.getElementsByTagNameNS('*','rtept');
+      if (rtepts.length >= 2){
+        points = gpxPointsFrom(rtepts);
+        detail = 'Route';
+      }
+    }
+
+    // 3) Fallback: lose Wegpunkte
+    if (points.length < 2){
+      var wpts = xml.getElementsByTagNameNS('*','wpt');
+      if (wpts.length >= 2){
+        points = gpxPointsFrom(wpts);
+        detail = 'Wegpunkte';
+      }
+    }
+
+    return { points: points, format: 'GPX', detail: detail };
+  }
+
+  // --- KML ---------------------------------------------------------------------------
+
+  function parseKML(xml){
+    var points = [];
+    var detail = null;
 
     // Primary: gx:Track (gx:coord [+ optional <when> timestamps])
     var trackEls = xml.getElementsByTagNameNS('*', 'Track');
@@ -736,6 +820,7 @@
           }
         }
         usedTrack = true;
+        detail = 'gx:Track';
       }
     }
 
@@ -760,10 +845,11 @@
             });
           }
         }
+        detail = 'LineString';
       }
     }
 
-    return points;
+    return { points: points, format: 'KML', detail: detail };
   }
 
   function computeStats(points){
@@ -814,9 +900,10 @@
     document.getElementById('errorBox').innerHTML = '';
   }
 
-  function renderTrack(points, fileName){
+  function renderTrack(result, fileName){
+    var points = result.points;
     if (points.length < 2){
-      showError('Keine ausreichenden Koordinaten in dieser Datei gefunden.');
+      showError('Keine ausreichenden Koordinaten in dieser ' + result.format + '-Datei gefunden.');
       return;
     }
     clearError();
@@ -839,6 +926,8 @@
     fitTrackBounds(trackLayer.getBounds());
 
     var stats = computeStats(points);
+    document.getElementById('statFormat').textContent =
+      result.format + (result.detail ? ' · ' + result.detail : '');
     document.getElementById('statPoints').textContent = stats.count;
     document.getElementById('statDistance').textContent = stats.distanceKm.toFixed(2) + ' km';
 
@@ -881,8 +970,8 @@
     var reader = new FileReader();
     reader.onload = function(e){
       try {
-        var points = parseKML(e.target.result);
-        renderTrack(points, file.name);
+        var result = parseTrackFile(e.target.result, file.name);
+        renderTrack(result, file.name);
       } catch(err){
         showError(err.message || 'Datei konnte nicht verarbeitet werden.');
       }
