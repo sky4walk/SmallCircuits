@@ -1,0 +1,3871 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DMG-Werkbank — Game-Boy-Emulator mit Debugger</title>
+<style>
+/* ==========================================================================
+   Palette taken from the DMG-01 chassis rather than from its screen:
+   the chalk-grey plastic, the berry red of the A/B buttons, the indigo of
+   the d-pad legend, and the purple-charcoal of the screen bezel.
+   ========================================================================== */
+:root {
+  --bezel:   #26232c;
+  --panel:   #302c39;
+  --panel-2: #3a3546;
+  --line:    #4a4456;
+  --chalk:   #b9b4a4;
+  --ink:     #e6e1d4;
+  --muted:   #8b8398;
+  --berry:   #b23a5f;
+  --indigo:  #5f72b0;
+  --amber:   #c9973f;
+
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bezel);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Silkscreen-style legend, as printed next to ports on the hardware. */
+.legend {
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--muted); font-weight: 600;
+}
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* -------------------------------------------------------------- app frame */
+#app { display: flex; flex-direction: column; height: 100vh; min-height: 0; }
+
+header {
+  display: flex; align-items: center; gap: 18px;
+  padding: 8px 14px; border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #302c39, #2a2732);
+  flex-wrap: wrap;
+}
+
+.wordmark {
+  font-weight: 800; letter-spacing: -0.02em; font-size: 15px;
+  color: var(--ink); white-space: nowrap;
+}
+.wordmark span { color: var(--berry); }
+
+#cartInfo { display: flex; gap: 16px; align-items: baseline; flex: 1; min-width: 0; flex-wrap: wrap; }
+#cartInfo .field { display: flex; flex-direction: column; gap: 1px; }
+#cartInfo .field b { font-family: var(--mono); font-weight: 500; font-size: 12px; color: var(--ink); }
+#cartInfo .bad { color: var(--berry); }
+#cartInfo .ok { color: #6fae7d; }
+
+/* ------------------------------------------------------------------ buttons */
+button, select, input[type=text] {
+  font-family: var(--sans); font-size: 12px;
+  background: var(--panel-2); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 3px;
+  padding: 5px 9px; cursor: pointer;
+}
+button:hover:not(:disabled) { background: #453f53; border-color: #5c5570; }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary { background: var(--berry); border-color: #cc4a70; color: #fff; }
+button.primary:hover { background: #c4436a; }
+button.on { background: var(--indigo); border-color: #7387c4; color: #fff; }
+input[type=text] { font-family: var(--mono); cursor: text; }
+input[type=text]:focus, button:focus-visible, select:focus-visible {
+  outline: 2px solid var(--indigo); outline-offset: 1px;
+}
+.bar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+
+/* -------------------------------------------------------------------- main */
+main { display: flex; flex: 1; min-height: 0; }
+
+#stage {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 16px; flex: 1; min-width: 0; overflow: auto;
+}
+
+.screen-block { display: flex; gap: 10px; align-items: stretch; }
+
+/* ------------------------------------------------------------- the chassis
+   Screen and buttons live on one chalk-grey plate with a dark bezel, the way
+   the plastic and the LCD window relate on the actual hardware. */
+#chassis {
+  background: linear-gradient(168deg, #c3bfaf 0%, #b4afa0 55%, #a49f91 100%);
+  border-radius: 10px 10px 44px 10px;
+  padding: 14px 16px 18px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.45);
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+
+#screenWrap {
+  padding: 12px 14px; border-radius: 6px 6px 22px 6px;
+  background: #1d1a22;
+  box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
+}
+#screen {
+  display: block; image-rendering: pixelated;
+  background: #000; border-radius: 1px;
+}
+
+/* Shown instead of the picture when the cartridge cannot run on a DMG. */
+#cgbNotice { display: none; max-width: 380px; padding: 18px 20px; text-align: center; color: var(--bezel); }
+#cgbNotice.on { display: block; }
+#cgbNotice h2 { margin: 0 0 8px; font-size: 16px; letter-spacing: -0.01em; }
+#cgbNotice p { margin: 0 0 10px; font-size: 12px; line-height: 1.55; color: #4a4553; }
+#cgbNotice .hint { color: #6a6478; }
+#cgbNotice button { background: var(--berry); border-color: #cc4a70; color: #fff; }
+
+/* ---------------------------------------------------------------- buttons */
+#pad {
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  width: 100%;
+  user-select: none; -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: none;                 /* no scrolling or zooming while playing */
+}
+#pad .pad-main {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%; gap: 20px; padding: 0 2%;
+}
+
+#dpad {
+  display: grid;
+  grid-template-columns: repeat(3, var(--dpad-cell, 34px));
+  grid-template-rows: repeat(3, var(--dpad-cell, 34px));
+  flex-shrink: 0;
+}
+#dpad > div { background: transparent; }
+#dpad .k, #dpad .c {
+  background: linear-gradient(180deg, #3b3741, #26232c);
+  display: grid; place-items: center; color: #8b8398; font-size: 11px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.09);
+}
+#dpad .c { box-shadow: none; }
+#dpad .k[data-btn="up"]    { border-radius: 5px 5px 0 0; }
+#dpad .k[data-btn="down"]  { border-radius: 0 0 5px 5px; }
+#dpad .k[data-btn="left"]  { border-radius: 5px 0 0 5px; }
+#dpad .k[data-btn="right"] { border-radius: 0 5px 5px 0; }
+#dpad .k.down { background: linear-gradient(180deg, #201d26, #17151b); color: #c9c3d4; }
+
+.ab { display: flex; gap: 14px; align-items: center; flex-shrink: 0; transform: rotate(-22deg); }
+.ab .round {
+  width: var(--ab-size, 46px); height: var(--ab-size, 46px); border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #c4547a, #9c2d4e 70%);
+  color: #f3e6ea; display: grid; place-items: center;
+  font-weight: 700; font-size: 15px; letter-spacing: 0.04em;
+  box-shadow: 0 2px 0 #6f1f37, inset 0 1px 0 rgba(255,255,255,0.35);
+}
+.ab .round.down { background: radial-gradient(circle at 38% 32%, #9c2d4e, #7c2340 70%); box-shadow: none; transform: translateY(2px); }
+
+.se { display: flex; gap: 22px; transform: rotate(-20deg); margin-top: 2px; }
+.se .pill {
+  padding: 5px 15px; border-radius: 9px;
+  background: linear-gradient(180deg, #4a4553, #33303b);
+  color: #cfc9d8; font-size: 8px; font-weight: 700; letter-spacing: 0.14em;
+  box-shadow: 0 2px 0 #241f2c, inset 0 1px 0 rgba(255,255,255,0.12);
+}
+.se .pill.down { background: #2b2733; box-shadow: none; transform: translateY(2px); }
+
+/* Screen reader / keyboard users still reach everything via the keymap. */
+
+/* ------------------------------------------------------------------ drawer */
+#drawer {
+  width: 520px; flex-shrink: 0; border-left: 1px solid var(--line);
+  background: var(--panel); display: flex; flex-direction: column; min-height: 0;
+}
+#drawer.hidden { display: none; }
+body.dbg-off .dbg-only { display: none !important; }
+
+/* Wrap rather than scroll: a tab that is merely off-screen with no visible
+   scrollbar is a tab nobody finds. */
+#tabs { display: flex; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+#tabs button {
+  border: 0; border-radius: 0; background: transparent; color: var(--muted);
+  padding: 9px 11px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+  font-weight: 600; border-bottom: 2px solid transparent; white-space: nowrap;
+  flex: 1 1 auto; text-align: center;
+}
+#tabs button.active { color: var(--ink); border-bottom-color: var(--berry); background: #35303f; }
+
+#panels { flex: 1; overflow: auto; min-height: 0; }
+.panel { display: none; padding: 12px; }
+.panel.active { display: block; }
+.panel h3 {
+  font-size: 9px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--muted); margin: 14px 0 6px; font-weight: 600;
+}
+.panel h3:first-child { margin-top: 0; }
+
+/* --------------------------------------------------------------- registers */
+.regs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 10px; font-family: var(--mono); font-size: 12px; }
+.regs .r { display: flex; justify-content: space-between; gap: 6px; padding: 2px 5px; background: var(--panel-2); border-radius: 2px; }
+.regs .r i { color: var(--muted); font-style: normal; }
+.regs .r b { font-weight: 500; }
+.regs .r.changed b { color: var(--amber); }
+
+.bits { display: flex; gap: 3px; font-family: var(--mono); font-size: 10px; flex-wrap: wrap; }
+.bits span {
+  padding: 2px 5px; border-radius: 2px; background: var(--panel-2); color: var(--muted);
+  border: 1px solid transparent;
+}
+.bits span.set { background: var(--indigo); color: #fff; border-color: #8296d0; }
+
+/* ------------------------------------------------------------------ tables */
+table.data { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11px; }
+table.data th {
+  text-align: left; font-weight: 600; color: var(--muted); font-size: 9px;
+  letter-spacing: 0.12em; text-transform: uppercase; padding: 3px 5px;
+  border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel);
+}
+table.data td { padding: 1px 5px; border-bottom: 1px solid rgba(74,68,86,0.35); white-space: nowrap; }
+table.data tr:hover td { background: #383243; }
+
+/* ------------------------------------------------------------- disassembly */
+#disasm { font-family: var(--mono); font-size: 11.5px; line-height: 1.5; }
+#disasm .row { display: flex; gap: 8px; padding: 0 4px; cursor: pointer; border-radius: 2px; }
+#disasm .row:hover { background: #383243; }
+#disasm .row.pc { background: rgba(178,58,95,0.22); box-shadow: inset 2px 0 0 var(--berry); }
+#disasm .row .a { color: var(--muted); width: 42px; }
+#disasm .row .b { color: #6d6579; width: 62px; }
+#disasm .row .t { color: var(--ink); }
+#disasm .row.bp .a { color: var(--berry); font-weight: 700; }
+#disasm .row.bp::before { content: "●"; color: var(--berry); margin-left: -10px; font-size: 9px; }
+
+/* ------------------------------------------------------------------ memory */
+#memView { font-family: var(--mono); font-size: 11.5px; line-height: 1.55; white-space: pre; overflow-x: auto; }
+#memView .addr { color: var(--muted); }
+#memView .hi { color: var(--amber); }
+#memView .asc { color: var(--indigo); }
+
+/* ------------------------------------------------------------------ canvas */
+canvas.viewer { image-rendering: pixelated; border: 1px solid var(--line); background: #1d1a22; display: block; }
+
+#serialOut, #traceOut {
+  font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all;
+  background: #1d1a22; border: 1px solid var(--line); border-radius: 3px;
+  padding: 8px; max-height: 340px; overflow: auto; color: var(--chalk);
+}
+#traceOut { white-space: pre; word-break: normal; overflow-x: auto; }
+
+.hint { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.kbd {
+  font-family: var(--mono); font-size: 10px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 3px; padding: 1px 5px;
+}
+.row-gap { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+
+/* -------------------------------------------------------------- drop state */
+#drop {
+  position: fixed; inset: 0; display: none; place-items: center;
+  background: rgba(38,35,44,0.92); z-index: 20; border: 3px dashed var(--berry);
+}
+#drop.on { display: grid; }
+#drop div { text-align: center; }
+
+#toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--berry);
+  padding: 8px 14px; border-radius: 3px; font-size: 12px; opacity: 0;
+  transition: opacity 0.25s; pointer-events: none; z-index: 30; max-width: 80vw;
+}
+#toast.show { opacity: 1; }
+
+/* ---------------------------------------------------------------- welcome */
+#welcome { text-align: center; max-width: 460px; }
+#welcome h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 6px; }
+#welcome p { color: var(--muted); line-height: 1.6; margin: 0 0 18px; }
+
+@media (max-width: 1000px) {
+  main { flex-direction: column; }
+  #drawer { width: 100%; border-left: 0; border-top: 1px solid var(--line); max-height: 50vh; }
+  #rasterKey { flex-direction: row; }
+  #stage { padding: 8px; gap: 8px; justify-content: flex-start; }
+  #screenWrap { padding: 7px; border-radius: 6px 6px 18px 6px; }
+}
+
+/* On a phone the cartridge legend collapses to the title; the rest lives in
+   the debugger anyway. */
+@media (max-width: 700px) {
+  header { gap: 10px; padding: 6px 10px; }
+  #cartInfo .field.dbg-only { display: none; }
+  #rasterWrap { display: none; }
+  .wordmark { font-size: 13px; }
+  #transport { font-size: 11px; }
+  /* Thumb-sized controls: 44 px is the smallest target that stays reliable. */
+  #pad { --dpad-cell: 50px; --ab-size: 66px; gap: 18px; }
+  .se .pill { padding: 11px 20px; font-size: 9px; }
+  .se { transform: rotate(-12deg); gap: 16px; }
+  #chassis { padding: 10px 12px 20px; width: 100%; }
+  #pad .pad-main { gap: 10px; }
+  /* The body stretches to fill the phone and the buttons sit at its bottom,
+     where thumbs actually rest. */
+  .screen-block { flex: 1; width: 100%; align-items: stretch; }
+  #chassis { flex: 1; }
+  #pad { margin-top: auto; padding-bottom: 4px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #toast { transition: none; }
+}
+
+</style>
+</head>
+<body>
+
+<div id="app">
+  <header>
+    <div class="wordmark">DMG<span>·</span>WERKBANK</div>
+
+    <div id="cartInfo">
+      <div class="field"><span class="legend">Modul</span><b id="ciTitle">— kein ROM —</b></div>
+      <div class="field"><span class="legend">System</span><b id="ciMachine">—</b></div>
+      <div class="field dbg-only"><span class="legend">MBC</span><b id="ciMbc">—</b></div>
+      <div class="field dbg-only"><span class="legend">ROM</span><b id="ciRom">—</b></div>
+      <div class="field dbg-only"><span class="legend">RAM</span><b id="ciRam">—</b></div>
+      <div class="field dbg-only"><span class="legend">Prüfsumme</span><b id="ciSum">—</b></div>
+      <div class="field dbg-only"><span class="legend">Tempo</span><b id="ciFps">—</b></div>
+    </div>
+
+    <div class="bar">
+      <button id="btnOpen">ROM laden</button>
+      <button id="btnRun" class="primary" disabled>Start</button>
+      <button id="btnReset" disabled>Reset</button>
+      <button id="btnDrawer" class="on">Debugger</button>
+    </div>
+  </header>
+
+  <main>
+    <div id="stage">
+      <div id="welcome">
+        <h1>Game Boy im Browser</h1>
+        <p>ROM-Datei (<span class="mono">.gb</span>) hierher ziehen oder über „ROM laden“ öffnen.
+           Die Datei bleibt lokal im Browser — es wird nichts hochgeladen.</p>
+        <button id="btnOpen2" class="primary">ROM-Datei wählen</button>
+      </div>
+
+      <div class="screen-block" id="screenBlock" style="display:none">
+        <div id="rasterWrap" class="dbg-only">
+          <canvas id="raster" width="96" height="154" title="Pro Rasterzeile: Dauer von Modus 3, SCX, SCY, Anzahl Sprites. Klick setzt einen Zeilen-Breakpoint."></canvas>
+          <div id="rasterKey">
+            <span><i style="background:#72b05f"></i>M3</span>
+            <span><i style="background:#5f72b0"></i>SCX</span>
+            <span><i style="background:#b9b4a4"></i>SCY</span>
+            <span><i style="background:#c9973f"></i>OBJ</span>
+          </div>
+        </div>
+
+        <div id="chassis">
+          <div id="cgbNotice">
+            <h2>Nur für Game Boy Color</h2>
+            <p>Dieses Modul hat keinen Schwarzweiß-Zweig und lässt sich auf einem
+               Game Boy nicht spielen. Auf echter Hardware verhindert schon die
+               fehlende Kerbe im Gehäuse das Einschalten.</p>
+            <p class="hint">Die Werkbank emuliert bisher nur den DMG. Ohne
+               Farbausgabe bleibt das Bild hier voraussichtlich leer.</p>
+            <button id="btnCgbAnyway">Trotzdem starten</button>
+          </div>
+          <div id="screenWrap">
+            <canvas id="screen" width="160" height="144"></canvas>
+          </div>
+
+          <div id="pad">
+            <div class="pad-main">
+              <div id="dpad">
+                <div></div><div class="k" data-btn="up">▲</div><div></div>
+                <div class="k" data-btn="left">◀</div><div class="c"></div><div class="k" data-btn="right">▶</div>
+                <div></div><div class="k" data-btn="down">▼</div><div></div>
+              </div>
+              <div class="ab">
+                <div class="k round" data-btn="b">B</div>
+                <div class="k round" data-btn="a">A</div>
+              </div>
+            </div>
+            <div class="se">
+              <div class="k pill" data-btn="select">SELECT</div>
+              <div class="k pill" data-btn="start">START</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bar" id="transport" style="display:none">
+        <button id="btnStepI" class="dbg-only" title="Ein Befehl (F11)">Befehl</button>
+        <button id="btnStepL" class="dbg-only" title="Eine Rasterzeile (F6)">Zeile</button>
+        <button id="btnStepF" class="dbg-only" title="Ein Frame (F10)">Frame</button>
+        <span class="legend dbg-only">Tempo</span>
+        <select id="selSpeed" class="dbg-only">
+          <option value="0.25">0,25×</option>
+          <option value="0.5">0,5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="0">max</option>
+        </select>
+        <span class="legend">Palette</span>
+        <select id="selPal">
+          <option value="dmg">DMG grün</option>
+          <option value="pocket">Pocket grau</option>
+          <option value="light">Light blau</option>
+          <option value="hicon">Hoher Kontrast</option>
+        </select>
+        <button id="btnAudio">Ton an</button>
+        <button id="btnScale">2×</button>
+      </div>
+
+    </div>
+
+    <aside id="drawer">
+      <div id="tabs">
+        <button data-tab="cpu" class="active">CPU</button>
+        <button data-tab="disasm">Disassembler</button>
+        <button data-tab="memory">Speicher</button>
+        <button data-tab="video">Video</button>
+        <button data-tab="raster">Raster</button>
+        <button data-tab="trace">Trace</button>
+        <button data-tab="serial">Seriell</button>
+        <button data-tab="tools">Extras</button>
+      </div>
+
+      <div id="panels">
+
+        <!-- ---------------------------------------------------------- CPU -->
+        <section class="panel active" data-panel="cpu">
+          <h3>Register</h3>
+          <div class="regs" id="regs"></div>
+
+          <h3>Flags · Interrupts</h3>
+          <div class="row-gap">
+            <div class="bits" id="flagBits"></div>
+            <div class="bits" id="imeBits"></div>
+          </div>
+          <div class="row-gap">
+            <span class="legend" style="width:22px">IF</span><div class="bits" id="ifBits"></div>
+          </div>
+          <div class="row-gap">
+            <span class="legend" style="width:22px">IE</span><div class="bits" id="ieBits"></div>
+          </div>
+
+          <h3>LCD</h3>
+          <div class="row-gap"><span class="legend" style="width:34px">LCDC</span><div class="bits" id="lcdcBits"></div></div>
+          <div class="row-gap"><span class="legend" style="width:34px">STAT</span><div class="bits" id="statBits"></div></div>
+          <div class="regs" id="lcdRegs"></div>
+
+          <h3>Zähler</h3>
+          <div class="regs" id="counters"></div>
+
+          <h3>Stack (SP →)</h3>
+          <div id="stackView" class="mono" style="font-size:11.5px;line-height:1.5"></div>
+        </section>
+
+        <!-- --------------------------------------------------- Disassembler -->
+        <section class="panel" data-panel="disasm">
+          <div class="row-gap">
+            <input type="text" id="disAddr" placeholder="Adresse, z. B. 0150" size="8">
+            <button id="btnDisGo">Springen</button>
+            <button id="btnDisPC" class="on">PC folgen</button>
+            <button id="btnBpClear">Breakpoints löschen</button>
+          </div>
+          <p class="hint">Klick auf eine Zeile setzt bzw. entfernt einen Breakpoint.</p>
+          <div id="disasm"></div>
+          <h3>Breakpoints</h3>
+          <div id="bpList" class="mono" style="font-size:11.5px"></div>
+          <h3>Watchpoints</h3>
+          <div class="row-gap">
+            <input type="text" id="wpAddr" placeholder="Adresse" size="8">
+            <button id="btnWpR">bei Lesen</button>
+            <button id="btnWpW">bei Schreiben</button>
+            <button id="btnWpClear">Löschen</button>
+          </div>
+          <div id="wpList" class="mono" style="font-size:11.5px"></div>
+        </section>
+
+        <!-- ------------------------------------------------------- Speicher -->
+        <section class="panel" data-panel="memory">
+          <div class="row-gap">
+            <input type="text" id="memAddr" placeholder="Adresse" size="8" value="C000">
+            <button data-goto="8000">VRAM</button>
+            <button data-goto="A000">Cart-RAM</button>
+            <button data-goto="C000">WRAM</button>
+            <button data-goto="FE00">OAM</button>
+            <button data-goto="FF00">IO</button>
+            <button data-goto="FF80">HRAM</button>
+          </div>
+          <div class="row-gap">
+            <input type="text" id="pokeAddr" placeholder="Adresse" size="8">
+            <input type="text" id="pokeVal" placeholder="Wert" size="4">
+            <button id="btnPoke">Schreiben</button>
+            <span class="hint">schreibt ohne Takt (verändert keine Zyklen)</span>
+          </div>
+          <div id="memView"></div>
+        </section>
+
+        <!-- ---------------------------------------------------------- Video -->
+        <section class="panel" data-panel="video">
+          <h3>Kacheln (VRAM 8000–97FF)</h3>
+          <canvas id="tiles" class="viewer" width="128" height="192" style="width:256px;height:384px"></canvas>
+          <h3>Kachelkarte</h3>
+          <div class="row-gap">
+            <select id="selMap">
+              <option value="9800">9800</option>
+              <option value="9C00">9C00</option>
+            </select>
+            <button id="btnMapAuto" class="on">wie LCDC</button>
+            <span class="hint">rot = sichtbarer Ausschnitt</span>
+          </div>
+          <canvas id="tilemap" class="viewer" width="256" height="256"></canvas>
+          <h3>Sprites (OAM)</h3>
+          <div class="row-gap"><button id="btnOamAll">alle zeigen</button></div>
+          <table class="data" id="oamTable"></table>
+        </section>
+
+        <!-- --------------------------------------------------------- Raster -->
+        <section class="panel" data-panel="raster">
+          <p class="hint">Registerwerte, wie sie beim Start von Modus 3 der jeweiligen Zeile
+             gültig waren — also genau die Werte, die diese Zeile gezeichnet haben.
+             Klick auf die Leiste links neben dem Bild setzt einen Zeilen-Breakpoint.</p>
+          <div class="row-gap">
+            <span class="legend">Zeilen-Breakpoint</span>
+            <input type="text" id="lyBreak" placeholder="LY" size="4">
+            <button id="btnLyClear">aus</button>
+          </div>
+          <table class="data" id="rasterTable"></table>
+        </section>
+
+        <!-- ---------------------------------------------------------- Trace -->
+        <section class="panel" data-panel="trace">
+          <div class="row-gap">
+            <button id="btnTrace">Aufzeichnung starten</button>
+            <button id="btnTraceDump">Als Datei sichern</button>
+            <span class="hint">Ringpuffer, letzte 8192 Befehle</span>
+          </div>
+          <div id="traceOut">Aufzeichnung aus.</div>
+        </section>
+
+        <!-- --------------------------------------------------------- Seriell -->
+        <section class="panel" data-panel="serial">
+          <p class="hint">Alles, was das ROM über den Link-Port ausgibt. Testroms wie die
+             von Blargg melden ihre Ergebnisse hier.</p>
+          <div class="row-gap"><button id="btnSerialClear">Leeren</button></div>
+          <div id="serialOut"></div>
+        </section>
+
+        <!-- ---------------------------------------------------------- Stände -->
+        <section class="panel" data-panel="tools">
+          <h3>Schnellstände</h3>
+          <div class="row-gap" id="slotBar"></div>
+          <div class="row-gap">
+            <button id="btnStateSave">Stand sichern (Datei)</button>
+            <button id="btnStateLoad">Stand laden (Datei)</button>
+          </div>
+          <h3>Als eigenständige Datei sichern</h3>
+          <p class="hint">Legt das geladene Modul fest in eine Kopie dieser HTML-Datei.
+             Die Kopie startet das Spiel beim Öffnen von selbst.</p>
+          <div class="row-gap">
+            <button id="btnExport" disabled>HTML mit diesem Modul sichern</button>
+            <label class="hint" style="display:flex;align-items:center;gap:5px">
+              <input type="checkbox" id="expCompress" checked> gzip
+            </label>
+          </div>
+          <p class="hint" id="expHint"></p>
+
+          <h3>Batteriespeicher</h3>
+          <div class="row-gap">
+            <button id="btnSavDl">.sav herunterladen</button>
+            <button id="btnSavUp">.sav laden</button>
+          </div>
+          <p class="hint" id="savHint"></p>
+          <h3>Optionen</h3>
+          <div class="row-gap">
+            <button id="btnBlocking">VRAM-Sperre: aus</button>
+            <span class="hint">sperrt VRAM/OAM während Modus 2/3 wie echte Hardware</span>
+          </div>
+          <div class="row-gap">
+            <span class="legend">Lautstärke</span>
+            <input type="range" id="vol" min="0" max="100" value="25" style="width:140px">
+          </div>
+          <h3>Tastatur</h3>
+          <p class="hint">
+            <span class="kbd">← ↑ → ↓</span> Steuerkreuz ·
+            <span class="kbd">X</span> A · <span class="kbd">Y</span>/<span class="kbd">Z</span> B ·
+            <span class="kbd">Enter</span> Start ·
+            <span class="kbd">Rücktaste</span>/<span class="kbd">Leertaste</span> Select<br>
+            <span class="kbd">F5</span> Start/Pause · <span class="kbd">F11</span> Einzelbefehl ·
+            <span class="kbd">F6</span> Zeile · <span class="kbd">F10</span> Frame ·
+            <span class="kbd">Umschalt+F1…F4</span> Stand sichern · <span class="kbd">F1…F4</span> laden
+          </p>
+        </section>
+
+      </div>
+    </aside>
+  </main>
+</div>
+
+<div id="drop"><div><h2>ROM hier ablegen</h2><p class="hint">.gb / .gbc / .sav / .state</p></div></div>
+<div id="toast"></div>
+<input type="file" id="fileIn" accept=".gb,.gbc,.bin,.rom" style="display:none">
+<input type="file" id="fileAux" style="display:none">
+
+<script>
+// ===========================================================================
+//  Cartridge / Memory Bank Controller
+// ===========================================================================
+//  Supported: ROM-only, MBC1, MBC2, MBC3 (+RTC), MBC5.
+//  Link's Awakening (DMG) is cartridge type 0x03 = MBC1 + RAM + Battery.
+// ===========================================================================
+
+const CART_TYPES = {
+  0x00: 'ROM ONLY',            0x01: 'MBC1',                0x02: 'MBC1+RAM',
+  0x03: 'MBC1+RAM+BATTERY',    0x05: 'MBC2',                0x06: 'MBC2+BATTERY',
+  0x08: 'ROM+RAM',             0x09: 'ROM+RAM+BATTERY',
+  0x0F: 'MBC3+TIMER+BATTERY',  0x10: 'MBC3+TIMER+RAM+BATTERY',
+  0x11: 'MBC3',                0x12: 'MBC3+RAM',            0x13: 'MBC3+RAM+BATTERY',
+  0x19: 'MBC5',                0x1A: 'MBC5+RAM',            0x1B: 'MBC5+RAM+BATTERY',
+  0x1C: 'MBC5+RUMBLE',         0x1D: 'MBC5+RUMBLE+RAM',     0x1E: 'MBC5+RUMBLE+RAM+BATTERY',
+};
+
+const RAM_SIZES = { 0x00: 0, 0x01: 2048, 0x02: 8192, 0x03: 32768, 0x04: 131072, 0x05: 65536 };
+
+class Cart {
+  constructor(rom) {
+    this.rom = rom;
+    this.type = rom[0x147];
+    this.typeName = CART_TYPES[this.type] || ('UNKNOWN 0x' + this.type.toString(16));
+    this.romBanks = 2 << rom[0x148];
+    this.ramSize = RAM_SIZES[rom[0x149]] ?? 0;
+
+    // MBC2 has 512 x 4 bit of internal RAM, not reported in the header.
+    this.mbc = this.type === 0x00 || this.type === 0x08 || this.type === 0x09 ? 'none'
+      : this.type <= 0x03 ? 'mbc1'
+      : this.type <= 0x06 ? 'mbc2'
+      : this.type <= 0x13 ? 'mbc3'
+      : 'mbc5';
+    if (this.mbc === 'mbc2') this.ramSize = 512;
+
+    this.hasBattery = /BATTERY/.test(this.typeName);
+    this.hasRTC = /TIMER/.test(this.typeName);
+
+    this.ram = new Uint8Array(this.ramSize);
+    this.ramDirty = false;
+
+    // --- banking state ---------------------------------------------------
+    this.romBank = 1;      // effective bank mapped at 0x4000
+    this.ramBank = 0;
+    this.bank1 = 1;        // MBC1 low  5 bits (or MBC5 low 8)
+    this.bank2 = 0;        // MBC1 high 2 bits (or RAM bank / MBC5 bit 8)
+    this.mode = 0;         // MBC1 banking mode: 0 = simple, 1 = advanced
+    this.ramEnabled = false;
+
+    // --- MBC3 real time clock -------------------------------------------
+    this.rtc = { s: 0, m: 0, h: 0, dl: 0, dh: 0, latched: null, lastLatch: 0xFF, sub: 0 };
+
+    // $0143 tells the console which machine the cartridge expects.  Bit 7 set
+    // means the game knows about the Color hardware; bit 6 additionally means
+    // it has no black-and-white fallback at all and cannot run on a DMG.
+    // On a real DMG such cartridges are locked out mechanically -- the clear
+    // shells lack the notch the power switch latches into.
+    const flag = rom[0x143];
+    this.cgbFlag = flag;
+    this.cgbAware = (flag & 0x80) !== 0;
+    this.cgbOnly = this.cgbAware && (flag & 0x40) !== 0;
+    this.machine = this.cgbOnly ? 'cgb-only' : this.cgbAware ? 'dmg+cgb' : 'dmg';
+    this.machineName = this.cgbOnly ? 'nur CGB' : this.cgbAware ? 'DMG + CGB' : 'DMG';
+    this.sgb = rom[0x146] === 0x03;
+
+    // A Color-aware cartridge spends byte $0143 on the flag, so its title is
+    // one character shorter.
+    this.title = '';
+    const titleEnd = this.cgbAware ? 0x143 : 0x144;
+    for (let i = 0x134; i < titleEnd; i++) {
+      const ch = rom[i];
+      if (ch === 0 || ch > 0x7E) break;
+      this.title += String.fromCharCode(ch);
+    }
+    this.updateBanks();
+  }
+
+  // Header validation, useful in the debugger to spot bad dumps.
+  verify() {
+    let hc = 0;
+    for (let i = 0x134; i <= 0x14C; i++) hc = (hc - this.rom[i] - 1) & 0xFF;
+    let gc = 0;
+    for (let i = 0; i < this.rom.length; i++) gc += this.rom[i];
+    gc = (gc - this.rom[0x14E] - this.rom[0x14F]) & 0xFFFF;
+    return {
+      headerOk: hc === this.rom[0x14D],
+      headerStored: this.rom[0x14D], headerComputed: hc,
+      globalOk: gc === ((this.rom[0x14E] << 8) | this.rom[0x14F]),
+      globalStored: (this.rom[0x14E] << 8) | this.rom[0x14F], globalComputed: gc,
+      sizeOk: this.rom.length === this.romBanks * 0x4000,
+    };
+  }
+
+  // Recompute the two ROM windows and the RAM window from the raw registers.
+  updateBanks() {
+    switch (this.mbc) {
+      case 'none':
+        this.lowBank = 0; this.romBank = 1; this.ramBank = 0; break;
+      case 'mbc1': {
+        const hi = this.bank2 << 5;
+        // A bank1 value of 0 always reads as 1 -- this is why MBC1 carts can
+        // never map bank 0x00/0x20/0x40/0x60 into the 0x4000 window.
+        this.romBank = ((this.bank1 === 0 ? 1 : this.bank1) | hi) % this.romBanks;
+        // In advanced mode bank2 also drives the 0x0000 window and the RAM bank.
+        this.lowBank = this.mode ? (hi % this.romBanks) : 0;
+        this.ramBank = this.mode ? this.bank2 : 0;
+        break;
+      }
+      case 'mbc2':
+        this.lowBank = 0;
+        this.romBank = (this.bank1 === 0 ? 1 : this.bank1) % this.romBanks;
+        this.ramBank = 0;
+        break;
+      case 'mbc3':
+        this.lowBank = 0;
+        this.romBank = (this.bank1 === 0 ? 1 : this.bank1) % this.romBanks;
+        break;
+      case 'mbc5':
+        this.lowBank = 0;
+        this.romBank = (this.bank1 | (this.bank2 << 8)) % this.romBanks;
+        break;
+    }
+    this.lowOff = this.lowBank * 0x4000;
+    this.highOff = this.romBank * 0x4000;
+  }
+
+  readROM(addr) {
+    return addr < 0x4000
+      ? this.rom[this.lowOff + addr]
+      : this.rom[this.highOff + (addr - 0x4000)];
+  }
+
+  writeControl(addr, val) {
+    switch (this.mbc) {
+      case 'mbc1':
+        if (addr < 0x2000)      this.ramEnabled = (val & 0x0F) === 0x0A;
+        else if (addr < 0x4000) this.bank1 = val & 0x1F;
+        else if (addr < 0x6000) this.bank2 = val & 0x03;
+        else                    this.mode = val & 1;
+        break;
+      case 'mbc2':
+        // Bit 8 of the address selects between RAM enable and ROM bank.
+        if (addr < 0x4000) {
+          if (addr & 0x100) this.bank1 = val & 0x0F;
+          else this.ramEnabled = (val & 0x0F) === 0x0A;
+        }
+        break;
+      case 'mbc3':
+        if (addr < 0x2000)      this.ramEnabled = (val & 0x0F) === 0x0A;
+        else if (addr < 0x4000) this.bank1 = val & 0x7F;
+        else if (addr < 0x6000) this.ramBank = val;
+        else {
+          if (this.rtc.lastLatch === 0x00 && val === 0x01) this.latchRTC();
+          this.rtc.lastLatch = val;
+        }
+        break;
+      case 'mbc5':
+        if (addr < 0x2000)      this.ramEnabled = (val & 0x0F) === 0x0A;
+        else if (addr < 0x3000) this.bank1 = val;
+        else if (addr < 0x4000) this.bank2 = val & 1;
+        else if (addr < 0x6000) this.ramBank = val & 0x0F;
+        break;
+    }
+    this.updateBanks();
+  }
+
+  ramAddr(addr) {
+    if (this.mbc === 'mbc2') return (addr - 0xA000) & 0x1FF;
+    if (!this.ramSize) return -1;
+    return ((this.ramBank * 0x2000) + (addr - 0xA000)) % this.ramSize;
+  }
+
+  readRAM(addr) {
+    if (this.mbc === 'mbc3' && this.ramBank >= 0x08) return this.readRTC();
+    if (!this.ramEnabled || !this.ramSize) return 0xFF;
+    const a = this.ramAddr(addr);
+    const v = this.ram[a];
+    return this.mbc === 'mbc2' ? (v | 0xF0) : v;
+  }
+
+  writeRAM(addr, val) {
+    if (this.mbc === 'mbc3' && this.ramBank >= 0x08) { this.writeRTC(val); return; }
+    if (!this.ramEnabled || !this.ramSize) return;
+    this.ram[this.ramAddr(addr)] = this.mbc === 'mbc2' ? (val & 0x0F) : val;
+    this.ramDirty = true;
+  }
+
+  // ---- RTC (only meaningful for MBC3 carts) -----------------------------
+  tickRTC(cycles) {
+    if (!this.hasRTC || (this.rtc.dh & 0x40)) return;   // bit 6 = halt
+    this.rtc.sub += cycles;
+    while (this.rtc.sub >= 4194304) {
+      this.rtc.sub -= 4194304;
+      if (++this.rtc.s > 59) {
+        this.rtc.s = 0;
+        if (++this.rtc.m > 59) {
+          this.rtc.m = 0;
+          if (++this.rtc.h > 23) {
+            this.rtc.h = 0;
+            if (++this.rtc.dl > 255) {
+              this.rtc.dl = 0;
+              if (this.rtc.dh & 1) this.rtc.dh = (this.rtc.dh & ~1) | 0x80; // day carry
+              else this.rtc.dh |= 1;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  latchRTC() {
+    this.rtc.latched = { s: this.rtc.s, m: this.rtc.m, h: this.rtc.h, dl: this.rtc.dl, dh: this.rtc.dh };
+  }
+
+  readRTC() {
+    const r = this.rtc.latched || this.rtc;
+    switch (this.ramBank) {
+      case 0x08: return r.s;
+      case 0x09: return r.m;
+      case 0x0A: return r.h;
+      case 0x0B: return r.dl;
+      case 0x0C: return r.dh;
+    }
+    return 0xFF;
+  }
+
+  writeRTC(val) {
+    switch (this.ramBank) {
+      case 0x08: this.rtc.s = val & 0x3F; this.rtc.sub = 0; break;
+      case 0x09: this.rtc.m = val & 0x3F; break;
+      case 0x0A: this.rtc.h = val & 0x1F; break;
+      case 0x0B: this.rtc.dl = val; break;
+      case 0x0C: this.rtc.dh = val & 0xC1; break;
+    }
+    this.ramDirty = true;
+  }
+}
+
+// ===========================================================================
+//  PPU -- scanline renderer with dot-accurate mode timing
+// ===========================================================================
+//  A line is 456 dots:  mode 2 (OAM scan, 80) -> mode 3 (draw, 172+) -> mode 0.
+//  Lines 144..153 are mode 1 (VBlank).  The whole visible line is rendered in
+//  one go at the moment mode 3 begins, so per-line register changes made from
+//  a HBlank or LYC interrupt take effect on the *next* line -- which is
+//  exactly how Link's Awakening keeps its status bar fixed while the map
+//  scrolls underneath it.
+// ===========================================================================
+
+const SCREEN_W = 160, SCREEN_H = 144;
+
+class PPU {
+  constructor(gb) {
+    this.gb = gb;
+    this.vram = new Uint8Array(0x2000);
+    this.oam = new Uint8Array(0xA0);
+
+    this.pixels = new Uint8Array(SCREEN_W * SCREEN_H);   // palette-mapped 0..3
+    this.bgIndex = new Uint8Array(SCREEN_W);             // raw BG index of current line
+    this.frame = 0;
+    this.frameReady = false;
+
+    this.lcdc = 0x91; this.stat = 0x85; this.scy = 0; this.scx = 0;
+    this.ly = 0; this.lyc = 0; this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
+    this.wy = 0; this.wx = 0;
+
+    this.dot = 0;            // dot counter inside the current line (0..455)
+    this.mode = 2;
+    this.windowLine = 0;     // internal window line counter
+    this.wyTriggered = false;
+    this.statLine = false;   // for edge-triggered STAT interrupts
+    this.lineRendered = false;
+    this.mode3Len = 172;
+    this.sprites = [];
+    this.enabled = true;
+    this.lcdOffFrames = 0;
+
+    // Per-scanline register log for the raster inspector.  Every visible line
+    // records the registers as they were latched when mode 3 started, which is
+    // what actually determines the pixels on that line.
+    this.recordRaster = true;
+    this.lineRegs = {
+      scx: new Uint8Array(154), scy: new Uint8Array(154), lcdc: new Uint8Array(154),
+      bgp: new Uint8Array(154), wx: new Uint8Array(154), wy: new Uint8Array(154),
+      spr: new Uint8Array(154), len: new Uint16Array(154),
+    };
+  }
+
+  get lcdEnabled() { return (this.lcdc & 0x80) !== 0; }
+
+  reset() {
+    this.dot = 0; this.ly = 0; this.mode = 2; this.windowLine = 0;
+    this.wyTriggered = false; this.statLine = false; this.lineRendered = false;
+  }
+
+  // -- register access -----------------------------------------------------
+  readReg(addr) {
+    switch (addr) {
+      case 0xFF40: return this.lcdc;
+      case 0xFF41: return 0x80 | (this.stat & 0x78) | (this.ly === this.lyc ? 4 : 0) |
+                          (this.lcdEnabled ? this.mode : 0);
+      case 0xFF42: return this.scy;
+      case 0xFF43: return this.scx;
+      case 0xFF44: return this.lcdEnabled ? this.ly : 0;
+      case 0xFF45: return this.lyc;
+      case 0xFF47: return this.bgp;
+      case 0xFF48: return this.obp0;
+      case 0xFF49: return this.obp1;
+      case 0xFF4A: return this.wy;
+      case 0xFF4B: return this.wx;
+    }
+    return 0xFF;
+  }
+
+  writeReg(addr, val) {
+    switch (addr) {
+      case 0xFF40: {
+        const was = this.lcdEnabled;
+        this.lcdc = val;
+        if (was && !this.lcdEnabled) {
+          // Turning the LCD off resets the line counter and blanks the screen.
+          this.ly = 0; this.dot = 0; this.mode = 0; this.windowLine = 0;
+          this.wyTriggered = false; this.statLine = false;
+          this.pixels.fill(0);
+          this.frameReady = true;
+        } else if (!was && this.lcdEnabled) {
+          this.ly = 0; this.dot = 0; this.mode = 2; this.lineRendered = false;
+          this.windowLine = 0; this.wyTriggered = false;
+          this.checkStat();
+        }
+        break;
+      }
+      case 0xFF41: this.stat = (this.stat & 0x07) | (val & 0x78); this.checkStat(); break;
+      case 0xFF42: this.scy = val; break;
+      case 0xFF43: this.scx = val; break;
+      case 0xFF44: break;                       // LY is read-only
+      case 0xFF45: this.lyc = val; this.checkStat(); break;
+      case 0xFF47: this.bgp = val; break;
+      case 0xFF48: this.obp0 = val; break;
+      case 0xFF49: this.obp1 = val; break;
+      case 0xFF4A: this.wy = val; break;
+      case 0xFF4B: this.wx = val; break;
+    }
+  }
+
+  // STAT interrupts are edge triggered: the IRQ only fires when the OR of all
+  // enabled sources goes from low to high ("STAT blocking").
+  checkStat() {
+    if (!this.lcdEnabled) return;
+    const lycMatch = this.ly === this.lyc;
+    let line = false;
+    if ((this.stat & 0x40) && lycMatch) line = true;
+    if ((this.stat & 0x20) && this.mode === 2) line = true;
+    if ((this.stat & 0x10) && this.mode === 1) line = true;
+    if ((this.stat & 0x08) && this.mode === 0) line = true;
+    if (line && !this.statLine) this.gb.requestInterrupt(INT_STAT);
+    this.statLine = line;
+  }
+
+  // -- main timing ---------------------------------------------------------
+  step(cycles) {
+    if (!this.lcdEnabled) return;
+    for (let i = 0; i < cycles; i++) {
+      this.dot++;
+
+      if (this.ly < SCREEN_H) {
+        if (this.dot === 80) {
+          this.mode = 3;
+          this.scanOAM();
+          this.mode3Len = this.computeMode3Length();
+          this.renderLine();
+          this.checkStat();
+        } else if (this.mode === 3 && this.dot >= 80 + this.mode3Len) {
+          this.mode = 0;
+          this.checkStat();
+        }
+      }
+
+      if (this.dot >= 456) {
+        this.dot = 0;
+        this.ly++;
+        if (this.gb.lyBreak === this.ly) this.gb.hitBreakpoint = { type: 'ly', addr: this.ly };
+        if (this.ly === SCREEN_H) {
+          this.mode = 1;
+          this.frame++;
+          this.frameReady = true;
+          this.gb.requestInterrupt(INT_VBLANK);
+          this.checkStat();
+        } else if (this.ly > 153) {
+          this.ly = 0;
+          this.windowLine = 0;
+          this.wyTriggered = false;
+          this.mode = 2;
+          this.checkStat();
+        } else if (this.ly < SCREEN_H) {
+          this.mode = 2;
+          this.checkStat();
+        } else {
+          this.checkStat();   // LYC can still match during VBlank lines
+        }
+      }
+    }
+  }
+
+  // Mode 3 is stretched by the fine scroll and by sprites on the line.
+  computeMode3Length() {
+    let len = 172 + (this.scx & 7);
+    if ((this.lcdc & 0x20) && this.wyTriggered && this.wx <= 166) len += 6;
+    len += this.sprites.length * 6;      // ~6 dots per sprite (approximation)
+    return len;
+  }
+
+  scanOAM() {
+    this.sprites.length = 0;
+    if (!(this.lcdc & 0x02)) return;
+    const h = (this.lcdc & 0x04) ? 16 : 8;
+    for (let i = 0; i < 40 && this.sprites.length < 10; i++) {
+      const o = i * 4;
+      const y = this.oam[o] - 16;
+      if (this.ly >= y && this.ly < y + h) {
+        this.sprites.push({ y, x: this.oam[o + 1] - 8, tile: this.oam[o + 2], flags: this.oam[o + 3], idx: i });
+      }
+    }
+    // DMG priority: smaller X wins; ties are broken by OAM order.
+    this.sprites.sort((a, b) => (a.x - b.x) || (a.idx - b.idx));
+  }
+
+  renderLine() {
+    const base = this.ly * SCREEN_W;
+    const px = this.pixels, bgi = this.bgIndex;
+
+    if (this.recordRaster) {
+      const r = this.lineRegs, y = this.ly;
+      r.scx[y] = this.scx; r.scy[y] = this.scy; r.lcdc[y] = this.lcdc;
+      r.bgp[y] = this.bgp; r.wx[y] = this.wx; r.wy[y] = this.wy;
+      r.spr[y] = this.sprites.length; r.len[y] = this.mode3Len;
+    }
+
+    // --- background & window ---------------------------------------------
+    if (this.lcdc & 0x01) {
+      if (this.ly === this.wy) this.wyTriggered = true;
+      const winActive = (this.lcdc & 0x20) && this.wyTriggered && this.wx <= 166;
+      const winStart = winActive ? this.wx - 7 : 999;
+      const bgMap = (this.lcdc & 0x08) ? 0x1C00 : 0x1800;
+      const winMap = (this.lcdc & 0x40) ? 0x1C00 : 0x1800;
+      const signed = !(this.lcdc & 0x10);
+      let usedWindow = false;
+
+      for (let x = 0; x < SCREEN_W; x++) {
+        let mapBase, tx, ty, fx, fy;
+        if (x >= winStart) {
+          usedWindow = true;
+          const wxp = x - winStart, wyp = this.windowLine;
+          mapBase = winMap; tx = wxp >> 3; ty = wyp >> 3; fx = wxp & 7; fy = wyp & 7;
+        } else {
+          const sxp = (this.scx + x) & 0xFF, syp = (this.scy + this.ly) & 0xFF;
+          mapBase = bgMap; tx = sxp >> 3; ty = syp >> 3; fx = sxp & 7; fy = syp & 7;
+        }
+        const tileNo = this.vram[mapBase + ty * 32 + tx];
+        const tileAddr = signed
+          ? 0x1000 + (((tileNo << 24) >> 24) * 16)     // 0x8800 addressing, signed
+          : tileNo * 16;                               // 0x8000 addressing
+        const lo = this.vram[tileAddr + fy * 2];
+        const hi = this.vram[tileAddr + fy * 2 + 1];
+        const bit = 7 - fx;
+        const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+        bgi[x] = ci;
+        px[base + x] = (this.bgp >> (ci * 2)) & 3;
+      }
+      if (usedWindow) this.windowLine++;
+    } else {
+      // BG disabled: the line is filled with colour 0 and sprites always win.
+      for (let x = 0; x < SCREEN_W; x++) { bgi[x] = 0; px[base + x] = 0; }
+    }
+
+    // --- sprites ----------------------------------------------------------
+    if (this.lcdc & 0x02) {
+      const h = (this.lcdc & 0x04) ? 16 : 8;
+      // Painter's algorithm: draw back-to-front so the highest priority
+      // sprite (lowest X, then lowest OAM index) ends up on top.
+      for (let s = this.sprites.length - 1; s >= 0; s--) {
+        const sp = this.sprites[s];
+        if (sp.x <= -8 || sp.x >= SCREEN_W) continue;
+        const flipX = sp.flags & 0x20, flipY = sp.flags & 0x40;
+        const pal = (sp.flags & 0x10) ? this.obp1 : this.obp0;
+        let row = this.ly - sp.y;
+        if (flipY) row = h - 1 - row;
+        let tile = sp.tile;
+        if (h === 16) tile = (tile & 0xFE) | (row >> 3);
+        const tileAddr = tile * 16 + (row & 7) * 2;
+        const lo = this.vram[tileAddr], hi = this.vram[tileAddr + 1];
+        for (let p = 0; p < 8; p++) {
+          const x = sp.x + p;
+          if (x < 0 || x >= SCREEN_W) continue;
+          const bit = flipX ? p : 7 - p;
+          const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+          if (ci === 0) continue;                                  // transparent
+          if ((sp.flags & 0x80) && bgi[x] !== 0) continue;         // behind BG 1..3
+          px[base + x] = (pal >> (ci * 2)) & 3;
+        }
+      }
+    }
+  }
+
+  // -- debug helpers -------------------------------------------------------
+  // Renders one 8x8 tile into an RGBA buffer; used by the tile viewer.
+  drawTile(out, outW, ox, oy, tileAddr, palette, colors) {
+    for (let y = 0; y < 8; y++) {
+      const lo = this.vram[tileAddr + y * 2], hi = this.vram[tileAddr + y * 2 + 1];
+      for (let x = 0; x < 8; x++) {
+        const bit = 7 - x;
+        const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
+        const c = colors[(palette >> (ci * 2)) & 3];
+        const o = ((oy + y) * outW + ox + x) * 4;
+        out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 255;
+      }
+    }
+  }
+}
+
+// ===========================================================================
+//  Timer -- DIV / TIMA / TMA / TAC
+// ===========================================================================
+//  DIV is not a counter of its own: it is the top 8 bits of a free running
+//  16 bit system counter.  TIMA increments on the *falling edge* of a selected
+//  bit of that counter ANDed with the enable bit, which is why writing to DIV
+//  or to TAC can produce an extra tick.  Blargg's timing tests check this.
+// ===========================================================================
+
+const TIMER_BITS = [9, 3, 5, 7];    // TAC 0..3 -> bit of the internal counter
+
+class Timer {
+  constructor(gb) {
+    this.gb = gb;
+    this.counter = 0xABCC;   // internal 16-bit counter (DIV = counter >> 8)
+    this.tima = 0; this.tma = 0; this.tac = 0xF8;
+    this.reloading = 0;      // cycles left in the 4-cycle overflow delay
+    this.lastEdge = false;
+  }
+
+  get div() { return (this.counter >> 8) & 0xFF; }
+
+  readReg(addr) {
+    switch (addr) {
+      case 0xFF04: return this.div;
+      case 0xFF05: return this.tima;
+      case 0xFF06: return this.tma;
+      case 0xFF07: return this.tac | 0xF8;
+    }
+    return 0xFF;
+  }
+
+  writeReg(addr, val) {
+    switch (addr) {
+      case 0xFF04: this.setCounter(0); break;              // any write resets DIV
+      case 0xFF05:
+        if (this.reloading !== 1) { this.tima = val; this.reloading = 0; }
+        break;
+      case 0xFF06:
+        this.tma = val;
+        if (this.reloading === 1) this.tima = val;         // write during reload
+        break;
+      case 0xFF07: this.tac = val & 0x07; this.updateEdge(); break;
+    }
+  }
+
+  setCounter(v) {
+    this.counter = v & 0xFFFF;
+    this.updateEdge();
+  }
+
+  // The edge detector: TIMA advances when this signal goes 1 -> 0.
+  edgeSignal() {
+    return ((this.tac & 0x04) !== 0) && ((this.counter >> TIMER_BITS[this.tac & 3]) & 1) !== 0;
+  }
+
+  updateEdge() {
+    const now = this.edgeSignal();
+    if (this.lastEdge && !now) this.incTIMA();
+    this.lastEdge = now;
+  }
+
+  incTIMA() {
+    this.tima = (this.tima + 1) & 0xFF;
+    if (this.tima === 0) this.reloading = 4;   // overflow: reload is delayed
+  }
+
+  step(cycles) {
+    for (let i = 0; i < cycles; i++) {
+      if (this.reloading > 0 && --this.reloading === 0) {
+        this.tima = this.tma;
+        this.gb.requestInterrupt(INT_TIMER);
+      }
+      this.counter = (this.counter + 1) & 0xFFFF;
+      this.updateEdge();
+    }
+  }
+}
+
+// ===========================================================================
+//  APU -- 2 pulse channels, wave channel, noise channel
+// ===========================================================================
+//  The frame sequencer runs at 512 Hz, clocked from bit 12 of the timer's
+//  internal counter (falling edge), so DIV writes can shift the envelope --
+//  same counter, same edge trick as the timer.
+// ===========================================================================
+
+const DUTY_TABLE = [
+  [0, 0, 0, 0, 0, 0, 0, 1],
+  [1, 0, 0, 0, 0, 0, 0, 1],
+  [1, 0, 0, 0, 0, 1, 1, 1],
+  [0, 1, 1, 1, 1, 1, 1, 0],
+];
+const NOISE_DIVISORS = [8, 16, 32, 48, 64, 80, 96, 112];
+
+class APU {
+  constructor(gb, sampleRate = 44100) {
+    this.gb = gb;
+    this.sampleRate = sampleRate;
+    this.cyclesPerSample = 4194304 / sampleRate;
+    this.sampleAcc = 0;
+
+    // Bounded ring buffer.  Roughly 190 ms of audio: enough to ride out a
+    // hiccup, small enough that a sink which stops consuming cannot build an
+    // unbounded backlog.  When it is full the oldest sample is dropped.
+    this.capacity = 8192;
+    this.mask = this.capacity - 1;
+    this.buffer = new Float32Array(this.capacity * 2);
+    this.overruns = 0;
+    this.drainedTotal = 0;   // real consumption, distinct from overrun skipping
+    this.cap = [0, 0];                           // high-pass filter state
+    this.setSampleRate(sampleRate);
+    this.writePos = 0;
+    this.readPos = 0;
+
+    this.enabled = true;
+    this.nr50 = 0x77; this.nr51 = 0xF3;
+    this.seqStep = 0;
+    this.lastSeqBit = false;
+    this.wave = new Uint8Array(16);
+    this.masterVolume = 0.25;
+
+    this.ch1 = this.newSquare(true);
+    this.ch2 = this.newSquare(false);
+    this.ch3 = { on: false, dacOn: false, len: 0, lenEnable: false, freq: 0, timer: 0, pos: 0, volCode: 0, sample: 0 };
+    this.ch4 = {
+      on: false, dacOn: false, len: 0, lenEnable: false, timer: 0, lfsr: 0x7FFF,
+      width7: false, divCode: 0, shift: 0, vol: 0, envInit: 0, envDir: 0, envPeriod: 0, envTimer: 0,
+    };
+  }
+
+  newSquare(hasSweep) {
+    return {
+      on: false, dacOn: false, duty: 0, dutyPos: 0, len: 0, lenEnable: false,
+      freq: 0, timer: 0, vol: 0, envInit: 0, envDir: 0, envPeriod: 0, envTimer: 0,
+      hasSweep, sweepPeriod: 0, sweepDir: 0, sweepShift: 0,
+      sweepTimer: 0, sweepEnabled: false, sweepShadow: 0, sweepNegUsed: false,
+    };
+  }
+
+  // The filter constant is per-sample, so it has to follow the output rate.
+  setSampleRate(rate) {
+    this.sampleRate = rate;
+    this.cyclesPerSample = 4194304 / rate;
+    this.chargeFactor = Math.pow(0.999958, 4194304 / rate);
+  }
+
+  reset() { this.writePos = this.readPos = 0; this.cap[0] = this.cap[1] = 0; this.overruns = 0; this.drainedTotal = 0; }
+
+  // -- register file -------------------------------------------------------
+  readReg(addr) {
+    const c1 = this.ch1, c2 = this.ch2, c3 = this.ch3, c4 = this.ch4;
+    switch (addr) {
+      case 0xFF10: return 0x80 | (c1.sweepPeriod << 4) | (c1.sweepDir << 3) | c1.sweepShift;
+      case 0xFF11: return 0x3F | (c1.duty << 6);
+      case 0xFF12: return (c1.envInit << 4) | (c1.envDir << 3) | c1.envPeriod;
+      case 0xFF13: return 0xFF;
+      case 0xFF14: return 0xBF | (c1.lenEnable ? 0x40 : 0);
+      case 0xFF16: return 0x3F | (c2.duty << 6);
+      case 0xFF17: return (c2.envInit << 4) | (c2.envDir << 3) | c2.envPeriod;
+      case 0xFF18: return 0xFF;
+      case 0xFF19: return 0xBF | (c2.lenEnable ? 0x40 : 0);
+      case 0xFF1A: return 0x7F | (c3.dacOn ? 0x80 : 0);
+      case 0xFF1B: return 0xFF;
+      case 0xFF1C: return 0x9F | (c3.volCode << 5);
+      case 0xFF1D: return 0xFF;
+      case 0xFF1E: return 0xBF | (c3.lenEnable ? 0x40 : 0);
+      case 0xFF20: return 0xFF;
+      case 0xFF21: return (c4.envInit << 4) | (c4.envDir << 3) | c4.envPeriod;
+      case 0xFF22: return (c4.divCode) | (c4.width7 ? 8 : 0) | (c4.shift << 4);
+      case 0xFF23: return 0xBF | (c4.lenEnable ? 0x40 : 0);
+      case 0xFF24: return this.nr50;
+      case 0xFF25: return this.nr51;
+      case 0xFF26: return 0x70 | (this.enabled ? 0x80 : 0) |
+        (c1.on ? 1 : 0) | (c2.on ? 2 : 0) | (c3.on ? 4 : 0) | (c4.on ? 8 : 0);
+    }
+    if (addr >= 0xFF30 && addr <= 0xFF3F) return this.wave[addr - 0xFF30];
+    return 0xFF;
+  }
+
+  writeReg(addr, val) {
+    if (addr >= 0xFF30 && addr <= 0xFF3F) { this.wave[addr - 0xFF30] = val; return; }
+    // While the APU is powered off only NR52 and the length counters respond.
+    if (!this.enabled && addr !== 0xFF26 &&
+        addr !== 0xFF11 && addr !== 0xFF16 && addr !== 0xFF1B && addr !== 0xFF20) return;
+
+    const c1 = this.ch1, c2 = this.ch2, c3 = this.ch3, c4 = this.ch4;
+    switch (addr) {
+      case 0xFF10:
+        c1.sweepPeriod = (val >> 4) & 7; c1.sweepDir = (val >> 3) & 1; c1.sweepShift = val & 7;
+        if (c1.sweepDir === 0 && c1.sweepNegUsed) c1.on = false;
+        break;
+      case 0xFF11: c1.duty = val >> 6; c1.len = 64 - (val & 0x3F); break;
+      case 0xFF12:
+        c1.envInit = val >> 4; c1.envDir = (val >> 3) & 1; c1.envPeriod = val & 7;
+        c1.dacOn = (val & 0xF8) !== 0; if (!c1.dacOn) c1.on = false;
+        break;
+      case 0xFF13: c1.freq = (c1.freq & 0x700) | val; break;
+      case 0xFF14:
+        c1.freq = (c1.freq & 0xFF) | ((val & 7) << 8);
+        c1.lenEnable = (val & 0x40) !== 0;
+        if (val & 0x80) this.triggerSquare(c1);
+        break;
+
+      case 0xFF16: c2.duty = val >> 6; c2.len = 64 - (val & 0x3F); break;
+      case 0xFF17:
+        c2.envInit = val >> 4; c2.envDir = (val >> 3) & 1; c2.envPeriod = val & 7;
+        c2.dacOn = (val & 0xF8) !== 0; if (!c2.dacOn) c2.on = false;
+        break;
+      case 0xFF18: c2.freq = (c2.freq & 0x700) | val; break;
+      case 0xFF19:
+        c2.freq = (c2.freq & 0xFF) | ((val & 7) << 8);
+        c2.lenEnable = (val & 0x40) !== 0;
+        if (val & 0x80) this.triggerSquare(c2);
+        break;
+
+      case 0xFF1A: c3.dacOn = (val & 0x80) !== 0; if (!c3.dacOn) c3.on = false; break;
+      case 0xFF1B: c3.len = 256 - val; break;
+      case 0xFF1C: c3.volCode = (val >> 5) & 3; break;
+      case 0xFF1D: c3.freq = (c3.freq & 0x700) | val; break;
+      case 0xFF1E:
+        c3.freq = (c3.freq & 0xFF) | ((val & 7) << 8);
+        c3.lenEnable = (val & 0x40) !== 0;
+        if (val & 0x80) {
+          c3.on = c3.dacOn;
+          if (c3.len === 0) c3.len = 256;
+          c3.timer = (2048 - c3.freq) * 2; c3.pos = 0;
+        }
+        break;
+
+      case 0xFF20: c4.len = 64 - (val & 0x3F); break;
+      case 0xFF21:
+        c4.envInit = val >> 4; c4.envDir = (val >> 3) & 1; c4.envPeriod = val & 7;
+        c4.dacOn = (val & 0xF8) !== 0; if (!c4.dacOn) c4.on = false;
+        break;
+      case 0xFF22:
+        c4.divCode = val & 7; c4.width7 = (val & 8) !== 0; c4.shift = val >> 4;
+        break;
+      case 0xFF23:
+        c4.lenEnable = (val & 0x40) !== 0;
+        if (val & 0x80) {
+          c4.on = c4.dacOn;
+          if (c4.len === 0) c4.len = 64;
+          c4.vol = c4.envInit; c4.envTimer = c4.envPeriod || 8;
+          c4.lfsr = 0x7FFF;
+          c4.timer = NOISE_DIVISORS[c4.divCode] << c4.shift;
+        }
+        break;
+
+      case 0xFF24: this.nr50 = val; break;
+      case 0xFF25: this.nr51 = val; break;
+      case 0xFF26:
+        if (!(val & 0x80)) {
+          for (let a = 0xFF10; a <= 0xFF25; a++) this.writeRegForce(a, 0);
+          this.enabled = false;
+        } else if (!this.enabled) {
+          this.enabled = true; this.seqStep = 0;
+          this.ch1.dutyPos = this.ch2.dutyPos = 0; this.ch3.pos = 0;
+        }
+        break;
+    }
+  }
+
+  writeRegForce(addr, val) { const e = this.enabled; this.enabled = true; this.writeReg(addr, val); this.enabled = e; }
+
+  triggerSquare(c) {
+    c.on = c.dacOn;
+    if (c.len === 0) c.len = 64;
+    c.timer = (2048 - c.freq) * 4;
+    c.vol = c.envInit;
+    c.envTimer = c.envPeriod || 8;
+    if (c.hasSweep) {
+      c.sweepShadow = c.freq;
+      c.sweepTimer = c.sweepPeriod || 8;
+      c.sweepEnabled = c.sweepPeriod !== 0 || c.sweepShift !== 0;
+      c.sweepNegUsed = false;
+      if (c.sweepShift) this.sweepCalc(c, false);
+    }
+  }
+
+  sweepCalc(c, write) {
+    let nf = c.sweepShadow >> c.sweepShift;
+    if (c.sweepDir) { nf = c.sweepShadow - nf; c.sweepNegUsed = true; }
+    else nf = c.sweepShadow + nf;
+    if (nf > 2047) { c.on = false; return -1; }
+    if (write && c.sweepShift) { c.sweepShadow = nf; c.freq = nf; }
+    return nf;
+  }
+
+  // -- frame sequencer -----------------------------------------------------
+  stepSequencer() {
+    const step = this.seqStep;
+    if ((step & 1) === 0) {                              // steps 0,2,4,6
+      for (const c of [this.ch1, this.ch2, this.ch3, this.ch4]) {
+        if (c.lenEnable && c.len > 0 && --c.len === 0) c.on = false;
+      }
+    }
+    if (step === 2 || step === 6) {                      // sweep
+      const c = this.ch1;
+      if (c.sweepEnabled && --c.sweepTimer <= 0) {
+        c.sweepTimer = c.sweepPeriod || 8;
+        if (c.sweepPeriod) { this.sweepCalc(c, true); this.sweepCalc(c, false); }
+      }
+    }
+    if (step === 7) {                                    // envelope
+      for (const c of [this.ch1, this.ch2, this.ch4]) {
+        if (c.envPeriod && --c.envTimer <= 0) {
+          c.envTimer = c.envPeriod;
+          if (c.envDir && c.vol < 15) c.vol++;
+          else if (!c.envDir && c.vol > 0) c.vol--;
+        }
+      }
+    }
+    this.seqStep = (step + 1) & 7;
+  }
+
+  step(cycles) {
+    // 512 Hz frame sequencer, clocked from bit 12 of the timer counter.
+    const bit = (this.gb.timer.counter & 0x1000) !== 0;
+    if (this.lastSeqBit && !bit && this.enabled) this.stepSequencer();
+    this.lastSeqBit = bit;
+
+    if (this.enabled) {
+      const c1 = this.ch1, c2 = this.ch2, c3 = this.ch3, c4 = this.ch4;
+      c1.timer -= cycles;
+      while (c1.timer <= 0) { c1.timer += (2048 - c1.freq) * 4 || 4; c1.dutyPos = (c1.dutyPos + 1) & 7; }
+      c2.timer -= cycles;
+      while (c2.timer <= 0) { c2.timer += (2048 - c2.freq) * 4 || 4; c2.dutyPos = (c2.dutyPos + 1) & 7; }
+      c3.timer -= cycles;
+      while (c3.timer <= 0) {
+        c3.timer += (2048 - c3.freq) * 2 || 2;
+        c3.pos = (c3.pos + 1) & 31;
+        const b = this.wave[c3.pos >> 1];
+        c3.sample = (c3.pos & 1) ? (b & 0x0F) : (b >> 4);
+      }
+      c4.timer -= cycles;
+      while (c4.timer <= 0) {
+        c4.timer += (NOISE_DIVISORS[c4.divCode] << c4.shift) || 8;
+        const x = (c4.lfsr ^ (c4.lfsr >> 1)) & 1;
+        c4.lfsr = (c4.lfsr >> 1) | (x << 14);
+        if (c4.width7) c4.lfsr = (c4.lfsr & ~0x40) | (x << 6);
+      }
+    }
+
+    this.sampleAcc += cycles;
+    while (this.sampleAcc >= this.cyclesPerSample) {
+      this.sampleAcc -= this.cyclesPerSample;
+      this.emitSample();
+    }
+  }
+
+  channelOutputs() {
+    const c1 = this.ch1, c2 = this.ch2, c3 = this.ch3, c4 = this.ch4;
+    const o = [0, 0, 0, 0];
+    if (c1.on && c1.dacOn) o[0] = DUTY_TABLE[c1.duty][c1.dutyPos] * c1.vol;
+    if (c2.on && c2.dacOn) o[1] = DUTY_TABLE[c2.duty][c2.dutyPos] * c2.vol;
+    if (c3.on && c3.dacOn) {
+      const shift = [4, 0, 1, 2][c3.volCode];
+      o[2] = c3.volCode === 0 ? 0 : (c3.sample >> shift);
+    }
+    if (c4.on && c4.dacOn) o[3] = (~c4.lfsr & 1) * c4.vol;
+    return o;
+  }
+
+  emitSample() {
+    let l = 0, r = 0;
+    if (this.enabled) {
+      const o = this.channelOutputs();
+      for (let i = 0; i < 4; i++) {
+        if (this.nr51 & (1 << i)) r += o[i];
+        if (this.nr51 & (0x10 << i)) l += o[i];
+      }
+      const lv = ((this.nr50 >> 4) & 7) + 1, rv = (this.nr50 & 7) + 1;
+      l = (l / 60) * lv / 8; r = (r / 60) * rv / 8;
+    }
+    // The DMG couples its output through a capacitor, so the DC component is
+    // removed.  Without this the signal sits entirely above zero and every
+    // channel that switches on or off produces an audible click.
+    l = this.hipass(l, 0);
+    r = this.hipass(r, 1);
+    const p = this.writePos & this.mask;
+    this.buffer[p * 2] = l * this.masterVolume;
+    this.buffer[p * 2 + 1] = r * this.masterVolume;
+    this.writePos++;
+    if (this.writePos - this.readPos > this.capacity) {
+      // Nobody is consuming fast enough -- discard the oldest audio rather
+      // than let the backlog grow without limit.
+      this.readPos = this.writePos - this.capacity;
+      this.overruns++;
+    }
+  }
+
+  hipass(input, ch) {
+    const out = input - this.cap[ch];
+    this.cap[ch] = input - out * this.chargeFactor;
+    return out;
+  }
+
+  available() { return this.writePos - this.readPos; }
+
+  // Pull `n` stereo frames into the supplied output arrays.
+  drain(outL, outR, n) {
+    for (let i = 0; i < n; i++) {
+      if (this.readPos >= this.writePos) { outL[i] = 0; outR[i] = 0; continue; }
+      const p = this.readPos & this.mask;
+      outL[i] = this.buffer[p * 2];
+      outR[i] = this.buffer[p * 2 + 1];
+      this.readPos++;
+      this.drainedTotal++;
+    }
+  }
+}
+
+// ===========================================================================
+//  SM83 CPU + memory map + system wiring
+// ===========================================================================
+//  Timing model: every memory access advances the rest of the machine by one
+//  M-cycle (4 dots) *before* the access happens, and instructions add explicit
+//  tick(4) calls for their internal cycles.  Instruction lengths therefore
+//  emerge from the code rather than from a lookup table, and the PPU sees
+//  writes at the right dot -- which is what mid-frame raster effects need.
+// ===========================================================================
+
+const FZ = 0x80, FN = 0x40, FH = 0x20, FC = 0x10;
+const INT_VBLANK = 0x01, INT_STAT = 0x02, INT_TIMER = 0x04, INT_SERIAL = 0x08, INT_JOYPAD = 0x10;
+const INT_VECTORS = [0x40, 0x48, 0x50, 0x58, 0x60];
+
+const BUTTONS = ['right', 'left', 'up', 'down', 'a', 'b', 'select', 'start'];
+
+class GB {
+  constructor(rom) {
+    this.cart = new Cart(rom);
+    this.ppu = new PPU(this);
+    this.timer = new Timer(this);
+    this.apu = new APU(this);
+
+    this.wram = new Uint8Array(0x2000);
+    this.hram = new Uint8Array(0x7F);
+
+    this.buttons = { right: false, left: false, up: false, down: false, a: false, b: false, select: false, start: false };
+    this.joypSelect = 0x30;
+
+    this.serialLog = '';
+    this.sb = 0; this.sc = 0x7E; this.serialTimer = 0;
+
+    this.dmaActive = false; this.dmaSrc = 0; this.dmaPos = 0; this.dmaTimer = 0;
+
+    // Debug hooks -- all optional, all cheap when unused.
+    this.breakpoints = new Set();
+    this.readWatch = new Set();
+    this.writeWatch = new Set();
+    this.trace = null;             // ring buffer, allocated by enableTrace()
+    this.traceIdx = 0;
+    this.hitBreakpoint = null;
+    this.lyBreak = -1;
+    this.strictBlocking = false;   // block VRAM/OAM during PPU modes 2/3
+    this.instrCount = 0;
+
+    this.reset();
+  }
+
+  reset() {
+    // Post-boot-ROM state of a DMG. We skip the boot ROM entirely.
+    this.a = 0x01; this.f = 0xB0; this.b = 0x00; this.c = 0x13;
+    this.d = 0x00; this.e = 0xD8; this.h = 0x01; this.l = 0x4D;
+    this.sp = 0xFFFE; this.pc = 0x0100;
+    this.ime = false; this.eiDelay = 0;
+    this.halted = false; this.stopped = false; this.haltBug = false;
+    this.ifReg = 0xE1; this.ieReg = 0x00;
+    this.cycles = 0;
+    this.instrCount = 0;
+    this.wram.fill(0); this.hram.fill(0);
+    this.ppu.reset();
+    this.apu.reset();
+    this.serialLog = '';
+  }
+
+  // -- 16-bit register pairs ----------------------------------------------
+  get af() { return (this.a << 8) | this.f; }
+  set af(v) { this.a = (v >> 8) & 0xFF; this.f = v & 0xF0; }
+  get bc() { return (this.b << 8) | this.c; }
+  set bc(v) { this.b = (v >> 8) & 0xFF; this.c = v & 0xFF; }
+  get de() { return (this.d << 8) | this.e; }
+  set de(v) { this.d = (v >> 8) & 0xFF; this.e = v & 0xFF; }
+  get hl() { return (this.h << 8) | this.l; }
+  set hl(v) { this.h = (v >> 8) & 0xFF; this.l = v & 0xFF; }
+
+  // =========================================================================
+  //  Clock distribution
+  // =========================================================================
+  tick(c) {
+    this.cycles += c;
+    this.timer.step(c);
+    this.ppu.step(c);
+    this.apu.step(c);
+    if (this.dmaActive) this.stepDMA(c);
+    if (this.serialTimer > 0) {
+      this.serialTimer -= c;
+      if (this.serialTimer <= 0) {
+        this.serialTimer = 0;
+        this.sb = 0xFF;
+        this.sc &= 0x7F;
+        this.requestInterrupt(INT_SERIAL);
+      }
+    }
+    if (this.cart.hasRTC) this.cart.tickRTC(c);
+  }
+
+  stepDMA(c) {
+    this.dmaTimer += c;
+    while (this.dmaTimer >= 4 && this.dmaPos < 160) {
+      this.dmaTimer -= 4;
+      this.ppu.oam[this.dmaPos] = this.readByte((this.dmaSrc << 8) | this.dmaPos);
+      this.dmaPos++;
+    }
+    if (this.dmaPos >= 160) this.dmaActive = false;
+  }
+
+  requestInterrupt(mask) { this.ifReg |= mask; }
+
+  // =========================================================================
+  //  Memory map
+  // =========================================================================
+  //  readByte/writeByte are *untimed* -- the debugger uses them so that
+  //  inspecting memory never perturbs the machine.  read8/write8 are the
+  //  timed versions used by the CPU.
+  // -------------------------------------------------------------------------
+  readByte(addr) {
+    addr &= 0xFFFF;
+    if (addr < 0x8000) return this.cart.readROM(addr);
+    if (addr < 0xA000) {
+      if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode === 3) return 0xFF;
+      return this.ppu.vram[addr - 0x8000];
+    }
+    if (addr < 0xC000) return this.cart.readRAM(addr);
+    if (addr < 0xE000) return this.wram[addr - 0xC000];
+    if (addr < 0xFE00) return this.wram[addr - 0xE000];
+    if (addr < 0xFEA0) {
+      if (this.dmaActive) return 0xFF;
+      if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode >= 2) return 0xFF;
+      return this.ppu.oam[addr - 0xFE00];
+    }
+    if (addr < 0xFF00) return 0x00;                 // unusable region
+    if (addr < 0xFF80) return this.readIO(addr);
+    if (addr < 0xFFFF) return this.hram[addr - 0xFF80];
+    return this.ieReg;
+  }
+
+  writeByte(addr, val) {
+    addr &= 0xFFFF; val &= 0xFF;
+    if (addr < 0x8000) { this.cart.writeControl(addr, val); return; }
+    if (addr < 0xA000) {
+      if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode === 3) return;
+      this.ppu.vram[addr - 0x8000] = val; return;
+    }
+    if (addr < 0xC000) { this.cart.writeRAM(addr, val); return; }
+    if (addr < 0xE000) { this.wram[addr - 0xC000] = val; return; }
+    if (addr < 0xFE00) { this.wram[addr - 0xE000] = val; return; }
+    if (addr < 0xFEA0) {
+      if (this.dmaActive) return;
+      if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode >= 2) return;
+      this.ppu.oam[addr - 0xFE00] = val; return;
+    }
+    if (addr < 0xFF00) return;
+    if (addr < 0xFF80) { this.writeIO(addr, val); return; }
+    if (addr < 0xFFFF) { this.hram[addr - 0xFF80] = val; return; }
+    this.ieReg = val;
+  }
+
+  readIO(addr) {
+    switch (addr) {
+      case 0xFF00: {
+        let v = this.joypSelect | 0xC0 | 0x0F;
+        if (!(this.joypSelect & 0x10)) {          // direction keys selected
+          if (this.buttons.right) v &= ~0x01;
+          if (this.buttons.left)  v &= ~0x02;
+          if (this.buttons.up)    v &= ~0x04;
+          if (this.buttons.down)  v &= ~0x08;
+        }
+        if (!(this.joypSelect & 0x20)) {          // action keys selected
+          if (this.buttons.a)      v &= ~0x01;
+          if (this.buttons.b)      v &= ~0x02;
+          if (this.buttons.select) v &= ~0x04;
+          if (this.buttons.start)  v &= ~0x08;
+        }
+        return v & 0xFF;
+      }
+      case 0xFF01: return this.sb;
+      case 0xFF02: return this.sc | 0x7E;
+      case 0xFF0F: return this.ifReg | 0xE0;
+      case 0xFF46: return this.dmaSrc;
+    }
+    if (addr >= 0xFF04 && addr <= 0xFF07) return this.timer.readReg(addr);
+    if (addr >= 0xFF10 && addr <= 0xFF3F) return this.apu.readReg(addr);
+    if (addr >= 0xFF40 && addr <= 0xFF4B) return this.ppu.readReg(addr);
+    return 0xFF;
+  }
+
+  writeIO(addr, val) {
+    switch (addr) {
+      case 0xFF00: this.joypSelect = val & 0x30; return;
+      case 0xFF01: this.sb = val; return;
+      case 0xFF02:
+        this.sc = val;
+        if (val & 0x80) {
+          // Capture the byte immediately: this is how the Blargg test ROMs
+          // report their results when no link cable partner exists.
+          this.serialLog += String.fromCharCode(this.sb);
+          if (this.onSerial) this.onSerial(this.sb);
+          this.serialTimer = (val & 1) ? 512 : 4096;
+        }
+        return;
+      case 0xFF0F: this.ifReg = val & 0x1F; return;
+      case 0xFF46:
+        this.dmaSrc = val; this.dmaActive = true; this.dmaPos = 0; this.dmaTimer = 0;
+        return;
+      case 0xFF50: return;                         // boot ROM disable (we skip it)
+    }
+    if (addr >= 0xFF04 && addr <= 0xFF07) { this.timer.writeReg(addr, val); return; }
+    if (addr >= 0xFF10 && addr <= 0xFF3F) { this.apu.writeReg(addr, val); return; }
+    if (addr >= 0xFF40 && addr <= 0xFF4B) { this.ppu.writeReg(addr, val); return; }
+  }
+
+  read8(addr) {
+    this.tick(4);
+    if (this.readWatch.size && this.readWatch.has(addr)) this.hitBreakpoint = { type: 'read', addr };
+    return this.readByte(addr);
+  }
+
+  write8(addr, val) {
+    this.tick(4);
+    if (this.writeWatch.size && this.writeWatch.has(addr)) this.hitBreakpoint = { type: 'write', addr, val };
+    this.writeByte(addr, val);
+  }
+
+  fetch8() { const v = this.read8(this.pc); this.pc = (this.pc + 1) & 0xFFFF; return v; }
+  fetch16() { const lo = this.fetch8(); return lo | (this.fetch8() << 8); }
+  push16(v) {
+    this.sp = (this.sp - 1) & 0xFFFF; this.write8(this.sp, (v >> 8) & 0xFF);
+    this.sp = (this.sp - 1) & 0xFFFF; this.write8(this.sp, v & 0xFF);
+  }
+  pop16() {
+    const lo = this.read8(this.sp); this.sp = (this.sp + 1) & 0xFFFF;
+    const hi = this.read8(this.sp); this.sp = (this.sp + 1) & 0xFFFF;
+    return lo | (hi << 8);
+  }
+
+  setButton(name, down) {
+    if (!(name in this.buttons)) return;
+    if (down && !this.buttons[name]) this.requestInterrupt(INT_JOYPAD);
+    this.buttons[name] = down;
+    if (down) this.stopped = false;
+  }
+
+  // =========================================================================
+  //  Instruction dispatch
+  // =========================================================================
+  //  Returns the number of cycles the step consumed.
+  step() {
+    const start = this.cycles;
+
+    // Interrupts are checked between instructions.
+    const pending = this.ifReg & this.ieReg & 0x1F;
+    if (pending) {
+      this.halted = false;
+      if (this.ime) { this.serviceInterrupt(pending); return this.cycles - start; }
+    }
+
+    if (this.halted || this.stopped) { this.tick(4); return this.cycles - start; }
+
+    if (this.trace) this.recordTrace();
+
+    const opPC = this.pc;
+    let op;
+    if (this.haltBug) {
+      // HALT with IME=0 and a pending interrupt: the byte after HALT is read
+      // twice because PC fails to increment once.
+      op = this.read8(this.pc);
+      this.haltBug = false;
+    } else {
+      op = this.fetch8();
+    }
+    this.lastOpPC = opPC;
+    this.lastOp = op;
+    this.instrCount++;
+
+    this.execute(op);
+
+    if (this.eiDelay && --this.eiDelay === 0) this.ime = true;
+
+    if (this.breakpoints.size && this.breakpoints.has(this.pc)) {
+      this.hitBreakpoint = { type: 'pc', addr: this.pc };
+    }
+    return this.cycles - start;
+  }
+
+  serviceInterrupt(pending) {
+    this.ime = false;
+    this.tick(4); this.tick(4);
+    this.push16(this.pc);
+    for (let i = 0; i < 5; i++) {
+      if (pending & (1 << i)) {
+        this.ifReg &= ~(1 << i);
+        this.pc = INT_VECTORS[i];
+        break;
+      }
+    }
+    this.tick(4);
+  }
+
+  onIllegal(op) {
+    this.illegalOp = { op, pc: (this.pc - 1) & 0xFFFF };
+    this.hitBreakpoint = { type: 'illegal', addr: (this.pc - 1) & 0xFFFF, op };
+  }
+
+  opHalt() {
+    if (this.ime) {
+      this.halted = true;
+    } else if (this.ifReg & this.ieReg & 0x1F) {
+      this.haltBug = true;        // documented hardware bug, some games rely on it
+    } else {
+      this.halted = true;
+    }
+  }
+
+  // -- ALU helpers ---------------------------------------------------------
+  aluAdd(v) {
+    const r = this.a + v;
+    this.f = ((r & 0xFF) === 0 ? FZ : 0) | (((this.a & 0xF) + (v & 0xF)) > 0xF ? FH : 0) | (r > 0xFF ? FC : 0);
+    this.a = r & 0xFF;
+  }
+  aluAdc(v) {
+    const c = (this.f & FC) ? 1 : 0, r = this.a + v + c;
+    this.f = ((r & 0xFF) === 0 ? FZ : 0) | (((this.a & 0xF) + (v & 0xF) + c) > 0xF ? FH : 0) | (r > 0xFF ? FC : 0);
+    this.a = r & 0xFF;
+  }
+  aluSub(v) {
+    const r = this.a - v;
+    this.f = FN | ((r & 0xFF) === 0 ? FZ : 0) | (((this.a & 0xF) - (v & 0xF)) < 0 ? FH : 0) | (r < 0 ? FC : 0);
+    this.a = r & 0xFF;
+  }
+  aluSbc(v) {
+    const c = (this.f & FC) ? 1 : 0, r = this.a - v - c;
+    this.f = FN | ((r & 0xFF) === 0 ? FZ : 0) | (((this.a & 0xF) - (v & 0xF) - c) < 0 ? FH : 0) | (r < 0 ? FC : 0);
+    this.a = r & 0xFF;
+  }
+  aluAnd(v) { this.a &= v; this.f = (this.a === 0 ? FZ : 0) | FH; }
+  aluXor(v) { this.a ^= v; this.f = this.a === 0 ? FZ : 0; }
+  aluOr(v)  { this.a |= v; this.f = this.a === 0 ? FZ : 0; }
+  aluCp(v) {
+    const r = this.a - v;
+    this.f = FN | ((r & 0xFF) === 0 ? FZ : 0) | (((this.a & 0xF) - (v & 0xF)) < 0 ? FH : 0) | (r < 0 ? FC : 0);
+  }
+  aluInc(v) {
+    const r = (v + 1) & 0xFF;
+    this.f = (this.f & FC) | (r === 0 ? FZ : 0) | ((v & 0xF) === 0xF ? FH : 0);
+    return r;
+  }
+  aluDec(v) {
+    const r = (v - 1) & 0xFF;
+    this.f = (this.f & FC) | FN | (r === 0 ? FZ : 0) | ((v & 0xF) === 0 ? FH : 0);
+    return r;
+  }
+  aluAddHL(v) {
+    const hl = this.hl, r = hl + v;
+    this.f = (this.f & FZ) | (((hl & 0xFFF) + (v & 0xFFF)) > 0xFFF ? FH : 0) | (r > 0xFFFF ? FC : 0);
+    this.hl = r & 0xFFFF;
+    this.tick(4);
+  }
+  // Shared by ADD SP,r8 and LD HL,SP+r8: flags come from the low byte only.
+  aluAddSP() {
+    const o = (this.fetch8() << 24) >> 24, sp = this.sp;
+    this.f = (((sp & 0xF) + (o & 0xF)) > 0xF ? FH : 0) | (((sp & 0xFF) + (o & 0xFF)) > 0xFF ? FC : 0);
+    return (sp + o) & 0xFFFF;
+  }
+  opDaa() {
+    let a = this.a;
+    if (!(this.f & FN)) {
+      if ((this.f & FH) || (a & 0x0F) > 9) a += 0x06;
+      if ((this.f & FC) || a > 0x9F) { a += 0x60; this.f |= FC; }
+    } else {
+      if (this.f & FH) a = (a - 0x06) & 0xFF;
+      if (this.f & FC) a -= 0x60;
+    }
+    a &= 0xFF;
+    this.f &= ~(FH | FZ);
+    if (a === 0) this.f |= FZ;
+    this.a = a;
+  }
+
+  // -- CB helpers ----------------------------------------------------------
+  opRlc(v) { const c = v >> 7; const r = ((v << 1) | c) & 0xFF; this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opRrc(v) { const c = v & 1; const r = (v >> 1) | (c << 7); this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opRl(v)  { const c = v >> 7; const r = ((v << 1) | ((this.f & FC) ? 1 : 0)) & 0xFF; this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opRr(v)  { const c = v & 1; const r = (v >> 1) | ((this.f & FC) ? 0x80 : 0); this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opSla(v) { const c = v >> 7; const r = (v << 1) & 0xFF; this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opSra(v) { const c = v & 1; const r = (v >> 1) | (v & 0x80); this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opSwap(v){ const r = ((v << 4) | (v >> 4)) & 0xFF; this.f = r === 0 ? FZ : 0; return r; }
+  opSrl(v) { const c = v & 1; const r = v >> 1; this.f = (r === 0 ? FZ : 0) | (c ? FC : 0); return r; }
+  opBit(n, v) { this.f = (this.f & FC) | FH | ((v & (1 << n)) ? 0 : FZ); }
+
+  // -- trace ---------------------------------------------------------------
+  enableTrace(size = 8192) {
+    this.trace = new Array(size).fill(null);
+    this.traceIdx = 0;
+    this.traceSize = size;
+  }
+  disableTrace() { this.trace = null; }
+  recordTrace() {
+    this.trace[this.traceIdx] = {
+      pc: this.pc, a: this.a, f: this.f, bc: this.bc, de: this.de, hl: this.hl,
+      sp: this.sp, cyc: this.cycles, ly: this.ppu.ly, op: this.readByte(this.pc),
+    };
+    this.traceIdx = (this.traceIdx + 1) % this.traceSize;
+  }
+  traceLines() {
+    if (!this.trace) return [];
+    const out = [];
+    for (let i = 0; i < this.traceSize; i++) {
+      const t = this.trace[(this.traceIdx + i) % this.traceSize];
+      if (!t) continue;
+      const d = disassemble(this, t.pc);
+      out.push(
+        `${hex16(t.pc)}  ${d.text.padEnd(18)} A:${hex8(t.a)} F:${flagStr(t.f)} ` +
+        `BC:${hex16(t.bc)} DE:${hex16(t.de)} HL:${hex16(t.hl)} SP:${hex16(t.sp)} ` +
+        `LY:${String(t.ly).padStart(3)} cyc:${t.cyc}`);
+    }
+    return out;
+  }
+
+  // -- frame driver --------------------------------------------------------
+  // Runs until the PPU finishes a frame or a debug condition trips.
+  runFrame(maxCycles = 100000) {
+    this.ppu.frameReady = false;
+    this.hitBreakpoint = null;
+    let spent = 0;
+    while (!this.ppu.frameReady && spent < maxCycles) {
+      spent += this.step();
+      if (this.hitBreakpoint) break;
+    }
+    return spent;
+  }
+
+  // -- save RAM ------------------------------------------------------------
+  getSaveRAM() { return this.cart.hasBattery && this.cart.ramSize ? this.cart.ram.slice() : null; }
+  setSaveRAM(data) {
+    if (!data || !this.cart.ramSize) return;
+    this.cart.ram.set(data.subarray(0, Math.min(data.length, this.cart.ram.length)));
+  }
+
+  execute(op) {
+    switch (op) {
+      // ---- 0x00..0x3F : loads, 16-bit arithmetic, jumps, rotates ------
+      case 0x00: /* NOP              */  break;
+      case 0x01: /* LD BC,d16        */ this.bc = this.fetch16(); break;
+      case 0x02: /* LD (BC),A        */ this.write8(this.bc, this.a); break;
+      case 0x03: /* INC BC           */ this.bc = (this.bc + 1) & 0xFFFF; this.tick(4); break;
+      case 0x04: /* INC B            */ this.b = this.aluInc(this.b); break;
+      case 0x05: /* DEC B            */ this.b = this.aluDec(this.b); break;
+      case 0x06: /* LD B,d8          */ this.b = this.fetch8(); break;
+      case 0x07: /* RLCA             */ { const c = this.a >> 7; this.a = ((this.a << 1) | c) & 0xFF; this.f = c ? FC : 0; } break;
+      case 0x08: /* LD (a16),SP      */ { const a = this.fetch16(); this.write8(a, this.sp & 0xFF); this.write8((a + 1) & 0xFFFF, this.sp >> 8); } break;
+      case 0x09: /* ADD HL,BC        */ this.aluAddHL(this.bc); break;
+      case 0x0A: /* LD A,(BC)        */ this.a = this.read8(this.bc); break;
+      case 0x0B: /* DEC BC           */ this.bc = (this.bc - 1) & 0xFFFF; this.tick(4); break;
+      case 0x0C: /* INC C            */ this.c = this.aluInc(this.c); break;
+      case 0x0D: /* DEC C            */ this.c = this.aluDec(this.c); break;
+      case 0x0E: /* LD C,d8          */ this.c = this.fetch8(); break;
+      case 0x0F: /* RRCA             */ { const c = this.a & 1; this.a = (this.a >> 1) | (c << 7); this.f = c ? FC : 0; } break;
+      case 0x10: /* STOP             */ this.fetch8(); this.stopped = true; break;
+      case 0x11: /* LD DE,d16        */ this.de = this.fetch16(); break;
+      case 0x12: /* LD (DE),A        */ this.write8(this.de, this.a); break;
+      case 0x13: /* INC DE           */ this.de = (this.de + 1) & 0xFFFF; this.tick(4); break;
+      case 0x14: /* INC D            */ this.d = this.aluInc(this.d); break;
+      case 0x15: /* DEC D            */ this.d = this.aluDec(this.d); break;
+      case 0x16: /* LD D,d8          */ this.d = this.fetch8(); break;
+      case 0x17: /* RLA              */ { const c = this.a >> 7; this.a = ((this.a << 1) | ((this.f & FC) ? 1 : 0)) & 0xFF; this.f = c ? FC : 0; } break;
+      case 0x18: /* JR r8            */ { const o = (this.fetch8() << 24) >> 24; this.tick(4); this.pc = (this.pc + o) & 0xFFFF; } break;
+      case 0x19: /* ADD HL,DE        */ this.aluAddHL(this.de); break;
+      case 0x1A: /* LD A,(DE)        */ this.a = this.read8(this.de); break;
+      case 0x1B: /* DEC DE           */ this.de = (this.de - 1) & 0xFFFF; this.tick(4); break;
+      case 0x1C: /* INC E            */ this.e = this.aluInc(this.e); break;
+      case 0x1D: /* DEC E            */ this.e = this.aluDec(this.e); break;
+      case 0x1E: /* LD E,d8          */ this.e = this.fetch8(); break;
+      case 0x1F: /* RRA              */ { const c = this.a & 1; this.a = (this.a >> 1) | ((this.f & FC) ? 0x80 : 0); this.f = c ? FC : 0; } break;
+      case 0x20: /* JR NZ,r8         */ { const o = (this.fetch8() << 24) >> 24; if (!(this.f & FZ)) { this.tick(4); this.pc = (this.pc + o) & 0xFFFF; } } break;
+      case 0x21: /* LD HL,d16        */ this.hl = this.fetch16(); break;
+      case 0x22: /* LD (HL+),A       */ this.write8(this.hl, this.a); this.hl = (this.hl + 1) & 0xFFFF; break;
+      case 0x23: /* INC HL           */ this.hl = (this.hl + 1) & 0xFFFF; this.tick(4); break;
+      case 0x24: /* INC H            */ this.h = this.aluInc(this.h); break;
+      case 0x25: /* DEC H            */ this.h = this.aluDec(this.h); break;
+      case 0x26: /* LD H,d8          */ this.h = this.fetch8(); break;
+      case 0x27: /* DAA              */ this.opDaa(); break;
+      case 0x28: /* JR Z,r8          */ { const o = (this.fetch8() << 24) >> 24; if ((this.f & FZ)) { this.tick(4); this.pc = (this.pc + o) & 0xFFFF; } } break;
+      case 0x29: /* ADD HL,HL        */ this.aluAddHL(this.hl); break;
+      case 0x2A: /* LD A,(HL+)       */ this.a = this.read8(this.hl); this.hl = (this.hl + 1) & 0xFFFF; break;
+      case 0x2B: /* DEC HL           */ this.hl = (this.hl - 1) & 0xFFFF; this.tick(4); break;
+      case 0x2C: /* INC L            */ this.l = this.aluInc(this.l); break;
+      case 0x2D: /* DEC L            */ this.l = this.aluDec(this.l); break;
+      case 0x2E: /* LD L,d8          */ this.l = this.fetch8(); break;
+      case 0x2F: /* CPL              */ this.a ^= 0xFF; this.f |= FN | FH; break;
+      case 0x30: /* JR NC,r8         */ { const o = (this.fetch8() << 24) >> 24; if (!(this.f & FC)) { this.tick(4); this.pc = (this.pc + o) & 0xFFFF; } } break;
+      case 0x31: /* LD SP,d16        */ this.sp = this.fetch16(); break;
+      case 0x32: /* LD (HL-),A       */ this.write8(this.hl, this.a); this.hl = (this.hl - 1) & 0xFFFF; break;
+      case 0x33: /* INC SP           */ this.sp = (this.sp + 1) & 0xFFFF; this.tick(4); break;
+      case 0x34: /* INC (HL)         */ this.write8(this.hl, this.aluInc(this.read8(this.hl))); break;
+      case 0x35: /* DEC (HL)         */ this.write8(this.hl, this.aluDec(this.read8(this.hl))); break;
+      case 0x36: /* LD (HL),d8       */ this.write8(this.hl, this.fetch8()); break;
+      case 0x37: /* SCF              */ this.f = (this.f & FZ) | FC; break;
+      case 0x38: /* JR C,r8          */ { const o = (this.fetch8() << 24) >> 24; if ((this.f & FC)) { this.tick(4); this.pc = (this.pc + o) & 0xFFFF; } } break;
+      case 0x39: /* ADD HL,SP        */ this.aluAddHL(this.sp); break;
+      case 0x3A: /* LD A,(HL-)       */ this.a = this.read8(this.hl); this.hl = (this.hl - 1) & 0xFFFF; break;
+      case 0x3B: /* DEC SP           */ this.sp = (this.sp - 1) & 0xFFFF; this.tick(4); break;
+      case 0x3C: /* INC A            */ this.a = this.aluInc(this.a); break;
+      case 0x3D: /* DEC A            */ this.a = this.aluDec(this.a); break;
+      case 0x3E: /* LD A,d8          */ this.a = this.fetch8(); break;
+      case 0x3F: /* CCF              */ this.f = (this.f & FZ) | ((this.f & FC) ? 0 : FC); break;
+
+      // ---- 0x40..0x7F : LD r,r'  (0x76 is HALT) ----------------------
+      case 0x40: /* LD B,B           */ this.b = this.b; break;
+      case 0x41: /* LD B,C           */ this.b = this.c; break;
+      case 0x42: /* LD B,D           */ this.b = this.d; break;
+      case 0x43: /* LD B,E           */ this.b = this.e; break;
+      case 0x44: /* LD B,H           */ this.b = this.h; break;
+      case 0x45: /* LD B,L           */ this.b = this.l; break;
+      case 0x46: /* LD B,(HL)        */ this.b = this.read8(this.hl); break;
+      case 0x47: /* LD B,A           */ this.b = this.a; break;
+      case 0x48: /* LD C,B           */ this.c = this.b; break;
+      case 0x49: /* LD C,C           */ this.c = this.c; break;
+      case 0x4A: /* LD C,D           */ this.c = this.d; break;
+      case 0x4B: /* LD C,E           */ this.c = this.e; break;
+      case 0x4C: /* LD C,H           */ this.c = this.h; break;
+      case 0x4D: /* LD C,L           */ this.c = this.l; break;
+      case 0x4E: /* LD C,(HL)        */ this.c = this.read8(this.hl); break;
+      case 0x4F: /* LD C,A           */ this.c = this.a; break;
+      case 0x50: /* LD D,B           */ this.d = this.b; break;
+      case 0x51: /* LD D,C           */ this.d = this.c; break;
+      case 0x52: /* LD D,D           */ this.d = this.d; break;
+      case 0x53: /* LD D,E           */ this.d = this.e; break;
+      case 0x54: /* LD D,H           */ this.d = this.h; break;
+      case 0x55: /* LD D,L           */ this.d = this.l; break;
+      case 0x56: /* LD D,(HL)        */ this.d = this.read8(this.hl); break;
+      case 0x57: /* LD D,A           */ this.d = this.a; break;
+      case 0x58: /* LD E,B           */ this.e = this.b; break;
+      case 0x59: /* LD E,C           */ this.e = this.c; break;
+      case 0x5A: /* LD E,D           */ this.e = this.d; break;
+      case 0x5B: /* LD E,E           */ this.e = this.e; break;
+      case 0x5C: /* LD E,H           */ this.e = this.h; break;
+      case 0x5D: /* LD E,L           */ this.e = this.l; break;
+      case 0x5E: /* LD E,(HL)        */ this.e = this.read8(this.hl); break;
+      case 0x5F: /* LD E,A           */ this.e = this.a; break;
+      case 0x60: /* LD H,B           */ this.h = this.b; break;
+      case 0x61: /* LD H,C           */ this.h = this.c; break;
+      case 0x62: /* LD H,D           */ this.h = this.d; break;
+      case 0x63: /* LD H,E           */ this.h = this.e; break;
+      case 0x64: /* LD H,H           */ this.h = this.h; break;
+      case 0x65: /* LD H,L           */ this.h = this.l; break;
+      case 0x66: /* LD H,(HL)        */ this.h = this.read8(this.hl); break;
+      case 0x67: /* LD H,A           */ this.h = this.a; break;
+      case 0x68: /* LD L,B           */ this.l = this.b; break;
+      case 0x69: /* LD L,C           */ this.l = this.c; break;
+      case 0x6A: /* LD L,D           */ this.l = this.d; break;
+      case 0x6B: /* LD L,E           */ this.l = this.e; break;
+      case 0x6C: /* LD L,H           */ this.l = this.h; break;
+      case 0x6D: /* LD L,L           */ this.l = this.l; break;
+      case 0x6E: /* LD L,(HL)        */ this.l = this.read8(this.hl); break;
+      case 0x6F: /* LD L,A           */ this.l = this.a; break;
+      case 0x70: /* LD (HL),B        */ this.write8(this.hl, this.b); break;
+      case 0x71: /* LD (HL),C        */ this.write8(this.hl, this.c); break;
+      case 0x72: /* LD (HL),D        */ this.write8(this.hl, this.d); break;
+      case 0x73: /* LD (HL),E        */ this.write8(this.hl, this.e); break;
+      case 0x74: /* LD (HL),H        */ this.write8(this.hl, this.h); break;
+      case 0x75: /* LD (HL),L        */ this.write8(this.hl, this.l); break;
+      case 0x76: /* HALT             */ this.opHalt(); break;
+      case 0x77: /* LD (HL),A        */ this.write8(this.hl, this.a); break;
+      case 0x78: /* LD A,B           */ this.a = this.b; break;
+      case 0x79: /* LD A,C           */ this.a = this.c; break;
+      case 0x7A: /* LD A,D           */ this.a = this.d; break;
+      case 0x7B: /* LD A,E           */ this.a = this.e; break;
+      case 0x7C: /* LD A,H           */ this.a = this.h; break;
+      case 0x7D: /* LD A,L           */ this.a = this.l; break;
+      case 0x7E: /* LD A,(HL)        */ this.a = this.read8(this.hl); break;
+      case 0x7F: /* LD A,A           */ this.a = this.a; break;
+
+      // ---- 0x80..0xBF : 8-bit ALU ------------------------------------
+      case 0x80: /* ADD A,B          */ this.aluAdd(this.b); break;
+      case 0x81: /* ADD A,C          */ this.aluAdd(this.c); break;
+      case 0x82: /* ADD A,D          */ this.aluAdd(this.d); break;
+      case 0x83: /* ADD A,E          */ this.aluAdd(this.e); break;
+      case 0x84: /* ADD A,H          */ this.aluAdd(this.h); break;
+      case 0x85: /* ADD A,L          */ this.aluAdd(this.l); break;
+      case 0x86: /* ADD A,(HL)       */ this.aluAdd(this.read8(this.hl)); break;
+      case 0x87: /* ADD A,A          */ this.aluAdd(this.a); break;
+      case 0x88: /* ADC A,B          */ this.aluAdc(this.b); break;
+      case 0x89: /* ADC A,C          */ this.aluAdc(this.c); break;
+      case 0x8A: /* ADC A,D          */ this.aluAdc(this.d); break;
+      case 0x8B: /* ADC A,E          */ this.aluAdc(this.e); break;
+      case 0x8C: /* ADC A,H          */ this.aluAdc(this.h); break;
+      case 0x8D: /* ADC A,L          */ this.aluAdc(this.l); break;
+      case 0x8E: /* ADC A,(HL)       */ this.aluAdc(this.read8(this.hl)); break;
+      case 0x8F: /* ADC A,A          */ this.aluAdc(this.a); break;
+      case 0x90: /* SUB B            */ this.aluSub(this.b); break;
+      case 0x91: /* SUB C            */ this.aluSub(this.c); break;
+      case 0x92: /* SUB D            */ this.aluSub(this.d); break;
+      case 0x93: /* SUB E            */ this.aluSub(this.e); break;
+      case 0x94: /* SUB H            */ this.aluSub(this.h); break;
+      case 0x95: /* SUB L            */ this.aluSub(this.l); break;
+      case 0x96: /* SUB (HL)         */ this.aluSub(this.read8(this.hl)); break;
+      case 0x97: /* SUB A            */ this.aluSub(this.a); break;
+      case 0x98: /* SBC A,B          */ this.aluSbc(this.b); break;
+      case 0x99: /* SBC A,C          */ this.aluSbc(this.c); break;
+      case 0x9A: /* SBC A,D          */ this.aluSbc(this.d); break;
+      case 0x9B: /* SBC A,E          */ this.aluSbc(this.e); break;
+      case 0x9C: /* SBC A,H          */ this.aluSbc(this.h); break;
+      case 0x9D: /* SBC A,L          */ this.aluSbc(this.l); break;
+      case 0x9E: /* SBC A,(HL)       */ this.aluSbc(this.read8(this.hl)); break;
+      case 0x9F: /* SBC A,A          */ this.aluSbc(this.a); break;
+      case 0xA0: /* AND B            */ this.aluAnd(this.b); break;
+      case 0xA1: /* AND C            */ this.aluAnd(this.c); break;
+      case 0xA2: /* AND D            */ this.aluAnd(this.d); break;
+      case 0xA3: /* AND E            */ this.aluAnd(this.e); break;
+      case 0xA4: /* AND H            */ this.aluAnd(this.h); break;
+      case 0xA5: /* AND L            */ this.aluAnd(this.l); break;
+      case 0xA6: /* AND (HL)         */ this.aluAnd(this.read8(this.hl)); break;
+      case 0xA7: /* AND A            */ this.aluAnd(this.a); break;
+      case 0xA8: /* XOR B            */ this.aluXor(this.b); break;
+      case 0xA9: /* XOR C            */ this.aluXor(this.c); break;
+      case 0xAA: /* XOR D            */ this.aluXor(this.d); break;
+      case 0xAB: /* XOR E            */ this.aluXor(this.e); break;
+      case 0xAC: /* XOR H            */ this.aluXor(this.h); break;
+      case 0xAD: /* XOR L            */ this.aluXor(this.l); break;
+      case 0xAE: /* XOR (HL)         */ this.aluXor(this.read8(this.hl)); break;
+      case 0xAF: /* XOR A            */ this.aluXor(this.a); break;
+      case 0xB0: /* OR B             */ this.aluOr(this.b); break;
+      case 0xB1: /* OR C             */ this.aluOr(this.c); break;
+      case 0xB2: /* OR D             */ this.aluOr(this.d); break;
+      case 0xB3: /* OR E             */ this.aluOr(this.e); break;
+      case 0xB4: /* OR H             */ this.aluOr(this.h); break;
+      case 0xB5: /* OR L             */ this.aluOr(this.l); break;
+      case 0xB6: /* OR (HL)          */ this.aluOr(this.read8(this.hl)); break;
+      case 0xB7: /* OR A             */ this.aluOr(this.a); break;
+      case 0xB8: /* CP B             */ this.aluCp(this.b); break;
+      case 0xB9: /* CP C             */ this.aluCp(this.c); break;
+      case 0xBA: /* CP D             */ this.aluCp(this.d); break;
+      case 0xBB: /* CP E             */ this.aluCp(this.e); break;
+      case 0xBC: /* CP H             */ this.aluCp(this.h); break;
+      case 0xBD: /* CP L             */ this.aluCp(this.l); break;
+      case 0xBE: /* CP (HL)          */ this.aluCp(this.read8(this.hl)); break;
+      case 0xBF: /* CP A             */ this.aluCp(this.a); break;
+
+      // ---- 0xC0..0xFF : control flow, stack, misc ---------------------
+      case 0xC0: /* RET NZ           */ this.tick(4); if (!(this.f & FZ)) { this.pc = this.pop16(); this.tick(4); } break;
+      case 0xC1: /* POP BC           */ this.bc = this.pop16(); break;
+      case 0xC2: /* JP NZ,a16        */ { const a = this.fetch16(); if (!(this.f & FZ)) { this.tick(4); this.pc = a; } } break;
+      case 0xC3: /* JP a16           */ { const a = this.fetch16(); this.tick(4); this.pc = a; } break;
+      case 0xC4: /* CALL NZ,a16      */ { const a = this.fetch16(); if (!(this.f & FZ)) { this.tick(4); this.push16(this.pc); this.pc = a; } } break;
+      case 0xC5: /* PUSH BC          */ this.tick(4); this.push16(this.bc); break;
+      case 0xC6: /* ADD A,d8         */ this.aluAdd(this.fetch8()); break;
+      case 0xC7: /* RST 00H          */ this.tick(4); this.push16(this.pc); this.pc = 0x00; break;
+      case 0xC8: /* RET Z            */ this.tick(4); if ((this.f & FZ)) { this.pc = this.pop16(); this.tick(4); } break;
+      case 0xC9: /* RET              */ this.pc = this.pop16(); this.tick(4); break;
+      case 0xCA: /* JP Z,a16         */ { const a = this.fetch16(); if ((this.f & FZ)) { this.tick(4); this.pc = a; } } break;
+      case 0xCB: /* PREFIX CB        */ this.executeCB(this.fetch8()); break;
+      case 0xCC: /* CALL Z,a16       */ { const a = this.fetch16(); if ((this.f & FZ)) { this.tick(4); this.push16(this.pc); this.pc = a; } } break;
+      case 0xCD: /* CALL a16         */ { const a = this.fetch16(); this.tick(4); this.push16(this.pc); this.pc = a; } break;
+      case 0xCE: /* ADC A,d8         */ this.aluAdc(this.fetch8()); break;
+      case 0xCF: /* RST 08H          */ this.tick(4); this.push16(this.pc); this.pc = 0x08; break;
+      case 0xD0: /* RET NC           */ this.tick(4); if (!(this.f & FC)) { this.pc = this.pop16(); this.tick(4); } break;
+      case 0xD1: /* POP DE           */ this.de = this.pop16(); break;
+      case 0xD2: /* JP NC,a16        */ { const a = this.fetch16(); if (!(this.f & FC)) { this.tick(4); this.pc = a; } } break;
+      case 0xD3: /* *ILLEGAL D3      */ this.onIllegal(op); break;
+      case 0xD4: /* CALL NC,a16      */ { const a = this.fetch16(); if (!(this.f & FC)) { this.tick(4); this.push16(this.pc); this.pc = a; } } break;
+      case 0xD5: /* PUSH DE          */ this.tick(4); this.push16(this.de); break;
+      case 0xD6: /* SUB d8           */ this.aluSub(this.fetch8()); break;
+      case 0xD7: /* RST 10H          */ this.tick(4); this.push16(this.pc); this.pc = 0x10; break;
+      case 0xD8: /* RET C            */ this.tick(4); if ((this.f & FC)) { this.pc = this.pop16(); this.tick(4); } break;
+      case 0xD9: /* RETI             */ this.pc = this.pop16(); this.tick(4); this.ime = true; this.eiDelay = 0; break;
+      case 0xDA: /* JP C,a16         */ { const a = this.fetch16(); if ((this.f & FC)) { this.tick(4); this.pc = a; } } break;
+      case 0xDB: /* *ILLEGAL DB      */ this.onIllegal(op); break;
+      case 0xDC: /* CALL C,a16       */ { const a = this.fetch16(); if ((this.f & FC)) { this.tick(4); this.push16(this.pc); this.pc = a; } } break;
+      case 0xDD: /* *ILLEGAL DD      */ this.onIllegal(op); break;
+      case 0xDE: /* SBC A,d8         */ this.aluSbc(this.fetch8()); break;
+      case 0xDF: /* RST 18H          */ this.tick(4); this.push16(this.pc); this.pc = 0x18; break;
+      case 0xE0: /* LDH (a8),A       */ this.write8(0xFF00 | this.fetch8(), this.a); break;
+      case 0xE1: /* POP HL           */ this.hl = this.pop16(); break;
+      case 0xE2: /* LD (C),A         */ this.write8(0xFF00 | this.c, this.a); break;
+      case 0xE3: /* *ILLEGAL E3      */ this.onIllegal(op); break;
+      case 0xE4: /* *ILLEGAL E4      */ this.onIllegal(op); break;
+      case 0xE5: /* PUSH HL          */ this.tick(4); this.push16(this.hl); break;
+      case 0xE6: /* AND d8           */ this.aluAnd(this.fetch8()); break;
+      case 0xE7: /* RST 20H          */ this.tick(4); this.push16(this.pc); this.pc = 0x20; break;
+      case 0xE8: /* ADD SP,r8        */ this.sp = this.aluAddSP(); this.tick(4); this.tick(4); break;
+      case 0xE9: /* JP (HL)          */ this.pc = this.hl; break;
+      case 0xEA: /* LD (a16),A       */ this.write8(this.fetch16(), this.a); break;
+      case 0xEB: /* *ILLEGAL EB      */ this.onIllegal(op); break;
+      case 0xEC: /* *ILLEGAL EC      */ this.onIllegal(op); break;
+      case 0xED: /* *ILLEGAL ED      */ this.onIllegal(op); break;
+      case 0xEE: /* XOR d8           */ this.aluXor(this.fetch8()); break;
+      case 0xEF: /* RST 28H          */ this.tick(4); this.push16(this.pc); this.pc = 0x28; break;
+      case 0xF0: /* LDH A,(a8)       */ this.a = this.read8(0xFF00 | this.fetch8()); break;
+      case 0xF1: /* POP AF           */ this.af = this.pop16(); break;
+      case 0xF2: /* LD A,(C)         */ this.a = this.read8(0xFF00 | this.c); break;
+      case 0xF3: /* DI               */ this.ime = false; this.eiDelay = 0; break;
+      case 0xF4: /* *ILLEGAL F4      */ this.onIllegal(op); break;
+      case 0xF5: /* PUSH AF          */ this.tick(4); this.push16(this.af); break;
+      case 0xF6: /* OR d8            */ this.aluOr(this.fetch8()); break;
+      case 0xF7: /* RST 30H          */ this.tick(4); this.push16(this.pc); this.pc = 0x30; break;
+      case 0xF8: /* LD HL,SP+r8      */ this.hl = this.aluAddSP(); this.tick(4); break;
+      case 0xF9: /* LD SP,HL         */ this.sp = this.hl; this.tick(4); break;
+      case 0xFA: /* LD A,(a16)       */ this.a = this.read8(this.fetch16()); break;
+      case 0xFB: /* EI               */ this.eiDelay = 2; break;
+      case 0xFC: /* *ILLEGAL FC      */ this.onIllegal(op); break;
+      case 0xFD: /* *ILLEGAL FD      */ this.onIllegal(op); break;
+      case 0xFE: /* CP d8            */ this.aluCp(this.fetch8()); break;
+      case 0xFF: /* RST 38H          */ this.tick(4); this.push16(this.pc); this.pc = 0x38; break;
+
+      default:
+        this.onIllegal(op);
+        break;
+    }
+  }
+
+  executeCB(op) {
+    switch (op) {
+      case 0x00: /* RLC B            */ this.b = this.opRlc(this.b); break;
+      case 0x01: /* RLC C            */ this.c = this.opRlc(this.c); break;
+      case 0x02: /* RLC D            */ this.d = this.opRlc(this.d); break;
+      case 0x03: /* RLC E            */ this.e = this.opRlc(this.e); break;
+      case 0x04: /* RLC H            */ this.h = this.opRlc(this.h); break;
+      case 0x05: /* RLC L            */ this.l = this.opRlc(this.l); break;
+      case 0x06: /* RLC (HL)         */ this.write8(this.hl, this.opRlc(this.read8(this.hl))); break;
+      case 0x07: /* RLC A            */ this.a = this.opRlc(this.a); break;
+      case 0x08: /* RRC B            */ this.b = this.opRrc(this.b); break;
+      case 0x09: /* RRC C            */ this.c = this.opRrc(this.c); break;
+      case 0x0A: /* RRC D            */ this.d = this.opRrc(this.d); break;
+      case 0x0B: /* RRC E            */ this.e = this.opRrc(this.e); break;
+      case 0x0C: /* RRC H            */ this.h = this.opRrc(this.h); break;
+      case 0x0D: /* RRC L            */ this.l = this.opRrc(this.l); break;
+      case 0x0E: /* RRC (HL)         */ this.write8(this.hl, this.opRrc(this.read8(this.hl))); break;
+      case 0x0F: /* RRC A            */ this.a = this.opRrc(this.a); break;
+      case 0x10: /* RL B             */ this.b = this.opRl(this.b); break;
+      case 0x11: /* RL C             */ this.c = this.opRl(this.c); break;
+      case 0x12: /* RL D             */ this.d = this.opRl(this.d); break;
+      case 0x13: /* RL E             */ this.e = this.opRl(this.e); break;
+      case 0x14: /* RL H             */ this.h = this.opRl(this.h); break;
+      case 0x15: /* RL L             */ this.l = this.opRl(this.l); break;
+      case 0x16: /* RL (HL)          */ this.write8(this.hl, this.opRl(this.read8(this.hl))); break;
+      case 0x17: /* RL A             */ this.a = this.opRl(this.a); break;
+      case 0x18: /* RR B             */ this.b = this.opRr(this.b); break;
+      case 0x19: /* RR C             */ this.c = this.opRr(this.c); break;
+      case 0x1A: /* RR D             */ this.d = this.opRr(this.d); break;
+      case 0x1B: /* RR E             */ this.e = this.opRr(this.e); break;
+      case 0x1C: /* RR H             */ this.h = this.opRr(this.h); break;
+      case 0x1D: /* RR L             */ this.l = this.opRr(this.l); break;
+      case 0x1E: /* RR (HL)          */ this.write8(this.hl, this.opRr(this.read8(this.hl))); break;
+      case 0x1F: /* RR A             */ this.a = this.opRr(this.a); break;
+      case 0x20: /* SLA B            */ this.b = this.opSla(this.b); break;
+      case 0x21: /* SLA C            */ this.c = this.opSla(this.c); break;
+      case 0x22: /* SLA D            */ this.d = this.opSla(this.d); break;
+      case 0x23: /* SLA E            */ this.e = this.opSla(this.e); break;
+      case 0x24: /* SLA H            */ this.h = this.opSla(this.h); break;
+      case 0x25: /* SLA L            */ this.l = this.opSla(this.l); break;
+      case 0x26: /* SLA (HL)         */ this.write8(this.hl, this.opSla(this.read8(this.hl))); break;
+      case 0x27: /* SLA A            */ this.a = this.opSla(this.a); break;
+      case 0x28: /* SRA B            */ this.b = this.opSra(this.b); break;
+      case 0x29: /* SRA C            */ this.c = this.opSra(this.c); break;
+      case 0x2A: /* SRA D            */ this.d = this.opSra(this.d); break;
+      case 0x2B: /* SRA E            */ this.e = this.opSra(this.e); break;
+      case 0x2C: /* SRA H            */ this.h = this.opSra(this.h); break;
+      case 0x2D: /* SRA L            */ this.l = this.opSra(this.l); break;
+      case 0x2E: /* SRA (HL)         */ this.write8(this.hl, this.opSra(this.read8(this.hl))); break;
+      case 0x2F: /* SRA A            */ this.a = this.opSra(this.a); break;
+      case 0x30: /* SWAP B           */ this.b = this.opSwap(this.b); break;
+      case 0x31: /* SWAP C           */ this.c = this.opSwap(this.c); break;
+      case 0x32: /* SWAP D           */ this.d = this.opSwap(this.d); break;
+      case 0x33: /* SWAP E           */ this.e = this.opSwap(this.e); break;
+      case 0x34: /* SWAP H           */ this.h = this.opSwap(this.h); break;
+      case 0x35: /* SWAP L           */ this.l = this.opSwap(this.l); break;
+      case 0x36: /* SWAP (HL)        */ this.write8(this.hl, this.opSwap(this.read8(this.hl))); break;
+      case 0x37: /* SWAP A           */ this.a = this.opSwap(this.a); break;
+      case 0x38: /* SRL B            */ this.b = this.opSrl(this.b); break;
+      case 0x39: /* SRL C            */ this.c = this.opSrl(this.c); break;
+      case 0x3A: /* SRL D            */ this.d = this.opSrl(this.d); break;
+      case 0x3B: /* SRL E            */ this.e = this.opSrl(this.e); break;
+      case 0x3C: /* SRL H            */ this.h = this.opSrl(this.h); break;
+      case 0x3D: /* SRL L            */ this.l = this.opSrl(this.l); break;
+      case 0x3E: /* SRL (HL)         */ this.write8(this.hl, this.opSrl(this.read8(this.hl))); break;
+      case 0x3F: /* SRL A            */ this.a = this.opSrl(this.a); break;
+      case 0x40: /* BIT 0,B          */ this.opBit(0, this.b); break;
+      case 0x41: /* BIT 0,C          */ this.opBit(0, this.c); break;
+      case 0x42: /* BIT 0,D          */ this.opBit(0, this.d); break;
+      case 0x43: /* BIT 0,E          */ this.opBit(0, this.e); break;
+      case 0x44: /* BIT 0,H          */ this.opBit(0, this.h); break;
+      case 0x45: /* BIT 0,L          */ this.opBit(0, this.l); break;
+      case 0x46: /* BIT 0,(HL)       */ this.opBit(0, this.read8(this.hl)); break;
+      case 0x47: /* BIT 0,A          */ this.opBit(0, this.a); break;
+      case 0x48: /* BIT 1,B          */ this.opBit(1, this.b); break;
+      case 0x49: /* BIT 1,C          */ this.opBit(1, this.c); break;
+      case 0x4A: /* BIT 1,D          */ this.opBit(1, this.d); break;
+      case 0x4B: /* BIT 1,E          */ this.opBit(1, this.e); break;
+      case 0x4C: /* BIT 1,H          */ this.opBit(1, this.h); break;
+      case 0x4D: /* BIT 1,L          */ this.opBit(1, this.l); break;
+      case 0x4E: /* BIT 1,(HL)       */ this.opBit(1, this.read8(this.hl)); break;
+      case 0x4F: /* BIT 1,A          */ this.opBit(1, this.a); break;
+      case 0x50: /* BIT 2,B          */ this.opBit(2, this.b); break;
+      case 0x51: /* BIT 2,C          */ this.opBit(2, this.c); break;
+      case 0x52: /* BIT 2,D          */ this.opBit(2, this.d); break;
+      case 0x53: /* BIT 2,E          */ this.opBit(2, this.e); break;
+      case 0x54: /* BIT 2,H          */ this.opBit(2, this.h); break;
+      case 0x55: /* BIT 2,L          */ this.opBit(2, this.l); break;
+      case 0x56: /* BIT 2,(HL)       */ this.opBit(2, this.read8(this.hl)); break;
+      case 0x57: /* BIT 2,A          */ this.opBit(2, this.a); break;
+      case 0x58: /* BIT 3,B          */ this.opBit(3, this.b); break;
+      case 0x59: /* BIT 3,C          */ this.opBit(3, this.c); break;
+      case 0x5A: /* BIT 3,D          */ this.opBit(3, this.d); break;
+      case 0x5B: /* BIT 3,E          */ this.opBit(3, this.e); break;
+      case 0x5C: /* BIT 3,H          */ this.opBit(3, this.h); break;
+      case 0x5D: /* BIT 3,L          */ this.opBit(3, this.l); break;
+      case 0x5E: /* BIT 3,(HL)       */ this.opBit(3, this.read8(this.hl)); break;
+      case 0x5F: /* BIT 3,A          */ this.opBit(3, this.a); break;
+      case 0x60: /* BIT 4,B          */ this.opBit(4, this.b); break;
+      case 0x61: /* BIT 4,C          */ this.opBit(4, this.c); break;
+      case 0x62: /* BIT 4,D          */ this.opBit(4, this.d); break;
+      case 0x63: /* BIT 4,E          */ this.opBit(4, this.e); break;
+      case 0x64: /* BIT 4,H          */ this.opBit(4, this.h); break;
+      case 0x65: /* BIT 4,L          */ this.opBit(4, this.l); break;
+      case 0x66: /* BIT 4,(HL)       */ this.opBit(4, this.read8(this.hl)); break;
+      case 0x67: /* BIT 4,A          */ this.opBit(4, this.a); break;
+      case 0x68: /* BIT 5,B          */ this.opBit(5, this.b); break;
+      case 0x69: /* BIT 5,C          */ this.opBit(5, this.c); break;
+      case 0x6A: /* BIT 5,D          */ this.opBit(5, this.d); break;
+      case 0x6B: /* BIT 5,E          */ this.opBit(5, this.e); break;
+      case 0x6C: /* BIT 5,H          */ this.opBit(5, this.h); break;
+      case 0x6D: /* BIT 5,L          */ this.opBit(5, this.l); break;
+      case 0x6E: /* BIT 5,(HL)       */ this.opBit(5, this.read8(this.hl)); break;
+      case 0x6F: /* BIT 5,A          */ this.opBit(5, this.a); break;
+      case 0x70: /* BIT 6,B          */ this.opBit(6, this.b); break;
+      case 0x71: /* BIT 6,C          */ this.opBit(6, this.c); break;
+      case 0x72: /* BIT 6,D          */ this.opBit(6, this.d); break;
+      case 0x73: /* BIT 6,E          */ this.opBit(6, this.e); break;
+      case 0x74: /* BIT 6,H          */ this.opBit(6, this.h); break;
+      case 0x75: /* BIT 6,L          */ this.opBit(6, this.l); break;
+      case 0x76: /* BIT 6,(HL)       */ this.opBit(6, this.read8(this.hl)); break;
+      case 0x77: /* BIT 6,A          */ this.opBit(6, this.a); break;
+      case 0x78: /* BIT 7,B          */ this.opBit(7, this.b); break;
+      case 0x79: /* BIT 7,C          */ this.opBit(7, this.c); break;
+      case 0x7A: /* BIT 7,D          */ this.opBit(7, this.d); break;
+      case 0x7B: /* BIT 7,E          */ this.opBit(7, this.e); break;
+      case 0x7C: /* BIT 7,H          */ this.opBit(7, this.h); break;
+      case 0x7D: /* BIT 7,L          */ this.opBit(7, this.l); break;
+      case 0x7E: /* BIT 7,(HL)       */ this.opBit(7, this.read8(this.hl)); break;
+      case 0x7F: /* BIT 7,A          */ this.opBit(7, this.a); break;
+      case 0x80: /* RES 0,B          */ this.b = this.b & ~0x01; break;
+      case 0x81: /* RES 0,C          */ this.c = this.c & ~0x01; break;
+      case 0x82: /* RES 0,D          */ this.d = this.d & ~0x01; break;
+      case 0x83: /* RES 0,E          */ this.e = this.e & ~0x01; break;
+      case 0x84: /* RES 0,H          */ this.h = this.h & ~0x01; break;
+      case 0x85: /* RES 0,L          */ this.l = this.l & ~0x01; break;
+      case 0x86: /* RES 0,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x01); break;
+      case 0x87: /* RES 0,A          */ this.a = this.a & ~0x01; break;
+      case 0x88: /* RES 1,B          */ this.b = this.b & ~0x02; break;
+      case 0x89: /* RES 1,C          */ this.c = this.c & ~0x02; break;
+      case 0x8A: /* RES 1,D          */ this.d = this.d & ~0x02; break;
+      case 0x8B: /* RES 1,E          */ this.e = this.e & ~0x02; break;
+      case 0x8C: /* RES 1,H          */ this.h = this.h & ~0x02; break;
+      case 0x8D: /* RES 1,L          */ this.l = this.l & ~0x02; break;
+      case 0x8E: /* RES 1,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x02); break;
+      case 0x8F: /* RES 1,A          */ this.a = this.a & ~0x02; break;
+      case 0x90: /* RES 2,B          */ this.b = this.b & ~0x04; break;
+      case 0x91: /* RES 2,C          */ this.c = this.c & ~0x04; break;
+      case 0x92: /* RES 2,D          */ this.d = this.d & ~0x04; break;
+      case 0x93: /* RES 2,E          */ this.e = this.e & ~0x04; break;
+      case 0x94: /* RES 2,H          */ this.h = this.h & ~0x04; break;
+      case 0x95: /* RES 2,L          */ this.l = this.l & ~0x04; break;
+      case 0x96: /* RES 2,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x04); break;
+      case 0x97: /* RES 2,A          */ this.a = this.a & ~0x04; break;
+      case 0x98: /* RES 3,B          */ this.b = this.b & ~0x08; break;
+      case 0x99: /* RES 3,C          */ this.c = this.c & ~0x08; break;
+      case 0x9A: /* RES 3,D          */ this.d = this.d & ~0x08; break;
+      case 0x9B: /* RES 3,E          */ this.e = this.e & ~0x08; break;
+      case 0x9C: /* RES 3,H          */ this.h = this.h & ~0x08; break;
+      case 0x9D: /* RES 3,L          */ this.l = this.l & ~0x08; break;
+      case 0x9E: /* RES 3,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x08); break;
+      case 0x9F: /* RES 3,A          */ this.a = this.a & ~0x08; break;
+      case 0xA0: /* RES 4,B          */ this.b = this.b & ~0x10; break;
+      case 0xA1: /* RES 4,C          */ this.c = this.c & ~0x10; break;
+      case 0xA2: /* RES 4,D          */ this.d = this.d & ~0x10; break;
+      case 0xA3: /* RES 4,E          */ this.e = this.e & ~0x10; break;
+      case 0xA4: /* RES 4,H          */ this.h = this.h & ~0x10; break;
+      case 0xA5: /* RES 4,L          */ this.l = this.l & ~0x10; break;
+      case 0xA6: /* RES 4,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x10); break;
+      case 0xA7: /* RES 4,A          */ this.a = this.a & ~0x10; break;
+      case 0xA8: /* RES 5,B          */ this.b = this.b & ~0x20; break;
+      case 0xA9: /* RES 5,C          */ this.c = this.c & ~0x20; break;
+      case 0xAA: /* RES 5,D          */ this.d = this.d & ~0x20; break;
+      case 0xAB: /* RES 5,E          */ this.e = this.e & ~0x20; break;
+      case 0xAC: /* RES 5,H          */ this.h = this.h & ~0x20; break;
+      case 0xAD: /* RES 5,L          */ this.l = this.l & ~0x20; break;
+      case 0xAE: /* RES 5,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x20); break;
+      case 0xAF: /* RES 5,A          */ this.a = this.a & ~0x20; break;
+      case 0xB0: /* RES 6,B          */ this.b = this.b & ~0x40; break;
+      case 0xB1: /* RES 6,C          */ this.c = this.c & ~0x40; break;
+      case 0xB2: /* RES 6,D          */ this.d = this.d & ~0x40; break;
+      case 0xB3: /* RES 6,E          */ this.e = this.e & ~0x40; break;
+      case 0xB4: /* RES 6,H          */ this.h = this.h & ~0x40; break;
+      case 0xB5: /* RES 6,L          */ this.l = this.l & ~0x40; break;
+      case 0xB6: /* RES 6,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x40); break;
+      case 0xB7: /* RES 6,A          */ this.a = this.a & ~0x40; break;
+      case 0xB8: /* RES 7,B          */ this.b = this.b & ~0x80; break;
+      case 0xB9: /* RES 7,C          */ this.c = this.c & ~0x80; break;
+      case 0xBA: /* RES 7,D          */ this.d = this.d & ~0x80; break;
+      case 0xBB: /* RES 7,E          */ this.e = this.e & ~0x80; break;
+      case 0xBC: /* RES 7,H          */ this.h = this.h & ~0x80; break;
+      case 0xBD: /* RES 7,L          */ this.l = this.l & ~0x80; break;
+      case 0xBE: /* RES 7,(HL)       */ this.write8(this.hl, this.read8(this.hl) & ~0x80); break;
+      case 0xBF: /* RES 7,A          */ this.a = this.a & ~0x80; break;
+      case 0xC0: /* SET 0,B          */ this.b = this.b | 0x01; break;
+      case 0xC1: /* SET 0,C          */ this.c = this.c | 0x01; break;
+      case 0xC2: /* SET 0,D          */ this.d = this.d | 0x01; break;
+      case 0xC3: /* SET 0,E          */ this.e = this.e | 0x01; break;
+      case 0xC4: /* SET 0,H          */ this.h = this.h | 0x01; break;
+      case 0xC5: /* SET 0,L          */ this.l = this.l | 0x01; break;
+      case 0xC6: /* SET 0,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x01); break;
+      case 0xC7: /* SET 0,A          */ this.a = this.a | 0x01; break;
+      case 0xC8: /* SET 1,B          */ this.b = this.b | 0x02; break;
+      case 0xC9: /* SET 1,C          */ this.c = this.c | 0x02; break;
+      case 0xCA: /* SET 1,D          */ this.d = this.d | 0x02; break;
+      case 0xCB: /* SET 1,E          */ this.e = this.e | 0x02; break;
+      case 0xCC: /* SET 1,H          */ this.h = this.h | 0x02; break;
+      case 0xCD: /* SET 1,L          */ this.l = this.l | 0x02; break;
+      case 0xCE: /* SET 1,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x02); break;
+      case 0xCF: /* SET 1,A          */ this.a = this.a | 0x02; break;
+      case 0xD0: /* SET 2,B          */ this.b = this.b | 0x04; break;
+      case 0xD1: /* SET 2,C          */ this.c = this.c | 0x04; break;
+      case 0xD2: /* SET 2,D          */ this.d = this.d | 0x04; break;
+      case 0xD3: /* SET 2,E          */ this.e = this.e | 0x04; break;
+      case 0xD4: /* SET 2,H          */ this.h = this.h | 0x04; break;
+      case 0xD5: /* SET 2,L          */ this.l = this.l | 0x04; break;
+      case 0xD6: /* SET 2,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x04); break;
+      case 0xD7: /* SET 2,A          */ this.a = this.a | 0x04; break;
+      case 0xD8: /* SET 3,B          */ this.b = this.b | 0x08; break;
+      case 0xD9: /* SET 3,C          */ this.c = this.c | 0x08; break;
+      case 0xDA: /* SET 3,D          */ this.d = this.d | 0x08; break;
+      case 0xDB: /* SET 3,E          */ this.e = this.e | 0x08; break;
+      case 0xDC: /* SET 3,H          */ this.h = this.h | 0x08; break;
+      case 0xDD: /* SET 3,L          */ this.l = this.l | 0x08; break;
+      case 0xDE: /* SET 3,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x08); break;
+      case 0xDF: /* SET 3,A          */ this.a = this.a | 0x08; break;
+      case 0xE0: /* SET 4,B          */ this.b = this.b | 0x10; break;
+      case 0xE1: /* SET 4,C          */ this.c = this.c | 0x10; break;
+      case 0xE2: /* SET 4,D          */ this.d = this.d | 0x10; break;
+      case 0xE3: /* SET 4,E          */ this.e = this.e | 0x10; break;
+      case 0xE4: /* SET 4,H          */ this.h = this.h | 0x10; break;
+      case 0xE5: /* SET 4,L          */ this.l = this.l | 0x10; break;
+      case 0xE6: /* SET 4,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x10); break;
+      case 0xE7: /* SET 4,A          */ this.a = this.a | 0x10; break;
+      case 0xE8: /* SET 5,B          */ this.b = this.b | 0x20; break;
+      case 0xE9: /* SET 5,C          */ this.c = this.c | 0x20; break;
+      case 0xEA: /* SET 5,D          */ this.d = this.d | 0x20; break;
+      case 0xEB: /* SET 5,E          */ this.e = this.e | 0x20; break;
+      case 0xEC: /* SET 5,H          */ this.h = this.h | 0x20; break;
+      case 0xED: /* SET 5,L          */ this.l = this.l | 0x20; break;
+      case 0xEE: /* SET 5,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x20); break;
+      case 0xEF: /* SET 5,A          */ this.a = this.a | 0x20; break;
+      case 0xF0: /* SET 6,B          */ this.b = this.b | 0x40; break;
+      case 0xF1: /* SET 6,C          */ this.c = this.c | 0x40; break;
+      case 0xF2: /* SET 6,D          */ this.d = this.d | 0x40; break;
+      case 0xF3: /* SET 6,E          */ this.e = this.e | 0x40; break;
+      case 0xF4: /* SET 6,H          */ this.h = this.h | 0x40; break;
+      case 0xF5: /* SET 6,L          */ this.l = this.l | 0x40; break;
+      case 0xF6: /* SET 6,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x40); break;
+      case 0xF7: /* SET 6,A          */ this.a = this.a | 0x40; break;
+      case 0xF8: /* SET 7,B          */ this.b = this.b | 0x80; break;
+      case 0xF9: /* SET 7,C          */ this.c = this.c | 0x80; break;
+      case 0xFA: /* SET 7,D          */ this.d = this.d | 0x80; break;
+      case 0xFB: /* SET 7,E          */ this.e = this.e | 0x80; break;
+      case 0xFC: /* SET 7,H          */ this.h = this.h | 0x80; break;
+      case 0xFD: /* SET 7,L          */ this.l = this.l | 0x80; break;
+      case 0xFE: /* SET 7,(HL)       */ this.write8(this.hl, this.read8(this.hl) | 0x80); break;
+      case 0xFF: /* SET 7,A          */ this.a = this.a | 0x80; break;
+    }
+  }
+}
+
+// Generated by gen_switch.py -- kept in sync with the opcode switch.
+const OP_NAMES = [
+  'NOP', 'LD BC,d16', 'LD (BC),A', 'INC BC',
+  'INC B', 'DEC B', 'LD B,d8', 'RLCA',
+  'LD (a16),SP', 'ADD HL,BC', 'LD A,(BC)', 'DEC BC',
+  'INC C', 'DEC C', 'LD C,d8', 'RRCA',
+  'STOP', 'LD DE,d16', 'LD (DE),A', 'INC DE',
+  'INC D', 'DEC D', 'LD D,d8', 'RLA',
+  'JR r8', 'ADD HL,DE', 'LD A,(DE)', 'DEC DE',
+  'INC E', 'DEC E', 'LD E,d8', 'RRA',
+  'JR NZ,r8', 'LD HL,d16', 'LD (HL+),A', 'INC HL',
+  'INC H', 'DEC H', 'LD H,d8', 'DAA',
+  'JR Z,r8', 'ADD HL,HL', 'LD A,(HL+)', 'DEC HL',
+  'INC L', 'DEC L', 'LD L,d8', 'CPL',
+  'JR NC,r8', 'LD SP,d16', 'LD (HL-),A', 'INC SP',
+  'INC (HL)', 'DEC (HL)', 'LD (HL),d8', 'SCF',
+  'JR C,r8', 'ADD HL,SP', 'LD A,(HL-)', 'DEC SP',
+  'INC A', 'DEC A', 'LD A,d8', 'CCF',
+  'LD B,B', 'LD B,C', 'LD B,D', 'LD B,E',
+  'LD B,H', 'LD B,L', 'LD B,(HL)', 'LD B,A',
+  'LD C,B', 'LD C,C', 'LD C,D', 'LD C,E',
+  'LD C,H', 'LD C,L', 'LD C,(HL)', 'LD C,A',
+  'LD D,B', 'LD D,C', 'LD D,D', 'LD D,E',
+  'LD D,H', 'LD D,L', 'LD D,(HL)', 'LD D,A',
+  'LD E,B', 'LD E,C', 'LD E,D', 'LD E,E',
+  'LD E,H', 'LD E,L', 'LD E,(HL)', 'LD E,A',
+  'LD H,B', 'LD H,C', 'LD H,D', 'LD H,E',
+  'LD H,H', 'LD H,L', 'LD H,(HL)', 'LD H,A',
+  'LD L,B', 'LD L,C', 'LD L,D', 'LD L,E',
+  'LD L,H', 'LD L,L', 'LD L,(HL)', 'LD L,A',
+  'LD (HL),B', 'LD (HL),C', 'LD (HL),D', 'LD (HL),E',
+  'LD (HL),H', 'LD (HL),L', 'HALT', 'LD (HL),A',
+  'LD A,B', 'LD A,C', 'LD A,D', 'LD A,E',
+  'LD A,H', 'LD A,L', 'LD A,(HL)', 'LD A,A',
+  'ADD A,B', 'ADD A,C', 'ADD A,D', 'ADD A,E',
+  'ADD A,H', 'ADD A,L', 'ADD A,(HL)', 'ADD A,A',
+  'ADC A,B', 'ADC A,C', 'ADC A,D', 'ADC A,E',
+  'ADC A,H', 'ADC A,L', 'ADC A,(HL)', 'ADC A,A',
+  'SUB B', 'SUB C', 'SUB D', 'SUB E',
+  'SUB H', 'SUB L', 'SUB (HL)', 'SUB A',
+  'SBC A,B', 'SBC A,C', 'SBC A,D', 'SBC A,E',
+  'SBC A,H', 'SBC A,L', 'SBC A,(HL)', 'SBC A,A',
+  'AND B', 'AND C', 'AND D', 'AND E',
+  'AND H', 'AND L', 'AND (HL)', 'AND A',
+  'XOR B', 'XOR C', 'XOR D', 'XOR E',
+  'XOR H', 'XOR L', 'XOR (HL)', 'XOR A',
+  'OR B', 'OR C', 'OR D', 'OR E',
+  'OR H', 'OR L', 'OR (HL)', 'OR A',
+  'CP B', 'CP C', 'CP D', 'CP E',
+  'CP H', 'CP L', 'CP (HL)', 'CP A',
+  'RET NZ', 'POP BC', 'JP NZ,a16', 'JP a16',
+  'CALL NZ,a16', 'PUSH BC', 'ADD A,d8', 'RST 00H',
+  'RET Z', 'RET', 'JP Z,a16', 'PREFIX CB',
+  'CALL Z,a16', 'CALL a16', 'ADC A,d8', 'RST 08H',
+  'RET NC', 'POP DE', 'JP NC,a16', '*ILLEGAL D3',
+  'CALL NC,a16', 'PUSH DE', 'SUB d8', 'RST 10H',
+  'RET C', 'RETI', 'JP C,a16', '*ILLEGAL DB',
+  'CALL C,a16', '*ILLEGAL DD', 'SBC A,d8', 'RST 18H',
+  'LDH (a8),A', 'POP HL', 'LD (C),A', '*ILLEGAL E3',
+  '*ILLEGAL E4', 'PUSH HL', 'AND d8', 'RST 20H',
+  'ADD SP,r8', 'JP (HL)', 'LD (a16),A', '*ILLEGAL EB',
+  '*ILLEGAL EC', '*ILLEGAL ED', 'XOR d8', 'RST 28H',
+  'LDH A,(a8)', 'POP AF', 'LD A,(C)', 'DI',
+  '*ILLEGAL F4', 'PUSH AF', 'OR d8', 'RST 30H',
+  'LD HL,SP+r8', 'LD SP,HL', 'LD A,(a16)', 'EI',
+  '*ILLEGAL FC', '*ILLEGAL FD', 'CP d8', 'RST 38H',
+];
+const OP_LENS = [1, 3, 1, 1, 1, 1, 2, 1, 3, 1, 1, 1, 1, 1, 2, 1, 1, 3, 1, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 3, 1, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 3, 1, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 1, 2, 1, 1, 1, 3, 1, 3, 3, 2, 1, 1, 1, 3, 1, 3, 1, 2, 1, 1, 1, 3, 1, 3, 1, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 3, 1, 1, 1, 2, 1, 2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 3, 1, 1, 1, 2, 1];
+const CB_NAMES = [
+  'RLC B', 'RLC C', 'RLC D', 'RLC E',
+  'RLC H', 'RLC L', 'RLC (HL)', 'RLC A',
+  'RRC B', 'RRC C', 'RRC D', 'RRC E',
+  'RRC H', 'RRC L', 'RRC (HL)', 'RRC A',
+  'RL B', 'RL C', 'RL D', 'RL E',
+  'RL H', 'RL L', 'RL (HL)', 'RL A',
+  'RR B', 'RR C', 'RR D', 'RR E',
+  'RR H', 'RR L', 'RR (HL)', 'RR A',
+  'SLA B', 'SLA C', 'SLA D', 'SLA E',
+  'SLA H', 'SLA L', 'SLA (HL)', 'SLA A',
+  'SRA B', 'SRA C', 'SRA D', 'SRA E',
+  'SRA H', 'SRA L', 'SRA (HL)', 'SRA A',
+  'SWAP B', 'SWAP C', 'SWAP D', 'SWAP E',
+  'SWAP H', 'SWAP L', 'SWAP (HL)', 'SWAP A',
+  'SRL B', 'SRL C', 'SRL D', 'SRL E',
+  'SRL H', 'SRL L', 'SRL (HL)', 'SRL A',
+  'BIT 0,B', 'BIT 0,C', 'BIT 0,D', 'BIT 0,E',
+  'BIT 0,H', 'BIT 0,L', 'BIT 0,(HL)', 'BIT 0,A',
+  'BIT 1,B', 'BIT 1,C', 'BIT 1,D', 'BIT 1,E',
+  'BIT 1,H', 'BIT 1,L', 'BIT 1,(HL)', 'BIT 1,A',
+  'BIT 2,B', 'BIT 2,C', 'BIT 2,D', 'BIT 2,E',
+  'BIT 2,H', 'BIT 2,L', 'BIT 2,(HL)', 'BIT 2,A',
+  'BIT 3,B', 'BIT 3,C', 'BIT 3,D', 'BIT 3,E',
+  'BIT 3,H', 'BIT 3,L', 'BIT 3,(HL)', 'BIT 3,A',
+  'BIT 4,B', 'BIT 4,C', 'BIT 4,D', 'BIT 4,E',
+  'BIT 4,H', 'BIT 4,L', 'BIT 4,(HL)', 'BIT 4,A',
+  'BIT 5,B', 'BIT 5,C', 'BIT 5,D', 'BIT 5,E',
+  'BIT 5,H', 'BIT 5,L', 'BIT 5,(HL)', 'BIT 5,A',
+  'BIT 6,B', 'BIT 6,C', 'BIT 6,D', 'BIT 6,E',
+  'BIT 6,H', 'BIT 6,L', 'BIT 6,(HL)', 'BIT 6,A',
+  'BIT 7,B', 'BIT 7,C', 'BIT 7,D', 'BIT 7,E',
+  'BIT 7,H', 'BIT 7,L', 'BIT 7,(HL)', 'BIT 7,A',
+  'RES 0,B', 'RES 0,C', 'RES 0,D', 'RES 0,E',
+  'RES 0,H', 'RES 0,L', 'RES 0,(HL)', 'RES 0,A',
+  'RES 1,B', 'RES 1,C', 'RES 1,D', 'RES 1,E',
+  'RES 1,H', 'RES 1,L', 'RES 1,(HL)', 'RES 1,A',
+  'RES 2,B', 'RES 2,C', 'RES 2,D', 'RES 2,E',
+  'RES 2,H', 'RES 2,L', 'RES 2,(HL)', 'RES 2,A',
+  'RES 3,B', 'RES 3,C', 'RES 3,D', 'RES 3,E',
+  'RES 3,H', 'RES 3,L', 'RES 3,(HL)', 'RES 3,A',
+  'RES 4,B', 'RES 4,C', 'RES 4,D', 'RES 4,E',
+  'RES 4,H', 'RES 4,L', 'RES 4,(HL)', 'RES 4,A',
+  'RES 5,B', 'RES 5,C', 'RES 5,D', 'RES 5,E',
+  'RES 5,H', 'RES 5,L', 'RES 5,(HL)', 'RES 5,A',
+  'RES 6,B', 'RES 6,C', 'RES 6,D', 'RES 6,E',
+  'RES 6,H', 'RES 6,L', 'RES 6,(HL)', 'RES 6,A',
+  'RES 7,B', 'RES 7,C', 'RES 7,D', 'RES 7,E',
+  'RES 7,H', 'RES 7,L', 'RES 7,(HL)', 'RES 7,A',
+  'SET 0,B', 'SET 0,C', 'SET 0,D', 'SET 0,E',
+  'SET 0,H', 'SET 0,L', 'SET 0,(HL)', 'SET 0,A',
+  'SET 1,B', 'SET 1,C', 'SET 1,D', 'SET 1,E',
+  'SET 1,H', 'SET 1,L', 'SET 1,(HL)', 'SET 1,A',
+  'SET 2,B', 'SET 2,C', 'SET 2,D', 'SET 2,E',
+  'SET 2,H', 'SET 2,L', 'SET 2,(HL)', 'SET 2,A',
+  'SET 3,B', 'SET 3,C', 'SET 3,D', 'SET 3,E',
+  'SET 3,H', 'SET 3,L', 'SET 3,(HL)', 'SET 3,A',
+  'SET 4,B', 'SET 4,C', 'SET 4,D', 'SET 4,E',
+  'SET 4,H', 'SET 4,L', 'SET 4,(HL)', 'SET 4,A',
+  'SET 5,B', 'SET 5,C', 'SET 5,D', 'SET 5,E',
+  'SET 5,H', 'SET 5,L', 'SET 5,(HL)', 'SET 5,A',
+  'SET 6,B', 'SET 6,C', 'SET 6,D', 'SET 6,E',
+  'SET 6,H', 'SET 6,L', 'SET 6,(HL)', 'SET 6,A',
+  'SET 7,B', 'SET 7,C', 'SET 7,D', 'SET 7,E',
+  'SET 7,H', 'SET 7,L', 'SET 7,(HL)', 'SET 7,A',
+];
+
+// ===========================================================================
+//  Disassembler + small formatting helpers
+// ===========================================================================
+
+const hex2 = (v) => v.toString(16).toUpperCase().padStart(2, '0');
+const hex8 = hex2;
+const hex16 = (v) => v.toString(16).toUpperCase().padStart(4, '0');
+const flagStr = (f) =>
+  ((f & FZ) ? 'Z' : '-') + ((f & FN) ? 'N' : '-') + ((f & FH) ? 'H' : '-') + ((f & FC) ? 'C' : '-');
+
+// Disassembles one instruction using untimed reads, so calling it from the
+// debugger never advances the machine.
+function disassemble(gb, addr) {
+  const op = gb.readByte(addr);
+  if (op === 0xCB) {
+    const cb = gb.readByte((addr + 1) & 0xFFFF);
+    return { text: CB_NAMES[cb], len: 2, bytes: [op, cb] };
+  }
+  const name = OP_NAMES[op];
+  const len = OP_LENS[op];
+  const b1 = gb.readByte((addr + 1) & 0xFFFF);
+  const b2 = gb.readByte((addr + 2) & 0xFFFF);
+  let text = name;
+  if (len === 3) {
+    text = name.replace(/[da]16/, '$' + hex16(b1 | (b2 << 8)));
+  } else if (len === 2) {
+    if (name.includes('r8')) {
+      const rel = (b1 << 24) >> 24;
+      text = name.replace('r8', `$${hex16((addr + 2 + rel) & 0xFFFF)}`) +
+             ` ; ${rel >= 0 ? '+' : ''}${rel}`;
+    } else if (name.includes('a8')) {
+      text = name.replace('a8', '$FF' + hex2(b1));
+    } else {
+      text = name.replace('d8', '$' + hex2(b1));
+    }
+  }
+  const bytes = [op];
+  for (let i = 1; i < len; i++) bytes.push(gb.readByte((addr + i) & 0xFFFF));
+  return { text, len, bytes };
+}
+
+// Disassembles `count` instructions starting at `addr`.
+function disassembleRange(gb, addr, count) {
+  const out = [];
+  let a = addr & 0xFFFF;
+  for (let i = 0; i < count; i++) {
+    const d = disassemble(gb, a);
+    out.push({
+      addr: a,
+      text: d.text,
+      bytes: d.bytes.map(hex2).join(' '),
+      isPC: a === gb.pc,
+      hasBP: gb.breakpoints.has(a),
+    });
+    a = (a + d.len) & 0xFFFF;
+  }
+  return out;
+}
+
+// ===========================================================================
+//  Save states
+// ===========================================================================
+//  Format: "GBST" magic, 4-byte JSON length, JSON scalars, then the raw memory
+//  blocks back to back.  Small enough to keep several in memory and simple
+//  enough to diff two states byte by byte when hunting a divergence.
+// ===========================================================================
+
+const STATE_MAGIC = 0x47425354;   // 'GBST'
+const STATE_VERSION = 2;
+
+function saveState(gb) {
+  const scalars = {
+    v: STATE_VERSION,
+    title: gb.cart.title,
+    cpu: {
+      a: gb.a, f: gb.f, b: gb.b, c: gb.c, d: gb.d, e: gb.e, h: gb.h, l: gb.l,
+      sp: gb.sp, pc: gb.pc, ime: gb.ime, eiDelay: gb.eiDelay,
+      halted: gb.halted, stopped: gb.stopped, haltBug: gb.haltBug,
+      ifReg: gb.ifReg, ieReg: gb.ieReg, cycles: gb.cycles, instrCount: gb.instrCount,
+    },
+    cart: {
+      romBank: gb.cart.romBank, ramBank: gb.cart.ramBank, bank1: gb.cart.bank1,
+      bank2: gb.cart.bank2, mode: gb.cart.mode, ramEnabled: gb.cart.ramEnabled,
+      rtc: gb.cart.rtc,
+    },
+    ppu: {
+      lcdc: gb.ppu.lcdc, stat: gb.ppu.stat, scy: gb.ppu.scy, scx: gb.ppu.scx,
+      ly: gb.ppu.ly, lyc: gb.ppu.lyc, bgp: gb.ppu.bgp, obp0: gb.ppu.obp0,
+      obp1: gb.ppu.obp1, wy: gb.ppu.wy, wx: gb.ppu.wx, dot: gb.ppu.dot,
+      mode: gb.ppu.mode, windowLine: gb.ppu.windowLine, wyTriggered: gb.ppu.wyTriggered,
+      statLine: gb.ppu.statLine, frame: gb.ppu.frame,
+    },
+    timer: {
+      counter: gb.timer.counter, tima: gb.timer.tima, tma: gb.timer.tma,
+      tac: gb.timer.tac, reloading: gb.timer.reloading, lastEdge: gb.timer.lastEdge,
+    },
+    apu: {
+      enabled: gb.apu.enabled, nr50: gb.apu.nr50, nr51: gb.apu.nr51,
+      seqStep: gb.apu.seqStep, lastSeqBit: gb.apu.lastSeqBit,
+      ch1: gb.apu.ch1, ch2: gb.apu.ch2, ch3: gb.apu.ch3, ch4: gb.apu.ch4,
+    },
+    io: {
+      joypSelect: gb.joypSelect, sb: gb.sb, sc: gb.sc, serialTimer: gb.serialTimer,
+      dmaActive: gb.dmaActive, dmaSrc: gb.dmaSrc, dmaPos: gb.dmaPos, dmaTimer: gb.dmaTimer,
+    },
+    ramSize: gb.cart.ram.length,
+  };
+
+  const json = new TextEncoder().encode(JSON.stringify(scalars));
+  const blocks = [gb.ppu.vram, gb.ppu.oam, gb.wram, gb.hram, gb.apu.wave,
+                  gb.ppu.pixels, gb.cart.ram];
+  let size = 8 + json.length;
+  for (const b of blocks) size += b.length;
+
+  const out = new Uint8Array(size);
+  const dv = new DataView(out.buffer);
+  dv.setUint32(0, STATE_MAGIC);
+  dv.setUint32(4, json.length);
+  out.set(json, 8);
+  let off = 8 + json.length;
+  for (const b of blocks) { out.set(b, off); off += b.length; }
+  return out;
+}
+
+function loadState(gb, bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (dv.getUint32(0) !== STATE_MAGIC) throw new Error('Not a save state file');
+  const jsonLen = dv.getUint32(4);
+  const s = JSON.parse(new TextDecoder().decode(bytes.subarray(8, 8 + jsonLen)));
+  if (s.v !== STATE_VERSION) throw new Error('Save state version ' + s.v + ' not supported');
+  if (s.title !== gb.cart.title) throw new Error(`State belongs to "${s.title}", not "${gb.cart.title}"`);
+
+  Object.assign(gb, s.cpu);
+  Object.assign(gb, s.io);
+  Object.assign(gb.cart, s.cart);
+  gb.cart.updateBanks();
+  Object.assign(gb.ppu, s.ppu);
+  Object.assign(gb.timer, s.timer);
+  Object.assign(gb.apu, s.apu);
+
+  let off = 8 + jsonLen;
+  const take = (target) => { target.set(bytes.subarray(off, off + target.length)); off += target.length; };
+  take(gb.ppu.vram); take(gb.ppu.oam); take(gb.wram); take(gb.hram);
+  take(gb.apu.wave); take(gb.ppu.pixels); take(gb.cart.ram);
+
+  gb.apu.reset();
+  gb.ppu.frameReady = false;
+}
+
+</script>
+<!-- ROM-SLOT-BEGIN -->
+<script id="embedded-rom" type="application/octet-stream" data-name="" data-encoding=""></script>
+<!-- ROM-SLOT-END -->
+
+<script>
+// ===========================================================================
+//  Browser front end: screen, input, audio, and the debugger panels
+// ===========================================================================
+(function () {
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+
+// The page can bake a ROM into a copy of itself.  The template for that copy
+// is captured here, at script start, before any user action has changed the
+// DOM -- serialising the live document later would freeze whatever state the
+// debugger panels happened to be in.
+const ROM_SLOT_BEGIN = '<!-- ROM-SLOT-BEGIN -->';
+const ROM_SLOT_END = '<!-- ROM-SLOT-END -->';
+const PAGE_TEMPLATE = (() => {
+  let doc = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  const a = doc.indexOf(ROM_SLOT_BEGIN), b = doc.indexOf(ROM_SLOT_END);
+  if (a < 0 || b < 0) return null;
+  // Drop any ROM that was already embedded, so the template stays small and
+  // exporting from an exported file works.
+  return doc.slice(0, a) + ROM_SLOT_BEGIN +
+    '\n<script id="embedded-rom" type="application/octet-stream" data-name="" data-encoding="">' +
+    '<\/script>\n' + doc.slice(b);
+})();
+const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+// ---------------------------------------------------------------- palettes
+const PALETTES = {
+  dmg:    [[0x9b, 0xbc, 0x0f], [0x8b, 0xac, 0x0f], [0x30, 0x62, 0x30], [0x0f, 0x38, 0x0f]],
+  pocket: [[0xe0, 0xe0, 0xd8], [0xa8, 0xa8, 0xa0], [0x60, 0x60, 0x5c], [0x20, 0x20, 0x20]],
+  light:  [[0xd8, 0xf0, 0xe8], [0x80, 0xc0, 0xb8], [0x38, 0x78, 0x88], [0x10, 0x28, 0x40]],
+  hicon:  [[0xff, 0xff, 0xff], [0xaa, 0xaa, 0xaa], [0x55, 0x55, 0x55], [0x00, 0x00, 0x00]],
+};
+
+// ------------------------------------------------------------------- state
+let gb = null;
+let running = false;
+let speed = 1;
+let scale = 3;
+let autoScale = true;
+let palette = 'dmg';
+let audioCtx = null, audioNode = null, audioOn = false, volume = 0.25;
+let rafId = 0, lastTime = 0, frameAcc = 0;
+let lastReadPos = 0, lastDrain = 0;
+let fpsFrames = 0, fpsTime = 0;
+let followPC = true, disasmBase = 0x0100, memBase = 0xC000, mapAuto = true, oamAll = false;
+let debugTick = 0;
+let romName = 'rom';
+let saveSlots = [null, null, null, null];
+let storageOk = true;
+let prevRegs = {};
+let autosaveTimer = 0;
+
+const FRAME_MS = 1000 / 59.727;
+
+// ------------------------------------------------------------------ screen
+const screenCv = $('screen');
+const screenCtx = screenCv.getContext('2d', { alpha: false });
+const imageData = screenCtx.createImageData(160, 144);
+const pixels32 = new Uint32Array(imageData.data.buffer);
+let palette32 = new Uint32Array(4);
+
+function buildPalette() {
+  const p = PALETTES[palette];
+  for (let i = 0; i < 4; i++) {
+    // little-endian ABGR packing for the 32-bit view of the ImageData
+    palette32[i] = (255 << 24) | (p[i][2] << 16) | (p[i][1] << 8) | p[i][0];
+  }
+}
+buildPalette();
+
+function drawScreen() {
+  const px = gb.ppu.pixels;
+  for (let i = 0; i < px.length; i++) pixels32[i] = palette32[px[i]];
+  screenCtx.putImageData(imageData, 0, 0);
+}
+
+// Picks the largest integer scale that fits the stage, so the screen is never
+// cut off on a phone and never postage-stamp sized on a desktop.
+function fitScale() {
+  if (!autoScale) return;
+  const stage = document.getElementById('stage');
+  const showRuler = window.innerWidth > 700 && !document.body.classList.contains('dbg-off');
+  const availW = stage.clientWidth - (showRuler ? 118 : 24) - 32;   // chassis padding
+  const padH = window.innerWidth <= 700 ? 200 : 160;                // buttons below
+  const availH = stage.clientHeight - padH - 80;
+  const s = Math.max(1, Math.min(5, Math.floor(Math.min(availW / 160, availH / 144))));
+  if (s !== scale) { scale = s; }
+}
+
+function applyScale() {
+  // Buttons are sized off the screen so the chassis keeps its proportions at
+  // every zoom level instead of turning into a big screen with toy controls.
+  const w = 160 * scale;
+  const pad = document.getElementById('pad');
+  pad.style.setProperty('--dpad-cell', Math.round(Math.min(64, Math.max(34, w * 0.085))) + 'px');
+  pad.style.setProperty('--ab-size', Math.round(Math.min(86, Math.max(46, w * 0.115))) + 'px');
+  screenCv.style.width = (160 * scale) + 'px';
+  screenCv.style.height = (144 * scale) + 'px';
+  // One ruler row per scanline at exactly the screen's scale, so row y lines up
+  // with screen line y; the last ten rows hang below the LCD as VBlank.
+  const r = $('raster');
+  r.style.width = '96px';
+  r.style.height = (154 * scale) + 'px';
+  $('btnScale').textContent = scale + '×';
+}
+
+// ------------------------------------------------------------------- toast
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+// =========================================================================
+//  ROM loading
+// =========================================================================
+function loadROM(bytes, name) {
+  stop();
+  try {
+    gb = new GB(bytes);
+  } catch (err) {
+    toast('ROM konnte nicht gelesen werden: ' + err.message);
+    return;
+  }
+  romName = (name || 'rom').replace(/\.[^.]+$/, '');
+  window.gb = gb;                       // handy when poking around in the console
+  gb.onSerial = () => { serialDirty = true; };
+  loadBattery();
+
+  $('welcome').style.display = 'none';
+  $('screenBlock').style.display = 'flex';
+  $('transport').style.display = 'flex';
+  $('btnRun').disabled = false;
+  $('btnReset').disabled = false;
+  $('btnExport').disabled = !PAGE_TEMPLATE;
+  if (!PAGE_TEMPLATE) {
+    $('expHint').textContent = 'In dieser Datei fehlt die Aufnahmestelle für ein Modul.';
+  } else if (typeof CompressionStream !== 'function') {
+    $('expHint').textContent = 'Dieser Browser kann kein gzip erzeugen — '
+      + 'die Datei wird unkomprimiert und dadurch größer.';
+  }
+
+  const v = gb.cart.verify();
+  $('ciTitle').textContent = gb.cart.title || '(ohne Titel)';
+  $('ciMachine').textContent = gb.cart.machineName + (gb.cart.sgb ? ' + SGB' : '');
+  $('ciMachine').className = gb.cart.cgbOnly ? 'bad' : '';
+  $('ciMbc').textContent = gb.cart.typeName;
+  $('ciRom').textContent = `${gb.cart.romBanks * 16} KiB / ${gb.cart.romBanks} Bänke`;
+  $('ciRam').textContent = gb.cart.ramSize ? `${gb.cart.ramSize / 1024} KiB${gb.cart.hasBattery ? ' + Batterie' : ''}` : 'keins';
+  $('ciSum').innerHTML = v.headerOk && v.globalOk
+    ? '<span class="ok">gültig</span>'
+    : `<span class="bad">${v.headerOk ? '' : 'Kopf '}${v.globalOk ? '' : 'global '}fehlerhaft</span>`;
+  if (!v.sizeOk) toast('Warnung: Dateigröße passt nicht zum Header — vermutlich ein unvollständiger Dump.');
+
+  // Start clean on a phone: play first, debugger on demand.
+  if (window.innerWidth <= 1000) setDebug(false);
+  fitScale();
+  applyScale();
+  drawScreen();
+  refreshDebug(true);
+
+  // A Color-only cartridge has no black-and-white code path, so starting it
+  // would just show an empty screen with no explanation.
+  const notice = $('cgbNotice');
+  notice.classList.toggle('on', gb.cart.cgbOnly);
+  $('screenWrap').style.display = gb.cart.cgbOnly ? 'none' : '';
+  if (gb.cart.cgbOnly) {
+    $('btnRun').disabled = true;
+  } else {
+    if (gb.cart.cgbAware) {
+      toast('Modul mit Farbunterstützung — die Werkbank emuliert den DMG, '
+            + 'das Spiel läuft daher in Schwarzweiß.');
+    }
+    start();
+  }
+}
+
+function readFile(file, cb) {
+  const fr = new FileReader();
+  fr.onload = () => cb(new Uint8Array(fr.result), file.name);
+  fr.readAsArrayBuffer(file);
+}
+
+function handleFile(file) {
+  const n = file.name.toLowerCase();
+  if (n.endsWith('.sav')) {
+    if (!gb) { toast('Erst ein ROM laden.'); return; }
+    readFile(file, (b) => { gb.setSaveRAM(b); toast('Batteriespeicher übernommen.'); });
+  } else if (n.endsWith('.state')) {
+    if (!gb) { toast('Erst ein ROM laden.'); return; }
+    readFile(file, (b) => {
+      try { loadState(gb, b); drawScreen(); refreshDebug(true); toast('Stand geladen.'); }
+      catch (e) { toast(e.message); }
+    });
+  } else {
+    readFile(file, loadROM);
+  }
+}
+
+// =========================================================================
+//  Main loop
+// =========================================================================
+function start() {
+  if (!gb || running) return;
+  running = true;
+  $('btnRun').textContent = 'Pause';
+  lastTime = performance.now();
+  frameAcc = 0;
+  rafId = requestAnimationFrame(loop);
+}
+
+function stop() {
+  running = false;
+  $('btnRun').textContent = 'Start';
+  cancelAnimationFrame(rafId);
+  if (gb) refreshDebug(true);
+}
+
+function toggleRun() { running ? stop() : start(); }
+
+function loop(now) {
+  if (!running) return;
+  rafId = requestAnimationFrame(loop);
+
+  const dt = Math.min(now - lastTime, 100);
+  lastTime = now;
+
+  let frames;
+  if (speed === 0) {
+    frames = 4;                                  // "max" -- as fast as rAF allows
+  } else {
+    frameAcc += dt / (FRAME_MS / speed);
+    frames = Math.floor(frameAcc);
+    frameAcc -= frames;
+    if (frames > 6) frames = 6;                  // don't spiral after a stall
+  }
+
+  // Gentle audio-driven sync: keep the ring buffer around a third full.
+  // Only ever throttle while the sink is demonstrably consuming samples --
+  // a suspended or stalled audio context must never stop the emulation.
+  if (audioOn && speed === 1) {
+    // drainedTotal counts samples the sink actually took.  readPos is not a
+    // usable signal here: the overrun guard advances it on its own, which
+    // would make a dead audio context look alive.
+    if (gb.apu.drainedTotal !== lastReadPos) { lastReadPos = gb.apu.drainedTotal; lastDrain = now; }
+    if (now - lastDrain < 300) {
+      const avail = gb.apu.available();
+      if (avail > 3500) frames = Math.max(0, frames - 1);
+      else if (avail < 900) frames += 1;
+    }
+  }
+
+  for (let i = 0; i < frames; i++) {
+    gb.runFrame(200000);
+    if (gb.hitBreakpoint) { onBreak(); break; }
+  }
+
+  drawScreen();
+  fpsFrames += frames;
+  if (now - fpsTime > 500) {
+    $('ciFps').textContent = (fpsFrames * 1000 / (now - fpsTime)).toFixed(0) + ' fps';
+    fpsFrames = 0; fpsTime = now;
+  }
+
+  if ((debugTick++ & 7) === 0) refreshDebug(false);
+
+  autosaveTimer += dt;
+  if (autosaveTimer > 4000) { autosaveTimer = 0; saveBattery(); }
+}
+
+function onBreak() {
+  const b = gb.hitBreakpoint;
+  stop();
+  const where = b.type === 'ly' ? `Rasterzeile ${b.addr}`
+    : b.type === 'illegal' ? `unbekannter Opcode ${hex2(b.op)} bei $${hex16(b.addr)}`
+    : b.type === 'pc' ? `PC $${hex16(b.addr)}`
+    : `${b.type === 'read' ? 'Lesen' : 'Schreiben'} $${hex16(b.addr)}`;
+  toast('Angehalten: ' + where);
+  gb.hitBreakpoint = null;
+  refreshDebug(true);
+}
+
+// -- single stepping --------------------------------------------------------
+function stepInstruction() {
+  if (!gb) return;
+  stop();
+  gb.hitBreakpoint = null;
+  gb.step();
+  drawScreen();
+  refreshDebug(true);
+}
+
+function stepLine() {
+  if (!gb) return;
+  stop();
+  const target = (gb.ppu.ly + 1) % 154;
+  let guard = 0;
+  gb.hitBreakpoint = null;
+  while (gb.ppu.ly !== target && guard++ < 200000) gb.step();
+  drawScreen();
+  refreshDebug(true);
+}
+
+function stepFrame() {
+  if (!gb) return;
+  stop();
+  gb.hitBreakpoint = null;
+  gb.runFrame(200000);
+  drawScreen();
+  refreshDebug(true);
+}
+
+// =========================================================================
+//  Audio
+// =========================================================================
+function initAudio() {
+  if (audioCtx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  audioCtx = new AC();
+  gb.apu.setSampleRate(audioCtx.sampleRate);
+  audioNode = audioCtx.createScriptProcessor(2048, 0, 2);
+  audioNode.onaudioprocess = (ev) => {
+    const l = ev.outputBuffer.getChannelData(0), r = ev.outputBuffer.getChannelData(1);
+    if (gb && audioOn) gb.apu.drain(l, r, l.length);
+    else { l.fill(0); r.fill(0); }
+  };
+  audioNode.connect(audioCtx.destination);
+}
+
+function toggleAudio() {
+  if (!gb) return;
+  if (!audioOn) {
+    initAudio();
+    // Drop whatever accumulated while the sound was off, otherwise the sync
+    // logic sees a backlog of every second played so far.
+    gb.apu.reset();
+    lastReadPos = gb.apu.drainedTotal;
+    lastDrain = performance.now();
+    audioCtx.resume().then(() => {
+      if (audioCtx.state !== 'running') {
+        toast('Der Browser hat die Tonausgabe blockiert. Bitte erneut auf „Ton an“ tippen.');
+      }
+    });
+    audioOn = true;
+    gb.apu.masterVolume = volume;
+    $('btnAudio').textContent = 'Ton aus';
+    $('btnAudio').classList.add('on');
+  } else {
+    audioOn = false;
+    $('btnAudio').textContent = 'Ton an';
+    $('btnAudio').classList.remove('on');
+  }
+}
+
+// =========================================================================
+//  Persistence (degrades to memory-only when storage is unavailable)
+// =========================================================================
+function storageKey() {
+  const v = gb.cart.verify();
+  return 'dmgwb:' + gb.cart.title + ':' + v.globalStored.toString(16);
+}
+
+function saveBattery() {
+  if (!gb || !gb.cart.hasBattery || !gb.cart.ramDirty || !storageOk) return;
+  try {
+    let s = '';
+    const r = gb.cart.ram;
+    for (let i = 0; i < r.length; i += 8192) s += String.fromCharCode.apply(null, r.subarray(i, i + 8192));
+    localStorage.setItem(storageKey(), btoa(s));
+    gb.cart.ramDirty = false;
+  } catch (e) {
+    storageOk = false;
+    $('savHint').textContent = 'Automatisches Speichern ist hier nicht möglich (Browser-Speicher gesperrt). ' +
+      'Der Spielstand lässt sich als .sav-Datei sichern.';
+  }
+}
+
+function loadBattery() {
+  if (!gb.cart.hasBattery) { $('savHint').textContent = 'Dieses Modul hat keinen Batteriespeicher.'; return; }
+  try {
+    const s = localStorage.getItem(storageKey());
+    if (s) {
+      const bin = atob(s);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+      gb.setSaveRAM(arr);
+      $('savHint').textContent = 'Gespeicherter Spielstand geladen, wird alle 4 s automatisch gesichert.';
+    } else {
+      $('savHint').textContent = 'Spielstand wird alle 4 s automatisch im Browser gesichert.';
+    }
+  } catch (e) {
+    storageOk = false;
+    $('savHint').textContent = 'Automatisches Speichern ist hier nicht möglich (Browser-Speicher gesperrt). ' +
+      'Der Spielstand lässt sich als .sav-Datei sichern.';
+  }
+}
+
+function download(bytes, name, mime) {
+  const blob = new Blob([bytes], { type: mime || 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+}
+
+// =========================================================================
+//  Debugger panels
+// =========================================================================
+let activeTab = 'cpu';
+let serialDirty = true;
+
+function refreshDebug(force) {
+  if (!gb || $('drawer').classList.contains('hidden')) return;
+  switch (activeTab) {
+    case 'cpu': renderCPU(); break;
+    case 'disasm': renderDisasm(); break;
+    case 'memory': renderMemory(); break;
+    case 'video': renderVideo(); break;
+    case 'raster': renderRasterTable(); break;
+    case 'trace': if (force) renderTrace(); break;
+    case 'serial': renderSerial(); break;
+  }
+  renderRasterRuler();
+}
+
+// -- CPU --------------------------------------------------------------------
+function reg(name, value, width) {
+  const changed = prevRegs[name] !== undefined && prevRegs[name] !== value;
+  prevRegs[name] = value;
+  const v = width === 4 ? hex16(value) : hex2(value);
+  return `<div class="r${changed ? ' changed' : ''}"><i>${name}</i><b>${v}</b></div>`;
+}
+
+function bitRow(names, value) {
+  return names.map((n, i) => {
+    const bit = names.length - 1 - i;
+    return `<span class="${(value >> bit) & 1 ? 'set' : ''}">${n}</span>`;
+  }).join('');
+}
+
+function renderCPU() {
+  $('regs').innerHTML =
+    reg('A', gb.a, 2) + reg('F', gb.f, 2) + reg('B', gb.b, 2) + reg('C', gb.c, 2) +
+    reg('D', gb.d, 2) + reg('E', gb.e, 2) + reg('H', gb.h, 2) + reg('L', gb.l, 2) +
+    reg('AF', gb.af, 4) + reg('BC', gb.bc, 4) + reg('DE', gb.de, 4) + reg('HL', gb.hl, 4) +
+    reg('SP', gb.sp, 4) + reg('PC', gb.pc, 4) +
+    `<div class="r"><i>HALT</i><b>${gb.halted ? 'ja' : 'nein'}</b></div>` +
+    `<div class="r"><i>Bank</i><b>${gb.cart.romBank}</b></div>`;
+
+  $('flagBits').innerHTML = bitRow(['Z', 'N', 'H', 'C'], gb.f >> 4);
+  $('imeBits').innerHTML = `<span class="${gb.ime ? 'set' : ''}">IME</span>` +
+    `<span class="${gb.halted ? 'set' : ''}">HALT</span>` +
+    `<span class="${gb.dmaActive ? 'set' : ''}">DMA</span>`;
+  const irq = ['JOY', 'SER', 'TIM', 'LCD', 'VBL'];
+  $('ifBits').innerHTML = bitRow(irq, gb.ifReg);
+  $('ieBits').innerHTML = bitRow(irq, gb.ieReg);
+  $('lcdcBits').innerHTML = bitRow(['AN', 'WMAP', 'WIN', 'DATA', 'BMAP', 'OBJ16', 'OBJ', 'BG'], gb.ppu.lcdc);
+  $('statBits').innerHTML = bitRow(['-', 'LYC', 'M2', 'M1', 'M0', '=', 'S1', 'S0'], gb.ppu.readReg(0xFF41));
+
+  const p = gb.ppu;
+  $('lcdRegs').innerHTML =
+    reg('LY', p.ly, 2) + reg('LYC', p.lyc, 2) + reg('SCX', p.scx, 2) + reg('SCY', p.scy, 2) +
+    reg('WX', p.wx, 2) + reg('WY', p.wy, 2) + reg('BGP', p.bgp, 2) + reg('OBP0', p.obp0, 2) +
+    `<div class="r"><i>Modus</i><b>${p.mode}</b></div>` +
+    `<div class="r"><i>Dot</i><b>${p.dot}</b></div>`;
+
+  $('counters').innerHTML =
+    `<div class="r"><i>Frame</i><b>${p.frame}</b></div>` +
+    `<div class="r"><i>DIV</i><b>${hex2(gb.timer.div)}</b></div>` +
+    `<div class="r"><i>TIMA</i><b>${hex2(gb.timer.tima)}</b></div>` +
+    `<div class="r"><i>TAC</i><b>${hex2(gb.timer.tac)}</b></div>` +
+    `<div class="r"><i>Zyklen</i><b>${gb.cycles}</b></div>` +
+    `<div class="r"><i>Befehle</i><b>${gb.instrCount}</b></div>`;
+
+  let stack = '';
+  for (let i = 0; i < 8; i++) {
+    const a = (gb.sp + i * 2) & 0xFFFF;
+    const v = gb.readByte(a) | (gb.readByte((a + 1) & 0xFFFF) << 8);
+    stack += `<div><span style="color:var(--muted)">${hex16(a)}</span> ${hex16(v)}</div>`;
+  }
+  $('stackView').innerHTML = stack;
+}
+
+// -- disassembly ------------------------------------------------------------
+function renderDisasm() {
+  if (followPC) {
+    // Keep PC on screen without jumping on every step.
+    if (gb.pc < disasmBase || gb.pc > disasmBase + 0x40) disasmBase = gb.pc;
+  }
+  const rows = disassembleRange(gb, disasmBase, 28);
+  $('disasm').innerHTML = rows.map((r) =>
+    `<div class="row${r.isPC ? ' pc' : ''}${r.hasBP ? ' bp' : ''}" data-a="${r.addr}">` +
+    `<span class="a">${hex16(r.addr)}</span><span class="b">${r.bytes}</span>` +
+    `<span class="t">${r.text.replace(/</g, '&lt;')}</span></div>`).join('');
+
+  $('bpList').innerHTML = gb.breakpoints.size
+    ? Array.from(gb.breakpoints).sort((a, b) => a - b)
+        .map((a) => `<div>$${hex16(a)} <button data-delbp="${a}" style="padding:0 5px">×</button></div>`).join('')
+    : '<span class="hint">keine</span>';
+
+  const wp = [];
+  gb.readWatch.forEach((a) => wp.push(`<div>R $${hex16(a)}</div>`));
+  gb.writeWatch.forEach((a) => wp.push(`<div>W $${hex16(a)}</div>`));
+  $('wpList').innerHTML = wp.join('') || '<span class="hint">keine</span>';
+}
+
+// -- memory -----------------------------------------------------------------
+function renderMemory() {
+  let out = '';
+  for (let row = 0; row < 16; row++) {
+    const a = (memBase + row * 16) & 0xFFFF;
+    let hexPart = '', ascii = '';
+    for (let i = 0; i < 16; i++) {
+      const v = gb.readByte((a + i) & 0xFFFF);
+      hexPart += hex2(v) + (i === 7 ? '  ' : ' ');
+      ascii += (v >= 32 && v < 127) ? String.fromCharCode(v) : '.';
+    }
+    out += `<span class="addr">${hex16(a)}</span>  ${hexPart} <span class="asc">${ascii
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>\n`;
+  }
+  $('memView').innerHTML = out;
+}
+
+// -- video ------------------------------------------------------------------
+const tilesCv = $('tiles'), tilesCtx = tilesCv.getContext('2d');
+const tilesImg = tilesCtx.createImageData(128, 192);
+const mapCv = $('tilemap'), mapCtx = mapCv.getContext('2d');
+const mapImg = mapCtx.createImageData(256, 256);
+
+function renderVideo() {
+  const cols = PALETTES[palette];
+  // 384 tiles, 16 across
+  for (let t = 0; t < 384; t++) {
+    gb.ppu.drawTile(tilesImg.data, 128, (t % 16) * 8, ((t / 16) | 0) * 8, t * 16, gb.ppu.bgp, cols);
+  }
+  tilesCtx.putImageData(tilesImg, 0, 0);
+
+  const lcdc = gb.ppu.lcdc;
+  const mapBase = (mapAuto ? ((lcdc & 0x08) ? 0x9C00 : 0x9800) : parseInt($('selMap').value, 16)) - 0x8000;
+  if (mapAuto) $('selMap').value = (mapBase + 0x8000).toString(16).toUpperCase();
+  const signed = !(lcdc & 0x10);
+  for (let ty = 0; ty < 32; ty++) {
+    for (let tx = 0; tx < 32; tx++) {
+      const no = gb.ppu.vram[mapBase + ty * 32 + tx];
+      const addr = signed ? 0x1000 + (((no << 24) >> 24) * 16) : no * 16;
+      gb.ppu.drawTile(mapImg.data, 256, tx * 8, ty * 8, addr, gb.ppu.bgp, cols);
+    }
+  }
+  mapCtx.putImageData(mapImg, 0, 0);
+  // viewport rectangle, wrapping at the map edges
+  const sx = gb.ppu.scx, sy = gb.ppu.scy;
+  for (const [w, col] of [[3, 'rgba(20,16,24,0.85)'], [1, '#ff5c86']]) {
+    mapCtx.lineWidth = w;
+    mapCtx.strokeStyle = col;
+    for (const dx of [0, -256]) for (const dy of [0, -256]) {
+      mapCtx.strokeRect(sx + dx + 0.5, sy + dy + 0.5, 160, 144);
+    }
+  }
+
+  let rows = '<tr><th>#</th><th>Y</th><th>X</th><th>Kachel</th><th>Attr</th><th>Flags</th></tr>';
+  const oam = gb.ppu.oam;
+  for (let i = 0; i < 40; i++) {
+    const y = oam[i * 4], x = oam[i * 4 + 1], tile = oam[i * 4 + 2], fl = oam[i * 4 + 3];
+    if (!oamAll && (y === 0 || y >= 160)) continue;
+    const flags = [(fl & 0x80) ? 'BG' : '', (fl & 0x40) ? 'FY' : '', (fl & 0x20) ? 'FX' : '',
+      (fl & 0x10) ? 'P1' : 'P0'].filter(Boolean).join(' ');
+    rows += `<tr><td>${i}</td><td>${y - 16}</td><td>${x - 8}</td><td>${hex2(tile)}</td>` +
+            `<td>${hex2(fl)}</td><td>${flags}</td></tr>`;
+  }
+  $('oamTable').innerHTML = rows;
+}
+
+// -- raster -----------------------------------------------------------------
+const rasterCv = $('raster'), rasterCtx = rasterCv.getContext('2d');
+const rasterImg = rasterCtx.createImageData(96, 154);
+const rasterPx = new Uint32Array(rasterImg.data.buffer);
+
+function renderRasterRuler() {
+  const r = gb.ppu.lineRegs;
+  rasterPx.fill(0xff221e28);
+  const put = (x, y, c) => { if (x >= 0 && x < 96) rasterPx[y * 96 + x] = c; };
+  const COL_LEN = 0xff5fb072;     // mode-3 duration
+  const COL_SCX = 0xffb0725f;     // indigo-ish in ABGR
+  const COL_SCY = 0xffa4b4b9;
+  const COL_SPR = 0xff3f97c9;
+  const COL_VBL = 0xff2a2632;
+
+  for (let y = 0; y < 154; y++) {
+    if (y >= 144) { for (let x = 0; x < 96; x++) rasterPx[y * 96 + x] = COL_VBL; continue; }
+    // mode 3 duration: 172 dots is the minimum, 260+ is a busy line
+    const len = Math.min(23, Math.max(1, ((r.len[y] - 171) * 23 / 90) | 0));
+    for (let x = 0; x < len; x++) put(x, y, COL_LEN);
+    put(24, y, 0xff3a3546);
+    put(25 + ((r.scx[y] * 22 / 255) | 0), y, COL_SCX);
+    put(48, y, 0xff3a3546);
+    put(49 + ((r.scy[y] * 22 / 255) | 0), y, COL_SCY);
+    put(72, y, 0xff3a3546);
+    for (let x = 0; x < Math.min(10, r.spr[y]) * 2; x++) put(73 + x, y, COL_SPR);
+  }
+  // live beam
+  const ly = gb.ppu.ly;
+  if (ly >= 0 && ly < 154) for (let x = 0; x < 96; x++) rasterPx[ly * 96 + x] = 0xff5f3ab2;
+  if (gb.lyBreak >= 0 && gb.lyBreak < 154) {
+    for (let x = 0; x < 96; x += 3) rasterPx[gb.lyBreak * 96 + x] = 0xff7cf0ff;
+  }
+  rasterCtx.putImageData(rasterImg, 0, 0);
+}
+
+function renderRasterTable() {
+  const r = gb.ppu.lineRegs;
+  let rows = '<tr><th>LY</th><th>SCX</th><th>SCY</th><th>LCDC</th><th>BGP</th><th>WX</th><th>WY</th><th>Spr</th><th>M3</th></tr>';
+  let prev = null;
+  for (let y = 0; y < 144; y++) {
+    const key = `${r.scx[y]},${r.scy[y]},${r.lcdc[y]},${r.bgp[y]},${r.wx[y]},${r.wy[y]}`;
+    const changed = key !== prev;
+    prev = key;
+    // Only list lines where something changed -- that is where the interesting
+    // raster tricks live.
+    if (!changed && y !== 143) continue;
+    rows += `<tr><td>${y}</td><td>${hex2(r.scx[y])}</td><td>${hex2(r.scy[y])}</td>` +
+            `<td>${hex2(r.lcdc[y])}</td><td>${hex2(r.bgp[y])}</td><td>${hex2(r.wx[y])}</td>` +
+            `<td>${hex2(r.wy[y])}</td><td>${r.spr[y]}</td><td>${r.len[y]}</td></tr>`;
+  }
+  $('rasterTable').innerHTML = rows;
+}
+
+// -- trace / serial ---------------------------------------------------------
+function renderTrace() {
+  if (!gb.trace) { $('traceOut').textContent = 'Aufzeichnung aus.'; return; }
+  const lines = gb.traceLines();
+  $('traceOut').textContent = lines.slice(-300).join('\n') || '(noch nichts aufgezeichnet)';
+}
+
+function renderSerial() {
+  if (!serialDirty) return;
+  serialDirty = false;
+  const el = $('serialOut');
+  el.textContent = gb.serialLog || '(keine Ausgabe)';
+  el.scrollTop = el.scrollHeight;
+}
+
+// =========================================================================
+//  Event wiring
+// =========================================================================
+$('btnCgbAnyway').onclick = () => {
+  $('cgbNotice').classList.remove('on');
+  $('screenWrap').style.display = '';
+  $('btnRun').disabled = false;
+  fitScale(); applyScale();
+  start();
+};
+
+$('btnOpen').onclick = $('btnOpen2').onclick = () => $('fileIn').click();
+$('fileIn').onchange = (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); e.target.value = ''; };
+$('btnRun').onclick = toggleRun;
+$('btnReset').onclick = () => {
+  const wasRunning = running;
+  stop();
+  const sram = gb.getSaveRAM();
+  gb.reset();
+  if (sram) gb.setSaveRAM(sram);
+  drawScreen(); refreshDebug(true);
+  if (wasRunning) start();
+};
+function setDebug(on) {
+  $('drawer').classList.toggle('hidden', !on);
+  $('btnDrawer').classList.toggle('on', on);
+  // The raster ruler, the step buttons and the speed control are debug tools
+  // too -- with the debugger off, nothing of it stays on screen.
+  document.body.classList.toggle('dbg-off', !on);
+  if (!on) { speed = 1; $('selSpeed').value = '1'; }
+  setTimeout(() => { fitScale(); applyScale(); }, 0);
+  refreshDebug(true);
+}
+
+$('btnDrawer').onclick = () => setDebug($('drawer').classList.contains('hidden'));
+
+let resizeTimer = 0;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => { fitScale(); applyScale(); }, 120);
+});
+$('btnStepI').onclick = stepInstruction;
+$('btnStepL').onclick = stepLine;
+$('btnStepF').onclick = stepFrame;
+$('selSpeed').onchange = (e) => { speed = parseFloat(e.target.value); };
+$('selPal').onchange = (e) => { palette = e.target.value; buildPalette(); if (gb) { drawScreen(); refreshDebug(true); } };
+$('btnAudio').onclick = toggleAudio;
+$('btnScale').onclick = () => { autoScale = false; scale = scale >= 5 ? 1 : scale + 1; applyScale(); };
+$('vol').oninput = (e) => { volume = e.target.value / 100; if (gb) gb.apu.masterVolume = volume; };
+
+$$('#tabs button').forEach((b) => {
+  b.onclick = () => {
+    $$('#tabs button').forEach((x) => x.classList.remove('active'));
+    $$('.panel').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    document.querySelector(`.panel[data-panel="${b.dataset.tab}"]`).classList.add('active');
+    activeTab = b.dataset.tab;
+    serialDirty = true;
+    refreshDebug(true);
+  };
+});
+
+// disassembly interaction
+$('disasm').onclick = (e) => {
+  const row = e.target.closest('.row');
+  if (!row || !gb) return;
+  const a = parseInt(row.dataset.a, 10);
+  if (gb.breakpoints.has(a)) gb.breakpoints.delete(a); else gb.breakpoints.add(a);
+  renderDisasm();
+};
+$('bpList').onclick = (e) => {
+  const a = e.target.dataset.delbp;
+  if (a !== undefined) { gb.breakpoints.delete(parseInt(a, 10)); renderDisasm(); }
+};
+$('btnDisGo').onclick = () => {
+  const v = parseInt($('disAddr').value.replace(/[^0-9a-f]/gi, ''), 16);
+  if (!isNaN(v)) { disasmBase = v & 0xFFFF; followPC = false; $('btnDisPC').classList.remove('on'); renderDisasm(); }
+};
+$('btnDisPC').onclick = () => {
+  followPC = !followPC;
+  $('btnDisPC').classList.toggle('on', followPC);
+  if (followPC && gb) { disasmBase = gb.pc; renderDisasm(); }
+};
+$('btnBpClear').onclick = () => { gb.breakpoints.clear(); renderDisasm(); };
+$('btnWpR').onclick = () => { addWatch(gb.readWatch); };
+$('btnWpW').onclick = () => { addWatch(gb.writeWatch); };
+$('btnWpClear').onclick = () => { gb.readWatch.clear(); gb.writeWatch.clear(); renderDisasm(); };
+function addWatch(set) {
+  const v = parseInt($('wpAddr').value.replace(/[^0-9a-f]/gi, ''), 16);
+  if (!isNaN(v)) { set.add(v & 0xFFFF); renderDisasm(); }
+}
+
+// memory interaction
+$('memAddr').oninput = (e) => {
+  const v = parseInt(e.target.value.replace(/[^0-9a-f]/gi, ''), 16);
+  if (!isNaN(v)) { memBase = v & 0xFFF0; renderMemory(); }
+};
+$$('#panels [data-goto]').forEach((b) => {
+  b.onclick = () => { memBase = parseInt(b.dataset.goto, 16); $('memAddr').value = b.dataset.goto; renderMemory(); };
+});
+$('btnPoke').onclick = () => {
+  const a = parseInt($('pokeAddr').value.replace(/[^0-9a-f]/gi, ''), 16);
+  const v = parseInt($('pokeVal').value.replace(/[^0-9a-f]/gi, ''), 16);
+  if (isNaN(a) || isNaN(v)) { toast('Adresse und Wert bitte hexadezimal.'); return; }
+  gb.writeByte(a & 0xFFFF, v & 0xFF);
+  renderMemory();
+  toast(`$${hex16(a & 0xFFFF)} = ${hex2(v & 0xFF)}`);
+};
+
+// video
+$('selMap').onchange = () => { mapAuto = false; $('btnMapAuto').classList.remove('on'); renderVideo(); };
+$('btnMapAuto').onclick = () => { mapAuto = !mapAuto; $('btnMapAuto').classList.toggle('on', mapAuto); renderVideo(); };
+$('btnOamAll').onclick = () => { oamAll = !oamAll; $('btnOamAll').classList.toggle('on', oamAll); renderVideo(); };
+
+// raster
+$('raster').onclick = (e) => {
+  const rect = e.target.getBoundingClientRect();
+  const y = Math.floor((e.clientY - rect.top) / rect.height * 154);
+  gb.lyBreak = (gb.lyBreak === y) ? -1 : y;
+  $('lyBreak').value = gb.lyBreak < 0 ? '' : gb.lyBreak;
+  toast(gb.lyBreak < 0 ? 'Zeilen-Breakpoint aus' : 'Halt bei Rasterzeile ' + gb.lyBreak);
+  renderRasterRuler();
+};
+$('lyBreak').oninput = (e) => {
+  const v = parseInt(e.target.value, 10);
+  gb.lyBreak = isNaN(v) ? -1 : v;
+};
+$('btnLyClear').onclick = () => { gb.lyBreak = -1; $('lyBreak').value = ''; renderRasterRuler(); };
+
+// trace
+$('btnTrace').onclick = () => {
+  if (gb.trace) { gb.disableTrace(); $('btnTrace').textContent = 'Aufzeichnung starten'; $('btnTrace').classList.remove('on'); }
+  else { gb.enableTrace(8192); $('btnTrace').textContent = 'Aufzeichnung stoppen'; $('btnTrace').classList.add('on'); }
+  renderTrace();
+};
+$('btnTraceDump').onclick = () => {
+  if (!gb.trace) { toast('Erst die Aufzeichnung starten.'); return; }
+  download(new TextEncoder().encode(gb.traceLines().join('\n')), romName + '-trace.txt', 'text/plain');
+};
+$('btnSerialClear').onclick = () => { gb.serialLog = ''; serialDirty = true; renderSerial(); };
+
+// states
+function renderSlots() {
+  $('slotBar').innerHTML = saveSlots.map((s, i) =>
+    `<button data-slot="${i}" class="${s ? 'on' : ''}">${i + 1}${s ? ' ●' : ' ○'}</button>`).join('') +
+    '<span class="hint">Klick lädt, Umschalt+Klick sichert</span>';
+}
+$('slotBar').onclick = (e) => {
+  const i = e.target.dataset.slot;
+  if (i === undefined || !gb) return;
+  const n = parseInt(i, 10);
+  if (e.shiftKey) { saveSlots[n] = saveState(gb); toast('Stand ' + (n + 1) + ' gesichert.'); }
+  else if (saveSlots[n]) {
+    try { loadState(gb, saveSlots[n]); drawScreen(); refreshDebug(true); toast('Stand ' + (n + 1) + ' geladen.'); }
+    catch (err) { toast(err.message); }
+  } else toast('Stand ' + (n + 1) + ' ist leer.');
+  renderSlots();
+};
+$('btnStateSave').onclick = () => download(saveState(gb), romName + '.state');
+$('btnStateLoad').onclick = () => { $('fileAux').accept = '.state'; $('fileAux').click(); };
+$('btnSavDl').onclick = () => {
+  const r = gb.getSaveRAM();
+  if (!r) { toast('Dieses Modul hat keinen Batteriespeicher.'); return; }
+  download(r, romName + '.sav');
+};
+$('btnSavUp').onclick = () => { $('fileAux').accept = '.sav'; $('fileAux').click(); };
+$('fileAux').onchange = (e) => { if (e.target.files[0]) handleFile(e.target.files[0]); e.target.value = ''; };
+$('btnBlocking').onclick = () => {
+  gb.strictBlocking = !gb.strictBlocking;
+  $('btnBlocking').textContent = 'VRAM-Sperre: ' + (gb.strictBlocking ? 'an' : 'aus');
+  $('btnBlocking').classList.toggle('on', gb.strictBlocking);
+};
+
+// -- keyboard ---------------------------------------------------------------
+const KEYMAP = {
+  ArrowRight: 'right', ArrowLeft: 'left', ArrowUp: 'up', ArrowDown: 'down',
+  x: 'a', X: 'a', y: 'b', Y: 'b', z: 'b', Z: 'b',
+  Enter: 'start', Backspace: 'select', ' ': 'select',
+};
+
+window.addEventListener('keydown', (e) => {
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  // A focused button must still be operable with Enter or Space, so those two
+  // keys are left alone there instead of being swallowed as Start/Select.
+  if (tag === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
+  if (!gb) return;
+  const b = KEYMAP[e.key];
+  if (b) { gb.setButton(b, true); e.preventDefault(); return; }
+  switch (e.key) {
+    case 'F5': toggleRun(); e.preventDefault(); break;
+    case 'F11': stepInstruction(); e.preventDefault(); break;
+    case 'F6': stepLine(); e.preventDefault(); break;
+    case 'F10': stepFrame(); e.preventDefault(); break;
+    case 'F1': case 'F2': case 'F3': case 'F4': {
+      const n = parseInt(e.key[1], 10) - 1;
+      if (e.shiftKey) { saveSlots[n] = saveState(gb); toast('Stand ' + (n + 1) + ' gesichert.'); }
+      else if (saveSlots[n]) {
+        try { loadState(gb, saveSlots[n]); drawScreen(); refreshDebug(true); toast('Stand ' + (n + 1) + ' geladen.'); }
+        catch (err) { toast(err.message); }
+      }
+      renderSlots();
+      e.preventDefault();
+      break;
+    }
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  if (tag === 'BUTTON' && (e.key === 'Enter' || e.key === ' ')) return;
+  const b = KEYMAP[e.key];
+  if (b && gb) { gb.setButton(b, false); e.preventDefault(); }
+});
+
+// -- on-screen buttons ------------------------------------------------------
+//  Hit testing is geometric rather than per-element, so a finger can slide
+//  across the pad, hold two buttons at once, and press diagonals by landing
+//  between two arms -- none of which works with plain per-button listeners.
+const padEl = $('pad');
+const dpadEl = $('dpad');
+
+const DIAGONALS = [
+  ['right'], ['right', 'down'], ['down'], ['down', 'left'],
+  ['left'], ['left', 'up'], ['up'], ['up', 'right'],
+];
+
+function hitTest(x, y, active) {
+  const d = dpadEl.getBoundingClientRect();
+  const nx = (x - (d.left + d.width / 2)) / (d.width / 2);
+  const ny = (y - (d.top + d.height / 2)) / (d.height / 2);
+  // Generous square around the cross, with a dead zone in the middle.
+  if (Math.abs(nx) <= 1.15 && Math.abs(ny) <= 1.15) {
+    if (nx * nx + ny * ny > 0.10) {
+      let sector = Math.round(Math.atan2(ny, nx) / (Math.PI / 4));
+      if (sector < 0) sector += 8;
+      for (const b of DIAGONALS[sector % 8]) active.add(b);
+    }
+    return;
+  }
+  for (const el of padEl.querySelectorAll('.round, .pill')) {
+    const r = el.getBoundingClientRect();
+    const pad = 6;                                 // a little slack around the edge
+    if (x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad) {
+      active.add(el.dataset.btn);
+      return;
+    }
+  }
+}
+
+let padActive = new Set();
+
+function applyPad(active) {
+  for (const b of BUTTONS) {
+    const now = active.has(b);
+    if (now !== padActive.has(b)) {
+      gb.setButton(b, now);
+      if (now && navigator.vibrate) navigator.vibrate(8);
+    }
+  }
+  padActive = active;
+  for (const el of padEl.querySelectorAll('.k')) {
+    el.classList.toggle('down', active.has(el.dataset.btn));
+  }
+}
+
+function onTouch(e) {
+  if (!gb) return;
+  e.preventDefault();
+  const active = new Set();
+  for (const t of e.touches) hitTest(t.clientX, t.clientY, active);
+  applyPad(active);
+}
+
+padEl.addEventListener('touchstart', onTouch, { passive: false });
+padEl.addEventListener('touchmove', onTouch, { passive: false });
+padEl.addEventListener('touchend', onTouch, { passive: false });
+padEl.addEventListener('touchcancel', onTouch, { passive: false });
+
+// Mouse: one pointer, same hit test, so the pad is usable on a desktop too.
+let mouseDown = false;
+function onMouse(e) {
+  if (!gb) return;
+  const active = new Set();
+  if (mouseDown) hitTest(e.clientX, e.clientY, active);
+  applyPad(active);
+}
+padEl.addEventListener('mousedown', (e) => { mouseDown = true; onMouse(e); e.preventDefault(); });
+window.addEventListener('mousemove', (e) => { if (mouseDown) onMouse(e); });
+window.addEventListener('mouseup', (e) => { mouseDown = false; onMouse(e); });
+
+// -- drag and drop ----------------------------------------------------------
+const drop = $('drop');
+window.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('on'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('on'));
+window.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('on');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+// Coming back from a background tab: the audio context was suspended while
+// the emulator kept running, so start the buffer over instead of catching up.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !gb) return;
+  lastTime = performance.now();
+  frameAcc = 0;
+  if (audioOn) {
+    gb.apu.reset();
+    lastReadPos = gb.apu.drainedTotal;
+    lastDrain = performance.now();
+    if (audioCtx && audioCtx.state !== 'running') audioCtx.resume();
+  }
+});
+
+window.addEventListener('beforeunload', saveBattery);
+
+renderSlots();
+applyScale();
+
+// -- exporting a self-contained copy ----------------------------------------
+function base64Of(bytes) {
+  // btoa needs a binary string; build it in chunks so the argument list of
+  // String.fromCharCode never gets long enough to blow the call stack.
+  let s = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(s);
+}
+
+async function gzip(bytes) {
+  if (typeof CompressionStream !== 'function') return null;
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function escapeAttr(s) {
+  return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function exportWithROM() {
+  if (!gb || !PAGE_TEMPLATE) { toast('Export nicht möglich.'); return; }
+  const btn = $('btnExport');
+  btn.disabled = true;
+  const previous = btn.textContent;
+  btn.textContent = 'wird gepackt …';
+  try {
+    const rom = gb.cart.rom;
+    let payload = null, encoding = '';
+    if ($('expCompress').checked) {
+      const packed = await gzip(rom);
+      if (packed && packed.length < rom.length * 0.95) {
+        payload = base64Of(packed);
+        encoding = 'gzip';
+      }
+    }
+    if (payload === null) payload = base64Of(rom);
+
+    const name = romName + '.gb';
+    const slot = ROM_SLOT_BEGIN +
+      '\n<script id="embedded-rom" type="application/octet-stream" data-name="' +
+      escapeAttr(name) + '" data-encoding="' + encoding + '">' + payload + '<\/script>\n' +
+      ROM_SLOT_END;
+
+    const a = PAGE_TEMPLATE.indexOf(ROM_SLOT_BEGIN);
+    const b = PAGE_TEMPLATE.indexOf(ROM_SLOT_END) + ROM_SLOT_END.length;
+    const doc = PAGE_TEMPLATE.slice(0, a) + slot + PAGE_TEMPLATE.slice(b);
+
+    download(new TextEncoder().encode(doc), romName + '.html', 'text/html');
+    $('expHint').textContent =
+      `${romName}.html erzeugt — ${Math.round(doc.length / 1024)} KiB` +
+      (encoding ? ' (gzip)' : ' (unkomprimiert)') + '.';
+  } catch (err) {
+    toast('Export fehlgeschlagen: ' + err.message);
+  } finally {
+    btn.textContent = previous;
+    btn.disabled = false;
+  }
+}
+
+$('btnExport').onclick = exportWithROM;
+
+// -- embedded cartridge -----------------------------------------------------
+//  embed_rom.py can bake a ROM into this file.  If it did, boot it straight
+//  away; the file picker still works for loading something else.
+(async () => {
+  const el = document.getElementById('embedded-rom');
+  const payload = el && el.textContent.trim();
+  if (!payload) return;
+  try {
+    const bin = atob(payload);
+    let bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    if (el.dataset.encoding === 'gzip') {
+      if (typeof DecompressionStream !== 'function') {
+        throw new Error('Dieser Browser kann kein gzip auspacken');
+      }
+      const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    loadROM(bytes, el.dataset.name || 'rom.gb');
+  } catch (err) {
+    toast('Eingebettetes ROM konnte nicht geladen werden: ' + err.message);
+  }
+})();
+})();
+
+</script>
+</body>
+</html>
