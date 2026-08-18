@@ -369,9 +369,10 @@ canvas.viewer { image-rendering: pixelated; border: 1px solid var(--line); backg
             <p>Dieses Modul hat keinen Schwarzweiß-Zweig und lässt sich auf einem
                Game Boy nicht spielen. Auf echter Hardware verhindert schon die
                fehlende Kerbe im Gehäuse das Einschalten.</p>
-            <p class="hint">Die Werkbank emuliert bisher nur den DMG. Ohne
-               Farbausgabe bleibt das Bild hier voraussichtlich leer.</p>
-            <button id="btnCgbAnyway">Trotzdem starten</button>
+            <p class="hint">Die Systemwahl steht auf „Game Boy (DMG)“. Auf
+               „automatisch“ oder „Game Boy Color“ läuft das Modul normal.</p>
+            <button id="btnCgbSwitch">Als Game Boy Color starten</button>
+            <button id="btnCgbAnyway">Trotzdem als DMG starten</button>
           </div>
           <div id="screenWrap">
             <canvas id="screen" width="160" height="144"></canvas>
@@ -409,6 +410,12 @@ canvas.viewer { image-rendering: pixelated; border: 1px solid var(--line); backg
           <option value="2">2×</option>
           <option value="4">4×</option>
           <option value="0">max</option>
+        </select>
+        <span class="legend">System</span>
+        <select id="selMachine" title="Welche Konsole emuliert wird. „Automatisch“ folgt dem Modulkopf.">
+          <option value="auto" selected>automatisch</option>
+          <option value="dmg">Game Boy (DMG)</option>
+          <option value="cgb">Game Boy Color</option>
         </select>
         <span class="legend">Palette</span>
         <select id="selPal">
@@ -511,7 +518,18 @@ canvas.viewer { image-rendering: pixelated; border: 1px solid var(--line); backg
         <!-- ---------------------------------------------------------- Video -->
         <section class="panel" data-panel="video">
           <h3>Kacheln (VRAM 8000–97FF)</h3>
+          <div class="row-gap">
+            <span class="legend">Bank</span>
+            <select id="selVBank">
+              <option value="0">0</option>
+              <option value="1">1</option>
+            </select>
+            <span class="hint" id="vbankHint">Bank 1 gibt es nur im Farbmodus</span>
+          </div>
           <canvas id="tiles" class="viewer" width="128" height="192" style="width:256px;height:384px"></canvas>
+          <h3>Farbpaletten</h3>
+          <p class="hint" id="palHint">Oben Hintergrund, unten Sprites — je acht Paletten zu vier Farben.</p>
+          <canvas id="palview" class="viewer" width="32" height="16" style="width:256px;height:128px"></canvas>
           <h3>Kachelkarte</h3>
           <div class="row-gap">
             <select id="selMap">
@@ -587,6 +605,11 @@ canvas.viewer { image-rendering: pixelated; border: 1px solid var(--line); backg
           <div class="row-gap">
             <button id="btnBlocking">VRAM-Sperre: aus</button>
             <span class="hint">sperrt VRAM/OAM während Modus 2/3 wie echte Hardware</span>
+          </div>
+          <div class="row-gap">
+            <button id="btnColorCorr" class="on">Farbkorrektur: an</button>
+            <span class="hint">bildet die 15-Bit-Farben auf den blassen Color-Bildschirm ab
+              statt sie direkt auszugeben</span>
           </div>
           <div class="row-gap">
             <span class="legend">Lautstärke</span>
@@ -866,20 +889,62 @@ class Cart {
 
 const SCREEN_W = 160, SCREEN_H = 144;
 
+// Global switches the front end may flip at runtime.
+const GBOPT = { colorCorrect: true };
+
+// A Color palette entry is 15 bit: 5 bits each for red, green and blue, low
+// byte first.  Feeding those straight into an sRGB monitor gives garishly
+// oversaturated colours, because the console's own screen was anything but
+// saturated -- games were authored against that washed-out LCD.  The
+// correction below is the well-worn approximation of it: every output channel
+// is mixed from all three inputs and tops out at 248 rather than 255, which is
+// why a "white" background on a Game Boy Color never looks pure white.
+function packRGB555(lo, hi) {
+  const raw = lo | (hi << 8);
+  const r = raw & 31, g = (raw >> 5) & 31, b = (raw >> 10) & 31;
+  let R, G, B;
+  if (GBOPT.colorCorrect) {
+    R = (r * 13 + g * 2 + b) >> 1;
+    G = (g * 3 + b) << 1;
+    B = (r * 3 + g * 2 + b * 11) >> 1;
+  } else {
+    R = (r << 3) | (r >> 2); G = (g << 3) | (g >> 2); B = (b << 3) | (b >> 2);
+  }
+  // little-endian ABGR, matching the 32-bit view of an ImageData buffer
+  return (255 << 24) | (B << 16) | (G << 8) | R;
+}
+
 class PPU {
   constructor(gb) {
     this.gb = gb;
-    this.vram = new Uint8Array(0x2000);
+    // Two banks of video RAM.  A DMG only ever sees the first one; the Color
+    // hardware maps the second into the same window through VBK ($FF4F).
+    this.vram = new Uint8Array(0x4000);
     this.oam = new Uint8Array(0xA0);
+    this.vbk = 0;
 
     this.pixels = new Uint8Array(SCREEN_W * SCREEN_H);   // palette-mapped 0..3
+    this.rgb = new Uint32Array(SCREEN_W * SCREEN_H);     // CGB output, packed ABGR
     this.bgIndex = new Uint8Array(SCREEN_W);             // raw BG index of current line
+    this.bgPrio = new Uint8Array(SCREEN_W);              // BG attribute bit 7 per pixel
     this.frame = 0;
     this.frameReady = false;
 
     this.lcdc = 0x91; this.stat = 0x85; this.scy = 0; this.scx = 0;
     this.ly = 0; this.lyc = 0; this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
     this.wy = 0; this.wx = 0;
+
+    // --- Color palette memory ---------------------------------------------
+    // 8 background and 8 sprite palettes, 4 colours each, 2 bytes per colour.
+    // The CPU only ever sees them through the index/data register pairs at
+    // $FF68..$FF6B, never as a flat memory window.
+    this.bgPalRam = new Uint8Array(64).fill(0xFF);
+    this.objPalRam = new Uint8Array(64).fill(0xFF);
+    this.bgPal32 = new Uint32Array(32);
+    this.objPal32 = new Uint32Array(32);
+    this.bcps = 0; this.ocps = 0;
+    this.opri = 0;            // $FF6C: 0 = OAM order (CGB), 1 = X order (DMG)
+    this.rebuildPalettes();
 
     this.dot = 0;            // dot counter inside the current line (0..455)
     this.mode = 2;
@@ -908,6 +973,26 @@ class PPU {
   reset() {
     this.dot = 0; this.ly = 0; this.mode = 2; this.windowLine = 0;
     this.wyTriggered = false; this.statLine = false; this.lineRendered = false;
+    this.lcdc = 0x91; this.stat = 0x85; this.scy = 0; this.scx = 0;
+    this.lyc = 0; this.bgp = 0xFC; this.obp0 = 0xFF; this.obp1 = 0xFF;
+    this.wy = 0; this.wx = 0;
+    this.vram.fill(0); this.oam.fill(0);
+    this.vbk = 0; this.bcps = 0; this.ocps = 0;
+    // In Color mode the boot ROM leaves object priority on OAM order; the
+    // compatibility mode it uses for black-and-white cartridges switches it
+    // back to the DMG's X-coordinate rule.
+    this.opri = this.gb.cgb ? 0 : 1;
+    this.bgPalRam.fill(0xFF); this.objPalRam.fill(0xFF);
+    this.rebuildPalettes();
+    this.pixels.fill(0); this.rgb.fill(0);
+  }
+
+  // ---- Color palettes -----------------------------------------------------
+  rebuildPalettes() {
+    for (let i = 0; i < 32; i++) {
+      this.bgPal32[i] = packRGB555(this.bgPalRam[i * 2], this.bgPalRam[i * 2 + 1]);
+      this.objPal32[i] = packRGB555(this.objPalRam[i * 2], this.objPalRam[i * 2 + 1]);
+    }
   }
 
   // -- register access -----------------------------------------------------
@@ -926,6 +1011,17 @@ class PPU {
       case 0xFF4A: return this.wy;
       case 0xFF4B: return this.wx;
     }
+    // The Color registers do not exist on a DMG, and they are also locked out
+    // when the Color hardware runs a black-and-white cartridge.
+    if (!this.gb.cgb) return 0xFF;
+    switch (addr) {
+      case 0xFF4F: return 0xFE | this.vbk;
+      case 0xFF68: return 0x40 | this.bcps;
+      case 0xFF69: return this.bgPalRam[this.bcps & 0x3F];
+      case 0xFF6A: return 0x40 | this.ocps;
+      case 0xFF6B: return this.objPalRam[this.ocps & 0x3F];
+      case 0xFF6C: return 0xFE | this.opri;
+    }
     return 0xFF;
   }
 
@@ -939,6 +1035,7 @@ class PPU {
           this.ly = 0; this.dot = 0; this.mode = 0; this.windowLine = 0;
           this.wyTriggered = false; this.statLine = false;
           this.pixels.fill(0);
+          this.rgb.fill(0xFFF8F8F8);
           this.frameReady = true;
         } else if (!was && this.lcdEnabled) {
           this.ly = 0; this.dot = 0; this.mode = 2; this.lineRendered = false;
@@ -957,6 +1054,29 @@ class PPU {
       case 0xFF49: this.obp1 = val; break;
       case 0xFF4A: this.wy = val; break;
       case 0xFF4B: this.wx = val; break;
+    }
+    if (!this.gb.cgb) return;
+    switch (addr) {
+      case 0xFF4F: this.vbk = val & 1; break;
+      case 0xFF68: this.bcps = val & 0xBF; break;
+      case 0xFF69: {
+        const i = this.bcps & 0x3F;
+        this.bgPalRam[i] = val;
+        this.bgPal32[i >> 1] = packRGB555(this.bgPalRam[i & 0x3E], this.bgPalRam[(i & 0x3E) + 1]);
+        // Bit 7 of the index register auto-increments after every write, which
+        // is what lets a game push all 64 bytes with a single tight loop.
+        if (this.bcps & 0x80) this.bcps = 0x80 | ((i + 1) & 0x3F);
+        break;
+      }
+      case 0xFF6A: this.ocps = val & 0xBF; break;
+      case 0xFF6B: {
+        const i = this.ocps & 0x3F;
+        this.objPalRam[i] = val;
+        this.objPal32[i >> 1] = packRGB555(this.objPalRam[i & 0x3E], this.objPalRam[(i & 0x3E) + 1]);
+        if (this.ocps & 0x80) this.ocps = 0x80 | ((i + 1) & 0x3F);
+        break;
+      }
+      case 0xFF6C: this.opri = val & 1; break;
     }
   }
 
@@ -990,6 +1110,7 @@ class PPU {
         } else if (this.mode === 3 && this.dot >= 80 + this.mode3Len) {
           this.mode = 0;
           this.checkStat();
+          this.gb.onHBlank();      // arms one block of HBlank DMA
         }
       }
 
@@ -1038,13 +1159,19 @@ class PPU {
         this.sprites.push({ y, x: this.oam[o + 1] - 8, tile: this.oam[o + 2], flags: this.oam[o + 3], idx: i });
       }
     }
-    // DMG priority: smaller X wins; ties are broken by OAM order.
-    this.sprites.sort((a, b) => (a.x - b.x) || (a.idx - b.idx));
+    // DMG priority: smaller X wins; ties are broken by OAM order.  The Color
+    // hardware drops the X rule entirely and goes by OAM index alone -- the
+    // list is already in that order, so there is nothing to sort.  OPRI can
+    // put the old rule back, and does so for black-and-white cartridges.
+    if (!this.gb.cgb || (this.opri & 1)) {
+      this.sprites.sort((a, b) => (a.x - b.x) || (a.idx - b.idx));
+    }
   }
 
   renderLine() {
     const base = this.ly * SCREEN_W;
-    const px = this.pixels, bgi = this.bgIndex;
+    const px = this.pixels, bgi = this.bgIndex, bpr = this.bgPrio, out = this.rgb;
+    const cgb = this.gb.cgb;
 
     if (this.recordRaster) {
       const r = this.lineRegs, y = this.ly;
@@ -1054,7 +1181,11 @@ class PPU {
     }
 
     // --- background & window ---------------------------------------------
-    if (this.lcdc & 0x01) {
+    // Bit 0 of LCDC means two different things.  On a DMG it switches the
+    // background off outright.  On the Color hardware the background is always
+    // drawn and the bit only decides whether it may ever sit in front of a
+    // sprite -- clearing it hands every sprite unconditional priority.
+    if (cgb || (this.lcdc & 0x01)) {
       if (this.ly === this.wy) this.wyTriggered = true;
       const winActive = (this.lcdc & 0x20) && this.wyTriggered && this.wx <= 166;
       const winStart = winActive ? this.wx - 7 : 999;
@@ -1073,21 +1204,35 @@ class PPU {
           const sxp = (this.scx + x) & 0xFF, syp = (this.scy + this.ly) & 0xFF;
           mapBase = bgMap; tx = sxp >> 3; ty = syp >> 3; fx = sxp & 7; fy = syp & 7;
         }
-        const tileNo = this.vram[mapBase + ty * 32 + tx];
-        const tileAddr = signed
+        const ent = mapBase + ty * 32 + tx;
+        const tileNo = this.vram[ent];
+        // The second VRAM bank holds an attribute byte for every map entry:
+        // palette (bits 0-2), tile bank (bit 3), flips (bits 5-6) and the
+        // per-tile priority flag (bit 7).
+        const attr = cgb ? this.vram[0x2000 + ent] : 0;
+        if (attr & 0x40) fy = 7 - fy;
+        if (attr & 0x20) fx = 7 - fx;
+        const tileAddr = (signed
           ? 0x1000 + (((tileNo << 24) >> 24) * 16)     // 0x8800 addressing, signed
-          : tileNo * 16;                               // 0x8000 addressing
+          : tileNo * 16)                               // 0x8000 addressing
+          + ((attr & 0x08) ? 0x2000 : 0);
         const lo = this.vram[tileAddr + fy * 2];
         const hi = this.vram[tileAddr + fy * 2 + 1];
         const bit = 7 - fx;
         const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
         bgi[x] = ci;
-        px[base + x] = (this.bgp >> (ci * 2)) & 3;
+        if (cgb) {
+          bpr[x] = attr & 0x80;
+          px[base + x] = ci;
+          out[base + x] = this.bgPal32[((attr & 7) << 2) | ci];
+        } else {
+          px[base + x] = (this.bgp >> (ci * 2)) & 3;
+        }
       }
       if (usedWindow) this.windowLine++;
     } else {
       // BG disabled: the line is filled with colour 0 and sprites always win.
-      for (let x = 0; x < SCREEN_W; x++) { bgi[x] = 0; px[base + x] = 0; }
+      for (let x = 0; x < SCREEN_W; x++) { bgi[x] = 0; bpr[x] = 0; px[base + x] = 0; }
     }
 
     // --- sprites ----------------------------------------------------------
@@ -1095,16 +1240,20 @@ class PPU {
       const h = (this.lcdc & 0x04) ? 16 : 8;
       // Painter's algorithm: draw back-to-front so the highest priority
       // sprite (lowest X, then lowest OAM index) ends up on top.
+      // In Color mode LCDC bit 0 acts as a master priority switch (see above).
+      const masterPrio = cgb ? (this.lcdc & 0x01) : 1;
       for (let s = this.sprites.length - 1; s >= 0; s--) {
         const sp = this.sprites[s];
         if (sp.x <= -8 || sp.x >= SCREEN_W) continue;
         const flipX = sp.flags & 0x20, flipY = sp.flags & 0x40;
         const pal = (sp.flags & 0x10) ? this.obp1 : this.obp0;
+        const palBase = (sp.flags & 0x07) << 2;      // CGB: bits 0-2 pick a palette
         let row = this.ly - sp.y;
         if (flipY) row = h - 1 - row;
         let tile = sp.tile;
         if (h === 16) tile = (tile & 0xFE) | (row >> 3);
-        const tileAddr = tile * 16 + (row & 7) * 2;
+        const tileAddr = tile * 16 + (row & 7) * 2
+          + ((cgb && (sp.flags & 0x08)) ? 0x2000 : 0);   // bit 3 selects the VRAM bank
         const lo = this.vram[tileAddr], hi = this.vram[tileAddr + 1];
         for (let p = 0; p < 8; p++) {
           const x = sp.x + p;
@@ -1112,8 +1261,11 @@ class PPU {
           const bit = flipX ? p : 7 - p;
           const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
           if (ci === 0) continue;                                  // transparent
-          if ((sp.flags & 0x80) && bgi[x] !== 0) continue;         // behind BG 1..3
-          px[base + x] = (pal >> (ci * 2)) & 3;
+          // Behind the background if either the sprite or -- on Color
+          // hardware -- the individual background tile claims priority.
+          if (masterPrio && bgi[x] !== 0 && ((sp.flags & 0x80) || bpr[x])) continue;
+          if (cgb) { px[base + x] = ci; out[base + x] = this.objPal32[palBase | ci]; }
+          else px[base + x] = (pal >> (ci * 2)) & 3;
         }
       }
     }
@@ -1121,15 +1273,27 @@ class PPU {
 
   // -- debug helpers -------------------------------------------------------
   // Renders one 8x8 tile into an RGBA buffer; used by the tile viewer.
-  drawTile(out, outW, ox, oy, tileAddr, palette, colors) {
+  //   bank   -- 0 or 1, the VRAM bank the tile data lives in
+  //   pal32  -- optional Uint32Array of 32 packed CGB colours; when given,
+  //             `palette` is a palette *number* rather than a DMG palette byte
+  //   flip   -- bit 5 = horizontal, bit 6 = vertical (map attribute layout)
+  drawTile(out, outW, ox, oy, tileAddr, palette, colors, bank = 0, pal32 = null, flip = 0) {
+    const off = bank ? 0x2000 : 0;
     for (let y = 0; y < 8; y++) {
-      const lo = this.vram[tileAddr + y * 2], hi = this.vram[tileAddr + y * 2 + 1];
+      const sy = (flip & 0x40) ? 7 - y : y;
+      const lo = this.vram[off + tileAddr + sy * 2], hi = this.vram[off + tileAddr + sy * 2 + 1];
       for (let x = 0; x < 8; x++) {
-        const bit = 7 - x;
+        const bit = (flip & 0x20) ? x : 7 - x;
         const ci = ((lo >> bit) & 1) | (((hi >> bit) & 1) << 1);
-        const c = colors[(palette >> (ci * 2)) & 3];
         const o = ((oy + y) * outW + ox + x) * 4;
-        out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 255;
+        if (pal32) {
+          const c = pal32[((palette & 7) << 2) | ci];
+          out[o] = c & 255; out[o + 1] = (c >> 8) & 255; out[o + 2] = (c >> 16) & 255;
+        } else {
+          const c = colors[(palette >> (ci * 2)) & 3];
+          out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2];
+        }
+        out[o + 3] = 255;
       }
     }
   }
@@ -1452,8 +1616,10 @@ class APU {
   }
 
   step(cycles) {
-    // 512 Hz frame sequencer, clocked from bit 12 of the timer counter.
-    const bit = (this.gb.timer.counter & 0x1000) !== 0;
+    // 512 Hz frame sequencer, clocked from bit 12 of the timer counter -- or
+    // bit 13 in double speed, where that counter runs twice as fast and the
+    // sequencer still has to land on 512 Hz.
+    const bit = (this.gb.timer.counter & (this.gb.doubleSpeed ? 0x2000 : 0x1000)) !== 0;
     if (this.lastSeqBit && !bit && this.enabled) this.stepSequencer();
     this.lastSeqBit = bit;
 
@@ -1565,14 +1731,36 @@ const INT_VECTORS = [0x40, 0x48, 0x50, 0x58, 0x60];
 const BUTTONS = ['right', 'left', 'up', 'down', 'a', 'b', 'select', 'start'];
 
 class GB {
-  constructor(rom) {
+  // opts.machine: 'auto' (follow the cartridge), 'dmg' or 'cgb'.
+  constructor(rom, opts = {}) {
     this.cart = new Cart(rom);
+
+    // Two separate questions.  `hardwareCgb` is which console is switched on
+    // and decides the register values the boot ROM leaves behind.  `cgb` is
+    // whether the Color feature set is actually live: a Color console running
+    // a black-and-white cartridge locks all of it away again, which is exactly
+    // what compatibility mode is.
+    const machine = opts.machine || 'auto';
+    this.machine = machine;
+    this.hardwareCgb = machine === 'cgb' || (machine === 'auto' && this.cart.cgbAware);
+    this.cgb = this.hardwareCgb && this.cart.cgbAware;
+
     this.ppu = new PPU(this);
     this.timer = new Timer(this);
     this.apu = new APU(this);
 
-    this.wram = new Uint8Array(0x2000);
+    // 8 banks of 4 KiB.  A DMG only uses the first two, contiguously.
+    this.wram = new Uint8Array(0x8000);
     this.hram = new Uint8Array(0x7F);
+    this.svbk = 1;
+
+    // --- Color-only system registers --------------------------------------
+    this.doubleSpeed = false;
+    this.key1 = 0;
+    this.halfTick = 0;              // carry for the halved video/audio clock
+    this.rp = 0;                    // $FF56 infrared port (no peer attached)
+    this.undoc = new Uint8Array(4); // $FF72..$FF75
+    this.hdma = { src: 0, dst: 0, len: 0, active: false, hblank: false, pending: false };
 
     this.buttons = { right: false, left: false, up: false, down: false, a: false, b: false, select: false, start: false };
     this.joypSelect = 0x30;
@@ -1597,10 +1785,24 @@ class GB {
   }
 
   reset() {
-    // Post-boot-ROM state of a DMG. We skip the boot ROM entirely.
-    this.a = 0x01; this.f = 0xB0; this.b = 0x00; this.c = 0x13;
-    this.d = 0x00; this.e = 0xD8; this.h = 0x01; this.l = 0x4D;
+    // Post-boot-ROM state. We skip the boot ROM entirely and hand the game the
+    // registers it would have found.  A is the machine ID a cartridge tests to
+    // find out where it is running: $01 on a DMG, $11 on Color hardware.  In
+    // compatibility mode B additionally comes back odd, which is how the
+    // handful of games that care tell a real Color console from a Game Boy
+    // Advance running in Color mode.
+    if (this.hardwareCgb) {
+      this.a = 0x11; this.f = 0x80; this.b = this.cgb ? 0x00 : 0x01; this.c = 0x00;
+      this.d = 0xFF; this.e = 0x56; this.h = 0x00; this.l = 0x0D;
+    } else {
+      this.a = 0x01; this.f = 0xB0; this.b = 0x00; this.c = 0x13;
+      this.d = 0x00; this.e = 0xD8; this.h = 0x01; this.l = 0x4D;
+    }
     this.sp = 0xFFFE; this.pc = 0x0100;
+    this.svbk = 1; this.doubleSpeed = false; this.key1 = 0; this.halfTick = 0;
+    this.rp = 0; this.undoc.fill(0);
+    this.hdma.src = this.hdma.dst = this.hdma.len = 0;
+    this.hdma.active = this.hdma.hblank = this.hdma.pending = false;
     this.ime = false; this.eiDelay = 0;
     this.halted = false; this.stopped = false; this.haltBug = false;
     this.ifReg = 0xE1; this.ieReg = 0x00;
@@ -1625,11 +1827,21 @@ class GB {
   // =========================================================================
   //  Clock distribution
   // =========================================================================
+  //  Double speed mode doubles the CPU clock, and with it the timer, the
+  //  serial port and both DMA engines.  The screen and the sound hardware keep
+  //  running at the original rate, so in that mode they only see half of the
+  //  cycles handed out here.  The frame sequencer follows suit by moving one
+  //  bit up the divider (see APU.step).
   tick(c) {
     this.cycles += c;
     this.timer.step(c);
-    this.ppu.step(c);
-    this.apu.step(c);
+    let vc = c;
+    if (this.doubleSpeed) {
+      this.halfTick += c;
+      vc = this.halfTick >> 1;
+      this.halfTick &= 1;
+    }
+    if (vc) { this.ppu.step(vc); this.apu.step(vc); }
     if (this.dmaActive) this.stepDMA(c);
     if (this.serialTimer > 0) {
       this.serialTimer -= c;
@@ -1640,7 +1852,40 @@ class GB {
         this.requestInterrupt(INT_SERIAL);
       }
     }
-    if (this.cart.hasRTC) this.cart.tickRTC(c);
+    if (this.cart.hasRTC) this.cart.tickRTC(this.doubleSpeed ? c >> 1 : c);
+  }
+
+  // =========================================================================
+  //  VRAM DMA (Color only)
+  // =========================================================================
+  //  Two flavours share one register pair.  General purpose DMA copies the
+  //  whole block at once and stalls the CPU while it runs.  HBlank DMA hands
+  //  over 16 bytes per scanline during the horizontal blanking gap, which is
+  //  the only way to push a meaningful amount of tile data into VRAM without
+  //  tearing -- games use it to stream animation and decompressed graphics.
+  // -------------------------------------------------------------------------
+  onHBlank() {
+    if (this.cgb && this.hdma.active && this.hdma.hblank && this.ppu.lcdEnabled) {
+      this.hdma.pending = true;
+    }
+  }
+
+  hdmaBlock() {
+    const off = this.ppu.vbk ? 0x2000 : 0;
+    for (let i = 0; i < 16; i++) {
+      this.ppu.vram[off + (this.hdma.dst & 0x1FFF)] = this.readByte(this.hdma.src);
+      this.hdma.src = (this.hdma.src + 1) & 0xFFFF;
+      this.hdma.dst = (this.hdma.dst + 1) & 0x1FFF;
+    }
+    this.hdma.len -= 16;
+    if (this.hdma.len <= 0) { this.hdma.len = 0; this.hdma.active = false; }
+    this.tick(32);            // 8 machine cycles per block
+  }
+
+  runGDMA() {
+    let guard = 0x800;
+    while (this.hdma.active && this.hdma.len > 0 && guard-- > 0) this.hdmaBlock();
+    this.hdma.active = false;
   }
 
   stepDMA(c) {
@@ -1655,6 +1900,10 @@ class GB {
 
   requestInterrupt(mask) { this.ifReg |= mask; }
 
+  // Offset of the bank currently mapped at D000.  Bank 0 is not selectable --
+  // writing 0 to SVBK gives bank 1, the same one a DMG sees there.
+  get wramOff() { return ((this.svbk & 7) || 1) * 0x1000; }
+
   // =========================================================================
   //  Memory map
   // =========================================================================
@@ -1667,11 +1916,14 @@ class GB {
     if (addr < 0x8000) return this.cart.readROM(addr);
     if (addr < 0xA000) {
       if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode === 3) return 0xFF;
-      return this.ppu.vram[addr - 0x8000];
+      return this.ppu.vram[(addr - 0x8000) + (this.ppu.vbk ? 0x2000 : 0)];
     }
     if (addr < 0xC000) return this.cart.readRAM(addr);
-    if (addr < 0xE000) return this.wram[addr - 0xC000];
-    if (addr < 0xFE00) return this.wram[addr - 0xE000];
+    // C000-CFFF is always bank 0; D000-DFFF is the switchable one.
+    if (addr < 0xD000) return this.wram[addr - 0xC000];
+    if (addr < 0xE000) return this.wram[this.wramOff + (addr - 0xD000)];
+    if (addr < 0xF000) return this.wram[addr - 0xE000];
+    if (addr < 0xFE00) return this.wram[this.wramOff + (addr - 0xF000)];
     if (addr < 0xFEA0) {
       if (this.dmaActive) return 0xFF;
       if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode >= 2) return 0xFF;
@@ -1688,11 +1940,13 @@ class GB {
     if (addr < 0x8000) { this.cart.writeControl(addr, val); return; }
     if (addr < 0xA000) {
       if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode === 3) return;
-      this.ppu.vram[addr - 0x8000] = val; return;
+      this.ppu.vram[(addr - 0x8000) + (this.ppu.vbk ? 0x2000 : 0)] = val; return;
     }
     if (addr < 0xC000) { this.cart.writeRAM(addr, val); return; }
-    if (addr < 0xE000) { this.wram[addr - 0xC000] = val; return; }
-    if (addr < 0xFE00) { this.wram[addr - 0xE000] = val; return; }
+    if (addr < 0xD000) { this.wram[addr - 0xC000] = val; return; }
+    if (addr < 0xE000) { this.wram[this.wramOff + (addr - 0xD000)] = val; return; }
+    if (addr < 0xF000) { this.wram[addr - 0xE000] = val; return; }
+    if (addr < 0xFE00) { this.wram[this.wramOff + (addr - 0xF000)] = val; return; }
     if (addr < 0xFEA0) {
       if (this.dmaActive) return;
       if (this.strictBlocking && this.ppu.lcdEnabled && this.ppu.mode >= 2) return;
@@ -1730,6 +1984,30 @@ class GB {
     if (addr >= 0xFF04 && addr <= 0xFF07) return this.timer.readReg(addr);
     if (addr >= 0xFF10 && addr <= 0xFF3F) return this.apu.readReg(addr);
     if (addr >= 0xFF40 && addr <= 0xFF4B) return this.ppu.readReg(addr);
+    if (addr === 0xFF4F || (addr >= 0xFF68 && addr <= 0xFF6C)) return this.ppu.readReg(addr);
+    if (!this.cgb) return 0xFF;
+    switch (addr) {
+      // KEY1: bit 7 is the speed currently in force, bit 0 the pending switch.
+      case 0xFF4D: return 0x7E | (this.doubleSpeed ? 0x80 : 0) | (this.key1 & 1);
+      case 0xFF51: return (this.hdma.src >> 8) & 0xFF;
+      case 0xFF52: return this.hdma.src & 0xFF;
+      case 0xFF53: return ((this.hdma.dst >> 8) & 0x1F) | 0x80;
+      case 0xFF54: return this.hdma.dst & 0xFF;
+      // Length left, in 16-byte blocks, minus one.  Bit 7 clear means a
+      // transfer is still running; $FF means there is nothing left to do.
+      case 0xFF55:
+        if (this.hdma.len === 0) return 0xFF;
+        return (this.hdma.active ? 0x00 : 0x80) | (((this.hdma.len >> 4) - 1) & 0x7F);
+      case 0xFF56: return (this.rp & 0xC1) | 0x3C;   // no infrared peer: reads dark
+      case 0xFF70: return 0xF8 | (this.svbk & 7);
+      case 0xFF72: return this.undoc[0];
+      case 0xFF73: return this.undoc[1];
+      case 0xFF74: return this.undoc[2];
+      case 0xFF75: return 0x8F | (this.undoc[3] & 0x70);
+      // PCM12/PCM34 expose the four channels' current output nibbles.
+      case 0xFF76: { const o = this.apu.channelOutputs(); return (o[0] & 15) | ((o[1] & 15) << 4); }
+      case 0xFF77: { const o = this.apu.channelOutputs(); return (o[2] & 15) | ((o[3] & 15) << 4); }
+    }
     return 0xFF;
   }
 
@@ -1756,6 +2034,36 @@ class GB {
     if (addr >= 0xFF04 && addr <= 0xFF07) { this.timer.writeReg(addr, val); return; }
     if (addr >= 0xFF10 && addr <= 0xFF3F) { this.apu.writeReg(addr, val); return; }
     if (addr >= 0xFF40 && addr <= 0xFF4B) { this.ppu.writeReg(addr, val); return; }
+    if (addr === 0xFF4F || (addr >= 0xFF68 && addr <= 0xFF6C)) { this.ppu.writeReg(addr, val); return; }
+    if (!this.cgb) return;
+    switch (addr) {
+      case 0xFF4D: this.key1 = val & 1; return;
+      // Both DMA addresses ignore their low four bits: transfers are always
+      // aligned to a 16-byte block.  The destination is an offset into VRAM.
+      case 0xFF51: this.hdma.src = ((val << 8) | (this.hdma.src & 0xF0)) & 0xFFFF; return;
+      case 0xFF52: this.hdma.src = (this.hdma.src & 0xFF00) | (val & 0xF0); return;
+      case 0xFF53: this.hdma.dst = (((val & 0x1F) << 8) | (this.hdma.dst & 0xF0)) & 0x1FFF; return;
+      case 0xFF54: this.hdma.dst = (this.hdma.dst & 0x1F00) | (val & 0xF0); return;
+      case 0xFF55:
+        if (this.hdma.active && this.hdma.hblank && !(val & 0x80)) {
+          // Writing with bit 7 clear during an HBlank transfer aborts it and
+          // leaves the remaining length readable.
+          this.hdma.active = false; this.hdma.pending = false;
+          return;
+        }
+        this.hdma.len = ((val & 0x7F) + 1) * 16;
+        this.hdma.hblank = (val & 0x80) !== 0;
+        this.hdma.active = true;
+        this.hdma.pending = false;
+        if (!this.hdma.hblank) this.runGDMA();
+        return;
+      case 0xFF56: this.rp = val; return;
+      case 0xFF70: this.svbk = val & 7; return;
+      case 0xFF72: this.undoc[0] = val; return;
+      case 0xFF73: this.undoc[1] = val; return;
+      case 0xFF74: this.undoc[2] = val; return;
+      case 0xFF75: this.undoc[3] = val & 0x70; return;
+    }
   }
 
   read8(addr) {
@@ -1795,6 +2103,14 @@ class GB {
   //  Returns the number of cycles the step consumed.
   step() {
     const start = this.cycles;
+
+    // A pending HBlank DMA block is handed over before the next instruction.
+    // The CPU is stalled for the duration on real hardware, so charging the
+    // cycles here rather than mid-instruction is close enough.
+    if (this.hdma.pending) {
+      this.hdma.pending = false;
+      if (this.hdma.active) this.hdmaBlock();
+    }
 
     // Interrupts are checked between instructions.
     const pending = this.ifReg & this.ieReg & 0x1F;
@@ -2004,7 +2320,22 @@ class GB {
       case 0x0D: /* DEC C            */ this.c = this.aluDec(this.c); break;
       case 0x0E: /* LD C,d8          */ this.c = this.fetch8(); break;
       case 0x0F: /* RRCA             */ { const c = this.a & 1; this.a = (this.a >> 1) | (c << 7); this.f = c ? FC : 0; } break;
-      case 0x10: /* STOP             */ this.fetch8(); this.stopped = true; break;
+      // STOP normally parks the machine until a button is pressed.  On Color
+      // hardware with a speed switch armed in KEY1 it does something else
+      // entirely: it flips the CPU clock and carries straight on.  This is the
+      // only way to reach double speed, and the divider restarts as a side
+      // effect.
+      case 0x10: /* STOP             */
+        this.fetch8();
+        if (this.cgb && (this.key1 & 1)) {
+          this.doubleSpeed = !this.doubleSpeed;
+          this.key1 = 0;
+          this.halfTick = 0;
+          this.timer.setCounter(0);
+        } else {
+          this.stopped = true;
+        }
+        break;
       case 0x11: /* LD DE,d16        */ this.de = this.fetch16(); break;
       case 0x12: /* LD (DE),A        */ this.write8(this.de, this.a); break;
       case 0x13: /* INC DE           */ this.de = (this.de + 1) & 0xFFFF; this.tick(4); break;
@@ -2722,12 +3053,13 @@ function disassembleRange(gb, addr, count) {
 // ===========================================================================
 
 const STATE_MAGIC = 0x47425354;   // 'GBST'
-const STATE_VERSION = 2;
+const STATE_VERSION = 3;   // 3 adds the Color registers, banks and palettes
 
 function saveState(gb) {
   const scalars = {
     v: STATE_VERSION,
     title: gb.cart.title,
+    cgb: gb.cgb, hardwareCgb: gb.hardwareCgb, machine: gb.machine,
     cpu: {
       a: gb.a, f: gb.f, b: gb.b, c: gb.c, d: gb.d, e: gb.e, h: gb.h, l: gb.l,
       sp: gb.sp, pc: gb.pc, ime: gb.ime, eiDelay: gb.eiDelay,
@@ -2745,6 +3077,13 @@ function saveState(gb) {
       obp1: gb.ppu.obp1, wy: gb.ppu.wy, wx: gb.ppu.wx, dot: gb.ppu.dot,
       mode: gb.ppu.mode, windowLine: gb.ppu.windowLine, wyTriggered: gb.ppu.wyTriggered,
       statLine: gb.ppu.statLine, frame: gb.ppu.frame,
+      vbk: gb.ppu.vbk, bcps: gb.ppu.bcps, ocps: gb.ppu.ocps, opri: gb.ppu.opri,
+    },
+    cgbSys: {
+      svbk: gb.svbk, doubleSpeed: gb.doubleSpeed, key1: gb.key1,
+      halfTick: gb.halfTick, rp: gb.rp,
+      hdma: { src: gb.hdma.src, dst: gb.hdma.dst, len: gb.hdma.len,
+              active: gb.hdma.active, hblank: gb.hdma.hblank, pending: gb.hdma.pending },
     },
     timer: {
       counter: gb.timer.counter, tima: gb.timer.tima, tma: gb.timer.tma,
@@ -2764,7 +3103,8 @@ function saveState(gb) {
 
   const json = new TextEncoder().encode(JSON.stringify(scalars));
   const blocks = [gb.ppu.vram, gb.ppu.oam, gb.wram, gb.hram, gb.apu.wave,
-                  gb.ppu.pixels, gb.cart.ram];
+                  gb.ppu.pixels, gb.ppu.bgPalRam, gb.ppu.objPalRam,
+                  new Uint8Array(gb.ppu.rgb.buffer), gb.undoc, gb.cart.ram];
   let size = 8 + json.length;
   for (const b of blocks) size += b.length;
 
@@ -2786,6 +3126,10 @@ function loadState(gb, bytes) {
   if (s.v !== STATE_VERSION) throw new Error('Save state version ' + s.v + ' not supported');
   if (s.title !== gb.cart.title) throw new Error(`State belongs to "${s.title}", not "${gb.cart.title}"`);
 
+  if (!!s.cgb !== !!gb.cgb) {
+    throw new Error('State was made in ' + (s.cgb ? 'Color' : 'DMG') + ' mode');
+  }
+
   Object.assign(gb, s.cpu);
   Object.assign(gb, s.io);
   Object.assign(gb.cart, s.cart);
@@ -2793,12 +3137,22 @@ function loadState(gb, bytes) {
   Object.assign(gb.ppu, s.ppu);
   Object.assign(gb.timer, s.timer);
   Object.assign(gb.apu, s.apu);
+  if (s.cgbSys) {
+    const c = s.cgbSys;
+    gb.svbk = c.svbk; gb.doubleSpeed = c.doubleSpeed; gb.key1 = c.key1;
+    gb.halfTick = c.halfTick; gb.rp = c.rp;
+    Object.assign(gb.hdma, c.hdma);
+  }
 
   let off = 8 + jsonLen;
   const take = (target) => { target.set(bytes.subarray(off, off + target.length)); off += target.length; };
   take(gb.ppu.vram); take(gb.ppu.oam); take(gb.wram); take(gb.hram);
-  take(gb.apu.wave); take(gb.ppu.pixels); take(gb.cart.ram);
+  take(gb.apu.wave); take(gb.ppu.pixels);
+  take(gb.ppu.bgPalRam); take(gb.ppu.objPalRam);
+  take(new Uint8Array(gb.ppu.rgb.buffer));
+  take(gb.undoc); take(gb.cart.ram);
 
+  gb.ppu.rebuildPalettes();
   gb.apu.reset();
   gb.ppu.frameReady = false;
 }
@@ -2850,6 +3204,9 @@ let speed = 1;
 let scale = 3;
 let autoScale = true;
 let palette = 'dmg';
+let machine = 'auto';                 // 'auto' | 'dmg' | 'cgb'
+let romBytes = null;                  // the raw cartridge, kept for reloads
+let vramBank = 0;                     // which bank the video panel shows
 let audioCtx = null, audioNode = null, audioOn = false, volume = 0.25;
 let rafId = 0, lastTime = 0, frameAcc = 0;
 let lastReadPos = 0, lastDrain = 0;
@@ -2881,8 +3238,14 @@ function buildPalette() {
 buildPalette();
 
 function drawScreen() {
-  const px = gb.ppu.pixels;
-  for (let i = 0; i < px.length; i++) pixels32[i] = palette32[px[i]];
+  if (gb.cgb) {
+    // In Color mode the PPU has already resolved every pixel to a real RGB
+    // value, so the front end's monochrome palette does not apply.
+    pixels32.set(gb.ppu.rgb);
+  } else {
+    const px = gb.ppu.pixels;
+    for (let i = 0; i < px.length; i++) pixels32[i] = palette32[px[i]];
+  }
   screenCtx.putImageData(imageData, 0, 0);
 }
 
@@ -2932,11 +3295,14 @@ function toast(msg) {
 function loadROM(bytes, name) {
   stop();
   try {
-    gb = new GB(bytes);
+    gb = new GB(bytes, { machine });
   } catch (err) {
     toast('ROM konnte nicht gelesen werden: ' + err.message);
     return;
   }
+  // Kept so that switching the system selector can rebuild the machine around
+  // the same cartridge without asking for the file again.
+  romBytes = bytes;
   romName = (name || 'rom').replace(/\.[^.]+$/, '');
   window.gb = gb;                       // handy when poking around in the console
   gb.onSerial = () => { serialDirty = true; };
@@ -2957,8 +3323,13 @@ function loadROM(bytes, name) {
 
   const v = gb.cart.verify();
   $('ciTitle').textContent = gb.cart.title || '(ohne Titel)';
-  $('ciMachine').textContent = gb.cart.machineName + (gb.cart.sgb ? ' + SGB' : '');
-  $('ciMachine').className = gb.cart.cgbOnly ? 'bad' : '';
+  // Two facts in one line: what the cartridge expects, and what it actually
+  // got.  They only differ when the system selector overrides the header.
+  const running = gb.cgb ? 'läuft in Farbe'
+    : gb.hardwareCgb ? 'läuft im Kompatibilitätsmodus' : 'läuft als DMG';
+  $('ciMachine').textContent = gb.cart.machineName + (gb.cart.sgb ? ' + SGB' : '')
+    + ' — ' + running;
+  $('ciMachine').className = (gb.cart.cgbOnly && !gb.cgb) ? 'bad' : gb.cgb ? 'ok' : '';
   $('ciMbc').textContent = gb.cart.typeName;
   $('ciRom').textContent = `${gb.cart.romBanks * 16} KiB / ${gb.cart.romBanks} Bänke`;
   $('ciRam').textContent = gb.cart.ramSize ? `${gb.cart.ramSize / 1024} KiB${gb.cart.hasBattery ? ' + Batterie' : ''}` : 'keins';
@@ -2967,6 +3338,8 @@ function loadROM(bytes, name) {
     : `<span class="bad">${v.headerOk ? '' : 'Kopf '}${v.globalOk ? '' : 'global '}fehlerhaft</span>`;
   if (!v.sizeOk) toast('Warnung: Dateigröße passt nicht zum Header — vermutlich ein unvollständiger Dump.');
 
+  syncPaletteControl();
+
   // Start clean on a phone: play first, debugger on demand.
   if (window.innerWidth <= 1000) setDebug(false);
   fitScale();
@@ -2974,20 +3347,39 @@ function loadROM(bytes, name) {
   drawScreen();
   refreshDebug(true);
 
-  // A Color-only cartridge has no black-and-white code path, so starting it
-  // would just show an empty screen with no explanation.
-  const notice = $('cgbNotice');
-  notice.classList.toggle('on', gb.cart.cgbOnly);
-  $('screenWrap').style.display = gb.cart.cgbOnly ? 'none' : '';
-  if (gb.cart.cgbOnly) {
-    $('btnRun').disabled = true;
-  } else {
-    if (gb.cart.cgbAware) {
-      toast('Modul mit Farbunterstützung — die Werkbank emuliert den DMG, '
-            + 'das Spiel läuft daher in Schwarzweiß.');
-    }
-    start();
+  // The only case left that cannot run is a Color-only cartridge with the
+  // system selector deliberately pinned to the black-and-white machine: such a
+  // module has no monochrome code path at all and would show nothing.
+  const blocked = gb.cart.cgbOnly && !gb.hardwareCgb;
+  $('cgbNotice').classList.toggle('on', blocked);
+  $('screenWrap').style.display = blocked ? 'none' : '';
+  $('btnRun').disabled = blocked;
+  if (blocked) return;
+
+  if (gb.hardwareCgb && !gb.cgb) {
+    toast('Schwarzweiß-Modul auf Farbhardware — läuft im Kompatibilitätsmodus.');
   }
+  start();
+}
+
+// The monochrome palette only has an effect while the PPU is producing DMG
+// pixels; in Color mode the game picks its own colours.
+function syncPaletteControl() {
+  const on = !gb || !gb.cgb;
+  $('selPal').disabled = !on;
+  $('selPal').title = on ? '' : 'Im Farbmodus bestimmt das Spiel die Farben.';
+}
+
+// Rebuilds the machine around the cartridge already loaded, keeping the
+// battery-backed save.
+function reloadMachine() {
+  if (!romBytes) return;
+  const wasRunning = running;
+  stop();
+  const sram = gb ? gb.getSaveRAM() : null;
+  loadROM(romBytes, romName);
+  if (sram) gb.setSaveRAM(sram);
+  if (!wasRunning) stop();
 }
 
 function readFile(file, cb) {
@@ -3278,7 +3670,19 @@ function renderCPU() {
     reg('LY', p.ly, 2) + reg('LYC', p.lyc, 2) + reg('SCX', p.scx, 2) + reg('SCY', p.scy, 2) +
     reg('WX', p.wx, 2) + reg('WY', p.wy, 2) + reg('BGP', p.bgp, 2) + reg('OBP0', p.obp0, 2) +
     `<div class="r"><i>Modus</i><b>${p.mode}</b></div>` +
-    `<div class="r"><i>Dot</i><b>${p.dot}</b></div>`;
+    `<div class="r"><i>Dot</i><b>${p.dot}</b></div>` +
+    // Everything below only exists on the Color hardware; on a DMG the row set
+    // stays exactly as it was.
+    (gb.cgb
+      ? `<div class="r"><i>Takt</i><b>${gb.doubleSpeed ? '2×' : '1×'}</b></div>` +
+        `<div class="r"><i>VBK</i><b>${p.vbk}</b></div>` +
+        `<div class="r"><i>SVBK</i><b>${(gb.svbk & 7) || 1}</b></div>` +
+        `<div class="r"><i>HDMA</i><b>${gb.hdma.active
+            ? (gb.hdma.hblank ? 'HBl ' : 'Gen ') + (gb.hdma.len >> 4)
+            : (gb.hdma.len ? 'Halt ' + (gb.hdma.len >> 4) : 'aus')}</b></div>` +
+        `<div class="r"><i>BCPS</i><b>${hex2(p.bcps)}</b></div>` +
+        `<div class="r"><i>OCPS</i><b>${hex2(p.ocps)}</b></div>`
+      : '');
 
   $('counters').innerHTML =
     `<div class="r"><i>Frame</i><b>${p.frame}</b></div>` +
@@ -3343,23 +3747,68 @@ const tilesImg = tilesCtx.createImageData(128, 192);
 const mapCv = $('tilemap'), mapCtx = mapCv.getContext('2d');
 const mapImg = mapCtx.createImageData(256, 256);
 
+const palCv = $('palview'), palCtx = palCv.getContext('2d');
+const palImg = palCtx.createImageData(32, 16);
+const palPx = new Uint32Array(palImg.data.buffer);
+
 function renderVideo() {
+  const cgb = gb.cgb;
   const cols = PALETTES[palette];
+  const p = gb.ppu;
+  // In Color mode there is no single "the" palette to preview a tile with, so
+  // the viewer shows raw tile data through background palette 0.
+  const pal32 = cgb ? p.bgPal32 : null;
+  const bank = cgb ? vramBank : 0;
+
   // 384 tiles, 16 across
   for (let t = 0; t < 384; t++) {
-    gb.ppu.drawTile(tilesImg.data, 128, (t % 16) * 8, ((t / 16) | 0) * 8, t * 16, gb.ppu.bgp, cols);
+    p.drawTile(tilesImg.data, 128, (t % 16) * 8, ((t / 16) | 0) * 8, t * 16,
+               cgb ? 0 : p.bgp, cols, bank, pal32);
   }
   tilesCtx.putImageData(tilesImg, 0, 0);
 
-  const lcdc = gb.ppu.lcdc;
+  // --- palette viewer: 8 background rows on top, 8 sprite rows below -------
+  palPx.fill(0xff1a1720);
+  if (cgb) {
+    for (let i = 0; i < 32; i++) {
+      const x = (i & 3) + (i >> 2) * 4;
+      for (let dy = 0; dy < 7; dy++) palPx[dy * 32 + x] = p.bgPal32[i];
+      for (let dy = 9; dy < 16; dy++) palPx[dy * 32 + x] = p.objPal32[i];
+    }
+  } else {
+    // On a DMG the three palette registers are all there is.
+    const regs = [p.bgp, p.obp0, p.obp1];
+    for (let r = 0; r < 3; r++) {
+      for (let i = 0; i < 4; i++) {
+        const c = cols[(regs[r] >> (i * 2)) & 3];
+        const v = (255 << 24) | (c[2] << 16) | (c[1] << 8) | c[0];
+        for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) {
+          palPx[(r * 5 + dy) * 32 + i * 4 + dx] = v;
+        }
+      }
+    }
+  }
+  palCtx.putImageData(palImg, 0, 0);
+  $('palHint').textContent = cgb
+    ? 'Oben Hintergrund, unten Sprites — je acht Paletten zu vier Farben.'
+    : 'DMG: BGP, OBP0 und OBP1 (von oben nach unten).';
+  $('vbankHint').style.display = cgb ? 'none' : '';
+  $('selVBank').disabled = !cgb;
+
+  const lcdc = p.lcdc;
   const mapBase = (mapAuto ? ((lcdc & 0x08) ? 0x9C00 : 0x9800) : parseInt($('selMap').value, 16)) - 0x8000;
   if (mapAuto) $('selMap').value = (mapBase + 0x8000).toString(16).toUpperCase();
   const signed = !(lcdc & 0x10);
   for (let ty = 0; ty < 32; ty++) {
     for (let tx = 0; tx < 32; tx++) {
-      const no = gb.ppu.vram[mapBase + ty * 32 + tx];
+      const ent = mapBase + ty * 32 + tx;
+      const no = p.vram[ent];
+      // The map is drawn the way the PPU would draw it, attributes and all.
+      const attr = cgb ? p.vram[0x2000 + ent] : 0;
       const addr = signed ? 0x1000 + (((no << 24) >> 24) * 16) : no * 16;
-      gb.ppu.drawTile(mapImg.data, 256, tx * 8, ty * 8, addr, gb.ppu.bgp, cols);
+      p.drawTile(mapImg.data, 256, tx * 8, ty * 8, addr,
+                 cgb ? (attr & 7) : p.bgp, cols,
+                 (attr & 0x08) ? 1 : 0, pal32, attr & 0x60);
     }
   }
   mapCtx.putImageData(mapImg, 0, 0);
@@ -3378,8 +3827,12 @@ function renderVideo() {
   for (let i = 0; i < 40; i++) {
     const y = oam[i * 4], x = oam[i * 4 + 1], tile = oam[i * 4 + 2], fl = oam[i * 4 + 3];
     if (!oamAll && (y === 0 || y >= 160)) continue;
+    // Bits 0-3 mean something different on each machine: a DMG only uses bit 4
+    // to pick between its two sprite palettes, while the Color hardware reads
+    // a palette number from bits 0-2 and a VRAM bank from bit 3.
     const flags = [(fl & 0x80) ? 'BG' : '', (fl & 0x40) ? 'FY' : '', (fl & 0x20) ? 'FX' : '',
-      (fl & 0x10) ? 'P1' : 'P0'].filter(Boolean).join(' ');
+      cgb ? ('P' + (fl & 7)) : ((fl & 0x10) ? 'P1' : 'P0'),
+      (cgb && (fl & 0x08)) ? 'B1' : ''].filter(Boolean).join(' ');
     rows += `<tr><td>${i}</td><td>${y - 16}</td><td>${x - 8}</td><td>${hex2(tile)}</td>` +
             `<td>${hex2(fl)}</td><td>${flags}</td></tr>`;
   }
@@ -3464,6 +3917,15 @@ $('btnCgbAnyway').onclick = () => {
   $('btnRun').disabled = false;
   fitScale(); applyScale();
   start();
+};
+$('btnCgbSwitch').onclick = () => {
+  machine = 'cgb';
+  $('selMachine').value = 'cgb';
+  reloadMachine();
+};
+$('selMachine').onchange = (e) => {
+  machine = e.target.value;
+  if (romBytes) reloadMachine();
 };
 
 $('btnOpen').onclick = $('btnOpen2').onclick = () => $('fileIn').click();
@@ -3568,6 +4030,7 @@ $('btnPoke').onclick = () => {
 $('selMap').onchange = () => { mapAuto = false; $('btnMapAuto').classList.remove('on'); renderVideo(); };
 $('btnMapAuto').onclick = () => { mapAuto = !mapAuto; $('btnMapAuto').classList.toggle('on', mapAuto); renderVideo(); };
 $('btnOamAll').onclick = () => { oamAll = !oamAll; $('btnOamAll').classList.toggle('on', oamAll); renderVideo(); };
+$('selVBank').onchange = (e) => { vramBank = parseInt(e.target.value, 10) & 1; renderVideo(); };
 
 // raster
 $('raster').onclick = (e) => {
@@ -3626,6 +4089,15 @@ $('btnBlocking').onclick = () => {
   gb.strictBlocking = !gb.strictBlocking;
   $('btnBlocking').textContent = 'VRAM-Sperre: ' + (gb.strictBlocking ? 'an' : 'aus');
   $('btnBlocking').classList.toggle('on', gb.strictBlocking);
+};
+$('btnColorCorr').onclick = () => {
+  GBOPT.colorCorrect = !GBOPT.colorCorrect;
+  $('btnColorCorr').textContent = 'Farbkorrektur: ' + (GBOPT.colorCorrect ? 'an' : 'aus');
+  $('btnColorCorr').classList.toggle('on', GBOPT.colorCorrect);
+  // The framebuffer already holds resolved colours, so a repaint is only
+  // visible once the next frame has been drawn -- unless we recolour the
+  // palettes and let the paused picture stand.
+  if (gb) { gb.ppu.rebuildPalettes(); refreshDebug(true); }
 };
 
 // -- keyboard ---------------------------------------------------------------
