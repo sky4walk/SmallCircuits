@@ -319,7 +319,7 @@ PAGE = r"""<!DOCTYPE html>
   #crumb b{color:var(--accent);font-weight:normal;}
   #tabs{display:flex;gap:12px;}
   .tab{padding:9px 22px;font-size:19px;color:var(--dim);border:3px solid transparent;
-    border-radius:6px;background:var(--panel);}
+    border-radius:6px;background:var(--panel);cursor:pointer;}
   .tab.on{color:var(--bg);background:var(--accent);font-weight:bold;}
 
   #list{flex:1;overflow-y:auto;padding:14px 30px 20px;}
@@ -463,6 +463,13 @@ function render(){
     var d = document.createElement('div');
     d.className = 'tab' + (FILTERS[t].id === filter ? ' on' : '');
     d.textContent = FILTERS[t].label;
+    (function(id, el){
+      el.onclick = function(){
+        if(id === filter) return;
+        filter = id;
+        load(path);
+      };
+    })(FILTERS[t].id, d);
     $tabs.appendChild(d);
   }
 
