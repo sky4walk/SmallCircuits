@@ -1,0 +1,1721 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Tempellauf</title>
+<style>
+  :root{
+    --stein:#1b1a17;
+    --moos:#2f4534;
+    --gold:#d8a531;
+    --sand:#e6d9bd;
+    --blut:#a8341f;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; overflow:hidden; background:var(--stein);}
+  body{
+    font-family:"Segoe UI",system-ui,-apple-system,Roboto,Helvetica,Arial,sans-serif;
+    color:var(--sand);
+    -webkit-tap-highlight-color:transparent;
+    touch-action:none;
+  }
+  #buehne{position:fixed; inset:0;}
+  canvas{display:block; width:100%; height:100%;}
+
+  /* ---------- HUD ---------- */
+  #hud{
+    position:absolute; inset:0; pointer-events:none;
+    padding:calc(14px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right))
+            14px calc(16px + env(safe-area-inset-left));
+    display:flex; justify-content:space-between; align-items:flex-start;
+    font-variant-numeric:tabular-nums;
+    text-shadow:0 2px 6px rgba(0,0,0,.75);
+  }
+  #hud.aus{display:none;}
+  .wert{font-size:clamp(20px,5.2vw,34px); font-weight:600; letter-spacing:.02em; line-height:1;}
+  .marke{font-size:11px; letter-spacing:.22em; text-transform:uppercase; opacity:.62; margin-bottom:4px;}
+  #muenzen .wert{color:var(--gold);}
+  .rechts{text-align:right;}
+  #tempo{margin-top:10px; font-size:11px; letter-spacing:.2em; opacity:.55;}
+
+  /* ---------- Overlays ---------- */
+  .tafel{
+    position:absolute; inset:0; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:22px; padding:24px;
+    background:radial-gradient(120% 80% at 50% 40%, rgba(20,26,20,.72), rgba(8,10,8,.94));
+    backdrop-filter:blur(2px);
+  }
+  .tafel.aus{display:none;}
+  h1{
+    font-family:Georgia,"Times New Roman",serif;
+    font-size:clamp(38px,11vw,86px); font-weight:400;
+    letter-spacing:.14em; text-transform:uppercase;
+    color:var(--sand);
+    text-shadow:0 0 40px rgba(216,165,49,.28);
+  }
+  h1 .akzent{color:var(--gold);}
+  h2{
+    font-family:Georgia,serif; font-weight:400;
+    font-size:clamp(26px,7vw,48px); letter-spacing:.1em; text-transform:uppercase;
+    color:var(--blut);
+  }
+  .untertitel{font-size:13px; letter-spacing:.28em; text-transform:uppercase; opacity:.6;}
+  .linie{width:min(340px,72vw); height:1px; background:linear-gradient(90deg,transparent,var(--gold),transparent); opacity:.5;}
+  .knopf{
+    pointer-events:auto; cursor:pointer;
+    font:inherit; font-size:15px; letter-spacing:.2em; text-transform:uppercase;
+    padding:14px 34px; color:var(--stein); background:var(--gold);
+    border:0; border-radius:2px; font-weight:700;
+    transition:transform .12s ease, box-shadow .12s ease;
+    box-shadow:0 6px 24px rgba(216,165,49,.25);
+  }
+  .knopf:hover{transform:translateY(-2px); box-shadow:0 10px 30px rgba(216,165,49,.35);}
+  .knopf:focus-visible{outline:2px solid var(--sand); outline-offset:4px;}
+  .knopf.mini{padding:9px 16px; font-size:11px; letter-spacing:.16em; align-self:flex-start; margin-top:2px;}
+  .knopf.leise{background:transparent; color:var(--sand); box-shadow:none; border:1px solid rgba(230,217,189,.3); font-weight:500;}
+
+  table.steuerung{border-collapse:collapse; font-size:13px; opacity:.75;}
+  table.steuerung td{padding:5px 12px;}
+  table.steuerung td:first-child{text-align:right; color:var(--gold); font-weight:600; white-space:nowrap;}
+  kbd{
+    font:inherit; font-size:11px; background:rgba(230,217,189,.1);
+    border:1px solid rgba(230,217,189,.22); border-radius:3px; padding:2px 6px;
+  }
+  .bilanz{display:flex; gap:38px; text-align:center;}
+  .bilanz .wert{font-size:clamp(26px,7vw,40px);}
+  .rekordhinweis{font-size:12px; letter-spacing:.2em; text-transform:uppercase; color:var(--gold);}
+
+  /* ---------- Kurvenwarnung ---------- */
+  #warnung{
+    position:absolute; left:50%; top:16%; transform:translateX(-50%);
+    font-family:Georgia,serif; font-size:clamp(22px,6vw,40px);
+    letter-spacing:.16em; text-transform:uppercase; color:var(--gold);
+    text-shadow:0 0 26px rgba(216,165,49,.5);
+    opacity:0; transition:opacity .12s linear; pointer-events:none;
+  }
+  #warnung.an{opacity:1; animation:puls .5s ease-in-out infinite alternate;}
+  @keyframes puls{from{transform:translateX(-50%) scale(1);} to{transform:translateX(-50%) scale(1.08);}}
+
+  @media (prefers-reduced-motion: reduce){
+    #warnung.an{animation:none;}
+    .knopf{transition:none;}
+  }
+</style>
+</head>
+<body>
+<div id="buehne">
+  <canvas id="spiel"></canvas>
+
+  <div id="hud" class="aus">
+    <div>
+      <div class="marke">Punkte</div>
+      <div class="wert" id="punkte">0</div>
+      <div id="tempo">Tempo 0</div>
+    </div>
+    <button class="knopf leise mini" id="pausenknopf">Pause</button>
+    <div class="rechts" id="muenzen">
+      <div class="marke">Münzen</div>
+      <div class="wert" id="muenzzahl">0</div>
+    </div>
+  </div>
+
+  <div id="warnung">Kurve links</div>
+
+  <div class="tafel" id="menue">
+    <div class="untertitel">Endloslauf im Dschungeltempel</div>
+    <h1>Tempel<span class="akzent">lauf</span></h1>
+    <div class="linie"></div>
+    <table class="steuerung">
+      <tr><td>Spur wechseln</td><td><kbd>←</kbd> <kbd>→</kbd> oder wischen</td></tr>
+      <tr><td>Springen</td><td><kbd>↑</kbd> / <kbd>Leertaste</kbd> oder hoch wischen</td></tr>
+      <tr><td>Rutschen</td><td><kbd>↓</kbd> oder runter wischen</td></tr>
+      <tr><td>Abbiegen</td><td>in der Kurve zur Seite wischen</td></tr>
+      <tr><td>Pause</td><td><kbd>P</kbd></td></tr>
+      <tr><td>Wächter</td><td>Stolpern kostet Tempo, dann holen sie auf</td></tr>
+    </table>
+    <button class="knopf" id="startknopf">Lauf starten</button>
+    <div class="untertitel" style="font-size:11px; opacity:.4">Am Telefon quer halten, dann sieht man mehr Strecke</div>
+    <button class="knopf leise" id="tonknopf">Ton: an</button>
+  </div>
+
+  <div class="tafel aus" id="ende">
+    <h2 id="todesursache">Erwischt</h2>
+    <div class="untertitel" id="todeshinweis"></div>
+    <div class="linie"></div>
+    <div class="bilanz">
+      <div><div class="marke">Punkte</div><div class="wert" id="endpunkte">0</div></div>
+      <div><div class="marke">Meter</div><div class="wert" id="endmeter">0</div></div>
+      <div><div class="marke">Münzen</div><div class="wert" id="endmuenzen">0</div></div>
+    </div>
+    <div class="rekordhinweis" id="rekordzeile">Rekord 0</div>
+    <button class="knopf" id="nochmal">Noch einmal</button>
+  </div>
+
+  <div class="tafel aus" id="pause">
+    <h2 style="color:var(--sand)">Pause</h2>
+    <button class="knopf" id="weiter">Weiterlaufen</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+(function(){
+
+// ===================================================================
+//  Konstanten der Welt
+// ===================================================================
+const SEG        = 200;      // Länge eines Streckensegments in Welteinheiten
+const ROAD       = 900;      // halbe Wegbreite
+const SPUREN     = [-0.6, 0, 0.6];   // Spurmitten als Anteil von ROAD
+const SICHT      = 90;       // gezeichnete Segmente
+const KAM_HOEHE  = 850;
+const KAM_ABST   = 800;      // Abstand Kamera -> Läufer
+const FOV        = 100;
+const KAM_TIEFE  = 1 / Math.tan((FOV/2) * Math.PI/180);
+
+const V_START    = 6200;     // Welteinheiten pro Sekunde
+const V_MAX      = 13000;
+const SPRUNG_V   = 2900;
+const SCHWERKRAFT= 7600;
+const RUTSCH_DAUER = 0.85;
+const LUFTZEIT   = 2 * SPRUNG_V / SCHWERKRAFT;   // Dauer eines Sprungs
+const ABSPRUNG   = 0.35;                         // ideale Vorlaufzeit zum Absprung
+
+const JAEGER_START = 5000;   // größter Abstand der Wächter in Welteinheiten
+const JAEGER_ANFANG = 950;  // zu Laufbeginn sitzen sie einem im Nacken
+const JAEGER_STOSS = 850;    // sofortiger Verlust je Stolperer
+const JAEGER_ANTEIL = 0.86;  // Tempo der Wächter, Anteil am Solltempo
+const JAEGER_SICHT = 2600;   // ab hier schiebt er sich von unten ins Bild
+const JAEGER_WARN  = 3600;   // ab hier roter Schein und Knurren
+const STOLPER_DAUER = 0.5;
+
+const KURVE_LEN  = 26;       // Segmente einer Pflichtkurve
+const KURVE_VORLAUF = 50;    // ab hier wird gewarnt und das Abbiegen angenommen
+const KURVE_STAERKE = 16;
+
+// Hindernisgrößen (Welteinheiten)
+const H_HUERDE   = 300;      // überspringbar
+const BALKEN_UK  = 380;      // Unterkante Balken -> darunter durchrutschen
+
+// ===================================================================
+//  Leinwand
+// ===================================================================
+const cv  = document.getElementById("spiel");
+const ctx = cv.getContext("2d");
+
+if (!ctx.roundRect){
+  CanvasRenderingContext2D.prototype.roundRect = function(x, y, w, h, r){
+    r = Math.min(r, Math.abs(w)/2, Math.abs(h)/2);
+    this.moveTo(x + r, y);
+    this.arcTo(x + w, y,     x + w, y + h, r);
+    this.arcTo(x + w, y + h, x,     y + h, r);
+    this.arcTo(x,     y + h, x,     y,     r);
+    this.arcTo(x,     y,     x + w, y,     r);
+    this.closePath();
+    return this;
+  };
+}
+let W = 0, H = 0;
+let VS = 0;        // Welteinheit -> Pixel in der Senkrechten
+let HORIZ = 0;     // Bildhöhe des Horizonts
+let dprGrenze = 2;
+
+function anpassen(){
+  const dpr = Math.min(window.devicePixelRatio || 1, dprGrenze);
+  W = Math.floor(cv.clientWidth);
+  H = Math.floor(cv.clientHeight);
+  cv.width  = Math.floor(W * dpr);
+  cv.height = Math.floor(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  // Ohne Kopplung an die Breite wird im Hochformat alles in die Länge gezogen,
+  // eine reine Breitenkopplung macht den Läufer dort aber briefmarkenklein.
+  VS = Math.min(H * 0.5, Math.max(W * 0.55, H * 0.36));
+  // Der Horizont ergibt sich aus der Kamerahöhe: so steht der Läufer auf jedem
+  // Format an derselben Stelle, egal wie hoch die Kamera gesetzt ist.
+  HORIZ = H * 0.78 - (KAM_TIEFE / KAM_ABST) * KAM_HOEHE * VS;
+  himmel = null; vignette = null;
+}
+window.addEventListener("resize", anpassen);
+window.addEventListener("orientationchange", function(){ setTimeout(anpassen, 120); });
+
+// ===================================================================
+//  Farbhilfen
+// ===================================================================
+function hex(h){
+  const n = parseInt(h.slice(1), 16);
+  return [(n>>16)&255, (n>>8)&255, n&255];
+}
+function mischArr(a, b, t){
+  return [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t];
+}
+function dunkler(a, f){ return [a[0]*f, a[1]*f, a[2]*f]; }
+function misch(a, b, t){
+  const r = Math.round(a[0] + (b[0]-a[0])*t);
+  const g = Math.round(a[1] + (b[1]-a[1])*t);
+  const bl= Math.round(a[2] + (b[2]-a[2])*t);
+  return "rgb(" + r + "," + g + "," + bl + ")";
+}
+
+const NEBEL = hex("#2c3b30");
+const C = {
+  weg1:   hex("#8b8069"),
+  weg2:   hex("#7c7160"),
+  kante1: hex("#3a3227"),
+  kante2: hex("#d8a531"),
+  boden1: hex("#243a29"),
+  boden2: hex("#1f3324"),
+  saeule: hex("#6f6552"),
+  saeuleD:hex("#4a4238"),
+  saeuleT:hex("#8b8069"),
+  huerde: hex("#5b4632"),
+  huerdeT:hex("#7a5f42"),
+  balken: hex("#4a3d2c"),
+  statue: hex("#54604b"),
+  statueT:hex("#6b7860"),
+  loch:   hex("#0d0f0c"),
+  lochTief: hex("#070806"),
+  bruch:  hex("#cbb98d"),
+  weg3:   hex("#948871"),
+  weg4:   hex("#6e6553"),
+  moos:   hex("#4a5c3a"),
+  urne:   hex("#7a6248"),
+  farn:   hex("#3f5c37"),
+  farnH:  hex("#587a45"),
+  flamme: hex("#ffb547"),
+};
+
+// ===================================================================
+//  Strecke: unendlich, segmentweise erzeugt
+// ===================================================================
+const strecke = new Map();
+const kurven  = [];
+let genBis = -1;
+
+// Generatorzustand
+let gKurve = 0, gKurveWert = 0;      // sanfte Kurve
+let gPflicht = 0, gPflichtDir = 0;   // Pflichtkurve
+let naechsteKurve = 260;
+let naechstesHindernis = 150;
+let letztesHindernisEnde = 0;
+let kurvenId = 0;
+
+function hoehe(i){
+  return 900 * Math.sin(i * 0.021) + 500 * Math.sin(i * 0.047);
+}
+
+function zufall(a, b){ return a + Math.random() * (b - a); }
+
+// Fester Streuwert je Segment: gleiche Strecke sieht in jedem Bild gleich aus.
+function streuen(i, k){
+  const n = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453;
+  return n - Math.floor(n);
+}
+
+// Abstände müssen in Zeit gerechnet werden, nicht in Segmenten: sonst rücken
+// die Hindernisse mit steigendem Tempo immer enger zusammen.
+function segAbstand(sekunden){
+  return Math.max(10, Math.round(S.sollTempo * sekunden / SEG));
+}
+// Kein Hindernis darf so dicht folgen, dass man es noch im Sprung erreicht.
+const MIND_FOLGE = () => segAbstand(LUFTZEIT + 0.35);
+function wuerfel(n){ return Math.floor(Math.random() * n); }
+
+function segErzeugen(i){
+  const s = { i:i, curve:0, y:hoehe(i), hind:null, muenze:null, deko:null, kurve:null,
+              stein: streuen(i, 7), moos: streuen(i, 9) < 0.16 };
+
+  if (gPflicht > 0){
+    s.curve = gPflichtDir * KURVE_STAERKE;
+    s.kurve = kurven[kurven.length - 1];
+    gPflicht--;
+  } else if (i >= naechsteKurve){
+    gPflichtDir = Math.random() < 0.5 ? -1 : 1;
+    gPflicht = KURVE_LEN - 1;
+    kurvenId++;
+    const k = { id:kurvenId, start:i, ende:i + KURVE_LEN, dir:gPflichtDir, geschafft:false, gewertet:false };
+    kurven.push(k);
+    s.curve = gPflichtDir * KURVE_STAERKE;
+    s.kurve = k;
+    naechsteKurve = i + Math.floor(zufall(300, 520));
+    naechstesHindernis = Math.max(naechstesHindernis, i + KURVE_LEN + 22);
+  } else {
+    if (gKurve > 0){ s.curve = gKurveWert; gKurve--; }
+    else if (Math.random() < 0.012){
+      gKurve = Math.floor(zufall(28, 70));
+      gKurveWert = zufall(1.0, 2.2) * (Math.random() < 0.5 ? -1 : 1);
+    }
+  }
+
+  // Hindernisse nur auf freier Strecke, mit Sicherheitsabstand zur Pflichtkurve
+  const kurveNah = kurven.some(k => i > k.start - 24 && i < k.ende + 14);
+  if (!kurveNah && i >= naechstesHindernis){
+    const schwer = Math.min(1, i / 2200);
+    letztesHindernisEnde = i;
+    baueHindernis(s, i, schwer);
+    // Der Abstand zählt ab dem spätesten Teil des Musters, nicht ab dessen Anfang.
+    naechstesHindernis = letztesHindernisEnde
+                       + Math.max(MIND_FOLGE(), segAbstand(zufall(1.7 - 0.5*schwer, 2.2 - 0.6*schwer)));
+  }
+
+  if (i % 7 === 0){
+    const r = streuen(i, 3);
+    s.deko = {
+      typ:   r < 0.30 ? "saeule" : r < 0.50 ? "ruine" : r < 0.66 ? "urne"
+           : r < 0.86 ? "farn" : "fackel",
+      seite: streuen(i, 4) < 0.5 ? -1 : 1,
+      beide: streuen(i, 5) < 0.4,
+      groesse: 0.75 + streuen(i, 6) * 0.55,
+      versatz: 1.30 + streuen(i, 8) * 0.25
+    };
+  }
+  strecke.set(i, s);
+
+  // vorgemerkte Objekte übernehmen
+  const offen = wartend.get(i);
+  if (offen){
+    for (const p of offen){
+      if (p.art === "hind"){ (s.hind || (s.hind = [])).push(p.wert); }
+      else if (p.art === "muenze"){ s.muenze = p.wert; }
+      else if (p.art === "loch"){ s.istLoch = true; }
+      else if (p.art === "bruch"){ s.bruch = true; }
+    }
+    wartend.delete(i);
+  }
+
+  // alte Segmente aufräumen
+  if (i % 64 === 0){
+    for (const key of strecke.keys()){ if (key < i - SICHT - 400) strecke.delete(key); }
+    for (const key of wartend.keys()){ if (key < i - 8) wartend.delete(key); }
+    while (kurven.length && kurven[0].ende < i - 400) kurven.shift();
+  }
+}
+
+// Objekte werden für spätere Segmente vorgemerkt, damit die Strecke
+// streng der Reihe nach erzeugt wird.
+const wartend = new Map();
+
+function merken(idx, art, wert){
+  if (strecke.has(idx)){
+    const s = strecke.get(idx);
+    if (art === "hind"){ (s.hind || (s.hind = [])).push(wert); }
+    else if (art === "muenze"){ s.muenze = wert; }
+    else if (art === "loch"){ s.istLoch = true; }
+    else if (art === "bruch"){ s.bruch = true; }
+    return;
+  }
+  if (!wartend.has(idx)) wartend.set(idx, []);
+  wartend.get(idx).push({ art:art, wert:wert });
+}
+
+function hindernisSetzen(idx, o){
+  o.z = idx * SEG;
+  if (idx > letztesHindernisEnde) letztesHindernisEnde = idx;
+  merken(idx, "hind", o);
+  if (o.typ === "loch"){
+    for (let k = 0; k < o.laenge; k++) merken(idx + k, "loch", true);
+    // Der Abstand zum nächsten Hindernis zählt ab dem Ende des Schachts.
+    if (idx + o.laenge > letztesHindernisEnde) letztesHindernisEnde = idx + o.laenge;
+    // Helle Bruchkanten davor und dahinter: der Schacht selbst ist dunkel und
+    // hebt sich vom Boden kaum ab, die Kanten schon.
+    merken(idx - 1, "bruch", true);
+    merken(idx + o.laenge, "bruch", true);
+  }
+}
+function muenzenSetzen(von, anzahl, spur, y){
+  for (let k = 0; k < anzahl; k++){
+    merken(von + k * 2, "muenze", { spur:spur, y:y, weg:false, phase:k });
+  }
+}
+
+function baueHindernis(s, i, schwer){
+  const art = wuerfel(6);
+  const frei = wuerfel(3);            // diese Spur bleibt garantiert offen
+
+  if (art === 0){                     // Hürde: springen oder ausweichen
+    for (let sp = 0; sp < 3; sp++){
+      if (sp !== frei && Math.random() < 0.75)
+        hindernisSetzen(i, { typ:"huerde", spur:sp, tiefe:150, hoehe:H_HUERDE });
+    }
+    muenzenSetzen(i + 1, 4, frei, 200);
+  } else if (art === 1){              // Balken: rutschen
+    for (let sp = 0; sp < 3; sp++) hindernisSetzen(i, { typ:"balken", spur:sp, tiefe:170, hoehe:900 });
+    muenzenSetzen(i + 3, 4, wuerfel(3), 180);
+  } else if (art === 2){              // Statue: nur ausweichen
+    const sp = wuerfel(3);
+    hindernisSetzen(i, { typ:"statue", spur:sp, tiefe:200, hoehe:1300 });
+    if (schwer > 0.5 && Math.random() < 0.5){
+      const sp2 = (sp + 1 + wuerfel(2)) % 3;
+      if (sp2 !== sp) hindernisSetzen(i + MIND_FOLGE(), { typ:"statue", spur:sp2, tiefe:200, hoehe:1300 });
+    }
+    muenzenSetzen(i + 2, 5, (sp + 1) % 3, 200);
+  } else if (art === 3){              // Loch: springen
+    const laenge = 5 + wuerfel(5);    // lang genug, um überhaupt aufzufallen
+    hindernisSetzen(i, { typ:"loch", spur:-1, tiefe:laenge * SEG, hoehe:0, laenge:laenge });
+    muenzenSetzen(i, laenge + 2, wuerfel(3), 700);
+  } else if (art === 4){              // Hürde einzeln mit Münzbogen darüber
+    const sp = wuerfel(3);
+    hindernisSetzen(i, { typ:"huerde", spur:sp, tiefe:150, hoehe:H_HUERDE });
+    muenzenSetzen(i - 3, 6, sp, 520);
+  } else {                            // Kombination Balken + Hürde
+    for (let sp = 0; sp < 3; sp++) hindernisSetzen(i, { typ:"balken", spur:sp, tiefe:170, hoehe:900 });
+    const sp = wuerfel(3);
+    hindernisSetzen(i + MIND_FOLGE(), { typ:"huerde", spur:sp, tiefe:150, hoehe:H_HUERDE });
+    muenzenSetzen(i + 6, 4, (sp + 1) % 3, 200);
+  }
+}
+
+const ERSATZ = { i:0, curve:0, y:0, hind:null, muenze:null, deko:null, kurve:null, stein:0.5, moos:false };
+function segment(i){
+  if (!strecke.has(i)) vorausErzeugen(i);
+  return strecke.get(i) || ERSATZ;
+}
+function vorausErzeugen(bis){
+  while (genBis < bis){ genBis++; if (!strecke.has(genBis)) segErzeugen(genBis); }
+}
+
+function streckeZuruecksetzen(){
+  strecke.clear();
+  wartend.clear();
+  kurven.length = 0;
+  genBis = -1;
+  gKurve = 0; gPflicht = 0;
+  naechsteKurve = 260;
+  naechstesHindernis = 150;
+  kurvenId = 0;
+  vorausErzeugen(SICHT + 40);
+}
+
+// ===================================================================
+//  Spielzustand
+// ===================================================================
+let sicht = SICHT;
+
+const S = {
+  modus: "menue",       // menue | lauf | pause | ende
+  pos: 0,
+  tempo: V_START,
+  spur: 1,
+  x: 0,
+  kamX: 0,
+  y: 0, vy: 0,
+  rutscht: 0,
+  sprungPuffer: 0,
+  sprungAbsicht: 0,
+  laufphase: 0,
+  muenzen: 0,
+  meter: 0,
+  punkte: 0,
+  rekord: 0,
+  neigung: 0,
+  blitz: 0,
+  strassenX: 0,
+  laufzeit: 0,
+  jaeger: JAEGER_ANFANG,
+  stolper: 0,
+  sichtbar: false,
+  sollTempo: V_START,
+  sterbeZeit: 0,
+  trefferObj: null,
+  hinweis: "",
+  ursache: "",
+  ton: true,
+};
+
+function neuStarten(){
+  streckeZuruecksetzen();
+  S.pos = 0; S.tempo = V_START; S.sollTempo = V_START; S.spur = 1; S.x = SPUREN[1]; S.kamX = S.x * ROAD;
+  S.y = 0; S.vy = 0; S.rutscht = 0; S.sprungPuffer = 0; S.sprungAbsicht = 0; S.laufphase = 0;
+  S.muenzen = 0; S.meter = 0; S.punkte = 0; S.neigung = 0; S.blitz = 0;
+  S.sterbeZeit = 0; S.trefferObj = null; S.strassenX = 0;
+  S.jaeger = JAEGER_ANFANG; S.stolper = 0; S.sollTempo = V_START; S.laufzeit = 0;
+  S.sichtbar = false;
+  S.modus = "lauf";
+  S.ursache = "";
+  hud.classList.remove("aus");
+  menue.classList.add("aus");
+  ende.classList.add("aus");
+  pause.classList.add("aus");
+}
+
+// ===================================================================
+//  Ton (kleine WebAudio-Signale, kein externes Material)
+// ===================================================================
+let ac = null;
+// iOS startet den Tonausgang nur nach einer Nutzergeste.
+function tonFreischalten(){
+  if (!S.ton) return;
+  try{
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === "suspended") ac.resume();
+  }catch(e){ /* Ton ist optional */ }
+}
+// Gebrüll. Entscheidend für den Eindruck einer Kreatur statt eines Synthesizers
+// sind drei Dinge: Sättigung (Obertöne), Formanten (Rachenraum) und ein
+// unregelmäßiges Knurren in Tonhöhe und Lautstärke.
+let letztesBruellen = -99;
+
+function verzerrKurve(staerke){
+  const n = 1024, k = new Float32Array(n);
+  for (let i = 0; i < n; i++){
+    const x = (i / (n - 1)) * 2 - 1;
+    k[i] = Math.tanh(staerke * x) / Math.tanh(staerke);
+  }
+  return k;
+}
+
+function bruellen(){
+  if (!S.ton) return;
+  try{
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    if (ac.state === "suspended") ac.resume();
+
+    const t0 = ac.currentTime;
+    const dauer = 1.5 + Math.random() * 0.4;
+    const grund = 62 + Math.random() * 16;          // jedes Brüllen etwas anders
+
+    const huelle = ac.createGain();                  // Schlusshüllkurve
+    huelle.gain.setValueAtTime(0.0001, t0);
+    huelle.gain.exponentialRampToValueAtTime(0.30, t0 + 0.05);
+    huelle.gain.setValueAtTime(0.30, t0 + dauer * 0.42);
+    huelle.gain.exponentialRampToValueAtTime(0.17, t0 + dauer * 0.53);
+    huelle.gain.exponentialRampToValueAtTime(0.29, t0 + dauer * 0.63);
+    huelle.gain.exponentialRampToValueAtTime(0.22, t0 + dauer * 0.86);
+    huelle.gain.exponentialRampToValueAtTime(0.0001, t0 + dauer);
+    huelle.connect(ac.destination);
+
+    const tiefpass = ac.createBiquadFilter();        // rollt zum Schluss ab
+    tiefpass.type = "lowpass";
+    tiefpass.Q.value = 1.2;
+    tiefpass.frequency.setValueAtTime(2800, t0);
+    tiefpass.frequency.exponentialRampToValueAtTime(520, t0 + dauer);
+    tiefpass.connect(huelle);
+
+    // Formanten: drei Resonanzen wie ein Rachenraum
+    const formanten = ac.createGain();
+    for (const [f, q, laut] of [[470, 4, 1.0], [1150, 5, 0.55], [2550, 6, 0.22]]){
+      const bp = ac.createBiquadFilter();
+      bp.type = "bandpass"; bp.frequency.value = f; bp.Q.value = q;
+      const g = ac.createGain(); g.gain.value = laut;
+      formanten.connect(bp); bp.connect(g); g.connect(tiefpass);
+    }
+    const durchlass = ac.createGain(); durchlass.gain.value = 0.35;
+    formanten.connect(durchlass); durchlass.connect(tiefpass);
+
+    const shaper = ac.createWaveShaper();            // Sättigung
+    shaper.curve = verzerrKurve(3.6);
+    shaper.oversample = "2x";
+    shaper.connect(formanten);
+
+    // Knurren: Amplitudenmodulation erzeugt raue Seitenbänder
+    const knurren = ac.createGain();
+    knurren.gain.value = 0.62;
+    knurren.connect(shaper);
+    const am = ac.createOscillator(), amTiefe = ac.createGain();
+    am.type = "sine";
+    am.frequency.setValueAtTime(52, t0);
+    am.frequency.exponentialRampToValueAtTime(27, t0 + dauer);
+    amTiefe.gain.setValueAtTime(0.30, t0);
+    amTiefe.gain.linearRampToValueAtTime(0.52, t0 + dauer);   // zum Ende hin rauer
+    am.connect(amTiefe); amTiefe.connect(knurren.gain);
+    am.start(t0); am.stop(t0 + dauer);
+
+    // Tonhöhe: kurzer Ansatz nach oben, dann langer Fall
+    const stimmen = [];
+    for (const [teiler, laut, verstimmt] of [[1, 0.5, 0], [0.5, 0.42, -9], [1.5, 0.16, 11]]){
+      const o = ac.createOscillator();
+      o.type = "sawtooth";
+      o.detune.setValueAtTime(verstimmt, t0);
+      o.frequency.setValueAtTime(grund * teiler * 0.8, t0);
+      o.frequency.exponentialRampToValueAtTime(grund * teiler * 2.1, t0 + 0.09);
+      o.frequency.exponentialRampToValueAtTime(grund * teiler * 0.92, t0 + dauer * 0.65);
+      o.frequency.exponentialRampToValueAtTime(grund * teiler * 0.7, t0 + dauer);
+      const g = ac.createGain(); g.gain.value = laut;
+      o.connect(g); g.connect(knurren);
+      o.start(t0); o.stop(t0 + dauer);
+      stimmen.push(o);
+    }
+
+    // Unruhe in der Tonhöhe, zum Ende hin stärker
+    const vib = ac.createOscillator(), vibTiefe = ac.createGain();
+    vib.type = "sine";
+    vib.frequency.setValueAtTime(5.5, t0);
+    vib.frequency.linearRampToValueAtTime(8.5, t0 + dauer);
+    vibTiefe.gain.setValueAtTime(10, t0);
+    vibTiefe.gain.linearRampToValueAtTime(55, t0 + dauer);
+    vib.connect(vibTiefe);
+    for (const o of stimmen) vibTiefe.connect(o.detune);
+    vib.start(t0); vib.stop(t0 + dauer);
+
+    // Atem
+    const laenge = Math.floor(ac.sampleRate * dauer);
+    const puffer = ac.createBuffer(1, laenge, ac.sampleRate);
+    const daten = puffer.getChannelData(0);
+    for (let i = 0; i < laenge; i++) daten[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / laenge, 0.35);
+    const rausch = ac.createBufferSource();
+    rausch.buffer = puffer;
+    const rbp = ac.createBiquadFilter();
+    rbp.type = "bandpass"; rbp.frequency.value = 1300; rbp.Q.value = 1.1;
+    const rg = ac.createGain(); rg.gain.value = 0.3;
+    rausch.connect(rbp); rbp.connect(rg); rg.connect(knurren);
+    rausch.start(t0);
+  }catch(e){ /* Ton ist optional */ }
+}
+
+function ton(freq, dauer, art, laut){
+  if (!S.ton) return;
+  try{
+    if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = art || "square";
+    o.frequency.setValueAtTime(freq, ac.currentTime);
+    g.gain.setValueAtTime(laut || 0.05, ac.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + dauer);
+    o.connect(g); g.connect(ac.destination);
+    o.start(); o.stop(ac.currentTime + dauer);
+  }catch(e){ /* Ton ist optional */ }
+}
+
+// ===================================================================
+//  Eingabe
+// ===================================================================
+function links(){ eingabe(-1); }
+function rechts(){ eingabe(1); }
+
+function eingabe(richtung){
+  if (S.modus !== "lauf") return;
+  const idx = Math.floor(S.pos / SEG);
+  // Annahmefenster und Warnpfeil müssen deckungsgleich sein: sonst wird ein
+  // Wischen, das der Spieler als Abbiegen meint, zum Spurwechsel.
+  const k = kurven.find(k => !k.geschafft && idx > k.start - KURVE_VORLAUF && idx < k.ende);
+  if (k){
+    if (richtung === k.dir){ k.geschafft = true; ton(520, 0.12, "triangle", 0.05); return; }
+    return; // falsche Richtung in der Kurve: einfach nichts
+  }
+  const neu = Math.max(0, Math.min(2, S.spur + richtung));
+  if (neu !== S.spur){ S.spur = neu; ton(300, 0.05, "sine", 0.03); }
+}
+// Sekunden bis zum nächsten Hindernis, das übersprungen werden muss.
+function sprungZielZeit(){
+  const idx = Math.floor(S.pos / SEG);
+  let naechste = Infinity;
+  const bis = idx + Math.ceil(S.tempo * 1.7 / SEG) + 2;
+  for (let i = idx; i < bis; i++){
+    const seg = strecke.get(i);
+    if (!seg || !seg.hind) continue;
+    for (const o of seg.hind){
+      if (o.typ !== "loch" && o.typ !== "huerde") continue;
+      if (o.typ === "huerde" && Math.abs(SPUREN[S.spur] - SPUREN[o.spur]) > 0.3) continue;
+      const d = o.z - S.pos;
+      if (d > -50 && d / S.tempo < naechste) naechste = d / S.tempo;
+    }
+  }
+  return naechste;
+}
+
+function abspringen(){
+  S.vy = SPRUNG_V; S.rutscht = 0; S.sprungPuffer = 0; S.sprungAbsicht = 0;
+  ton(420, 0.12, "sine", 0.05);
+}
+
+function springen(){
+  if (S.modus !== "lauf") return;
+  if (S.y > 0){ S.sprungPuffer = 0.2; return; }   // in der Luft: für die Landung merken
+  // Ein Hindernis ist länger sichtbar, als ein Sprung dauert. Wer zu früh
+  // drückt, setzt sonst davor wieder auf: der Absprung wartet dann kurz.
+  const zeit = sprungZielZeit();
+  if (zeit > LUFTZEIT * 0.7 && zeit < 1.5){ S.sprungAbsicht = 1.5; return; }
+  abspringen();
+}
+function rutschen(){
+  if (S.modus !== "lauf") return;
+  if (S.y > 0){ S.vy = -SPRUNG_V * 0.9; }   // aus der Luft nach unten stampfen
+  S.rutscht = RUTSCH_DAUER;
+  ton(180, 0.16, "sawtooth", 0.04);
+}
+
+document.addEventListener("keydown", function(e){
+  const t = e.key;
+  if (t === "ArrowLeft"  || t === "a" || t === "A"){ links();  e.preventDefault(); }
+  else if (t === "ArrowRight" || t === "d" || t === "D"){ rechts(); e.preventDefault(); }
+  else if (t === "ArrowUp"    || t === "w" || t === "W" || t === " "){ springen(); e.preventDefault(); }
+  else if (t === "ArrowDown"  || t === "s" || t === "S"){ rutschen(); e.preventDefault(); }
+  else if (t === "p" || t === "P"){ pauseUmschalten(); }
+  else if (t === "Enter"){
+    if (S.modus === "menue" || S.modus === "ende") neuStarten();
+    else if (S.modus === "pause") pauseUmschalten();
+  }
+});
+
+// Wischen wird schon während der Bewegung ausgewertet, nicht erst beim Loslassen:
+// beim Loslassen wäre die Reaktion bei hohem Tempo zu spät.
+let tx = 0, ty = 0, tzeit = 0, tAktiv = false, tAusgeloest = false;
+const SCHWELLE = 26;
+
+function wischStart(e){
+  const b = e.changedTouches[0];
+  tx = b.clientX; ty = b.clientY;
+  tzeit = performance.now();
+  tAktiv = true; tAusgeloest = false;
+  tonFreischalten();
+}
+function wischPruefen(dx, dy){
+  if (Math.abs(dx) < SCHWELLE && Math.abs(dy) < SCHWELLE) return false;
+  if (Math.abs(dx) > Math.abs(dy)) (dx > 0 ? rechts() : links());
+  else (dy > 0 ? rutschen() : springen());
+  return true;
+}
+function wischZug(e){
+  if (!tAktiv || tAusgeloest) return;
+  const b = e.changedTouches[0];
+  if (wischPruefen(b.clientX - tx, b.clientY - ty)) tAusgeloest = true;
+}
+function wischEnde(e){
+  if (!tAktiv) return;
+  tAktiv = false;
+  if (tAusgeloest) return;
+  if (performance.now() - tzeit > 700) return;
+  const b = e.changedTouches[0];
+  wischPruefen(b.clientX - tx, b.clientY - ty);
+}
+const buehne = document.getElementById("buehne");
+buehne.addEventListener("touchstart", wischStart, {passive:true});
+buehne.addEventListener("touchmove",  wischZug,   {passive:true});
+buehne.addEventListener("touchend",   wischEnde,  {passive:true});
+buehne.addEventListener("touchcancel", function(){ tAktiv = false; }, {passive:true});
+
+// ===================================================================
+//  Projektion
+// ===================================================================
+function proj(wx, wy, wz, kx, ky, kz){
+  const cz = wz - kz;
+  const scale = KAM_TIEFE / cz;
+  return {
+    x: W/2 + scale * (wx - kx) * W/2,
+    y: HORIZ - scale * (wy - ky) * VS,
+    w: scale * ROAD * W/2,
+    s: scale,
+    cz: cz
+  };
+}
+
+function viereck(x1,y1,w1, x2,y2,w2, farbe){
+  ctx.fillStyle = farbe;
+  ctx.beginPath();
+  ctx.moveTo(x1 - w1, y1);
+  ctx.lineTo(x2 - w2, y2);
+  ctx.lineTo(x2 + w2, y2);
+  ctx.lineTo(x1 + w1, y1);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// Streifen zwischen zwei Anteilen der Wegbreite
+function band(p1, p2, von, bis, farbe){
+  const m = (von + bis) / 2, hw = Math.abs(bis - von) / 2;
+  viereck(p1.x + p1.w * m, p1.y, p1.w * hw,
+          p2.x + p2.w * m, p2.y, p2.w * hw, farbe);
+}
+
+// Quader zwischen zwei projizierten Punkten
+function quader(pn, pf, mitte, breite, unten, hoehe, cVorn, cOben, cSeite){
+  const xn = pn.x + pn.w * mitte, wn = pn.w * breite;
+  const xf = pf.x + pf.w * mitte, wf = pf.w * breite;
+  const yn0 = pn.y - unten * pn.s * VS;
+  const yn1 = pn.y - (unten + hoehe) * pn.s * VS;
+  const yf0 = pf.y - unten * pf.s * VS;
+  const yf1 = pf.y - (unten + hoehe) * pf.s * VS;
+
+  // Oberseite
+  ctx.fillStyle = cOben;
+  ctx.beginPath();
+  ctx.moveTo(xn - wn, yn1); ctx.lineTo(xf - wf, yf1);
+  ctx.lineTo(xf + wf, yf1); ctx.lineTo(xn + wn, yn1);
+  ctx.closePath(); ctx.fill();
+
+  // Seitenfläche (die dem Blick zugewandte)
+  ctx.fillStyle = cSeite;
+  ctx.beginPath();
+  if (xn < W/2){
+    ctx.moveTo(xn + wn, yn1); ctx.lineTo(xf + wf, yf1);
+    ctx.lineTo(xf + wf, yf0); ctx.lineTo(xn + wn, yn0);
+  } else {
+    ctx.moveTo(xn - wn, yn1); ctx.lineTo(xf - wf, yf1);
+    ctx.lineTo(xf - wf, yf0); ctx.lineTo(xn - wn, yn0);
+  }
+  ctx.closePath(); ctx.fill();
+
+  // Vorderseite
+  ctx.fillStyle = cVorn;
+  ctx.fillRect(xn - wn, yn1, wn*2, Math.max(1, yn0 - yn1));
+}
+
+// Randobjekte: Säulen, Ruinen, Urnen, Farne, Fackeln
+function dekoZeichnen(p1, p2, d, t, seite){
+  const xf = seite * d.versatz;
+  const cS = misch(C.saeule, NEBEL, t), cH = misch(C.saeuleT, NEBEL, t), cD = misch(C.saeuleD, NEBEL, t);
+  const e = p1.s * VS;
+  const bx = p1.x + p1.w * xf;
+
+  // Kontaktschatten
+  ctx.fillStyle = "rgba(0,0,0,0.28)";
+  ctx.beginPath();
+  ctx.ellipse(bx, p1.y, p1.w * 0.22, p1.w * 0.07, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  if (d.typ === "saeule"){
+    const h = 1500 * d.groesse;
+    quader(p1, p2, xf, 0.19, 0, 120, cD, cH, cD);              // Sockel
+    quader(p1, p2, xf, 0.15, 120, h, cS, cH, cD);              // Schaft
+    quader(p1, p2, xf, 0.21, 120 + h, 150, cH, cH, cD);        // Kapitell
+  } else if (d.typ === "ruine"){
+    const h = 620 * d.groesse;
+    quader(p1, p2, xf, 0.19, 0, 90, cD, cH, cD);
+    quader(p1, p2, xf, 0.15, 90, h, cS, cH, cD);
+    quader(p1, p2, xf + 0.1, 0.09, 0, 200 * d.groesse, cD, cH, cD);   // abgestürztes Stück
+  } else if (d.typ === "urne"){
+    const g = 300 * d.groesse;
+    quader(p1, p2, xf, 0.07, 0, g * 0.25, cD, cH, cD);
+    quader(p1, p2, xf, 0.13, g * 0.25, g * 0.6, misch(C.urne, NEBEL, t), cH, cD);
+    quader(p1, p2, xf, 0.08, g * 0.85, g * 0.25, cD, cH, cD);
+  } else if (d.typ === "farn"){
+    // Wedel als Striche: billiger und lebendiger als Kästen
+    const g = 320 * d.groesse * e;
+    ctx.lineCap = "round";
+    for (let k = -3; k <= 3; k++){
+      const a = k / 3;
+      ctx.strokeStyle = misch(k % 2 ? C.farn : C.farnH, NEBEL, t);
+      ctx.lineWidth = Math.max(0.6, 26 * e);
+      ctx.beginPath();
+      ctx.moveTo(bx, p1.y);
+      ctx.quadraticCurveTo(bx + a * g * 0.9, p1.y - g * 0.9,
+                           bx + a * g * 1.7, p1.y - g * (0.5 + 0.4 * (1 - Math.abs(a))));
+      ctx.stroke();
+    }
+  } else {                                   // Fackel
+    const h = 900 * d.groesse;
+    quader(p1, p2, xf, 0.13, 0, h, cS, cH, cD);
+    const fy = p1.y - (h + 120) * e;
+    const flacker = 0.75 + 0.25 * Math.sin(spielzeit * 17 + d.versatz * 20);
+    const r = 150 * e * flacker;
+    if (r > 0.7){
+      const g = ctx.createRadialGradient(bx, fy, 0, bx, fy, r * 6);
+      g.addColorStop(0, "rgba(255,180,80," + (0.55 * (1 - t)).toFixed(3) + ")");
+      g.addColorStop(1, "rgba(255,140,40,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(bx, fy, r * 6, 0, Math.PI*2); ctx.fill();
+      ctx.fillStyle = misch(C.flamme, NEBEL, t * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(bx - r * 0.5, fy + r * 0.6);
+      ctx.quadraticCurveTo(bx, fy - r * 1.8, bx + r * 0.5, fy + r * 0.6);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+}
+
+// ===================================================================
+//  Hintergrund
+// ===================================================================
+let letzteSpielerPos = null;
+let himmel = null, himmelH = 0;
+function himmelZeichnen(versatz, horizont){
+  if (!himmel || himmelH !== H){
+    himmel = ctx.createLinearGradient(0, 0, 0, H);
+    himmel.addColorStop(0,   "#101a17");
+    himmel.addColorStop(0.45,"#2b3f33");
+    himmel.addColorStop(0.8, "#5d6b48");
+    himmel.addColorStop(1,   "#8d8a5e");
+    himmelH = H;
+  }
+  ctx.fillStyle = himmel;
+  ctx.fillRect(0, 0, W, H);
+
+  // Nebelbank am Horizont
+  const g = ctx.createLinearGradient(0, horizont - H*0.22, 0, horizont + 8);
+  g.addColorStop(0, "rgba(44,59,48,0)");
+  g.addColorStop(1, "rgba(44,59,48,0.95)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, horizont - H*0.22, W, H*0.22 + 8);
+
+  // Dunstglühen über dem Horizont
+  const glut = ctx.createRadialGradient(W*0.5, horizont, 0, W*0.5, horizont, W*0.75);
+  glut.addColorStop(0, "rgba(226,178,96,0.30)");
+  glut.addColorStop(0.5, "rgba(190,140,70,0.10)");
+  glut.addColorStop(1, "rgba(190,140,70,0)");
+  ctx.fillStyle = glut;
+  ctx.fillRect(0, Math.max(0, horizont - H*0.55), W, H*0.6);
+
+  // ferne Tempelsilhouette, parallax
+  ctx.fillStyle = "rgba(18,28,22,0.75)";
+  const bw = W * 0.5;
+  let px = ((-versatz * 0.35) % bw + bw) % bw - bw;
+  for (let k = 0; k < 4; k++){
+    const x0 = px + k * bw;
+    const h = H * 0.16;
+    ctx.beginPath();
+    ctx.moveTo(x0, horizont);
+    ctx.lineTo(x0 + bw*0.18, horizont - h*0.55);
+    ctx.lineTo(x0 + bw*0.30, horizont - h*0.55);
+    ctx.lineTo(x0 + bw*0.40, horizont - h);
+    ctx.lineTo(x0 + bw*0.52, horizont - h);
+    ctx.lineTo(x0 + bw*0.62, horizont - h*0.5);
+    ctx.lineTo(x0 + bw*0.86, horizont - h*0.5);
+    ctx.lineTo(x0 + bw*0.95, horizont - h*0.72);
+    ctx.lineTo(x0 + bw,      horizont);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // nähere Baumkronen, schneller versetzt: erzeugt Tiefe
+  ctx.fillStyle = "rgba(11,20,15,0.9)";
+  const kw = W * 0.22;
+  let kx = ((-versatz * 0.85) % kw + kw) % kw - kw;
+  ctx.beginPath();
+  ctx.moveTo(kx, horizont + 4);
+  for (let k = 0; k <= 10; k++){
+    const x0 = kx + k * kw;
+    const hk = H * (0.05 + 0.035 * Math.abs(Math.sin(k * 2.7)));
+    ctx.lineTo(x0, horizont + 2);
+    ctx.quadraticCurveTo(x0 + kw*0.25, horizont - hk, x0 + kw*0.5, horizont - hk*0.55);
+    ctx.quadraticCurveTo(x0 + kw*0.75, horizont - hk*1.1, x0 + kw, horizont + 2);
+  }
+  ctx.lineTo(kx + 11*kw, horizont + 40);
+  ctx.lineTo(kx, horizont + 40);
+  ctx.closePath(); ctx.fill();
+}
+
+// Staub in der Luft, radial vom Fluchtpunkt nach außen
+const staub = [];
+for (let i = 0; i < 44; i++){
+  staub.push({ a: Math.random() * Math.PI * 2, r0: Math.random(), v: 0.55 + Math.random() * 0.9 });
+}
+function staubZeichnen(horizont){
+  const maxR = Math.hypot(W, H) * 0.62;
+  const schnell = 0.10 + S.tempo / 90000;
+  ctx.fillStyle = "rgba(228,214,178,0.5)";
+  for (const k of staub){
+    const r = ((k.r0 + spielzeit * k.v * schnell) % 1);
+    const px = W/2 + Math.cos(k.a) * r * maxR;
+    const py = horizont + Math.sin(k.a) * r * maxR * 0.8;
+    if (px < -20 || px > W + 20 || py < -20 || py > H + 20) continue;
+    const gr = 0.4 + r * 2.2;
+    ctx.globalAlpha = Math.min(1, r * 2) * (1 - r) * 0.75;
+    ctx.beginPath(); ctx.arc(px, py, gr, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+// Vignette, einmal je Bildgröße gebaut
+let vignette = null, vignetteH = 0;
+function vignetteZeichnen(){
+  if (!vignette || vignetteH !== H){
+    vignette = ctx.createRadialGradient(W/2, H*0.52, Math.min(W,H)*0.32, W/2, H*0.52, Math.max(W,H)*0.78);
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(0.65, "rgba(0,0,0,0.16)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.5)");
+    vignetteH = H;
+  }
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function markieren(p1, p2, o){
+  const puls = 0.35 + 0.35 * Math.abs(Math.sin(spielzeit * 9));
+  ctx.save();
+  ctx.globalAlpha = puls;
+  if (o.typ === "huerde")      quader(p1, p2, SPUREN[o.spur], 0.34, 0, o.hoehe + 60, "#e2452a", "#ff8a5c", "#e2452a");
+  else if (o.typ === "balken") quader(p1, p2, SPUREN[o.spur], 0.40, BALKEN_UK - 40, 380, "#e2452a", "#ff8a5c", "#e2452a");
+  else if (o.typ === "statue") quader(p1, p2, SPUREN[o.spur], 0.34, 0, o.hoehe, "#e2452a", "#ff8a5c", "#e2452a");
+  ctx.restore();
+}
+
+// Der Wächter läuft in dieselbe Richtung, wird also von hinten gesehen.
+function waechterZeichnen(x, boden, e){
+  const phase = S.laufphase * 0.85;
+
+  ctx.save();
+  ctx.translate(x, boden);
+  // Leichtes Wanken im Lauftakt
+  ctx.rotate(Math.sin(phase) * 0.035);
+
+  const schwung = Math.sin(phase) * 80 * e;
+
+  // Beine
+  ctx.strokeStyle = "#241a15";
+  ctx.lineWidth = 90 * e;
+  ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(-70*e, -300*e); ctx.lineTo(-70*e + schwung, -40*e); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 70*e, -300*e); ctx.lineTo( 70*e - schwung, -40*e); ctx.stroke();
+
+  // Rumpf mit hohen Schultern
+  ctx.fillStyle = "#2f231b";
+  ctx.beginPath();
+  ctx.moveTo(-210*e, -320*e);
+  ctx.quadraticCurveTo(-260*e, -640*e, -150*e, -700*e);
+  ctx.quadraticCurveTo(0, -760*e, 150*e, -700*e);
+  ctx.quadraticCurveTo(260*e, -640*e, 210*e, -320*e);
+  ctx.closePath();
+  ctx.fill();
+
+  // Fellzeichnung
+  ctx.strokeStyle = "rgba(90,66,48,0.5)";
+  ctx.lineWidth = 12 * e;
+  for (let k = -1; k <= 1; k++){
+    ctx.beginPath();
+    ctx.moveTo(k*90*e, -640*e);
+    ctx.lineTo(k*70*e, -360*e);
+    ctx.stroke();
+  }
+
+  // Arme, im Knöchelgang weit unten
+  ctx.strokeStyle = "#241a15";
+  ctx.lineWidth = 70 * e;
+  ctx.beginPath(); ctx.moveTo(-190*e, -600*e); ctx.lineTo(-280*e, -120*e - schwung*0.6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 190*e, -600*e); ctx.lineTo( 280*e, -120*e + schwung*0.6); ctx.stroke();
+
+  // Kopf zwischen den Schultern
+  ctx.fillStyle = "#241a15";
+  ctx.beginPath();
+  ctx.ellipse(0, -720*e, 105*e, 90*e, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Hörner
+  ctx.strokeStyle = "#c9bfa6";
+  ctx.lineWidth = 26 * e;
+  ctx.beginPath(); ctx.moveTo(-80*e, -770*e); ctx.quadraticCurveTo(-160*e, -850*e, -110*e, -900*e); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( 80*e, -770*e); ctx.quadraticCurveTo( 160*e, -850*e,  110*e, -900*e); ctx.stroke();
+
+  ctx.restore();
+}
+
+// ===================================================================
+//  Läufer
+// ===================================================================
+function laeuferZeichnen(p){
+  const e = p.s * VS;                 // Welteinheit -> Pixel
+  const x = p.x;
+  const boden = p.y;
+  const phase = S.laufphase;
+  const rutscht = S.rutscht > 0;
+  const inLuft = S.y > 4;
+
+  // Schatten
+  const schattenY = p.y + (S.y * p.s * VS);
+  const sf = Math.max(0.25, 1 - S.y / 900);
+  ctx.fillStyle = "rgba(0,0,0," + (0.42 * sf) + ")";
+  ctx.beginPath();
+  ctx.ellipse(x, schattenY, 150*e*sf, 44*e*sf, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  const koerperH = rutscht ? 190 : 420;
+  const kopfR = 62 * e;
+  const oben = boden - koerperH * e;
+
+  // Der Rumpf wippt zweimal je Schrittzyklus, am tiefsten im Standbein.
+  const huepf = (rutscht || inLuft) ? 0 : Math.abs(Math.sin(phase)) * 20 * e;
+  // Beim Spurwechsel legt er sich in die Bewegung
+  const neige = rutscht ? 0 : (SPUREN[S.spur] - S.x) * 0.25;
+
+  ctx.save();
+  ctx.translate(x, boden);
+  if (rutscht) ctx.rotate(-0.12);
+  else if (S.stolper > 0) ctx.rotate(Math.sin(S.stolper * 34) * 0.22);
+  else ctx.rotate(neige);
+
+  const armS = inLuft ? 0 : Math.sin(phase + Math.PI) * 42 * e;
+
+  // Beine
+  ctx.strokeStyle = "#3b2f22";
+  ctx.lineWidth = 34 * e;
+  ctx.lineCap = "round";
+  if (rutscht){
+    ctx.beginPath(); ctx.moveTo(0, -60*e); ctx.lineTo(150*e, -30*e); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -60*e); ctx.lineTo(130*e, -95*e); ctx.stroke();
+  } else if (inLuft){
+    ctx.beginPath(); ctx.moveTo(-26*e, -120*e); ctx.lineTo(-46*e, -18*e); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 26*e, -120*e); ctx.lineTo( 52*e, -46*e); ctx.stroke();
+  } else {
+    // Von hinten schwingt ein Laufbein kaum zur Seite. Es knickt im Knie ein,
+    // die Ferse kommt hoch, das Bein wird dabei sichtbar kürzer.
+    for (const seite of [-1, 1]){
+      const p = phase + (seite < 0 ? 0 : Math.PI);
+      const sp = ((p % (Math.PI*2)) + Math.PI*2) % (Math.PI*2);
+      const imSchwung = sp < Math.PI;                  // sonst Bodenkontakt
+      const heben = imSchwung ? Math.sin(sp) : 0;      // 1 = Ferse ganz oben
+      // Am Boden wandert der Fuß nach hinten, also zur Kamera
+      const stand = imSchwung ? 0 : (sp - Math.PI) / Math.PI;
+      const hx = seite * 24 * e, hy = -150 * e - huepf;
+      const kx = hx + seite * 10 * e * heben;
+      const ky = -(58 + 26 * heben) * e - huepf * 0.5;
+      const fx = hx + seite * 16 * e * heben;
+      const fy = imSchwung ? -135 * e * heben : (stand - 0.5) * 18 * e;
+
+      ctx.strokeStyle = "#3b2f22";
+      ctx.lineWidth = 36 * e;                          // Oberschenkel
+      ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(kx, ky); ctx.stroke();
+      ctx.lineWidth = 27 * e;                          // Unterschenkel
+      ctx.beginPath(); ctx.moveTo(kx, ky); ctx.lineTo(fx, fy); ctx.stroke();
+
+      // Beim Abheben sieht man die Sohle
+      ctx.fillStyle = heben > 0.3 ? "#8a6f4e" : "#2b2119";
+      ctx.beginPath();
+      ctx.ellipse(fx, fy - 8*e, (27 + 4*stand)*e, (11 + 9*heben + 3*stand)*e, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  if (huepf) ctx.translate(0, -huepf);
+
+  // Rumpf
+  const rH = rutscht ? 90*e : 210*e;
+  const rY = rutscht ? -140*e : -360*e;
+  ctx.fillStyle = "#c9b184";
+  ctx.beginPath();
+  if (rutscht) ctx.roundRect(-46*e, rY, 150*e, rH, 22*e);
+  else ctx.roundRect(-58*e, rY, 116*e, rH, 20*e);
+  ctx.fill();
+
+  // Rucksack
+  ctx.fillStyle = "#6d4c2f";
+  ctx.beginPath();
+  if (rutscht) ctx.roundRect(-10*e, rY - 26*e, 78*e, 44*e, 12*e);
+  else ctx.roundRect(-40*e, rY + 26*e, 80*e, 110*e, 16*e);
+  ctx.fill();
+
+  // Arme
+  ctx.strokeStyle = "#c9a06a";
+  ctx.lineWidth = 26 * e;
+  if (rutscht){
+    ctx.beginPath(); ctx.moveTo(60*e, rY + 30*e); ctx.lineTo(150*e, rY + 6*e); ctx.stroke();
+  } else if (inLuft){
+    ctx.beginPath(); ctx.moveTo(-56*e, rY + 40*e); ctx.lineTo(-104*e, rY - 40*e); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( 56*e, rY + 40*e); ctx.lineTo( 104*e, rY - 40*e); ctx.stroke();
+  } else {
+    for (const seite of [-1, 1]){
+      const sw = seite < 0 ? armS : -armS;
+      ctx.lineWidth = 26 * e;
+      ctx.beginPath();                                   // Oberarm
+      ctx.moveTo(seite * 52*e, rY + 40*e);
+      ctx.lineTo(seite * 90*e, rY + 108*e + sw * 0.35);
+      ctx.stroke();
+      ctx.lineWidth = 22 * e;
+      ctx.beginPath();                                   // Unterarm
+      ctx.moveTo(seite * 90*e, rY + 108*e + sw * 0.35);
+      ctx.lineTo(seite * 80*e, rY + 152*e + sw);
+      ctx.stroke();
+    }
+  }
+
+  // Kopf
+  const kY = rutscht ? -150*e : -430*e;
+  const kX = rutscht ?  110*e : 0;
+  ctx.fillStyle = "#8a5f3c";
+  ctx.beginPath(); ctx.arc(kX, kY, kopfR, 0, Math.PI*2); ctx.fill();
+
+  // Hut
+  ctx.fillStyle = "#5c4126";
+  ctx.beginPath();
+  ctx.ellipse(kX, kY - 22*e, kopfR*1.7, kopfR*0.5, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.ellipse(kX, kY - 50*e, kopfR*0.8, kopfR*0.55, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+// ===================================================================
+//  Bild aufbauen
+// ===================================================================
+function zeichnen(){
+  // Die Strecke muss ab der Kamera gezeichnet werden, sonst fehlt das Stück
+  // zwischen Kamera und Läufer und der untere Bildrand bleibt leer.
+  // Rücken die Wächter auf, weicht die Kamera zurück, sonst wären sie hinter
+  // ihr und damit unsichtbar.
+  const sichtN = sicht;
+  const kamZ = S.pos - KAM_ABST;
+  const basis = Math.floor(kamZ / SEG);
+  const anteil = (kamZ / SEG) - basis;
+  vorausErzeugen(basis + sichtN + 6);
+
+  const kamY = hoehe(kamZ / SEG) + KAM_HOEHE + S.y * 0.35 - (S.rutscht > 0 ? 140 : 0);
+  const kamX = S.kamX;
+
+  const spielerSeg = Math.floor(S.pos / SEG);
+  const spielerAnteil = (S.pos / SEG) - spielerSeg;
+  let spielerVersatz = 0;
+
+  let x = 0, dx = -(segment(basis).curve * anteil);
+  const liste = [];
+  for (let n = 0; n < sichtN; n++){
+    const s = segment(basis + n);
+    const z1 = (basis + n) * SEG;
+    const p1 = proj(x, s.y, z1, kamX, kamY, kamZ);
+    if (basis + n === spielerSeg){ spielerVersatz = x + dx * spielerAnteil; S.strassenX = spielerVersatz; }
+    x += dx; dx += s.curve;
+    const p2 = proj(x, hoehe(basis + n + 1), z1 + SEG, kamX, kamY, kamZ);
+    liste.push({ s:s, p1:p1, p2:p2, n:n });
+  }
+
+  const horizont = liste.length ? liste[liste.length-1].p1.y : H*0.4;
+  himmelZeichnen(S.kamX + x * 0.2, horizont);
+
+  ctx.save();
+  ctx.translate(0, S.neigung * 6);
+
+  // von hinten nach vorne
+  for (let n = liste.length - 1; n >= 0; n--){
+    const e = liste[n];
+    const t = Math.pow(n / sichtN, 2.2);        // Nebelanteil
+    const p1 = e.p1, p2 = e.p2, s = e.s;
+    if (p1.cz < 60 || p2.cz < 60) continue;   // Nahebene: keine entarteten Flächen
+    // Feinheiten nur dort zeichnen, wo sie mehr als ein paar Pixel groß sind
+    const nah = n < 34, mittel = n < 46;
+
+    const hell = (Math.floor(s.i / 3) % 2) === 0;
+    // Jede Platte etwas anders getönt: das nimmt dem Weg das Streifenmuster.
+    const stein = mischArr(hell ? C.weg1 : C.weg2, hell ? C.weg3 : C.weg4, s.stein);
+
+    // Boden neben dem Weg
+    viereck(p1.x, p1.y, p1.w * 14, p2.x, p2.y, p2.w * 14,
+            misch(mischArr(C.boden1, C.boden2, s.stein), NEBEL, t));
+
+    if (s.istLoch){
+      // Schacht: Boden fehlt, Seitenwände geben ihm Tiefe
+      viereck(p1.x, p1.y, p1.w * 1.15, p2.x, p2.y, p2.w * 1.15, misch(C.kante1, NEBEL, t));
+      viereck(p1.x, p1.y, p1.w, p2.x, p2.y, p2.w, misch(C.lochTief, NEBEL, t * 0.4));
+      const wand = misch(C.loch, NEBEL, t * 0.6);
+      quader(p1, p2, -1.0, 0.05, -900, 900, wand, wand, wand);
+      quader(p1, p2,  1.0, 0.05, -900, 900, wand, wand, wand);
+    } else {
+      // Randstein
+      viereck(p1.x, p1.y, p1.w * 1.14, p2.x, p2.y, p2.w * 1.14,
+              misch(hell ? C.kante2 : C.kante1, NEBEL, t));
+      // Abdunklung am Wegrand: gibt der Fläche Tiefe statt Pappe
+      if (mittel) viereck(p1.x, p1.y, p1.w * 1.02, p2.x, p2.y, p2.w * 1.02,
+                          misch(dunkler(stein, 0.62), NEBEL, t));
+      // Weg
+      viereck(p1.x, p1.y, p1.w * (mittel ? 0.955 : 1.02), p2.x, p2.y, p2.w * (mittel ? 0.955 : 1.02),
+              misch(stein, NEBEL, t));
+      // Moos kriecht von den Rändern herein
+      if (s.moos && nah){
+        const m = misch(mischArr(C.moos, stein, 0.35), NEBEL, t);
+        band(p1, p2, -0.955, -0.72 - s.stein*0.15, m);
+        band(p1, p2,  0.70 + s.stein*0.18, 0.955, m);
+      }
+      // Spurfugen
+      if (hell && nah){
+        const fuge = misch(dunkler(stein, 0.5), NEBEL, t);
+        for (const f of [-0.3, 0.3]){
+          band(p1, p2, f - 0.012, f + 0.012, fuge);
+        }
+      }
+    }
+
+    // Bruchkante am Schachtrand
+    if (s.bruch && p1.cz > 100){
+      const hellK = misch(C.bruch, NEBEL, t);
+      quader(p1, p2, 0, 1.08, 0, 90, misch(C.kante1, NEBEL, t), hellK, hellK);
+    }
+
+    // Mauer an der Kurvenaußenseite: erst dadurch ist die Kurve als solche lesbar
+    if (s.kurve && p1.cz > 100){
+      const aussen = -s.kurve.dir * 1.38;
+      quader(p1, p2, aussen, 0.36, 0, 2000,
+             misch(C.saeule, NEBEL, t), misch(C.saeuleT, NEBEL, t), misch(C.saeuleD, NEBEL, t));
+      quader(p1, p2, aussen, 0.40, 1900, 130,
+             misch(C.kante2, NEBEL, t), misch(C.kante2, NEBEL, t), misch(C.kante2, NEBEL, t));
+    }
+
+    // Randobjekte
+    if (s.deko && p1.cz > 180 && mittel){
+      dekoZeichnen(p1, p2, s.deko, t, s.deko.seite);
+      if (s.deko.beide) dekoZeichnen(p1, p2, s.deko, t, -s.deko.seite);
+    }
+
+    // Hindernisse
+    if (s.hind){
+      for (const o of s.hind){
+        // Kontaktschatten: ohne ihn schweben die Körper über dem Weg
+        if (o.spur >= 0 && p1.cz > 120 && nah){
+          const b = o.typ === "balken" ? 0.30 : 0.34;
+          band(p1, p2, SPUREN[o.spur] - b, SPUREN[o.spur] + b, "rgba(0,0,0,0.3)");
+        }
+        if (o.typ === "huerde"){
+          quader(p1, p2, SPUREN[o.spur], 0.28, 0, o.hoehe,
+                 misch(C.huerde, NEBEL, t), misch(C.huerdeT, NEBEL, t), misch(C.huerde, NEBEL, t));
+        } else if (o.typ === "balken"){
+          quader(p1, p2, SPUREN[o.spur], 0.34, BALKEN_UK, 300,
+                 misch(C.balken, NEBEL, t), misch(C.huerdeT, NEBEL, t), misch(C.balken, NEBEL, t));
+          // Goldband an der Unterkante: macht die Durchfahrthöhe von weitem lesbar
+          quader(p1, p2, SPUREN[o.spur], 0.34, BALKEN_UK, 45,
+                 misch(C.kante2, NEBEL, t), misch(C.kante2, NEBEL, t), misch(C.kante2, NEBEL, t));
+          if (o.spur === 1){
+            quader(p1, p2, -1.05, 0.12, 0, BALKEN_UK + 300,
+                   misch(C.balken, NEBEL, t), misch(C.huerdeT, NEBEL, t), misch(C.balken, NEBEL, t));
+            quader(p1, p2,  1.05, 0.12, 0, BALKEN_UK + 300,
+                   misch(C.balken, NEBEL, t), misch(C.huerdeT, NEBEL, t), misch(C.balken, NEBEL, t));
+          }
+        } else if (o.typ === "statue"){
+          quader(p1, p2, SPUREN[o.spur], 0.22, 0, o.hoehe * 0.72,
+                 misch(C.statue, NEBEL, t), misch(C.statueT, NEBEL, t), misch(C.statue, NEBEL, t));
+          quader(p1, p2, SPUREN[o.spur], 0.30, o.hoehe * 0.72, o.hoehe * 0.28,
+                 misch(C.statueT, NEBEL, t), misch(C.statueT, NEBEL, t), misch(C.statue, NEBEL, t));
+        }
+        if (o === S.trefferObj) markieren(p1, p2, o);
+      }
+    }
+
+    // Münze
+    if (s.muenze && !s.muenze.weg && p1.cz > 120){
+      const m = s.muenze;
+      const mx = p1.x + p1.w * SPUREN[m.spur];
+      const my = p1.y - m.y * p1.s * VS;
+      const r  = 95 * p1.s * VS;
+      const dreh = Math.abs(Math.cos(spielzeit * 4 + m.phase));
+      if (r > 3.5){
+        const g = ctx.createRadialGradient(mx, my, 0, mx, my, r * 3);
+        g.addColorStop(0, "rgba(255,205,110," + (0.45 * (1 - t)).toFixed(3) + ")");
+        g.addColorStop(1, "rgba(255,190,80,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(mx, my, r * 3, 0, Math.PI*2); ctx.fill();
+      }
+      ctx.fillStyle = misch(hex("#d8a531"), NEBEL, t);
+      ctx.beginPath();
+      ctx.ellipse(mx, my, Math.max(0.6, r * dreh), r, 0, 0, Math.PI*2);
+      ctx.fill();
+      if (dreh > 0.35 && r > 3){
+        ctx.fillStyle = misch(hex("#8a6a18"), NEBEL, t);
+        ctx.beginPath();
+        ctx.ellipse(mx, my, Math.max(0.4, r*dreh*0.55), r*0.55, 0, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Läufer
+  const pSpieler = proj(spielerVersatz + S.x * ROAD, hoehe(S.pos/SEG) + S.y, S.pos, kamX, kamY, kamZ);
+  letzteSpielerPos = pSpieler;
+  laeuferZeichnen(pSpieler);
+
+  // Der Wächter läuft dicht hinter der Kamera und wäre geometrisch nie im Bild.
+  // Er wird deshalb am unteren Rand gezeichnet und schiebt sich mit sinkendem
+  // Abstand weiter herein - Kopf, Schultern, Arme, mehr nicht.
+  const naeheW = Math.min(1.35, (JAEGER_SICHT - S.jaeger) / JAEGER_SICHT);
+  if (naeheW > 0.02){
+    const eW = pSpieler.s * VS * 1.9;
+    const hoeheW = 900 * eW;
+    const bodenW = H + hoeheW * (1.05 - 0.55 * naeheW);
+    const schwankW = Math.sin(spielzeit * 2.1) * 40 * eW;
+    waechterZeichnen(pSpieler.x + schwankW, bodenW, eW);
+  }
+
+  ctx.restore();
+
+  staubZeichnen(horizont);
+  vignetteZeichnen();
+
+  // Warnschein, wenn die Wächter nah sind
+  if (S.jaeger < JAEGER_WARN){
+    const naehe = 1 - S.jaeger / JAEGER_WARN;
+    const g = ctx.createRadialGradient(W/2, H*0.6, H*0.2, W/2, H*0.6, H*0.85);
+    g.addColorStop(0, "rgba(120,20,10,0)");
+    g.addColorStop(1, "rgba(120,20,10," + (0.55 * naehe * naehe).toFixed(3) + ")");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Treffer-Blitz
+  if (S.blitz > 0){
+    ctx.fillStyle = "rgba(168,52,31," + (S.blitz * 0.55) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ===================================================================
+//  Logik
+// ===================================================================
+// Ein Treffer ist nicht tödlich: er kostet Tempo, und die Wächter rücken auf.
+// Tödlich sind nur Sturz, verpasste Kurve und das Eingeholtwerden.
+function stolpern(o, klang){
+  if (S.modus !== "lauf" || S.stolper > 0) return;
+  o.erledigt = true;
+  S.stolper = STOLPER_DAUER;
+  S.tempo = S.sollTempo * 0.5;
+  S.jaeger -= JAEGER_STOSS;
+  S.rutscht = 0;
+  ton(130, 0.25, "sawtooth", 0.06);
+  if (klang) ton(70, 0.5, "sawtooth", 0.05);
+}
+
+// Beim Treffer erst kurz das Standbild zeigen und das Hindernis rot markieren,
+// sonst ist nicht erkennbar, woran der Lauf gescheitert ist.
+function tot(grund, hinweis, objekt){
+  if (S.modus !== "lauf") return;
+  S.modus = "sterben";
+  S.ursache = grund;
+  S.hinweis = hinweis || "";
+  S.trefferObj = objekt || null;
+  S.sterbeZeit = 1.0;
+  S.blitz = 1;
+  ton(90, 0.5, "sawtooth", 0.08);
+  warnung.classList.remove("an");
+}
+
+function bilanzZeigen(){
+  S.modus = "ende";
+  const grund = S.ursache;
+  const punkte = Math.floor(S.punkte);
+  if (punkte > S.rekord) S.rekord = punkte;
+  document.getElementById("todesursache").textContent = grund;
+  document.getElementById("todeshinweis").textContent = S.hinweis || "";
+  document.getElementById("endpunkte").textContent  = punkte.toLocaleString("de-DE");
+  document.getElementById("endmeter").textContent   = Math.floor(S.meter).toLocaleString("de-DE");
+  document.getElementById("endmuenzen").textContent = S.muenzen;
+  document.getElementById("rekordzeile").textContent = "Rekord " + S.rekord.toLocaleString("de-DE");
+  hud.classList.add("aus");
+  ende.classList.remove("aus");
+}
+
+// Ein Balken ist deutlich früher zu sehen, als das Rutschen dauert. Wer zu früh
+// wischt, würde sonst trotz richtiger Reaktion hineinlaufen: solange ein Balken
+// unmittelbar bevorsteht, läuft das Rutschen deshalb nicht aus.
+function balkenVoraus(sekunden){
+  const idx = Math.floor(S.pos / SEG);
+  const reichweite = S.tempo * sekunden;
+  // Die Suchweite muss in Segmenten mitwachsen, sonst reicht sie bei hohem
+  // Tempo nicht mehr bis zum Hindernis.
+  const bis = idx + Math.ceil(reichweite / SEG) + 2;
+  for (let i = idx; i < bis; i++){
+    const s = strecke.get(i);
+    if (!s || !s.hind) continue;
+    for (const o of s.hind){
+      if (o.typ !== "balken") continue;
+      const d = o.z + o.tiefe - S.pos;
+      if (d > -60 && d < reichweite) return true;
+    }
+  }
+  return false;
+}
+
+function pruefen(){
+  const idx = Math.floor(S.pos / SEG);
+  const vorn = S.pos + 70, hinten = S.pos - 70;
+
+  for (let i = idx - 3; i <= idx + 2; i++){
+    const s = strecke.get(i);
+    if (!s) continue;
+
+    if (s.hind){
+      for (const o of s.hind){
+        if (o.erledigt) continue;
+        if (!(vorn > o.z && hinten < o.z + o.tiefe)) continue;
+
+        if (o.typ === "loch"){
+          if (S.y < 120) return tot("Schacht", "Hoch wischen zum Springen", o);
+          continue;
+        }
+        if (Math.abs(S.x - SPUREN[o.spur]) > 0.44) continue;
+
+        if (o.typ === "huerde"){
+          if (S.y < o.hoehe + 20) return stolpern(o);
+        } else if (o.typ === "balken"){
+          if (S.rutscht <= 0) return stolpern(o);
+        } else if (o.typ === "statue"){
+          return stolpern(o, true);
+        }
+      }
+    }
+
+    if (s.muenze && !s.muenze.weg){
+      const m = s.muenze;
+      const mz = i * SEG;
+      if (Math.abs(mz - S.pos) < 130 &&
+          Math.abs(S.x - SPUREN[m.spur]) < 0.42 &&
+          Math.abs(S.y + 250 - m.y) < 420){
+        m.weg = true;
+        S.muenzen++;
+        S.punkte += 25;
+        ton(880 + (S.muenzen % 5) * 90, 0.07, "triangle", 0.045);
+      }
+    }
+  }
+
+  // Pflichtkurven
+  for (const k of kurven){
+    if (k.gewertet) continue;
+    if (idx > k.ende - 6){
+      k.gewertet = true;
+      if (!k.geschafft) return tot("Kurve verpasst", k.dir < 0 ? "Nach links wischen" : "Nach rechts wischen", null);
+      S.punkte += 60;
+    }
+  }
+}
+
+let spielzeit = 0;
+
+function schritt(dt){
+  spielzeit += dt;
+  if (S.blitz > 0) S.blitz = Math.max(0, S.blitz - dt * 2);
+  if (S.modus === "sterben"){
+    S.sterbeZeit -= dt;
+    if (S.sterbeZeit <= 0) bilanzZeigen();
+    return;
+  }
+  if (S.modus !== "lauf") return;
+
+  // Tempo
+  S.sollTempo = Math.min(V_MAX, S.sollTempo + (V_MAX - S.sollTempo) * dt * 0.022 + 70 * dt);
+  S.tempo += (S.sollTempo - S.tempo) * Math.min(1, dt * 0.95);
+  S.pos += S.tempo * dt;
+  S.meter += S.tempo * dt / 100;
+  S.punkte += S.tempo * dt / 100;
+  S.laufphase += dt * Math.min(18, S.tempo / 620);   // sonst trippelt er bei Höchsttempo
+
+  // Spurwechsel weich
+  const ziel = SPUREN[S.spur];
+  S.x += (ziel - S.x) * Math.min(1, dt * 12);
+  // Ohne Kopplung an den Straßenverlauf würde der Läufer in der Kurve seitlich
+  // aus dem Bild geschoben, statt dass sich die Strecke um ihn herum biegt.
+  S.kamX += ((S.strassenX + S.x * ROAD) - S.kamX) * Math.min(1, dt * 8);
+
+  // Sprung
+  if (S.y > 0 || S.vy > 0){
+    S.vy -= SCHWERKRAFT * dt;
+    S.y  += S.vy * dt;
+    if (S.y <= 0){
+      S.y = 0; S.vy = 0;
+      if (S.sprungPuffer > 0){ S.sprungPuffer = 0; S.vy = SPRUNG_V; ton(420, 0.12, "sine", 0.05); }
+    }
+  }
+  if (S.sprungPuffer > 0) S.sprungPuffer -= dt;
+
+  if (S.sprungAbsicht > 0 && S.y === 0){
+    S.sprungAbsicht -= dt;
+    if (sprungZielZeit() <= ABSPRUNG || S.sprungAbsicht <= 0) abspringen();
+  }
+
+  // Wächter
+  S.laufzeit += dt;
+  if (S.stolper > 0) S.stolper -= dt;
+  // Die Wächter laufen gleichmäßig. Wer langsam ist, verliert Boden, wer wieder
+  // auf Tempo ist, hängt sie ab.
+  // Im Startspurt bleiben sie einem im Nacken, erst danach läuft man sich frei.
+  const anteil = S.laufzeit < 2.0 ? 0.98 : JAEGER_ANTEIL;
+  S.jaeger = Math.min(JAEGER_START, S.jaeger + (S.tempo - S.sollTempo * anteil) * dt);
+  if (S.jaeger <= 0) return tot("Eingeholt", "Nicht mehrfach kurz hintereinander stolpern", null);
+  // Gebrüll, sobald er auftaucht oder wieder auftaucht. Die Hysterese verhindert,
+  // dass es an der Sichtgrenze im Wechsel auslöst.
+  if (!S.sichtbar && S.jaeger < JAEGER_SICHT * 0.7){
+    S.sichtbar = true;
+    if (spielzeit - letztesBruellen > 2.2){ bruellen(); letztesBruellen = spielzeit; }
+  } else if (S.sichtbar && S.jaeger > JAEGER_SICHT){
+    S.sichtbar = false;
+  }
+  if (S.jaeger < JAEGER_WARN && Math.random() < dt * 1.1) ton(zufall(58, 88), 0.4, "sawtooth", 0.045);
+
+  if (S.rutscht > 0){
+    S.rutscht -= dt;
+    if (S.rutscht < 0.22 && balkenVoraus(0.45)) S.rutscht = 0.22;
+  }
+
+  // Kurvenneigung
+  const kurveJetzt = segment(Math.floor(S.pos / SEG)).curve;
+  S.neigung += (kurveJetzt - S.neigung) * Math.min(1, dt * 5);
+
+  pruefen();
+
+  // Warnung vor Pflichtkurve
+  const idx = Math.floor(S.pos / SEG);
+  const k = kurven.find(k => !k.geschafft && !k.gewertet && idx > k.start - KURVE_VORLAUF && idx < k.ende - 4);
+  if (S.laufzeit < 1.6){
+    warnung.textContent = "Lauf!";
+    warnung.classList.add("an");
+  } else if (k){
+    warnung.textContent = k.dir < 0 ? "◀ Kurve links" : "Kurve rechts ▶";
+    warnung.classList.add("an");
+  } else {
+    warnung.classList.remove("an");
+  }
+}
+
+function hudAktualisieren(){
+  punkteAnzeige.textContent = Math.floor(S.punkte).toLocaleString("de-DE");
+  muenzAnzeige.textContent  = S.muenzen;
+  tempoAnzeige.textContent  = "Tempo " + Math.round(S.tempo / 100) + " · " + Math.floor(S.meter) + " m";
+}
+
+// ===================================================================
+//  Schleife
+// ===================================================================
+let letzte = 0;
+function rahmen(t){
+  requestAnimationFrame(rahmen);
+  if (!letzte) letzte = t;
+  let dt = (t - letzte) / 1000;
+  letzte = t;
+  if (dt > 0.05) dt = 0.05;          // nach Tabwechsel nicht durchrasen
+
+  if (S.modus === "pause"){ return; }
+
+  leistungPruefen(dt);
+  schritt(dt);
+  zeichnen();
+  if (S.modus === "lauf") hudAktualisieren();
+}
+
+// ===================================================================
+//  Bedienelemente
+// ===================================================================
+const hud          = document.getElementById("hud");
+const menue        = document.getElementById("menue");
+const ende         = document.getElementById("ende");
+const pause        = document.getElementById("pause");
+const warnung      = document.getElementById("warnung");
+const punkteAnzeige= document.getElementById("punkte");
+const muenzAnzeige = document.getElementById("muenzzahl");
+const tempoAnzeige = document.getElementById("tempo");
+const tonknopf     = document.getElementById("tonknopf");
+const pausenknopf  = document.getElementById("pausenknopf");
+pausenknopf.addEventListener("click", pauseUmschalten);
+
+// Sichtweite an die tatsächliche Bildrate anpassen, damit auch schwache
+// Telefone flüssig bleiben.
+let mittelDt = 1/60, anpassZeit = 0;
+function leistungPruefen(dt){
+  mittelDt += (dt - mittelDt) * 0.05;
+  anpassZeit += dt;
+  if (anpassZeit < 1.2) return;
+  anpassZeit = 0;
+  if (mittelDt > 1/44 && sicht > 46) sicht -= 8;
+  else if (mittelDt < 1/57 && sicht < SICHT) sicht += 4;
+}
+
+function pauseUmschalten(){
+  if (S.modus === "lauf"){ S.modus = "pause"; pause.classList.remove("aus"); }
+  else if (S.modus === "pause"){ S.modus = "lauf"; pause.classList.add("aus"); letzte = 0; }
+}
+
+document.getElementById("startknopf").addEventListener("click", function(){ tonFreischalten(); neuStarten(); });
+document.getElementById("nochmal").addEventListener("click", function(){ tonFreischalten(); neuStarten(); });
+document.getElementById("weiter").addEventListener("click", pauseUmschalten);
+tonknopf.addEventListener("click", function(){
+  S.ton = !S.ton;
+  tonknopf.textContent = "Ton: " + (S.ton ? "an" : "aus");
+});
+document.addEventListener("visibilitychange", function(){
+  if (document.hidden && S.modus === "lauf") pauseUmschalten();
+});
+
+// Start
+if (Math.min(window.innerWidth || 1024, window.innerHeight || 768) < 820) dprGrenze = 1.6;
+anpassen();
+streckeZuruecksetzen();
+S.x = SPUREN[1]; S.kamX = S.x * ROAD;
+zeichnen();
+requestAnimationFrame(rahmen);
+
+})();
+</script>
+</body>
+</html>
