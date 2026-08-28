@@ -493,8 +493,66 @@ const rawPatterns = [
 // Ignore-Case greift (genau wie im Original durch re.IGNORECASE).
 const patterns = rawPatterns.map(([src, responses]) => ({
   regex: new RegExp('^(?:' + src + ')', 'i'),
-  responses
+  responses,
+  i: 0            // Ringzeiger, siehe waehleAntwort()
 }));
+
+/* =========================================================================
+   ERWEITERUNGEN ÜBER DIE PYTHON-VORLAGE HINAUS
+   Beide sind über die Schalter abschaltbar; auf false verhält sich das
+   Programm wieder exakt wie das Original (Zufallsantwort, kein Gedächtnis).
+   ========================================================================= */
+const ROTIERENDE_ANTWORTEN = true;   // statt Math.random(): Ring pro Muster
+const ERINNERUNGSSPEICHER  = true;   // "mein ..." merken und später aufgreifen
+
+// Das letzte Muster '(.*)' fängt alles ab: hier landen die Standardfloskeln,
+// und genau hier darf das Gedächtnis dazwischenfunken.
+const AUFFANGMUSTER = patterns[patterns.length - 1];
+
+/* Antwortauswahl: rotierender Ring mit zufälligem Startpunkt. Der Ring sorgt
+   dafür, dass dieselbe Zerlegung nicht zweimal hintereinander dieselbe
+   Floskel liefert — der Startpunkt dafür, dass zwei Sitzungen trotzdem nicht
+   identisch beginnen. */
+function waehleAntwort(eintrag) {
+  if (!ROTIERENDE_ANTWORTEN) {
+    return eintrag.responses[Math.floor(Math.random() * eintrag.responses.length)];
+  }
+  const antwort = eintrag.responses[eintrag.i % eintrag.responses.length];
+  eintrag.i++;
+  return antwort;
+}
+
+function ringZuruecksetzen() {
+  patterns.forEach(p => {
+    p.i = Math.floor(Math.random() * p.responses.length);
+  });
+}
+
+/* -------------------------- Erinnerungsspeicher --------------------------
+   Weizenbaums MEMORY-Kniff: Wendungen mit "mein ..." werden beiseitegelegt
+   und hervorgeholt, sobald kein Muster mehr greift. Statt einer leeren
+   Floskel nimmt ELIZA dann einen früheren Faden wieder auf — das ist der
+   billigste und wirksamste Trick des ganzen Programms.
+   Gespeichert wird nur das Bezugswort, dann stimmt der Kasus in der
+   späteren Frage immer. */
+const speicher = [];
+let letzteWarErinnerung = false;
+
+function merken(rohtext) {
+  if (!ERINNERUNGSSPEICHER) return;
+  const m = rohtext.match(/(?:^|\s)mein(?:e|em|en|er|es)?\s+([A-Za-zÄÖÜäöüß-]{3,})/i);
+  if (!m) return;
+  const wort = m[1].charAt(0).toUpperCase() + m[1].slice(1);
+  const notiz = 'Vorhin fiel das Wort \u201E' + wort + '\u201C. Erzählen Sie mir mehr darüber.';
+  if (speicher.includes(notiz)) return;
+  speicher.push(notiz);
+  if (speicher.length > 6) speicher.shift();
+}
+
+function erinnerungFaellig() {
+  return ERINNERUNGSSPEICHER && speicher.length > 0 &&
+         !letzteWarErinnerung && Math.random() < 0.4;
+}
 
 const reflections = {
   'ich': 'Sie', 'mir': 'Ihnen', 'mich': 'sich',
@@ -526,13 +584,27 @@ function formatStr(template, args) {
   });
 }
 
-function respond(text) {
+function respond(rohtext) {
+  const antwort = antwortErzeugen(rohtext);
+  merken(rohtext);   // erst danach merken, sonst käme das Wort im selben Zug zurück
+  return antwort;
+}
+
+function antwortErzeugen(text) {
   text = text.toLowerCase().trim();
 
-  for (const { regex, responses } of patterns) {
+  for (const eintrag of patterns) {
+    const { regex } = eintrag;
     const match = regex.exec(text);
     if (match) {
-      const response = responses[Math.floor(Math.random() * responses.length)];
+      // Auffangmuster erreicht: erst im Gedächtnis nachsehen
+      if (eintrag === AUFFANGMUSTER && erinnerungFaellig()) {
+        letzteWarErinnerung = true;
+        return speicher.shift();
+      }
+      letzteWarErinnerung = false;
+
+      const response = waehleAntwort(eintrag);
       if (match.length > 1) {
         try {
           const reflected = reflect(match[1]);
@@ -616,6 +688,9 @@ function newSessionNumber() {
 }
 
 function startSession() {
+  speicher.length = 0;
+  letzteWarErinnerung = false;
+  ringZuruecksetzen();
   transcript.innerHTML = '';
   sessionNoEl.textContent = newSessionNumber();
   appendSystemMessage('— Sitzung gestartet —');
