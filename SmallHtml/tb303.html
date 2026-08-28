@@ -174,7 +174,7 @@ canvas#scope{position:absolute;right:24px;top:0;height:42px;width:110px}
     <div class="kb-container" id="kb-container" style="height:86px"></div>
   </div>
 
-  <div class="footer">Roland TB-303 Bass Line &mdash; Browser Emulator &mdash; Web Audio API</div>
+  <div class="footer">Roland TB-303 Bass Line &mdash; Browser Emulator &mdash; <span id="engine">Web Audio API</span></div>
 </div>
 
 <script>
@@ -187,6 +187,92 @@ let params={cutoff:800,reso:0.7,envmod:0.5,decay:0.3,tune:0,vol:0.7,accent:0.6};
 let waveType='sawtooth',bpm=130,running=false,currentStep=0,nextNoteTime=0,timerID=null;
 let audioCtx=null,masterGain=null,analyser=null,scopeData=null;
 let kbOctave=2,kbMode='play',recStepIdx=0;
+
+/* --- Ladder-VCF als AudioWorklet -----------------------------------
+   Vier kaskadierte Einpol-Tiefpaesse mit tanh-Saettigung in jeder
+   Stufe und in der Rueckkopplung. Der Ausgang wird an Stufe 3
+   abgegriffen (18 dB/Okt wie beim Original), die Rueckkopplung kommt
+   aus Stufe 4. Bewusst OHNE Passband-Kompensation: dass der Bass mit
+   steigender Resonanz duenner wird, ist Teil des Klangs.
+   4-faches Oversampling gegen das Aliasing der Nichtlinearitaet. */
+const LADDER_SRC=`
+class LadderFilter extends AudioWorkletProcessor{
+  static get parameterDescriptors(){
+    return [
+      {name:'frequency',defaultValue:800,minValue:20,maxValue:18000,automationRate:'a-rate'},
+      {name:'resonance',defaultValue:0.7,minValue:0,maxValue:1,automationRate:'a-rate'},
+      {name:'drive',defaultValue:1.15,minValue:0.1,maxValue:6,automationRate:'k-rate'}
+    ];
+  }
+  constructor(){
+    super();
+    this.OS=4;
+    this.srOS=sampleRate*this.OS;
+    this.z1=0;this.z2=0;this.z3=0;this.z4=0;
+  }
+  /* Pade-Naeherung fuer tanh, deutlich billiger als Math.tanh */
+  ft(x){
+    if(x<-3)return -1;
+    if(x>3)return 1;
+    const x2=x*x;
+    return x*(27+x2)/(27+9*x2);
+  }
+  process(inputs,outputs,par){
+    const out=outputs[0][0];
+    if(!out)return true;
+    const inp=(inputs[0]&&inputs[0][0])?inputs[0][0]:null;
+    if(!inp){out.fill(0);return true;}
+    const fA=par.frequency,rA=par.resonance,drive=par.drive[0];
+    const OS=this.OS,srOS=this.srOS,inv=1/OS;
+    for(let i=0;i<out.length;i++){
+      const fc=fA.length>1?fA[i]:fA[0];
+      const res=rA.length>1?rA[i]:rA[0];
+      const g=1-Math.exp(-2*Math.PI*fc/srOS);
+      const k=res*4.4;
+      const x=inp[i]*drive;
+      let acc=0;
+      for(let n=0;n<OS;n++){
+        const u=this.ft(x-k*this.z4);
+        this.z1+=g*(u-this.ft(this.z1));
+        this.z2+=g*(this.ft(this.z1)-this.ft(this.z2));
+        this.z3+=g*(this.ft(this.z2)-this.ft(this.z3));
+        this.z4+=g*(this.ft(this.z3)-this.ft(this.z4));
+        acc+=this.z3;
+      }
+      out[i]=acc*inv;
+    }
+    return true;
+  }
+}
+registerProcessor('ladder-filter',LadderFilter);
+`;
+
+/* --- durchgehende monophone Stimmen (Sequencer + Keyboard) --- */
+let seqVoice=null,kbVoice=null,useLadder=false,audioReady=null;
+const kbHeld=new Set();
+
+/* --- Accent-Ladung: bildet den Kondensator nach, der sich zwischen
+       den Steps nicht vollstaendig entlaedt --- */
+const ACC_TAU=0.22;      /* Zeitkonstante der Entladung in Sekunden */
+const ACC_MAX=1.8;       /* Saettigung der Ladung                   */
+const ACC_KICK=1.0;      /* Ladungszuwachs pro akzentuierter Note   */
+const SLIDE_TIME=0.055;  /* Portamento-Zeit des Originals           */
+let accentCharge=0,lastStepTime=0;
+
+/* --- analytischer Zustand der Filterhuellkurve ---------------------
+   Die Stimme hat nur EIN Filter, dessen AudioParam eine einzige
+   Zeitachse hat. Automationsevents muessen daher streng aufsteigend
+   geschrieben werden. Statt eine Rampe ueber mehrere Steps laufen zu
+   lassen, wird die Huellkurve hier mitgerechnet und pro Step genau
+   ein Segment geschrieben. So laeuft der Verlauf auch ueber
+   gebundene Noten sauber weiter. */
+let envPeak=800,envFloor=800,envT0=0,envDec=0.3;
+function envValueAt(t){
+  if(envPeak<=0||envFloor<=0)return Math.max(30,params.cutoff);
+  if(t<=envT0)return envPeak;
+  const k=Math.min(1,(t-envT0)/envDec);
+  return envPeak*Math.pow(envFloor/envPeak,k);
+}
 
 const steps=Array.from({length:16},()=>({note:'A2',active:true,accent:false,slide:false}));
 
@@ -201,54 +287,144 @@ const PRESETS=[
    active:[1,1,1,1,0,1,1,0,1,1,1,1,0,1,1,0],accent:[1,0,0,1,0,1,0,0,1,0,0,1,0,0,1,0],slide:[0,1,0,0,0,0,1,0,0,1,0,0,0,0,0,1]}
 ];
 
-function initAudio(){
-  if(audioCtx)return;
-  audioCtx=new(window.AudioContext||window.webkitAudioContext)();
-  masterGain=audioCtx.createGain();
-  masterGain.gain.value=params.vol;
-  analyser=audioCtx.createAnalyser();
-  analyser.fftSize=256;
-  masterGain.connect(analyser);
-  analyser.connect(audioCtx.destination);
-  scopeData=new Uint8Array(analyser.frequencyBinCount);
-  drawScope();
-}
-
-function playNote(time,noteStr,accent,slide,prevNote,prevSlide){
-  const freq=(NOTE_FREQS[noteStr]||440)*Math.pow(2,params.tune/12);
-  const dur=60/bpm/4;
+/* Die Stimme kapselt das Filter hinter zwei Feldern:
+   .cutoff  -> AudioParam, identisch fuer Ladder und Biquad
+   .setReso -> Setter, weil Q und resonance verschieden skalieren */
+function makeVoice(){
   const osc=audioCtx.createOscillator();
   osc.type=waveType;
-  osc.frequency.setValueAtTime(freq,time);
-  if(slide&&prevSlide&&prevNote&&NOTE_FREQS[prevNote]){
-    const pf=NOTE_FREQS[prevNote]*Math.pow(2,params.tune/12);
-    osc.frequency.setValueAtTime(pf,time);
-    osc.frequency.exponentialRampToValueAtTime(freq,time+0.06);
+  osc.frequency.value=110;
+
+  let flt,cutoff,setReso;
+  if(useLadder){
+    flt=new AudioWorkletNode(audioCtx,'ladder-filter',{numberOfInputs:1,numberOfOutputs:1,outputChannelCount:[1]});
+    cutoff=flt.parameters.get('frequency');
+    const rp=flt.parameters.get('resonance');
+    cutoff.value=params.cutoff;
+    rp.value=params.reso;
+    setReso=x=>{rp.value=x;};
+  }else{
+    flt=audioCtx.createBiquadFilter();
+    flt.type='lowpass';
+    flt.Q.value=params.reso*30;
+    flt.frequency.value=params.cutoff;
+    cutoff=flt.frequency;
+    setReso=x=>{flt.Q.value=x*30;};
   }
-  const flt=audioCtx.createBiquadFilter();
-  flt.type='lowpass';
-  flt.Q.value=params.reso*30;
-  const ab=accent?params.accent*3000:0;
-  flt.frequency.setValueAtTime(params.cutoff+ab+params.envmod*6000,time);
-  flt.frequency.exponentialRampToValueAtTime(Math.max(params.cutoff,20),time+params.decay);
+
   const vca=audioCtx.createGain();
-  const pg=accent?0.9:0.6;
-  const rt=slide?dur*1.1:dur*0.75;
-  vca.gain.setValueAtTime(0,time);
-  vca.gain.linearRampToValueAtTime(pg,time+0.004);
-  vca.gain.setValueAtTime(pg,time+rt-0.02);
-  vca.gain.linearRampToValueAtTime(0,time+rt);
+  vca.gain.value=0.0001;
   osc.connect(flt);flt.connect(vca);vca.connect(masterGain);
-  osc.start(time);osc.stop(time+rt+0.02);
+  osc.start();
+  return {osc,flt,cutoff,setReso,vca};
+}
+
+/* Gibt ein Promise zurueck und laeuft nur einmal. Das Worklet-Modul
+   wird aus einem Blob geladen, damit die Seite eine einzelne Datei
+   bleibt. Schlaegt das fehl, wird auf den Biquad zurueckgefallen. */
+function initAudio(){
+  if(audioReady)return audioReady;
+  audioReady=(async()=>{
+    audioCtx=new(window.AudioContext||window.webkitAudioContext)();
+    masterGain=audioCtx.createGain();
+    masterGain.gain.value=params.vol;
+    analyser=audioCtx.createAnalyser();
+    analyser.fftSize=256;
+    masterGain.connect(analyser);
+    analyser.connect(audioCtx.destination);
+    scopeData=new Uint8Array(analyser.frequencyBinCount);
+
+    try{
+      if(!audioCtx.audioWorklet)throw new Error('kein AudioWorklet');
+      const url=URL.createObjectURL(new Blob([LADDER_SRC],{type:'application/javascript'}));
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      useLadder=true;
+    }catch(err){
+      console.warn('Ladder-VCF nicht verfuegbar, Biquad-Fallback:',err);
+      useLadder=false;
+    }
+
+    seqVoice=makeVoice();
+    kbVoice=makeVoice();
+    const tag=document.getElementById('engine');
+    if(tag)tag.textContent=useLadder?'Ladder-VCF (AudioWorklet, 18 dB/Okt, 4x OS)':'Biquad-Fallback (12 dB/Okt)';
+  })();
+  return audioReady;
+}
+
+function silence(v){
+  if(!v||!audioCtx)return;
+  const now=audioCtx.currentTime;
+  v.osc.frequency.cancelScheduledValues(now);
+  v.cutoff.cancelScheduledValues(now);
+  v.vca.gain.cancelScheduledValues(now);
+  v.vca.gain.setTargetAtTime(0.0001,now,0.01);
+}
+
+/* Ein Step wird auf die durchgehende Stimme geschrieben.
+   Slide bedeutet: dieser Step ist mit dem FOLGENDEN gebunden.
+   Bei einer gebundenen Note bleibt das Gate offen und die
+   Huellkurve triggert nicht neu - so wie beim Original. */
+function scheduleStep(idx,time){
+  const s=steps[idx];
+  const stepDur=60/bpm/4;
+
+  /* Accent-Kondensator bis zu diesem Zeitpunkt entladen */
+  accentCharge*=Math.exp(-Math.max(0,time-lastStepTime)/ACC_TAU);
+  lastStepTime=time;
+
+  if(!s.active)return;
+
+  const v=seqVoice;
+  if(!v)return;
+
+  const prev=steps[(idx-1+16)%16];
+  const next=steps[(idx+1)%16];
+  const legato=prev.active&&prev.slide;   /* wird hineingebunden */
+  const tieOut=s.slide&&next.active;      /* bindet weiter       */
+
+  if(s.accent)accentCharge=Math.min(ACC_MAX,accentCharge+ACC_KICK);
+  const acc=s.accent?params.accent*accentCharge:0;
+
+  const freq=(NOTE_FREQS[s.note]||440)*Math.pow(2,params.tune/12);
+
+  /* --- Tonhoehe --- */
+  if(legato){
+    const pf=(NOTE_FREQS[prev.note]||440)*Math.pow(2,params.tune/12);
+    v.osc.frequency.setValueAtTime(pf,time);
+    v.osc.frequency.exponentialRampToValueAtTime(freq,time+SLIDE_TIME);
+  }else{
+    v.osc.frequency.setValueAtTime(freq,time);
+  }
+
+  /* --- Filterhuellkurve: neu nur bei Anschlag oder Accent,
+         sonst laeuft der alte Verlauf weiter --- */
+  if(!legato||s.accent){
+    envPeak=Math.min(18000,params.cutoff+params.envmod*6000+acc*3500);
+    envFloor=Math.max(30,params.cutoff);
+    envDec=Math.max(0.02,params.decay*(s.accent?0.55:1));
+    envT0=time;
+  }
+  const seg=stepDur*0.99;
+  v.cutoff.setValueAtTime(envValueAt(time),time);
+  v.cutoff.exponentialRampToValueAtTime(envValueAt(time+seg),time+seg);
+
+  /* --- VCA: Attack nur bei echtem Anschlag --- */
+  if(!legato){
+    const pg=Math.min(1,0.5+acc*0.45);
+    v.vca.gain.setValueAtTime(0.0001,time);
+    v.vca.gain.linearRampToValueAtTime(pg,time+0.003);
+  }
+  /* --- Release nur, wenn nicht weitergebunden wird --- */
+  if(!tieOut){
+    v.vca.gain.setTargetAtTime(0.0001,time+stepDur*0.55,0.007);
+  }
 }
 
 function scheduler(){
-  while(nextNoteTime<audioCtx.currentTime+0.1){
-    const s=steps[currentStep];
-    if(s.active){
-      const p=steps[(currentStep-1+16)%16];
-      playNote(nextNoteTime,s.note,s.accent,s.slide,p.active?p.note:null,p.slide);
-    }
+  while(nextNoteTime<audioCtx.currentTime+0.08){
+    scheduleStep(currentStep,nextNoteTime);
     flashStep(currentStep);
     currentStep=(currentStep+1)%16;
     nextNoteTime+=60/bpm/4;
@@ -269,19 +445,22 @@ function flashStep(idx){
   });
 }
 
-function togglePlay(){
-  initAudio();
-  if(audioCtx.state==='suspended')audioCtx.resume();
+async function togglePlay(){
+  await initAudio();
+  if(audioCtx.state==='suspended')await audioCtx.resume();
   running=!running;
   const btn=document.getElementById('btn-play');
   if(running){
     currentStep=0;nextNoteTime=audioCtx.currentTime+0.05;
+    accentCharge=0;lastStepTime=nextNoteTime;
+    envPeak=envFloor=Math.max(30,params.cutoff);envT0=nextNoteTime;
     scheduler();
     btn.innerHTML='&#9646;&#9646; PAUSE';
     btn.classList.add('running');
     document.getElementById('dtext').textContent='PLAYING';
   }else{
     clearTimeout(timerID);
+    silence(seqVoice);
     btn.innerHTML='&#9654; PLAY';
     btn.classList.remove('running');
     document.getElementById('dtext').textContent='PAUSED';
@@ -295,13 +474,16 @@ function stopAll(){
   document.querySelectorAll('.cell-ind').forEach(e=>e.classList.remove('playing'));
   lastHL=-1;
   document.getElementById('dtext').textContent='STOPPED';
-  if(audioCtx)audioCtx.suspend();
+  accentCharge=0;
+  silence(seqVoice);
 }
 
 function setTempo(v){bpm=parseInt(v);document.getElementById('tempo-val').textContent=bpm;}
 
 function setWave(t){
   waveType=t;
+  if(seqVoice)seqVoice.osc.type=t;
+  if(kbVoice)kbVoice.osc.type=t;
   document.getElementById('wave-saw').classList.toggle('active',t==='sawtooth');
   document.getElementById('wave-sq').classList.toggle('active',t==='square');
 }
@@ -450,6 +632,10 @@ function initKnobs(){
       knob.style.transform=`rotate(${-135+norm*270}deg)`;
       document.getElementById('val-'+param).textContent=(val<1&&val>0)?val.toFixed(2):Math.round(val);
       if(param==='vol'&&masterGain)masterGain.gain.setTargetAtTime(val,audioCtx?audioCtx.currentTime:0,0.01);
+      if(param==='reso'){
+        if(seqVoice)seqVoice.setReso(val);
+        if(kbVoice)kbVoice.setReso(val);
+      }
     }
     upd(val);
     let sy,sv;
@@ -474,7 +660,6 @@ const NOTES_ALL=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const WHITE_NOTES=['C','D','E','F','G','A','B'];
 const BLACK_POS=[0.65,1.65,null,3.65,4.65,5.65,null];
 const BLACK_NAMES=['C#','D#',null,'F#','G#','A#',null];
-const activeKbNodes={};
 
 function noteFreqKb(name,oct){
   return 440*Math.pow(2,(12*(oct+1)+NOTES_ALL.indexOf(name)-69)/12);
@@ -514,12 +699,13 @@ function attachKey(k){
   k.addEventListener('touchend',e=>{e.preventDefault();kPress(k,false);});
 }
 
-function kPress(k,on){
+async function kPress(k,on){
   const note=k.dataset.note,oct=parseInt(k.dataset.oct),full=note+oct;
   if(on){
     k.classList.add('pressed');
     if(kbMode==='play'){
-      initAudio();if(audioCtx.state==='suspended')audioCtx.resume();
+      await initAudio();
+      if(audioCtx.state==='suspended')await audioCtx.resume();
       kbStart(full,note,oct);
     }else{
       if(recStepIdx>=16)recStepIdx=0;
@@ -534,29 +720,38 @@ function kPress(k,on){
   }
 }
 
+/* Das Keyboard hat eine eigene, ebenfalls durchgehende Stimme.
+   Monophon mit Last-Note-Priority, wie beim Original. */
 function kbStart(full,note,oct){
-  kbStop(full);
-  const freq=noteFreqKb(note,oct)*Math.pow(2,params.tune/12);
-  const osc=audioCtx.createOscillator();
-  osc.type=waveType;osc.frequency.value=freq;
-  const flt=audioCtx.createBiquadFilter();
-  flt.type='lowpass';flt.Q.value=params.reso*30;
+  const v=kbVoice;if(!v)return;
   const now=audioCtx.currentTime;
-  flt.frequency.setValueAtTime(params.cutoff+params.envmod*5000,now);
-  flt.frequency.exponentialRampToValueAtTime(Math.max(params.cutoff,20),now+params.decay);
-  const vca=audioCtx.createGain();
-  vca.gain.setValueAtTime(0,now);vca.gain.linearRampToValueAtTime(0.7,now+0.005);
-  osc.connect(flt);flt.connect(vca);vca.connect(masterGain);osc.start(now);
-  activeKbNodes[full]={osc,flt,vca};
+  const freq=noteFreqKb(note,oct)*Math.pow(2,params.tune/12);
+  const legato=kbHeld.size>0;
+  kbHeld.add(full);
+
+  v.osc.frequency.cancelScheduledValues(now);
+  if(legato){
+    v.osc.frequency.setValueAtTime(v.osc.frequency.value,now);
+    v.osc.frequency.exponentialRampToValueAtTime(freq,now+SLIDE_TIME);
+  }else{
+    v.osc.frequency.setValueAtTime(freq,now);
+    v.cutoff.cancelScheduledValues(now);
+    v.cutoff.setValueAtTime(Math.min(18000,params.cutoff+params.envmod*6000),now);
+    v.cutoff.exponentialRampToValueAtTime(Math.max(30,params.cutoff),now+Math.max(0.02,params.decay));
+    v.vca.gain.cancelScheduledValues(now);
+    v.vca.gain.setValueAtTime(0.0001,now);
+    v.vca.gain.linearRampToValueAtTime(0.6,now+0.003);
+  }
   document.getElementById('dtext').textContent=full;
   document.getElementById('led').classList.add('on');
 }
 
 function kbStop(full){
-  const n=activeKbNodes[full];if(!n)return;
-  const now=audioCtx?audioCtx.currentTime:0;
-  n.vca.gain.setTargetAtTime(0,now,0.03);n.osc.stop(now+0.15);
-  delete activeKbNodes[full];
+  kbHeld.delete(full);
+  if(!kbVoice||!audioCtx||kbHeld.size>0)return;
+  const now=audioCtx.currentTime;
+  kbVoice.vca.gain.cancelScheduledValues(now);
+  kbVoice.vca.gain.setTargetAtTime(0.0001,now,0.02);
   document.getElementById('led').classList.remove('on');
 }
 
@@ -580,7 +775,7 @@ const KEY_MAP={
   'k':'C','o':'C#','l':'D'
 };
 const pressedKeys=new Set();
-document.addEventListener('keydown',e=>{
+document.addEventListener('keydown',async e=>{
   if(e.repeat||e.target.tagName==='SELECT')return;
   const note=KEY_MAP[e.key.toLowerCase()];
   if(!note)return;
@@ -589,7 +784,8 @@ document.addEventListener('keydown',e=>{
   const full=note+kbOctave;
   if(pressedKeys.has(full))return;
   pressedKeys.add(full);
-  initAudio();if(audioCtx.state==='suspended')audioCtx.resume();
+  await initAudio();
+  if(audioCtx.state==='suspended')await audioCtx.resume();
   const n=NOTES_ALL.indexOf(note);
   kbStart(full,note,kbOctave);
   document.querySelectorAll('.wkey,.bkey').forEach(k=>{

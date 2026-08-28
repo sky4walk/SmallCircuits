@@ -104,6 +104,27 @@ body{
   background:#b0b0b0;
 }
 
+/* No-Guess toggle */
+#ngRow{display:flex;gap:4px;margin-bottom:6px;}
+#ngBtn{
+  flex:1;font-size:7px;letter-spacing:0px;
+  padding:4px 2px;background:#c0c0c0;cursor:pointer;
+  border-top:2px solid #fff;border-left:2px solid #fff;
+  border-bottom:2px solid #808080;border-right:2px solid #808080;
+  font-family:'Press Start 2P',monospace;
+  white-space:nowrap;display:flex;align-items:center;justify-content:center;gap:6px;
+}
+#ngBtn.active{
+  border-top:2px solid #808080;border-left:2px solid #808080;
+  border-bottom:2px solid #fff;border-right:2px solid #fff;
+  background:#b0b0b0;
+}
+#ngBox{
+  width:11px;height:11px;background:#fff;
+  border-top:2px solid #808080;border-left:2px solid #808080;
+  border-bottom:2px solid #fff;border-right:2px solid #fff;
+  font-size:8px;line-height:9px;color:#000;text-align:center;
+}
 /* Grid */
 #gridWrap{
   background:#c0c0c0;
@@ -212,6 +233,11 @@ body{
       <button class="diffBtn"        id="dHard"    onclick="setDiff('hard')">GROSS</button>
     </div>
 
+    <!-- No-Guess -->
+    <div id="ngRow">
+      <button id="ngBtn" onclick="toggleNoGuess()"><span id="ngBox"></span>OHNE RATEN</button>
+    </div>
+
     <!-- Panel: mines left, face, timer -->
     <div id="panel" class="sunken">
       <div class="lcd" id="mineCount">010</div>
@@ -283,6 +309,24 @@ let minesLeft=0;
 let timerVal=0;
 let timerInterval=null;
 let firstClick=true;
+let NB=[];         // Nachbar-Indizes je Feld (für den Solver)
+let genToken=0;    // bricht laufende Generierung bei Neustart ab
+
+// ── NO-GUESS ──────────────────────────────────────────────
+const NGKEY='minesweeper_noguess';
+let noGuess=false;
+try{ noGuess=localStorage.getItem(NGKEY)==='1'; }catch(e){}
+
+function toggleNoGuess(){
+  noGuess=!noGuess;
+  try{localStorage.setItem(NGKEY,noGuess?'1':'0');}catch(e){}
+  renderNoGuess();
+  newGame();
+}
+function renderNoGuess(){
+  document.getElementById('ngBtn').classList.toggle('active',noGuess);
+  document.getElementById('ngBox').textContent=noGuess?'✔':'';
+}
 
 function idx(c,r){ return r*cols+c; }
 function cell(c,r){ return (c>=0&&c<cols&&r>=0&&r<rows)?cells[idx(c,r)]:null; }
@@ -310,7 +354,9 @@ function newGame(){
   cells=[];
   firstClick=true;
   gameState='idle';
+  genToken++;
   minesLeft=totalMines;
+  buildNB();
   stopTimer(); timerVal=0;
   updateLCD('mineCount',minesLeft);
   updateLCD('timer',0);
@@ -350,39 +396,257 @@ function newGame(){
 }
 
 // ── PLACE MINES (after first click) ───────────────────────
-function placeMines(safeI){
-  const safe=new Set();
-  // safe zone: clicked cell + neighbors
+function buildNB(){
+  const n=cols*rows;
+  NB=new Array(n);
+  for(let r=0;r<rows;r++) for(let c=0;c<cols;c++){
+    const list=[];
+    for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
+      if(!dr&&!dc) continue;
+      const nc=c+dc, nr=r+dr;
+      if(nc>=0&&nc<cols&&nr>=0&&nr<rows) list.push(nr*cols+nc);
+    }
+    NB[r*cols+c]=Int32Array.from(list);
+  }
+}
+
+// Zufällige Verteilung; das angeklickte Feld und seine 8 Nachbarn bleiben frei,
+// das erste Feld hat damit immer die Zahl 0 und öffnet einen Bereich.
+function randomMines(safeI){
+  const n=cols*rows, m=new Uint8Array(n);
   const sc=safeI%cols, sr=Math.floor(safeI/cols);
-  for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++){
-    const ni=idx(sc+dc,sr+dr);
-    if(sc+dc>=0&&sc+dc<cols&&sr+dr>=0&&sr+dr<rows) safe.add(ni);
+  const safe=new Set([safeI]);
+  for(const j of NB[safeI]) safe.add(j);
+  const cand=[];
+  for(let i=0;i<n;i++) if(!safe.has(i)) cand.push(i);
+  for(let k=0;k<totalMines&&k<cand.length;k++){
+    const j=k+Math.floor(Math.random()*(cand.length-k));
+    const t=cand[k]; cand[k]=cand[j]; cand[j]=t;
+    m[cand[k]]=1;
+  }
+  return m;
+}
+
+function countsFor(m){
+  const n=cols*rows, cnt=new Int8Array(n);
+  for(let i=0;i<n;i++){
+    if(m[i]){ cnt[i]=-1; continue; }
+    let k=0; const nb=NB[i];
+    for(let q=0;q<nb.length;q++) if(m[nb[q]]) k++;
+    cnt[i]=k;
+  }
+  return cnt;
+}
+
+function applyMines(m){
+  const cnt=countsFor(m);
+  cells.forEach((c,i)=>{ c.mine=!!m[i]; c.count=m[i]?0:cnt[i]; });
+}
+
+function placeMines(safeI){ applyMines(randomMines(safeI)); }
+
+// ── SOLVER ────────────────────────────────────────────────
+// Spielt ein Feld rein logisch durch: Einzelfeld-Regeln, Teilmengen-Regeln
+// und vollständige Aufzählung kleiner Grenzbereiche. Es wird nie geraten –
+// wenn der Solver stecken bleibt, ist das Feld nicht eindeutig lösbar.
+function simulateSolve(m,cnt,startI){
+  const n=cols*rows;
+  const st=new Uint8Array(n);   // 0 = unbekannt, 1 = offen, 2 = Mine
+  let opened=0, flags=0;
+  const need=n-totalMines;
+
+  function open(i){
+    if(st[i]) return;
+    st[i]=1; opened++;
+    if(cnt[i]===0){ const nb=NB[i]; for(let q=0;q<nb.length;q++) if(!st[nb[q]]) open(nb[q]); }
   }
 
-  let placed=0;
-  while(placed<totalMines){
-    const i=Math.floor(Math.random()*cells.length);
-    if(!cells[i].mine&&!safe.has(i)){
-      cells[i].mine=true; placed++;
+  function stepSimple(){
+    let ch=false;
+    for(let i=0;i<n;i++){
+      if(st[i]!==1||cnt[i]===0) continue;
+      const nb=NB[i];
+      let unk=0, fl=0;
+      for(let q=0;q<nb.length;q++){ const s=st[nb[q]]; if(s===0) unk++; else if(s===2) fl++; }
+      if(!unk) continue;
+      if(cnt[i]===fl){
+        for(let q=0;q<nb.length;q++) if(st[nb[q]]===0){ open(nb[q]); ch=true; }
+      } else if(cnt[i]-fl===unk){
+        for(let q=0;q<nb.length;q++) if(st[nb[q]]===0){ st[nb[q]]=2; flags++; ch=true; }
+      }
     }
+    if(!ch){   // globale Minenzahl
+      let unkTot=0;
+      for(let i=0;i<n;i++) if(st[i]===0) unkTot++;
+      if(unkTot){
+        if(flags===totalMines){ for(let i=0;i<n;i++) if(st[i]===0){ open(i); ch=true; } }
+        else if(unkTot===totalMines-flags){ for(let i=0;i<n;i++) if(st[i]===0){ st[i]=2; flags++; } ch=true; }
+      }
+    }
+    return ch;
   }
-  // calculate counts
-  cells.forEach((c,i)=>{
-    if(c.mine) return;
-    const cc=i%cols, cr=Math.floor(i/cols);
-    c.count=neighbors(cc,cr).filter(n=>n.mine).length;
-  });
+
+  function constraints(){
+    const cs=[];
+    for(let i=0;i<n;i++){
+      if(st[i]!==1||cnt[i]===0) continue;
+      const nb=NB[i]; const list=[]; let fl=0;
+      for(let q=0;q<nb.length;q++){ const j=nb[q], s=st[j]; if(s===0) list.push(j); else if(s===2) fl++; }
+      if(list.length) cs.push({o:i,cells:list,m:cnt[i]-fl});
+    }
+    return cs;
+  }
+
+  // A ⊂ B  ⇒  B\A enthält (mB − mA) Minen
+  function stepSubset(){
+    const cs=constraints(); let ch=false;
+    for(let a=0;a<cs.length;a++) for(let b=0;b<cs.length;b++){
+      if(a===b) continue;
+      const A=cs[a], B=cs[b];
+      if(A.cells.length>=B.cells.length) continue;
+      if(Math.abs(A.o%cols-B.o%cols)>2) continue;
+      if(Math.abs(Math.floor(A.o/cols)-Math.floor(B.o/cols))>2) continue;
+      let sub=true;
+      for(const x of A.cells) if(B.cells.indexOf(x)<0){ sub=false; break; }
+      if(!sub) continue;
+      const diff=B.cells.filter(x=>A.cells.indexOf(x)<0);
+      const dm=B.m-A.m;
+      if(dm===0){ for(const x of diff) if(st[x]===0){ open(x); ch=true; } }
+      else if(dm===diff.length){ for(const x of diff) if(st[x]===0){ st[x]=2; flags++; ch=true; } }
+    }
+    return ch;
+  }
+
+  // Vollständige Aufzählung einer Zusammenhangskomponente des Randes
+  function enumComp(cellsArr,comp,remaining,otherUnknown){
+    const k=cellsArr.length;
+    const pos=new Map(); cellsArr.forEach((x,ix)=>pos.set(x,ix));
+    const cIdx=comp.map(c=>c.cells.map(x=>pos.get(x)));
+    const cM=comp.map(c=>c.m);
+    const cellCons=Array.from({length:k},()=>[]);
+    cIdx.forEach((arr,ci)=>arr.forEach(ix=>cellCons[ix].push(ci)));
+    const asg=new Int8Array(k), sum=new Int32Array(comp.length);
+    const rem=cIdx.map(a=>a.length);
+    const everMine=new Uint8Array(k), everSafe=new Uint8Array(k);
+    let nodes=0, ok=true;
+
+    function rec(ix,used){
+      if(++nodes>60000){ ok=false; return; }
+      if(used>remaining) return;
+      if(ix===k){
+        if(remaining-used>otherUnknown) return;   // Rest passt nicht ins übrige Feld
+        for(let t=0;t<k;t++){ if(asg[t]) everMine[t]=1; else everSafe[t]=1; }
+        return;
+      }
+      for(let v=0;v<=1;v++){
+        asg[ix]=v;
+        const cc=cellCons[ix]; let feas=true;
+        for(let z=0;z<cc.length;z++){
+          const ci=cc[z]; sum[ci]+=v; rem[ci]--;
+          if(sum[ci]>cM[ci]||sum[ci]+rem[ci]<cM[ci]) feas=false;
+        }
+        if(feas) rec(ix+1,used+v);
+        for(let z=0;z<cc.length;z++){ const ci=cc[z]; sum[ci]-=v; rem[ci]++; }
+        if(!ok) return;
+      }
+    }
+    rec(0,0);
+    return ok?{everMine,everSafe}:null;
+  }
+
+  function stepEnum(){
+    const cs=constraints();
+    if(!cs.length) return false;
+    const byCell=new Map();
+    cs.forEach((c,ci)=>c.cells.forEach(x=>{
+      if(!byCell.has(x)) byCell.set(x,[]);
+      byCell.get(x).push(ci);
+    }));
+    let unkTot=0; for(let i=0;i<n;i++) if(st[i]===0) unkTot++;
+    const remaining=totalMines-flags;
+    const seen=new Uint8Array(cs.length);
+    let ch=false;
+    for(let s=0;s<cs.length;s++){
+      if(seen[s]) continue;
+      const queue=[s]; seen[s]=1;
+      const comp=[], cellsArr=[], inComp=new Set();
+      while(queue.length){
+        const ci=queue.pop(); comp.push(cs[ci]);
+        for(const x of cs[ci].cells){
+          if(!inComp.has(x)){ inComp.add(x); cellsArr.push(x); }
+          for(const cj of byCell.get(x)) if(!seen[cj]){ seen[cj]=1; queue.push(cj); }
+        }
+      }
+      if(cellsArr.length>24) continue;
+      const r=enumComp(cellsArr,comp,remaining,unkTot-cellsArr.length);
+      if(!r) continue;
+      cellsArr.forEach((x,ix)=>{
+        if(st[x]!==0) return;
+        if(r.everMine[ix]&&!r.everSafe[ix]){ st[x]=2; flags++; ch=true; }
+        else if(!r.everMine[ix]&&r.everSafe[ix]){ open(x); ch=true; }
+      });
+    }
+    return ch;
+  }
+
+  open(startI);
+  while(opened<need){
+    if(stepSimple()) continue;
+    if(stepSubset()) continue;
+    if(stepEnum())  continue;
+    break;
+  }
+  return {solved:opened===need, opened};
+}
+
+// ── NO-GUESS GENERATOR ────────────────────────────────────
+// Verwirft Felder so lange, bis eines rein logisch lösbar ist. Läuft in
+// Häppchen, damit die Oberfläche nicht einfriert.
+const NG_BUDGET={easy:2500,medium:5000,hard:8000};
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+async function generateNoGuess(safeI,token){
+  const t0=performance.now(), budget=NG_BUDGET[diff]||5000;
+  let attempts=0, best=null, bestOpened=-1;
+  while(true){
+    for(let k=0;k<6;k++){
+      attempts++;
+      const m=randomMines(safeI);
+      const cnt=countsFor(m);
+      const res=simulateSolve(m,cnt,safeI);
+      if(res.solved) return {m,attempts,ms:Math.round(performance.now()-t0),ok:true};
+      if(res.opened>bestOpened){ bestOpened=res.opened; best=m; }
+    }
+    if(token!==genToken) return null;
+    if(performance.now()-t0>budget) break;
+    await sleep(0);
+  }
+  return {m:best,attempts,ms:Math.round(performance.now()-t0),ok:false};
 }
 
 // ── CLICK HANDLERS ────────────────────────────────────────
-function onLeftClick(i){
-  if(gameState==='won'||gameState==='lost') return;
+async function onLeftClick(i){
+  if(gameState==='won'||gameState==='lost'||gameState==='generating') return;
   const c=cells[i];
   if(c.flagged||c.revealed) return;
 
   if(firstClick){
     firstClick=false;
-    placeMines(i);
+    if(noGuess){
+      const token=genToken;
+      gameState='generating';
+      setFace('⏳');
+      await sleep(20);                      // Gesicht zeichnen lassen
+      const res=await generateNoGuess(i,token);
+      if(!res||token!==genToken) return;    // Neustart während der Suche
+      applyMines(res.m);
+      setFace('🙂');
+      console.log(res.ok
+        ? `Ohne Raten: lösbar (${res.attempts} Versuche, ${res.ms} ms)`
+        : `Kein eindeutiges Feld gefunden (${res.attempts} Versuche) – bestes verwendet, Raten möglich.`);
+    } else {
+      placeMines(i);
+    }
     gameState='playing';
     startTimer();
   }
@@ -403,7 +667,7 @@ function onLeftClick(i){
 }
 
 function onRightClick(i){
-  if(gameState==='won'||gameState==='lost') return;
+  if(gameState==='won'||gameState==='lost'||gameState==='generating') return;
   const c=cells[i];
   if(c.revealed) return;
   c.flagged=!c.flagged;
@@ -522,6 +786,7 @@ document.addEventListener('keydown',e=>{
 });
 
 // ── INIT ──────────────────────────────────────────────────
+renderNoGuess();
 newGame();
 </script>
 </body>
