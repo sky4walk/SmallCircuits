@@ -165,6 +165,10 @@
       <b>.prg</b> lädt sofort · <b>.d64/.t64</b> in die Box (erste startet automatisch) · <b>.crt</b> steckt das Modul · <b>.sid</b> spielt den Tune · <b>.c64snap.json</b> lädt Snapshot · dos1541.bin als Laufwerks-ROM</div>
     <input type="file" id="fileInput" multiple accept=".prg,.d64,.t64,.crt,.sid,.p00">
     <div id="disklist"></div>
+    <button id="btnBundle" title="Erzeugt eine Kopie dieser Seite mit allen Disketten/Modulen/Tunes aus der Box eingebettet — eine Datei, die beim Öffnen sofort spielbereit ist">📦 Alles in einer HTML-Datei speichern</button>
+    <label class="chk" title="Zusätzlich den aktuellen Maschinenzustand einbetten: die Datei öffnet dann genau an dieser Stelle im Spiel (statt neu zu laden)">
+      <input type="checkbox" id="chkBundleState"> mit Spielstand (Snapshot)
+    </label>
     <div id="diskhint">
       Tastatur: <kbd>F2</kbd>/<kbd>F4</kbd> Snapshot speichern/laden · <kbd>F11</kbd> Warp · <kbd>Shift+F11</kbd> zyklusgenau · <kbd>F12</kbd> Reset ·
       <kbd>Esc</kbd> RUN/STOP · <kbd>Tab</kbd> CTRL · <kbd>Numpad</kbd> Joystick
@@ -4743,6 +4747,8 @@ if (typeof module !== "undefined") {
 <script>
 "use strict";
 // ============================= Frontend ===================================
+// Unveränderter Seitenquelltext für "Alles in einer Datei" (vor jeder DOM-Änderung sichern)
+const PAGE_SRC = (document.documentElement && document.documentElement.outerHTML) || "";
 const CYCLES_PER_FRAME = 312 * 63;          // PAL
 const FRAME_MS = 1000 / (985248 / CYCLES_PER_FRAME);   // ~19,95 ms
 
@@ -5264,8 +5270,15 @@ $("btnDiskNext").onclick = nextDisk;
 function addFiles(files) {
   for (const f of files) {
     const rd = new FileReader();
-    rd.onload = () => {
-      const data = new Uint8Array(rd.result);
+    rd.onload = () => ingestFile(f.name, new Uint8Array(rd.result));
+    rd.readAsArrayBuffer(f);
+  }
+}
+// Eine Datei (Name + Bytes) in den Emulator/die Box aufnehmen
+function ingestFile(fname, data) {
+  {
+    const f = { name: fname };
+    {
       const ext = f.name.toLowerCase().split(".").pop();
       if (ext === "prg" || ext === "p00") {
         try {
@@ -5298,8 +5311,7 @@ function addFiles(files) {
         setMsg(`${f.name}: unbekannter Dateityp`);
       }
       canvas.focus();
-    };
-    rd.readAsArrayBuffer(f);
+    }
   }
 }
 function renderDiskBox() {
@@ -6136,6 +6148,85 @@ function serviceCpuTest() {
   }
   $("stMsg").textContent = "CPU-Test: " + (cpuTest.steps / 1e6).toFixed(1) + " Mio. Schritte …";
 }
+
+// --- "Alles in einer Datei": Seite + Box-Inhalt als eigenständige HTML ---
+function u8ToB64(u8) {
+  let s = "";
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function buildBundle() {
+  if (!PAGE_SRC) throw new Error("Seitenquelltext nicht verfügbar");
+  const entries = diskBox.map((d) => ({ name: d.name, kind: d.kind, mounted: !!d.mounted, data: u8ToB64(d.data) }));
+  const bundle = {
+    version: 1, created: new Date().toISOString(), entries,
+    dosRom: customDosRom ? u8ToB64(customDosRom) : null,
+    settings: { autorun: $("chkAutorun").checked, drive: $("chkDrive").checked,
+                cycle: $("chkCycle").checked, sid8580: $("chkSid8580").checked, joyPort },
+    // Optional der komplette Maschinenzustand (Typed Arrays als base64-Objekte)
+    snapshot: $("chkBundleState").checked ? JSON.parse(snapshotToJson(takeSnapshot())) : null,
+  };
+  // Marker zur Laufzeit zusammensetzen: stünde er wörtlich im Quelltext,
+  // träfe der Aufräum-Regex sein eigenes Literal und zerschnitte das Skript.
+  const MARK = "c64" + "bundle";
+  const openTag = '<script id="' + MARK + '">';
+  const closeTag = "<\/scr" + "ipt>";
+  let src = PAGE_SRC.replace(new RegExp(openTag + "[\\s\\S]*?" + closeTag + "\\s*"), "");
+  const inject = openTag + "\nconst BUNDLE = " +
+                 JSON.stringify(bundle).replace(/<\//g, "<\\/") + ";\n" + closeTag + "\n";
+  const at = src.indexOf("<script>");
+  if (at < 0) throw new Error("Einfügepunkt nicht gefunden");
+  src = src.slice(0, at) + inject + src.slice(at);
+  return "<!DOCTYPE html>\n" + src;
+}
+function saveBundle() {
+  try {
+    if (!diskBox.length) { setMsg("Die Box ist leer — erst etwas hineinziehen"); return; }
+    const html = buildBundle();
+    const blob = new Blob([html], { type: "text/html" });
+    const mounted = diskBox.find((d) => d.mounted) || diskBox[0];
+    const base = mounted.name.replace(/\.[^.]+$/, "").replace(/[^\w\-]+/g, "_");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "c64emu-" + base + ".html";
+    a.click();
+    setMsg(`Gespeichert: c64emu-${base}.html (${Math.round(html.length / 1024)} KB, ${diskBox.length} Einträge` +
+           ($("chkBundleState").checked ? ", mit Spielstand)" : ")"));
+  } catch (err) { setMsg("Speichern fehlgeschlagen: " + err.message); }
+  canvas.focus();
+}
+$("btnBundle").onclick = saveBundle;
+function applyBundle(bundle) {
+  if (!bundle || !bundle.entries) return;
+  const st = bundle.settings || {};
+  if ("autorun" in st) $("chkAutorun").checked = !!st.autorun;
+  if ("sid8580" in st) { $("chkSid8580").checked = !!st.sid8580; sys.sid.setModel(st.sid8580 ? "8580" : "6581"); }
+  if (typeof st.joyPort === "number") { joyPort = st.joyPort; $("btnJoy").textContent = "Joy: " + ["Port 1", "Port 2", "beide"][joyPort]; }
+  if (bundle.dosRom) customDosRom = b64ToU8(bundle.dosRom);
+  if (st.drive) { $("chkDrive").checked = true; setDrive(true); }
+  if (st.cycle) setCycleMode(true);
+  for (const e of bundle.entries)
+    diskBox.push({ name: e.name, data: b64ToU8(e.data), kind: e.kind, mounted: false });
+  renderDiskBox();
+  if (bundle.snapshot) {
+    // Spielstand eingebettet: direkt dort weitermachen statt neu zu laden
+    applySnapshot(snapshotFromJson(JSON.stringify(bundle.snapshot)));
+    $("chkBundleState").checked = true;
+    setMsg(`Eingebettete Sammlung mit Spielstand geladen — weiter geht's` +
+           (bundle.created ? " (Stand " + new Date(bundle.created).toLocaleString("de-DE") + ")" : ""));
+    return;
+  }
+  const idx = bundle.entries.findIndex((e) => e.mounted);
+  const pick = idx >= 0 ? idx : bundle.entries.findIndex((e) => e.kind === "d64" || e.kind === "t64" || e.kind === "crt" || e.kind === "sid");
+  if (pick >= 0) {
+    const e = bundle.entries[pick];
+    if (e.kind === "d64" || e.kind === "t64") mountEntry(pick, "drop");
+    else if (e.kind === "crt") insertCart(pick);
+    else if (e.kind === "sid") playSidFile(diskBox[pick].data, e.name);
+  }
+  setMsg(`Eingebettete Sammlung geladen: ${bundle.entries.length} Einträge` + (bundle.created ? " (" + new Date(bundle.created).toLocaleDateString("de-DE") + ")" : ""));
+}
+if (typeof BUNDLE !== "undefined") { try { applyBundle(BUNDLE); } catch (err) { setMsg("Eingebettete Sammlung fehlerhaft: " + err.message); } }
 
 // --- Hauptschleife: 50 Hz PAL, Warp = so viele Frames wie möglich ---
 let lastT = performance.now(), acc = 0;
