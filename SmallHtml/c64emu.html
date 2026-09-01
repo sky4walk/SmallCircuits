@@ -162,7 +162,7 @@
   <div id="diskbox">
     <h2>Diskettenbox &amp; Programme</h2>
     <div id="filedrop">Dateien hierher ziehen oder klicken<br>
-      <b>.prg</b> lädt sofort · <b>.d64/.t64</b> in die Box (erste startet automatisch) · <b>.crt</b> steckt das Modul · <b>.sid</b> spielt den Tune · <b>.c64snap.json</b> lädt Snapshot · dos1541.bin als Laufwerks-ROM</div>
+      <b>.prg</b> lädt sofort und kommt in die Box · <b>.d64/.t64</b> in die Box (erste startet automatisch) · <b>.crt</b> steckt das Modul · <b>.sid</b> spielt den Tune · <b>.c64snap.json</b> lädt Snapshot · dos1541.bin als Laufwerks-ROM</div>
     <input type="file" id="fileInput" multiple accept=".prg,.d64,.t64,.crt,.sid,.p00">
     <div id="disklist"></div>
     <button id="btnBundle" title="Erzeugt eine Kopie dieser Seite mit allen Disketten/Modulen/Tunes aus der Box eingebettet — eine Datei, die beim Öffnen sofort spielbereit ist">📦 Alles in einer HTML-Datei speichern</button>
@@ -5213,6 +5213,10 @@ function serviceAutoload() {
       armAfterQueue = null;
     }
   }
+  if (pendingPrg !== null && sys.cpu.cycles - lastResetCycles > BOOT_CYCLES) {
+    const i = pendingPrg; pendingPrg = null;
+    runPrg(i, "drop");
+  }
   const pend = sys.pendingAutostart;
   sys.tickAutostart();
   if (pend && !sys.pendingAutostart) {
@@ -5254,6 +5258,22 @@ function autoLoadDisk() {
     // addr < $0400: selbststartender Loader — kein SYS nötig
   }
 }
+// Ein PRG aus der Box ins RAM legen. mode: "drop"/"start" starten es auch,
+// "insert" (Klick) legt es nur ab — wie eine eingelegte Diskette.
+function runPrg(idx, mode) {
+  const d = diskBox[idx];
+  try {
+    const info = sys.loadPrg(d.data);
+    setMsg(`${d.name}: geladen bei $${info.loadAddr.toString(16)}`);
+    if (mode === "drop" && info.isBasic && $("chkAutorun").checked) sys.typeString("RUN\r");
+    else if (mode === "start") {
+      if (info.isBasic) sys.typeString("RUN\r");
+      else if (info.loadAddr >= 0x0400) sys.typeString("SYS" + info.loadAddr + "\r");
+    }
+  } catch (err) { setMsg("Fehler: " + err.message); }
+  canvas.focus();
+}
+let pendingPrg = null;              // PRG aus einem Bundle: erst nach dem Boot einspielen
 function diskEntries() {
   return diskBox.map((d, i) => [d, i]).filter(([d]) => d.kind === "d64" || d.kind === "t64");
 }
@@ -5281,11 +5301,11 @@ function ingestFile(fname, data) {
     {
       const ext = f.name.toLowerCase().split(".").pop();
       if (ext === "prg" || ext === "p00") {
-        try {
-          const info = sys.loadPrg(ext === "p00" ? data.subarray(26) : data);
-          setMsg(`${f.name}: geladen bei $${info.loadAddr.toString(16)}`);
-          if (info.isBasic && $("chkAutorun").checked) sys.typeString("RUN\r");
-        } catch (err) { setMsg("Fehler: " + err.message); }
+        // Auch Programme kommen in die Box — sonst wäre sie beim Speichern leer
+        diskBox.push({ name: f.name, data: ext === "p00" ? data.subarray(26) : data,
+                       kind: "prg", mounted: false });
+        renderDiskBox();
+        runPrg(diskBox.length - 1, "drop");
       } else if (ext === "d64" || ext === "t64") {
         const hadMounted = diskBox.some((d) => d.mounted);
         diskBox.push({ name: f.name, data, kind: ext, mounted: false });
@@ -5319,12 +5339,13 @@ function renderDiskBox() {
   list.innerHTML = "";
   diskBox.forEach((d, i) => {
     const active = d.kind === "d64" || d.kind === "t64";
-    const isCart = d.kind === "crt", isSid = d.kind === "sid";
+    const isCart = d.kind === "crt", isSid = d.kind === "sid", isPrg = d.kind === "prg";
     const div = document.createElement("div");
     div.className = "diskentry" + (d.mounted ? " mounted" : "");
     div.title = active ? "Klick: einlegen (wie F6-Wechsel)" :
                 isCart ? "Klick: Modul stecken (Kaltstart)" :
-                isSid ? "Klick: Tune abspielen" : "";
+                isSid ? "Klick: Tune abspielen" :
+                isPrg ? "Klick: Programm ins RAM laden" : "";
     if (isCart) {
       div.onclick = () => insertCart(i);
       if (d.mounted) {
@@ -5335,6 +5356,7 @@ function renderDiskBox() {
       }
     }
     if (isSid) div.onclick = () => playSidFile(d.data, d.name);
+    if (isPrg) div.onclick = () => runPrg(i, "insert");
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = d.name + (d.img && d.img.dirty ? " \u25CF" : "");
@@ -5347,6 +5369,14 @@ function renderDiskBox() {
       play.title = "Einlegen und starten (tippt LOAD am READY-Prompt; kommt keiner: Reset)";
       play.onclick = (e) => { e.stopPropagation(); mountEntry(i, "start"); };
       div.appendChild(play);
+    }
+    if (isPrg) {
+      const run = document.createElement("button");
+      run.className = "eject";
+      run.textContent = "\u25B6";
+      run.title = "Laden und starten (RUN bzw. SYS)";
+      run.onclick = (e) => { e.stopPropagation(); runPrg(i, "start"); };
+      div.appendChild(run);
     }
     if (d.img && d.img.dirty) {
       const dl = document.createElement("button");
@@ -5381,6 +5411,9 @@ for (const el of [canvas, $("filedrop"), document.body]) {
   el.addEventListener("dragleave", () => canvas.classList.remove("dragover"));
   el.addEventListener("drop", (e) => {
     e.preventDefault();
+    // Ohne stopPropagation läuft der Drop auf canvas/#filedrop zusätzlich am
+    // body-Handler vorbei — die Datei landete dann zweimal in der Box.
+    e.stopPropagation();
     canvas.classList.remove("dragover");
     addFiles(e.dataTransfer.files);
   });
@@ -5551,8 +5584,13 @@ function toggleSound() {
 }
 $("btnSound").onclick = toggleSound;
 $("chkSid8580").onchange = () => sys.sid.setModel($("chkSid8580").checked ? "8580" : "6581");
-// Browser verlangen eine Nutzeraktion für Audio: erster Klick auf den Canvas genügt
-canvas.addEventListener("click", () => { if (!audioCtx && !audioOn) initAudio(); }, { once: true });
+// Browser verlangen eine Nutzeraktion für Audio: erster Klick auf den Canvas genügt.
+// Ein eingebettetes SID legt den Kontext schon beim Laden an — der bleibt dann
+// "suspended"; der Klick muss ihn deshalb auch nachträglich noch starten.
+canvas.addEventListener("click", () => {
+  if (!audioCtx) { initAudio(); return; }
+  if (audioOn && audioCtx.state === "suspended") audioCtx.resume();
+});
 
 // --- Snapshots: 5 Slots in IndexedDB (Fallback: nur Sitzungsspeicher) ---
 const snapMem = new Map();
@@ -6157,7 +6195,10 @@ function u8ToB64(u8) {
 }
 function buildBundle() {
   if (!PAGE_SRC) throw new Error("Seitenquelltext nicht verfügbar");
-  const entries = diskBox.map((d) => ({ name: d.name, kind: d.kind, mounted: !!d.mounted, data: u8ToB64(d.data) }));
+  // Beschriebene Disketten (Spielstände!) im aktuellen Stand einbetten,
+  // nicht die Originalbytes vom Drop — D64Image arbeitet auf einer Kopie.
+  const entries = diskBox.map((d) => ({ name: d.name, kind: d.kind, mounted: !!d.mounted,
+                                        data: u8ToB64(d.img && d.img.dirty ? d.img.data : d.data) }));
   const bundle = {
     version: 1, created: new Date().toISOString(), entries,
     dosRom: customDosRom ? u8ToB64(customDosRom) : null,
@@ -6217,12 +6258,13 @@ function applyBundle(bundle) {
     return;
   }
   const idx = bundle.entries.findIndex((e) => e.mounted);
-  const pick = idx >= 0 ? idx : bundle.entries.findIndex((e) => e.kind === "d64" || e.kind === "t64" || e.kind === "crt" || e.kind === "sid");
+  const pick = idx >= 0 ? idx : bundle.entries.findIndex((e) => e.kind === "d64" || e.kind === "t64" || e.kind === "crt" || e.kind === "sid" || e.kind === "prg");
   if (pick >= 0) {
     const e = bundle.entries[pick];
     if (e.kind === "d64" || e.kind === "t64") mountEntry(pick, "drop");
     else if (e.kind === "crt") insertCart(pick);
     else if (e.kind === "sid") playSidFile(diskBox[pick].data, e.name);
+    else if (e.kind === "prg") pendingPrg = pick;   // erst nach dem BASIC-Boot einspielen
   }
   setMsg(`Eingebettete Sammlung geladen: ${bundle.entries.length} Einträge` + (bundle.created ? " (" + new Date(bundle.created).toLocaleDateString("de-DE") + ")" : ""));
 }
