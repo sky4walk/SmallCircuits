@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Amiga 500 – Etappe 3</title>
+<title>Amiga 500</title>
 <style>
   :root{
     --grund:#0b1420; --flaeche:#132038; --kante:#0055aa; --akzent:#ff8800;
@@ -88,7 +88,7 @@
 
 <header>
   <h1>Amiga 500</h1>
-  <p>68000-Kern, CIA-8520, Copper, Blitter, Denise, Tastatur, Maus und Diskettenlaufwerk. <span class="stand">Etappe 3</span> – Kickstart bootet von ADF-Abbildern.</p>
+  <p><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></p>
 </header>
 
 <main>
@@ -119,34 +119,53 @@
     </div>
     <div class="controls">
       <div class="drives">
-      <div class="drive"><span class="dfname">DF0</span>
+      <div class="drive"><input type="checkbox" class="drvOn" data-unit="0" title="Laufwerk vorhanden" checked disabled><span class="dfname">DF0</span>
         <label class="file">Einlegen<input type="file" class="adfFile" data-unit="0" accept=".adf"></label>
         <button class="btnEject" data-unit="0">Auswerfen</button>
         <button class="btnSaveADF" data-unit="0">Speichern</button>
         <span id="disk0" class="disk"></span></div>
-      <div class="drive"><span class="dfname">DF1</span>
+      <div class="drive"><input type="checkbox" class="drvOn" data-unit="1" title="Laufwerk vorhanden" checked><span class="dfname">DF1</span>
         <label class="file">Einlegen<input type="file" class="adfFile" data-unit="1" accept=".adf"></label>
         <button class="btnEject" data-unit="1">Auswerfen</button>
         <button class="btnSaveADF" data-unit="1">Speichern</button>
         <span id="disk1" class="disk"></span></div>
-      <div class="drive"><span class="dfname">DF2</span>
+      <div class="drive"><input type="checkbox" class="drvOn" data-unit="2" title="Laufwerk vorhanden" ><span class="dfname">DF2</span>
         <label class="file">Einlegen<input type="file" class="adfFile" data-unit="2" accept=".adf"></label>
         <button class="btnEject" data-unit="2">Auswerfen</button>
         <button class="btnSaveADF" data-unit="2">Speichern</button>
         <span id="disk2" class="disk"></span></div>
-      <div class="drive"><span class="dfname">DF3</span>
+      <div class="drive"><input type="checkbox" class="drvOn" data-unit="3" title="Laufwerk vorhanden" ><span class="dfname">DF3</span>
         <label class="file">Einlegen<input type="file" class="adfFile" data-unit="3" accept=".adf"></label>
         <button class="btnEject" data-unit="3">Auswerfen</button>
         <button class="btnSaveADF" data-unit="3">Speichern</button>
         <span id="disk3" class="disk"></span></div>
       </div>
+      <button id="btnNewDisk">Leere Diskette erzeugen</button>
+      <span class="hint">Häkchen = Laufwerk angeschlossen; wirkt beim nächsten Zurücksetzen. Manche Spiele vertragen keine vier Laufwerke.</span>
       <label><input type="checkbox" id="wprot"> Schreibschutz</label>
       <label><input type="checkbox" id="turbo"> Turbo-Diskette</label>
+    </div>
+    <div class="controls">
+      <label><input type="checkbox" id="joyKeys" checked> Ziffernblock = Joystick (Port 2), Feuer: 0 oder Enter</label>
+      <label>Tastatur
+        <select id="keyMode">
+          <option value="chars">Zeichen umsetzen (Amiga mit USA-Belegung)</option>
+          <option value="pos">Tastenposition durchreichen (Amiga mit SetMap d)</option>
+        </select>
+      </label>
+      <span class="hint">Help: Einfg/F12 · Amiga-Tasten: Windows-Tasten oder Pos1/Ende · Reset: Strg + beide Amiga-Tasten</span>
+      <label><input type="checkbox" id="blitTiming" checked> Blitter braucht Zeit</label>
+      <label><input type="checkbox" id="dmaContention" checked> DMA bremst CPU</label>
+      <label><input type="checkbox" id="sound" checked> Ton</label>
+      <label>Lautstärke <input type="range" id="volume" min="0" max="100" value="70"></label>
     </div>
     <div class="controls">
       <button id="btnSaveSnap">Zustand sichern</button>
       <label class="file">Zustand laden<input type="file" id="snapFile" accept=".a500"></label>
       <span class="hint">Ein Schnappschuss enthält Speicher, Chipsatz, ROM, Diskette und Einstellungen; Datei .a500</span>
+      <button id="btnSavePage">Seite mit Zustand sichern</button>
+      <button id="btnFactory">Alles zurücksetzen</button>
+      <span class="hint">Die Seite speichert nichts im Browser: nach dem Schließen oder Neuladen ist alles weg. Zum Aufbewahren dienen Schnappschuss und »Seite mit Zustand sichern«.</span>
     </div>
     <p id="status" class="status"></p>
     <p id="log" class="log"></p>
@@ -1402,9 +1421,9 @@ function makeFloppy(io) {
 
   function makeDrive(unit) {
     return {
-      unit, present: true,                  // DF0 eingebaut, DF1-DF3 als externe Laufwerke
+      unit, present: unit < 2,              // DF0 eingebaut, DF1 angeschlossen, DF2/DF3 per Haekchen
       adf: null, name: null, wprot: false,
-      cyl: 0, side: 0, motor: false, sel: false,
+      cyl: 0, side: 0, motor: false, sel: false, spin: 0,   // spin: Zeilen seit Motorstart
       changeLatch: true,                    // /CHNG bleibt aktiv, bis ein Schritt bei eingelegter Diskette kommt
       tracks: new Map(),                    // Spurnummer -> Uint16Array (MFM)
       dirty: false,
@@ -1509,7 +1528,11 @@ function makeFloppy(io) {
   F.writePRB = function (oldV, v) {
     for (const d of drives) {
       const selNow = !(v & (8 << d.unit));
-      if (selNow && !d.sel) d.motor = !(v & 0x80);          // Motorbit wird beim Anwaehlen uebernommen
+      if (selNow && !d.sel) {                                // Motorbit wird beim Anwaehlen uebernommen
+        const on = !(v & 0x80);
+        if (on && !d.motor) d.spin = 0;
+        d.motor = on;
+      }
       d.sel = selNow;
       if (!selNow) continue;
       d.side = (v & 4) ? 0 : 1;
@@ -1525,7 +1548,7 @@ function makeFloppy(io) {
     let bits = 0x3c;
     for (const d of drives) {
       if (!d.sel || !d.present) continue;
-      if (d.adf && d.motor) bits &= ~0x20;
+      if (d.adf && d.motor && d.spin >= SPINUP_LINES) bits &= ~0x20;   // bereit erst nach dem Hochlauf
       if (!d.motor) bits &= ~0x20;                           // Motor aus: Kennung eines Amiga-Laufwerks (Nullen)
       if (d.cyl === 0) bits &= ~0x10;
       if (d.adf && d.wprot) bits &= ~0x08;
@@ -1566,11 +1589,21 @@ function makeFloppy(io) {
   };
   F.readDSKDATR = () => lastWord;
 
-  // Wird einmal je Rasterzeile gerufen: Rotation und DMA-Transport.
+  // Ein echtes Laufwerk braucht rund 400 ms, bis die Scheibe auf Drehzahl ist.
+  const SPINUP_LINES = 312 * 20;
+  // Wird einmal je Rasterzeile gerufen: Rotation, Indeximpuls und DMA-Transport.
   F.tickLine = function () {
     const d = selectedDrive();
     const step = F.turbo ? 64 : WORDS_PER_LINE;
-    for (const dr of drives) if (dr.motor && dr.adf) dr.pos = (dr.pos + step) % TRACK_WORDS;
+    for (const dr of drives) {
+      if (!dr.motor) continue;
+      if (dr.spin < SPINUP_LINES) dr.spin++;
+      if (!dr.adf) continue;
+      const np = (dr.pos + step) % TRACK_WORDS;
+      // Indexloch einmal je Umdrehung: /INDEX geht an FLAG der CIA-B
+      if (np < dr.pos && dr.spin >= SPINUP_LINES && io.indexPulse) io.indexPulse();
+      dr.pos = np;
+    }
     if (!dma) return;
     if (!d || !d.motor) return;                              // ohne bereites Laufwerk passiert nichts
     const t = trackOf(d);
@@ -1598,6 +1631,9 @@ function makeFloppy(io) {
   };
 
   F.reset = function () {
+    // Welche Laufwerke es gibt, bestimmt die Seite (Haekchen); DF0 ist immer da.
+    // trackdisk erkennt Laufwerke nur beim Start.
+    drives[0].present = true;
     dma = null; lastWord = 0;
     for (const d of drives) { d.motor = false; d.sel = false; d.changeLatch = true; d.side = 0; }
   };
@@ -1607,11 +1643,12 @@ function makeFloppy(io) {
              pos: d.pos, write: dma ? dma.write : false, present: d.present };
   };
   F.setPresent = (unit, v) => { drives[unit].present = !!v; };
+  F.clearDirty = (unit) => { drives[unit].dirty = false; };
   F.getState = function () {
     return {
       turbo: F.turbo, dsksync, adkcon, lastWord, byteToggle,
       dma: dma ? { ...dma } : null,
-      drives: drives.map(d => ({ cyl: d.cyl, side: d.side, motor: d.motor, sel: d.sel, changeLatch: d.changeLatch,
+      drives: drives.map(d => ({ cyl: d.cyl, side: d.side, motor: d.motor, sel: d.sel, changeLatch: d.changeLatch, spin: d.spin,
                                  pos: d.pos, wprot: d.wprot, name: d.name, dirty: d.dirty, hasDisk: !!d.adf, present: d.present })),
     };
   };
@@ -1620,7 +1657,7 @@ function makeFloppy(io) {
     dma = o.dma ? { ...o.dma } : null;
     o.drives.forEach((sd, i) => {
       const d = drives[i];
-      Object.assign(d, { cyl: sd.cyl, side: sd.side, motor: sd.motor, sel: sd.sel, changeLatch: sd.changeLatch,
+      Object.assign(d, { cyl: sd.cyl, side: sd.side, motor: sd.motor, sel: sd.sel, changeLatch: sd.changeLatch, spin: sd.spin === undefined ? SPINUP_LINES : sd.spin,
                          pos: sd.pos, wprot: sd.wprot, name: sd.name, dirty: sd.dirty, present: sd.present !== false });
       d.adf = (sd.hasDisk && adfs && adfs[i]) ? new Uint8Array(adfs[i]) : null;
       d.tracks.clear();
@@ -1671,6 +1708,24 @@ function makePaula(io) {
   };
   P.drop = (n) => { rd = (rd + n + RING) % RING; };
   P.muted = false;
+  // LED-Filter: Tiefpass 2. Ordnung (Butterworth, ~3,3 kHz), geschaltet ueber
+  // Bit 1 von CIA-A PRA (Power-LED an = Filter an). Je Kanalseite ein Biquad.
+  P.filter = true;
+  const fq = (() => {
+    const fc = 3275, fs = 31250;
+    const w = Math.tan(Math.PI * fc / fs), q = Math.SQRT1_2;
+    const n = 1 / (1 + w / q + w * w);
+    return { b0: w * w * n, b1: 2 * w * w * n, b2: w * w * n, a1: 2 * (w * w - 1) * n, a2: (1 - w / q + w * w) * n };
+  })();
+  const fl = { x1: 0, x2: 0, y1: 0, y2: 0 }, fr = { x1: 0, x2: 0, y1: 0, y2: 0 };
+  // Fester Tiefpass des A500 (1. Ordnung, ~4,9 kHz), liegt immer im Signalweg.
+  const FIX_A = Math.exp(-2 * Math.PI * 4900 / 31250);
+  const fix = { l: 0, r: 0 };
+  function lowpass(st, x) {
+    const y = fq.b0 * x + fq.b1 * st.x1 + fq.b2 * st.x2 - fq.a1 * st.y1 - fq.a2 * st.y2;
+    st.x2 = st.x1; st.x1 = x; st.y2 = st.y1; st.y1 = y;
+    return y;
+  }
 
   function fetchWord(c) {
     c.dat = io.chipR16(c.ptr); c.ptr = (c.ptr + 2) & 0x1ffffe;
@@ -1737,7 +1792,12 @@ function makePaula(io) {
         if (c.n === 0 || c.n === 3) l += out; else r += out;
       }
       const k = 1 / (128 * 64 * 2);
-      ring[wr * 2] = P.muted ? 0 : l * k; ring[wr * 2 + 1] = P.muted ? 0 : r * k;
+      let ol = l * k, or = r * k;
+      fix.l = FIX_A * fix.l + (1 - FIX_A) * ol; fix.r = FIX_A * fix.r + (1 - FIX_A) * or;
+      ol = fix.l; or = fix.r;
+      if (P.filter) { ol = lowpass(fl, ol); or = lowpass(fr, or); }
+      else { fl.x1 = fl.x2 = fl.y1 = fl.y2 = 0; fr.x1 = fr.x2 = fr.y1 = fr.y2 = 0; }
+      ring[wr * 2] = P.muted ? 0 : ol; ring[wr * 2 + 1] = P.muted ? 0 : or;
       const next = (wr + 1) % RING;
       if (next !== rd) wr = next;             // bei vollem Puffer wird der neueste Wert verworfen
     }
@@ -1786,6 +1846,7 @@ function makeMachine() {
     chipSize = kb * 1024;
     chip = new Uint8Array(chipSize);
   };
+  M.unloadROM = function () { rom = null; romMask = 0; };
   M.loadROM = function (bytes) {
     rom = new Uint8Array(bytes);
     romMask = rom.length - 1;
@@ -1898,6 +1959,7 @@ function makeMachine() {
   const floppy = _makeFloppy({
     chipR16: (a) => chipR16(a), chipW16: (a, v) => chipW16(a, v),
     setINTREQ, onDMADone: (pt) => setPtr(0x020, pt),
+    indexPulse: () => { ciab.icr |= 0x10; updateCIAInt(); },   // /INDEX an FLAG der CIA-B
     log: (msg) => { if (M.onLog) M.onLog(msg); },
   });
   M.floppy = floppy;
@@ -1961,7 +2023,7 @@ function makeMachine() {
     switch (r) {
       case 0:
         c.pra = v;
-        if (c === ciaa) M.ovl = (v & 1) !== 0;
+        if (c === ciaa) { M.ovl = (v & 1) !== 0; paula.filter = (v & 2) === 0; }   // Bit 1: Power-LED aus = Filter aus
         break;
       case 1: { const old = c.prb; c.prb = v; if (c === ciab) floppy.writePRB(old, v); break; }
       case 2: c.ddra = v; break;
@@ -2198,6 +2260,9 @@ function makeMachine() {
   // --- Custom-Zugriffe ----------------------------------------------------
   function customRead(reg) {
     switch (reg) {
+      // Strobe-Register loesen auch beim Lesen aus (COPJMP1/2)
+      case 0x088: copPC = ptr(0x080); copWait = -1; return 0xffff;
+      case 0x08a: copPC = ptr(0x084); copWait = -1; return 0xffff;
       case R.DMACONR: return dmacon | (bltBusy ? 0x4000 : 0) | (M.bltzero ? 0x2000 : 0);
       case R.VPOSR: return (lof ? 0x8000 : 0) | ((vpos >> 8) & 7);
       case R.VHPOSR: return ((vpos & 0xff) << 8) | ((lineCycles >> 1) & 0xff);
@@ -2213,8 +2278,9 @@ function makeMachine() {
         if (j.left !== j.up) v |= 0x0100;
         return v;
       }
-      case R.POTGOR: return 0xff00 | ((M.mouseButtons & 2) ? 0 : 0x0400);
+      case R.POTGOR: return 0xbb00 | ((M.mouseButtons & 2) ? 0 : 0x0400) | 0x4000;   // Bit 10: rechte Maustaste Port 1, Bit 14: Port 2 (beide aktiv low)
       case R.DSKDATR: return floppy.readDSKDATR();
+      case 0x00e: { const v = clxdat; clxdat = 0; return v; }         // CLXDAT, loescht sich beim Lesen
       case 0x01a: return floppy.readDSKBYTR();   // DSKBYTR
       case 0x010: return adkcon;                 // ADKCONR
     }
@@ -2223,6 +2289,7 @@ function makeMachine() {
 
   function customWrite(reg, v) {
     v &= 0xffff;
+    if (M.traceWrite) M.traceWrite(reg, v);
     cst[reg >> 1] = v;
     switch (reg) {
       case 0x096:                                 // DMACON
@@ -2379,8 +2446,8 @@ function makeMachine() {
     for (let guard = 0; guard < 512; guard++) {
       const i1 = chipR16(copPC), i2 = chipR16(copPC + 2);
       copPC = (copPC + 4) >>> 0;
-      if (!(i1 & 1)) {                       // MOVE
-        copH += 2;
+      if (!(i1 & 1)) {                       // MOVE: zwei Buszyklen, der Copper bekommt jeden zweiten Slot -> 4 Farbtakte
+        copH += 4;
         const reg = i1 & 0x1fe;
         const grenze = (cst[0x02e >> 1] & 2) ? 0x040 : 0x080;   // COPCON CDANG
         if (reg < grenze) {
@@ -2404,7 +2471,7 @@ function makeMachine() {
         customWrite(reg, i2);
         continue;
       }
-      copH += 3;
+      copH += 6;                             // WAIT/SKIP: drei Buszyklen
       const wv = (i1 >> 8) & 0xff, wh = i1 & 0xfe;
       const vm = ((i2 >> 8) & 0x7f) | 0x80, hm = i2 & 0xfe;
       if (i2 & 1) {                          // SKIP
@@ -2439,6 +2506,10 @@ function makeMachine() {
   // Spielfeldindex je Hires-Pixel der aktuellen Zeile, fuer die Sprite-Prioritaet:
   // pfA = Spielfeld 1 (bzw. das einzige Spielfeld), pfB = Spielfeld 2 im Dual-Playfield.
   const pfA = new Uint8Array(FB_W), pfB = new Uint8Array(FB_W);
+  // Kollisionserkennung: Trefferpixel je Spielfeld und Sprite-Paare je Pixel
+  const clx1 = new Uint8Array(FB_W), clx2 = new Uint8Array(FB_W), sprMask = new Uint8Array(FB_W);
+  let clxdat = 0;
+  const SPR_PAIR_BIT = [[0, 9, 10, 11], [9, 0, 12, 13], [10, 12, 0, 14], [11, 13, 14, 0]];
   const lineDat = new Uint16Array(6 * 80);
 
   function applyColorEvents(upToX, evIdx) {
@@ -2462,7 +2533,7 @@ function makeMachine() {
     }
     fb.fill(c0, base + fillFrom, base + FB_W);
     let evIdx = 0;
-    pfA.fill(0); pfB.fill(0);
+    pfA.fill(0); pfB.fill(0); clx1.fill(0); clx2.fill(0); sprMask.fill(0);
 
     const bplcon0 = cst[0x100 >> 1];
     const nplanes = (bplcon0 >> 12) & 7;
@@ -2490,6 +2561,14 @@ function makeMachine() {
     const bplcon2 = cst[0x104 >> 1];
     const pf2pri = (bplcon2 & 0x40) !== 0;
     const px = hires ? 1 : 2;
+    // CLXCON: Bits 11-6 aktivieren Ebene 6..1, Bits 5-0 sind die Vergleichswerte
+    const clxcon = cst[0x098 >> 1];
+    let en1 = 0, en2 = 0, mv1 = 0, mv2 = 0;
+    for (let p = 0; p < 6; p++) {
+      const en = (clxcon >> (6 + p)) & 1, mv = (clxcon >> p) & 1;
+      if (p & 1) { en2 |= en << (p >> 1); mv2 |= mv << (p >> 1); } else { en1 |= en << (p >> 1); mv1 |= mv << (p >> 1); }
+    }
+    let hamR = (color[0] & 0xf), hamG = (color[0] >> 8) & 0xf, hamB = (color[0] >> 16) & 0xf;
 
     for (let w = 0; w < words; w++) {
       for (let p = 0; p < nplanes; p++) {
@@ -2520,13 +2599,24 @@ function makeMachine() {
         let idx = 0;
         for (let p = 0; p < nplanes; p++) if ((p & 1) ? (idx2 >> (p >> 1)) & 1 : (idx1 >> (p >> 1)) & 1) idx |= 1 << p;
         a = idx;
-        if (ham) c = color[idx & 15];
+        if (ham && nplanes >= 5) {
+          // HAM6: 00 = Palette, 01 = Blau, 10 = Rot, 11 = Gruen aus den unteren vier Bits
+          const ctl = (idx >> 4) & 3, val = idx & 15;
+          if (ctl === 0) { const pc = color[val]; hamR = pc & 0xf; hamG = (pc >> 8) & 0xf; hamB = (pc >> 16) & 0xf; }
+          else if (ctl === 1) hamB = val;
+          else if (ctl === 2) hamR = val;
+          else hamG = val;
+          c = ((255 << 24) | ((hamB * 17) << 16) | ((hamG * 17) << 8) | (hamR * 17)) >>> 0;
+        }
         else if (nplanes === 6) c = (idx & 32) ? halfBright(color[idx & 31]) : color[idx];
         else c = color[idx];
       }
+      // Trefferpixel fuer die Kollisionserkennung (nicht aktivierte Ebenen zaehlen immer als Treffer)
+      const hit1 = ((idx1 ^ mv1) & en1) === 0, hit2 = ((idx2 ^ mv2) & en2) === 0;
+      if (hit1 && hit2 && (en1 || en2)) clxdat |= 1;
       for (let k = 0; k < px; k++) {
         const x = x0 + k;
-        if (x >= xstart && x < xstop && x < FB_W) { fb[base + x] = c; pfA[x] = a; pfB[x] = b; }
+        if (x >= xstart && x < xstop && x < FB_W) { fb[base + x] = c; pfA[x] = a; pfB[x] = b; clx1[x] = hit1 ? 1 : 0; clx2[x] = hit2 ? 1 : 0; }
       }
     }
     applyColorEvents(1e9, evIdx);
@@ -2581,6 +2671,7 @@ function makeMachine() {
     const bplcon0 = cst[0x100 >> 1], bplcon2 = cst[0x104 >> 1];
     const dpf = (bplcon0 & 0x400) !== 0;
     const pf1p = bplcon2 & 7, pf2p = (bplcon2 >> 3) & 7;
+    const clxcon = cst[0x098 >> 1];
     for (let sp = 7; sp >= 0; sp--) {
       if (!sprArmed[sp]) continue;
       const attached = (sp & 1) && (cst[(0x142 + sp * 8) >> 1] & 0x80);
@@ -2593,6 +2684,9 @@ function makeMachine() {
       const a2 = partner ? cst[(0x144 + (sp + 1) * 8) >> 1] : 0, b2 = partner ? cst[(0x146 + (sp + 1) * 8) >> 1] : 0;
       const pair = sp >> 1;
       const cbase = 16 + pair * 4;
+      // Fuer die Kollision zaehlt ein ungerades Sprite nur, wenn CLXCON es freigibt
+      const oddEnabled = (clxcon >> (12 + pair)) & 1;
+      const countsForClx = !(sp & 1) || oddEnabled;
       for (let i = 0; i < 16; i++) {
         let v = ((a >> (15 - i)) & 1) | (((b >> (15 - i)) & 1) << 1);
         if (partner) v |= (((a2 >> (15 - i)) & 1) << 2) | (((b2 >> (15 - i)) & 1) << 3);
@@ -2600,6 +2694,13 @@ function makeMachine() {
         const c = partner ? color[16 + v] : color[cbase + v];
         const x = x0 + i * 2;
         if (x < xstart || x + 1 >= xstop || x + 1 >= FB_W) continue;
+        if (countsForClx) {
+          if (clx1[x]) clxdat |= 1 << (1 + pair);
+          if (clx2[x]) clxdat |= 1 << (5 + pair);
+          const others = sprMask[x];
+          for (let q = 0; q < 4; q++) if (q !== pair && (others & (1 << q))) clxdat |= 1 << SPR_PAIR_BIT[pair][q];
+          sprMask[x] |= 1 << pair; sprMask[x + 1] |= 1 << pair;
+        }
         // Prioritaet: das Sprite liegt nur vor Spielfeldern, ueber die es Vorrang hat
         let vorn;
         if (dpf) vorn = (pfA[x] === 0 || pair < pf1p) && (pfB[x] === 0 || pair < pf2p);
@@ -2665,7 +2766,7 @@ function makeMachine() {
       version: 1,
       regs: { dmacon, intena, intreq, adkcon, vpos, lineCycles, frame, lof, copPC, copWait, copWaitH, copWaitVM, copWaitHM,
               kbdWait, dskPrev, eclkAcc, ovl: M.ovl, bltzero: !!M.bltzero, slowRAM: !!M.slowRAM, chipSize,
-              bltBusy, bltSlots, bltZeroPending },
+              bltBusy, bltSlots, bltZeroPending, clxdat },
       cst: Array.from(cst), color: Array.from(color), bplpt: Array.from(bplpt),
       sprPt: Array.from(sprPt), sprState: Array.from(sprState), sprV1: Array.from(sprV1), sprV2: Array.from(sprV2),
       sprH: Array.from(sprH), sprDat: Array.from(sprDat), sprArmed: Array.from(sprArmed),
@@ -2687,11 +2788,12 @@ function makeMachine() {
     vpos = r.vpos; lineCycles = r.lineCycles; frame = r.frame; lof = r.lof;
     copPC = r.copPC; copWait = r.copWait; copWaitH = r.copWaitH; copWaitVM = r.copWaitVM; copWaitHM = r.copWaitHM;
     kbdWait = r.kbdWait; dskPrev = r.dskPrev; eclkAcc = r.eclkAcc;
-    bltBusy = !!r.bltBusy; bltSlots = r.bltSlots || 0; bltZeroPending = r.bltZeroPending === undefined ? true : r.bltZeroPending;
+    clxdat = r.clxdat || 0; bltBusy = !!r.bltBusy; bltSlots = r.bltSlots || 0; bltZeroPending = r.bltZeroPending === undefined ? true : r.bltZeroPending;
     cst.set(o.cst); color.set(o.color); bplpt.set(o.bplpt);
     sprPt.set(o.sprPt); sprState.set(o.sprState); sprV1.set(o.sprV1); sprV2.set(o.sprV2); sprH.set(o.sprH); sprDat.set(o.sprDat);
     if (o.sprArmed) sprArmed.set(o.sprArmed);
     Object.assign(ciaa, o.ciaa); Object.assign(ciab, o.ciab);
+    paula.filter = (ciaa.pra & 2) === 0;
     M.keyQueue = o.input.keyQueue.slice(); M.mouseX = o.input.mouseX; M.mouseY = o.input.mouseY;
     M.mouseButtons = 0; M.joy = { up: false, down: false, left: false, right: false, fire: false };
     M.cpu.setState(o.cpu);
@@ -2935,6 +3037,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   const $ = (id) => document.getElementById(id);
   const hex = (v, n) => (v >>> 0).toString(16).padStart(n, '0');
 
+  const PAGE_SOURCE = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
   const machine = makeMachine();
   const cpu = makeCPU(machine.bus);
   machine.cpu = cpu;
@@ -2966,84 +3069,6 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     }
     ctx.putImageData(img, 0, 0);
   }
-
-  // --- Tastatur und Maus --------------------------------------------------
-  const KEYMAP = {
-    Backquote:0x00, Digit1:0x01, Digit2:0x02, Digit3:0x03, Digit4:0x04, Digit5:0x05,
-    Digit6:0x06, Digit7:0x07, Digit8:0x08, Digit9:0x09, Digit0:0x0a, Minus:0x0b,
-    Equal:0x0c, Backslash:0x0d, Backspace:0x41,
-    KeyQ:0x10, KeyW:0x11, KeyE:0x12, KeyR:0x13, KeyT:0x14, KeyY:0x15, KeyU:0x16,
-    KeyI:0x17, KeyO:0x18, KeyP:0x19, BracketLeft:0x1a, BracketRight:0x1b,
-    KeyA:0x20, KeyS:0x21, KeyD:0x22, KeyF:0x23, KeyG:0x24, KeyH:0x25, KeyJ:0x26,
-    KeyK:0x27, KeyL:0x28, Semicolon:0x29, Quote:0x2a,
-    KeyZ:0x31, KeyX:0x32, KeyC:0x33, KeyV:0x34, KeyB:0x35, KeyN:0x36, KeyM:0x37,
-    Comma:0x38, Period:0x39, Slash:0x3a,
-    Space:0x40, Tab:0x42, Enter:0x44, Escape:0x45, Delete:0x46,
-    F1:0x50, F2:0x51, F3:0x52, F4:0x53, F5:0x54, F6:0x55, F7:0x56, F8:0x57, F9:0x58, F10:0x59,
-    ArrowUp:0x4c, ArrowDown:0x4d, ArrowRight:0x4e, ArrowLeft:0x4f,
-    ShiftLeft:0x60, ShiftRight:0x61, ControlLeft:0x63, AltLeft:0x64, AltRight:0x65,
-    MetaLeft:0x66, MetaRight:0x67,
-  };
-  // Joystick in Port 2 auf dem Ziffernblock: 8/2/4/6 Richtungen, 7/9/1/3 Diagonalen,
-  // 0 oder Enter = Feuer, 5 = alle Richtungen loslassen.
-  const JOYKEYS = {
-    Numpad8: ['up'], Numpad2: ['down'], Numpad4: ['left'], Numpad6: ['right'],
-    Numpad7: ['up', 'left'], Numpad9: ['up', 'right'], Numpad1: ['down', 'left'], Numpad3: ['down', 'right'],
-    Numpad0: ['fire'], NumpadEnter: ['fire'], Numpad5: [],
-  };
-  function joyKey(e, down) {
-    if (!$('joyKeys').checked) return false;
-    const dirs = JOYKEYS[e.code];
-    if (!dirs) return false;
-    if (e.code === 'Numpad5') { for (const k of ['up', 'down', 'left', 'right']) machine.joy[k] = false; }
-    for (const k of dirs) machine.joy[k] = down;
-    e.preventDefault();
-    return true;
-  }
-  window.addEventListener('keydown', (e) => {
-    if (!running) return;
-    if (joyKey(e, true)) return;
-    const code = KEYMAP[e.code];
-    if (code === undefined) return;
-    e.preventDefault();
-    if (!e.repeat) machine.keyQueue.push(code);
-  });
-  window.addEventListener('keyup', (e) => {
-    if (!running) return;
-    if (joyKey(e, false)) return;
-    const code = KEYMAP[e.code];
-    if (code === undefined) return;
-    e.preventDefault();
-    machine.keyQueue.push(code | 0x80);
-  });
-
-  // Maus: ein Zaehlerschritt entspricht einem Lores-Pixel. Bruchteile werden
-  // aufbewahrt, damit langsame Bewegungen nicht durch Rundung verloren gehen.
-  // Ein Klick auf den Bildschirm faengt den Zeiger ein (Esc gibt ihn frei).
-  let mRestX = 0, mRestY = 0;
-  function mouseMove(dx, dy) {
-    const r = canvas.getBoundingClientRect();
-    const scale = (CROP_W / r.width) * 0.5;
-    mRestX += dx * scale; mRestY += dy * scale;
-    const ix = Math.trunc(mRestX), iy = Math.trunc(mRestY);
-    mRestX -= ix; mRestY -= iy;
-    machine.mouseX = (machine.mouseX + ix) & 0xff;
-    machine.mouseY = (machine.mouseY + iy) & 0xff;
-  }
-  canvas.addEventListener('mousemove', (e) => {
-    if (!running) return;
-    mouseMove(e.movementX || 0, e.movementY || 0);
-  });
-  canvas.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    if (document.pointerLockElement !== canvas && canvas.requestPointerLock) {
-      canvas.requestPointerLock();
-      log('Maus eingefangen – Esc gibt sie wieder frei.');
-    }
-    machine.mouseButtons |= (e.button === 0 ? 1 : 2);
-  });
-  window.addEventListener('mouseup', (e) => { machine.mouseButtons &= ~(e.button === 0 ? 1 : 2); });
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // --- Hauptschleife ------------------------------------------------------
   // Das Tempo richtet sich nach der echten Uhr, nicht nach der Bildrate des
@@ -3097,14 +3122,170 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   }
 
   function log(msg) {
-    const el = $('log');
-    el.textContent = msg;
+    $('log').textContent = msg;
   }
+
+  // --- Tastatur und Maus --------------------------------------------------
+  const KEYMAP = {
+    Backquote:0x00, Digit1:0x01, Digit2:0x02, Digit3:0x03, Digit4:0x04, Digit5:0x05,
+    Digit6:0x06, Digit7:0x07, Digit8:0x08, Digit9:0x09, Digit0:0x0a, Minus:0x0b,
+    Equal:0x0c, Backslash:0x0d, Backspace:0x41,
+    KeyQ:0x10, KeyW:0x11, KeyE:0x12, KeyR:0x13, KeyT:0x14, KeyY:0x15, KeyU:0x16,
+    KeyI:0x17, KeyO:0x18, KeyP:0x19, BracketLeft:0x1a, BracketRight:0x1b,
+    KeyA:0x20, KeyS:0x21, KeyD:0x22, KeyF:0x23, KeyG:0x24, KeyH:0x25, KeyJ:0x26,
+    KeyK:0x27, KeyL:0x28, Semicolon:0x29, Quote:0x2a,
+    KeyZ:0x31, KeyX:0x32, KeyC:0x33, KeyV:0x34, KeyB:0x35, KeyN:0x36, KeyM:0x37,
+    Comma:0x38, Period:0x39, Slash:0x3a,
+    Space:0x40, Tab:0x42, Enter:0x44, Escape:0x45, Delete:0x46,
+    F1:0x50, F2:0x51, F3:0x52, F4:0x53, F5:0x54, F6:0x55, F7:0x56, F8:0x57, F9:0x58, F10:0x59,
+    ArrowUp:0x4c, ArrowDown:0x4d, ArrowRight:0x4e, ArrowLeft:0x4f,
+    ShiftLeft:0x60, ShiftRight:0x61, ControlLeft:0x63, ControlRight:0x63, AltLeft:0x64, AltRight:0x65,
+    MetaLeft:0x66, MetaRight:0x67, ContextMenu:0x67, Home:0x66, End:0x67,
+    IntlBackslash:0x30, IntlRo:0x2b, Insert:0x5f, F11:0x5f, F12:0x5f,
+    Numpad0:0x0f, Numpad1:0x1d, Numpad2:0x1e, Numpad3:0x1f, Numpad4:0x2d, Numpad5:0x2e, Numpad6:0x2f,
+    Numpad7:0x3d, Numpad8:0x3e, Numpad9:0x3f, NumpadDecimal:0x3c, NumpadEnter:0x43,
+    NumpadSubtract:0x4a, NumpadAdd:0x5e, NumpadMultiply:0x5d, NumpadDivide:0x5c,
+  };
+  // Zeichenmodus: das getippte Zeichen wird auf Taste und Shift der USA-Belegung
+  // des Amiga umgesetzt, damit eine deutsche Tastatur ohne SetMap richtig tippt.
+  const USA_CHARS = {};
+  (() => {
+    const add = (chars, codes, shift) => { for (let i = 0; i < chars.length; i++) USA_CHARS[chars[i]] = [codes[i], shift]; };
+    const letters = 'abcdefghijklmnopqrstuvwxyz';
+    const letterCodes = [0x20,0x35,0x33,0x22,0x12,0x23,0x24,0x25,0x17,0x26,0x27,0x28,0x37,0x36,0x18,0x19,0x10,0x13,0x21,0x14,0x16,0x34,0x11,0x32,0x15,0x31];
+    add(letters, letterCodes, false); add(letters.toUpperCase(), letterCodes, true);
+    const row = '`1234567890-=[];\',\\./';
+    const rowCodes = [0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x1a,0x1b,0x29,0x2a,0x38,0x0d,0x39,0x3a];
+    add(row, rowCodes, false);
+    const rowShift = '~!@#$%^&*()_+{}:"<|>?';
+    add(rowShift, rowCodes, true);
+    USA_CHARS[' '] = [0x40, false];
+  })();
+  const DEAD_CHARS = new Set(['ä', 'ö', 'ü', 'Ä', 'Ö', 'Ü', 'ß', '€', '§', '°', '´', '`']);
+  // Joystick in Port 2 auf dem Ziffernblock: 8/2/4/6 Richtungen, 7/9/1/3 Diagonalen,
+  // 0 oder Enter = Feuer, 5 = alle Richtungen loslassen.
+  const JOYKEYS = {
+    Numpad8: ['up'], Numpad2: ['down'], Numpad4: ['left'], Numpad6: ['right'],
+    Numpad7: ['up', 'left'], Numpad9: ['up', 'right'], Numpad1: ['down', 'left'], Numpad3: ['down', 'right'],
+    Numpad0: ['fire'], NumpadEnter: ['fire'], Numpad5: [],
+  };
+  function joyKey(e, down) {
+    if (!$('joyKeys').checked) return false;
+    const dirs = JOYKEYS[e.code];
+    if (!dirs) return false;
+    if (e.code === 'Numpad5') { for (const k of ['up', 'down', 'left', 'right']) machine.joy[k] = false; }
+    for (const k of dirs) machine.joy[k] = down;
+    e.preventDefault();
+    return true;
+  }
+  // Umschaltung: 'chars' = Zeichen auf USA-Belegung umsetzen, 'pos' = Tastenposition
+  // durchreichen (fuer Amiga-Keymaps wie SetMap d).
+  let shiftHeld = { phys: false, synth: false };
+  let dead = new Set();
+  function amigaKeyMode() { return $('keyMode').value; }
+  function sendKey(code, down) { machine.keyQueue.push(down ? code : (code | 0x80)); }
+  const amigaDown = new Set();
+  window.addEventListener('keydown', (e) => {
+    if (!running) return;
+    if (joyKey(e, true)) return;
+    if (e.code === 'CapsLock') {                 // Amiga meldet nur den Zustand der Verriegelung
+      e.preventDefault();
+      sendKey(0x62, e.getModifierState('CapsLock'));
+      return;
+    }
+    const posCode = KEYMAP[e.code];
+    if (posCode === 0x66 || posCode === 0x67) {
+      amigaDown.add(posCode);
+      if (amigaDown.has(0x66) && amigaDown.has(0x67) && e.ctrlKey) { e.preventDefault(); log('Ctrl-Amiga-Amiga: Reset.'); doReset(); setRunning(true); amigaDown.clear(); return; }
+    }
+    if (amigaKeyMode() === 'chars' && e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      if (e.repeat) return;
+      const m = USA_CHARS[e.key];
+      if (!m) {
+        if (DEAD_CHARS.has(e.key) && !dead.has(e.key)) { dead.add(e.key); log(`»${e.key}« gibt es in der USA-Belegung des Amiga nicht – dafür »SetMap d« und Modus »Tastenposition«.`); }
+        return;
+      }
+      const [code, shift] = m;
+      // Shift so setzen, wie das Zeichen es braucht, unabhaengig von der physischen Taste
+      if (shift && !shiftHeld.synth) { sendKey(0x60, true); shiftHeld.synth = true; }
+      if (!shift && shiftHeld.synth) { sendKey(0x60, false); shiftHeld.synth = false; }
+      sendKey(code, true);
+      return;
+    }
+    if (posCode === undefined) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (amigaKeyMode() === 'chars' && (posCode === 0x60 || posCode === 0x61)) return;   // Shift wird im Zeichenmodus synthetisch gesetzt
+    sendKey(posCode, true);
+  });
+  window.addEventListener('keyup', (e) => {
+    if (!running) return;
+    if (joyKey(e, false)) return;
+    if (e.code === 'CapsLock') { e.preventDefault(); return; }
+    const posCode = KEYMAP[e.code];
+    if (posCode === 0x66 || posCode === 0x67) amigaDown.delete(posCode);
+    if (amigaKeyMode() === 'chars' && e.key && e.key.length === 1 && !e.ctrlKey && !e.altKey) {
+      e.preventDefault();
+      const m = USA_CHARS[e.key] || (e.key.length === 1 ? USA_CHARS[e.key.toLowerCase()] : null);
+      if (m) sendKey(m[0], false);
+      // Shift-Zustand nach dem Loslassen aufraeumen
+      if (shiftHeld.synth) { sendKey(0x60, false); shiftHeld.synth = false; }
+      return;
+    }
+    if (posCode === undefined) return;
+    e.preventDefault();
+    if (amigaKeyMode() === 'chars' && (posCode === 0x60 || posCode === 0x61)) return;
+    sendKey(posCode, false);
+  });
+  window.addEventListener('blur', () => {         // Fensterwechsel: alle Tasten loslassen
+    if (shiftHeld.synth) { sendKey(0x60, false); shiftHeld.synth = false; }
+    machine.joy = { up: false, down: false, left: false, right: false, fire: false };
+    amigaDown.clear();
+  });
+
+  // --- Maus ---------------------------------------------------------------------
+  // Ein Zaehlerschritt entspricht einem Lores-Pixel. Bruchteile werden aufbewahrt,
+  // damit langsame Bewegungen nicht durch Rundung verloren gehen. Ein Klick auf
+  // den Bildschirm faengt den Zeiger ein (Esc gibt ihn frei).
+  let mRestX = 0, mRestY = 0;
+  function mouseMove(dx, dy) {
+    const r = canvas.getBoundingClientRect();
+    const scale = (CROP_W / r.width) * 0.5;
+    mRestX += dx * scale; mRestY += dy * scale;
+    const ix = Math.trunc(mRestX), iy = Math.trunc(mRestY);
+    mRestX -= ix; mRestY -= iy;
+    machine.mouseX = (machine.mouseX + ix) & 0xff;
+    machine.mouseY = (machine.mouseY + iy) & 0xff;
+  }
+  canvas.addEventListener('mousemove', (e) => {
+    if (!running) return;
+    mouseMove(e.movementX || 0, e.movementY || 0);
+  });
+  canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    if (e.button === 1) {                       // mittlere Taste: Zeiger wieder freigeben
+      if (document.pointerLockElement === canvas) { document.exitPointerLock(); log('Maus freigegeben.'); }
+      return;
+    }
+    if (document.pointerLockElement !== canvas && canvas.requestPointerLock) {
+      canvas.requestPointerLock();
+      log('Maus eingefangen – mittlere Maustaste oder Esc gibt sie wieder frei.');
+    }
+    if (e.button === 0) machine.mouseButtons |= 1;
+    if (e.button === 2) machine.mouseButtons |= 2;
+  });
+  window.addEventListener('mouseup', (e) => {
+    if (e.button === 0) machine.mouseButtons &= ~1;
+    if (e.button === 2) machine.mouseButtons &= ~2;
+  });
+  window.addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
   // --- ROM laden ----------------------------------------------------------
   function loadROMBuffer(buf, name) {
     let bytes = new Uint8Array(buf);
-    // Amiga-Forever-Kopf (11 Byte "AMIROMTYPE1") abtrennen, falls vorhanden
+    // Amiga-Forever-Kopf (11 Byte "AMIROMTYPE1") erkennen
     const magic = 'AMIROMTYPE1';
     let isEnc = true;
     for (let i = 0; i < magic.length; i++) if (bytes[i] !== magic.charCodeAt(i)) { isEnc = false; break; }
@@ -3119,25 +3300,65 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     try { doReset(); } catch (e) { log('Reset fehlgeschlagen: ' + JSON.stringify(e)); return; }
     log(`ROM geladen: ${romName}. Erste Anweisung bei $${hex(cpu.pc, 6)}.`);
   }
-
   $('romFile').addEventListener('change', (e) => {
     const f = e.target.files[0];
     if (!f) return;
     f.arrayBuffer().then((b) => loadROMBuffer(b, f.name));
+    e.target.value = '';
   });
 
+  // Nichts wird im Browser gespeichert: Beim Laden der Seite ist alles leer.
+  // Reste einer frueheren Version, die IndexedDB benutzt hat, werden entfernt.
+  try { if (window.indexedDB) indexedDB.deleteDatabase('amiga500'); } catch (e) {}
+
+  // --- Leere Diskette -----------------------------------------------------------
+  // Erzeugt ein formatiertes OFS-Abbild: Bootblock mit DOS-Kennung, Wurzelblock 880
+  // und Bitmapblock 881, alle Bloecke frei. Entspricht dem Ergebnis von "format".
+  function makeEmptyADF(name) {
+    const adf = new Uint8Array(901120);
+    const dv = new DataView(adf.buffer);
+    const putLong = (block, idx, v) => dv.setUint32(block * 512 + idx * 4, v >>> 0, false);
+    const checksum = (block, skipIdx) => {                // Summe aller Langwoerter soll 0 ergeben
+      let sum = 0;
+      for (let i = 0; i < 128; i++) { if (i === skipIdx) continue; sum = (sum + dv.getUint32(block * 512 + i * 4, false)) >>> 0; }
+      return (-sum) >>> 0;
+    };
+    adf.set([0x44, 0x4f, 0x53, 0x00], 0); putLong(0, 2, 880);
+    const R = 880;
+    putLong(R, 0, 2); putLong(R, 3, 72); putLong(R, 78, 0xffffffff); putLong(R, 79, 881); putLong(R, 127, 1);
+    const now = new Date(), days = Math.floor((now - Date.UTC(1978, 0, 1)) / 86400000);
+    const mins = now.getUTCHours() * 60 + now.getUTCMinutes(), ticks = now.getUTCSeconds() * 50;
+    for (const base of [105, 118, 121]) { putLong(R, base, days); putLong(R, base + 1, mins); putLong(R, base + 2, ticks); }   // $1a4, $1d8, $1e4
+    const nm = new TextEncoder().encode(name.slice(0, 30));
+    adf[R * 512 + 108 * 4] = nm.length; adf.set(nm, R * 512 + 108 * 4 + 1);
+    putLong(R, 5, checksum(R, 5));
+    const B = 881;
+    for (let i = 1; i <= 55; i++) putLong(B, i, 0xffffffff);
+    const setUsed = (blk) => { const bit = blk - 2; const idx = 1 + (bit >> 5); dv.setUint32(B * 512 + idx * 4, (dv.getUint32(B * 512 + idx * 4, false) & ~(1 << (bit & 31))) >>> 0, false); };
+    setUsed(880); setUsed(881);
+    for (let bit = 1758; bit < 1760; bit++) setUsed(bit + 2);
+    putLong(B, 0, checksum(B, 0));
+    return adf;
+  }
+  $('btnNewDisk').onclick = () => {
+    const name = (prompt('Name der neuen Diskette', 'Leer') || '').trim();
+    if (!name) return;
+    const unit = freeDrive();
+    insertADF(unit, makeEmptyADF(name).buffer, name + '.adf');
+  };
+
   // --- Disketten ------------------------------------------------------------
-  // Vier Laufwerke; DF0 ist eingebaut, DF1-DF3 gelten als externe Laufwerke.
-  // Beim Ziehen einer ADF-Datei auf die Seite landet sie im ersten freien Laufwerk.
   function insertADF(unit, buf, name) {
     try {
       machine.floppy.insert(unit, new Uint8Array(buf), name);
       machine.floppy.setWriteProtect(unit, $('wprot').checked);
-      log(`DF${unit}: ${name} eingelegt.`);
+      if (!machine.floppy.state(unit).present) { machine.floppy.setPresent(unit, true); log(`DF${unit}: ${name} eingelegt – Laufwerk eingeschaltet, gilt ab dem nächsten Zurücksetzen.`); }
+      else log(`DF${unit}: ${name} eingelegt.`);
     } catch (e) { log(e.message); }
     updateDisk();
   }
   function freeDrive() {
+    for (let u = 0; u < 4; u++) { const st = machine.floppy.state(u); if (st.present && !st.name) return u; }
     for (let u = 0; u < 4; u++) if (!machine.floppy.state(u).name) return u;
     return 0;
   }
@@ -3149,7 +3370,17 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
         ? `${st.name} · Zyl ${st.cyl} · Seite ${st.side} · Motor ${st.motor ? 'an' : 'aus'}${st.dirty ? ' · geändert' : ''}`
         : 'keine Diskette';
       el.classList.toggle('on', st.motor && !!st.name);
+      const chk = document.querySelector(`.drvOn[data-unit="${u}"]`);
+      if (chk) chk.checked = st.present;
     }
+  }
+  for (const chk of document.querySelectorAll('.drvOn')) {
+    chk.addEventListener('change', () => {
+      const u = parseInt(chk.dataset.unit, 10);
+      if (u === 0) { chk.checked = true; return; }
+      machine.floppy.setPresent(u, chk.checked);
+      log(`DF${u} ${chk.checked ? 'angeschlossen' : 'abgeklemmt'} – wirkt beim nächsten Zurücksetzen.`);
+    });
   }
   for (const inp of document.querySelectorAll('.adfFile')) {
     inp.addEventListener('change', (e) => {
@@ -3231,8 +3462,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   // --- Schnappschuss --------------------------------------------------------
   // Datei: "A500SNAP" + Version(u32) + Laenge(u32) + JSON + Speicherbloecke am Stueck.
   const SNAP_MAGIC = 'A500SNAP';
-  function saveSnapshot() {
-    if (!machine.hasROM()) { log('Kein ROM geladen – nichts zu sichern.'); return; }
+  function snapshotParts() {
     const st = machine.getState();
     const blobs = st.blobs; delete st.blobs;
     const list = [];
@@ -3244,21 +3474,74 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     st.blobList = list;
     st.ui = { chipSize: $('chipSize').value, slowRam: $('slowRam').checked, speed: $('speed').value,
               turbo: $('turbo').checked, wprot: $('wprot').checked, joyKeys: $('joyKeys').checked,
-              blitTiming: $('blitTiming').checked, dmaContention: $('dmaContention').checked, romName };
+              blitTiming: $('blitTiming').checked, dmaContention: $('dmaContention').checked, keyMode: $('keyMode').value, romName };
     const json = new TextEncoder().encode(JSON.stringify(st));
     const head = new Uint8Array(16);
     head.set(new TextEncoder().encode(SNAP_MAGIC), 0);
     new DataView(head.buffer).setUint32(8, 1, true);
     new DataView(head.buffer).setUint32(12, json.length, true);
-    const blob = new Blob([head, json, ...parts], { type: 'application/octet-stream' });
+    return [head, json, ...parts];
+  }
+  const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  function download(blob, name) {
     const a = document.createElement('a');
-    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
     a.href = URL.createObjectURL(blob);
-    a.download = `amiga500-${stamp}.a500`;
+    a.download = name;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+  function saveSnapshot() {
+    if (!machine.hasROM()) { log('Kein ROM geladen – nichts zu sichern.'); return; }
+    const blob = new Blob(snapshotParts(), { type: 'application/octet-stream' });
+    download(blob, `amiga500-${stamp()}.a500`);
     log(`Zustand gesichert (${(blob.size / 1024 / 1024).toFixed(1)} MB).`);
   }
+  // Die ganze Seite mit eingebettetem Zustand: beim Oeffnen laeuft der Amiga direkt los.
+  function base64(bytes) {
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) out += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(out);
+  }
+  function fromBase64(str) {
+    const bin = atob(str), out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  // Die Marker werden aus Stuecken zusammengesetzt, damit sie im Quelltext der
+  // Seite selbst nicht woertlich vorkommen - sonst fuende die Suche sich selbst.
+  const SNAP_OPEN = '<scr' + 'ipt id="autosnap" type="application/octet-stream">';
+  const SNAP_CLOSE = '</scr' + 'ipt>';
+  const BODY_CLOSE = '</bo' + 'dy>';
+  function buildPageWithState() {
+    const parts = snapshotParts();
+    const total = parts.reduce((n, p) => n + p.length, 0);
+    const all = new Uint8Array(total); let off = 0;
+    for (const p of parts) { all.set(p, off); off += p.length; }
+    const b64 = base64(all);
+    let src = PAGE_SOURCE;
+    const a = src.indexOf(SNAP_OPEN);
+    if (a >= 0) { const b = src.indexOf(SNAP_CLOSE, a); if (b >= 0) src = src.slice(0, a) + src.slice(b + SNAP_CLOSE.length); }
+    const bodyAt = src.lastIndexOf(BODY_CLOSE);
+    const block = SNAP_OPEN + b64 + SNAP_CLOSE + '\n';
+    return bodyAt >= 0 ? src.slice(0, bodyAt) + block + src.slice(bodyAt) : src + block;
+  }
+  function buildCleanPage() {
+    let src = PAGE_SOURCE;
+    const a = src.indexOf(SNAP_OPEN);
+    if (a >= 0) { const b = src.indexOf(SNAP_CLOSE, a); if (b >= 0) src = src.slice(0, a) + src.slice(b + SNAP_CLOSE.length); }
+    return src;
+  }
+  function savePageWithState() {
+    if (!machine.hasROM()) {
+      download(new Blob([buildCleanPage()], { type: 'text/html' }), 'amiga500.html');
+      log('Kein ROM geladen – die Seite wurde ohne Zustand gesichert.');
+      return;
+    }
+    const blob = new Blob([buildPageWithState()], { type: 'text/html' });
+    download(blob, `amiga500-${stamp()}.html`);
+    log(`Seite mit Zustand gesichert (${(blob.size / 1024 / 1024).toFixed(1)} MB).`);
+  }
+  $('btnSavePage').onclick = savePageWithState;
   function loadSnapshot(buf) {
     const bytes = new Uint8Array(buf);
     const magic = new TextDecoder().decode(bytes.subarray(0, 8));
@@ -3279,6 +3562,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     $('joyKeys').checked = ui.joyKeys !== false;
     $('blitTiming').checked = ui.blitTiming !== false; machine.blitTiming = ui.blitTiming !== false;
     $('dmaContention').checked = ui.dmaContention !== false; machine.dmaContention = ui.dmaContention !== false;
+    if (ui.keyMode) $('keyMode').value = ui.keyMode;
     machine.setState(st, blobs);
     romName = ui.romName || 'ROM aus Schnappschuss';
     draw(); refreshPanels(); updateStatus(); updateDisk();
@@ -3598,6 +3882,44 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   requestAnimationFrame(frame);
   updateDisk();
   log('Kickstart-ROM hierher ziehen, dann »Starten«. Eine ADF-Diskette kann jederzeit eingelegt werden.');
+  (async () => {
+    // Der eingebettete Zustand steht hinter diesem Skript: erst das Dokumentende abwarten
+    if (document.readyState === 'loading') await new Promise((r) => document.addEventListener('DOMContentLoaded', r, { once: true }));
+    const auto = document.getElementById('autosnap');
+    if (auto && auto.textContent.trim()) {
+      try {
+        const bytes = fromBase64(auto.textContent.trim());
+        loadSnapshot(bytes.buffer);
+        setRunning(true);
+        log('Eingebetteter Zustand geladen – der Amiga läuft. Der Ton startet beim ersten Klick auf die Seite.');
+      } catch (e) { log('Eingebetteter Zustand konnte nicht geladen werden: ' + e.message); }
+      return;
+    }
+  })();
+  // Alles zuruecksetzen: Disketten raus, ROM weg, Einstellungen auf Standard,
+  // eingebetteter Zustand aus dem Dokument entfernt. Die Datei auf der Platte bleibt unveraendert.
+  $('btnFactory').onclick = () => {
+    if (!confirm('Wirklich alles zurücksetzen? ROM, Disketten und Einstellungen werden verworfen.')) return;
+    setRunning(false);
+    for (let u = 0; u < 4; u++) { machine.floppy.eject(u); machine.floppy.setPresent(u, u < 2); }
+    machine.unloadROM(); romName = null;
+    const auto = document.getElementById('autosnap');
+    if (auto) auto.remove();
+    $('chipSize').value = '512'; $('slowRam').checked = false; $('speed').value = '1'; speed = 1;
+    $('turbo').checked = false; machine.floppy.turbo = false;
+    $('wprot').checked = false; $('joyKeys').checked = true;
+    $('blitTiming').checked = true; machine.blitTiming = true;
+    $('dmaContention').checked = true; machine.dmaContention = true;
+    $('sound').checked = true; machine.paula.muted = false; $('volume').value = '70';
+    $('keyMode').value = 'chars';
+    try { doReset(); } catch (e) {}
+    draw(); updateDisk(); updateStatus();
+    log('Zurückgesetzt: kein ROM, keine Disketten, Standardeinstellungen. Eine geöffnete Datei mit Zustand lädt ihn beim nächsten Öffnen wieder – »Seite mit Zustand sichern« liefert jetzt eine leere Seite.');
+  };
+  // Fuer Tests und die Browser-Konsole
+  window.amiga = { machine, cpu, loadROMBuffer, insertADF, setRunning, buildPageWithState, get running() { return running; } };
+  // Ton darf erst nach einer Nutzeraktion starten: erster Klick irgendwo genuegt
+  document.addEventListener('click', () => { if (running) { startAudio(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } });
 })();
 
 </script>
