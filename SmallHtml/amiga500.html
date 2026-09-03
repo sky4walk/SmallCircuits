@@ -146,7 +146,13 @@
       <label><input type="checkbox" id="turbo"> Turbo-Diskette</label>
     </div>
     <div class="controls">
-      <label><input type="checkbox" id="joyKeys" checked> Ziffernblock = Joystick (Port 2), Feuer: 0 oder Enter</label>
+      <label><input type="checkbox" id="joyKeys" checked> Ziffernblock = Joystick, Feuer: 0 oder Enter</label>
+      <label>Joystick-Port
+        <select id="joyPort">
+          <option value="2">Port 2 (Maus in Port 1)</option>
+          <option value="1">Port 1 (Maus in Port 2)</option>
+        </select>
+      </label>
       <label>Tastatur
         <select id="keyMode">
           <option value="chars">Zeichen umsetzen (Amiga mit USA-Belegung)</option>
@@ -1988,8 +1994,9 @@ function makeMachine() {
           // Bit0 OVL, Bit1 LED sind Ausgaenge; Rest sind Laufwerks- und Joystickleitungen
           let inp = 0xc0 | floppy.readPRA();
           if (M.praInputs !== undefined) inp = M.praInputs;
-          if (M.mouseButtons & 1) inp &= ~0x40;      // FIR0, aktiv low
-          if (M.joy.fire) inp &= ~0x80;              // FIR1 (Port 2), aktiv low
+          // FIR0 (Port 1) und FIR1 (Port 2), beide aktiv low; der Joystick sitzt in M.joyPort
+          if (M.joyPort === 1) { if (M.joy.fire) inp &= ~0x40; if (M.mouseButtons & 1) inp &= ~0x80; }
+          else { if (M.mouseButtons & 1) inp &= ~0x40; if (M.joy.fire) inp &= ~0x80; }
           return (c.pra & c.ddra) | (inp & ~c.ddra);
         }
         return c.pra;
@@ -2258,6 +2265,15 @@ function makeMachine() {
   function sx(v) { return (v << 16) >> 16; }
 
   // --- Custom-Zugriffe ----------------------------------------------------
+  // Joystick-Kodierung: Bit1 = rechts, Bit9 = links; runter = Bit1 XOR Bit0, hoch = Bit9 XOR Bit8
+  function joyDat() {
+    const j = M.joy;
+    let v = (j.right ? 0x0002 : 0) | (j.left ? 0x0200 : 0);
+    if (j.right !== j.down) v |= 0x0001;
+    if (j.left !== j.up) v |= 0x0100;
+    return v;
+  }
+  M.joyPort = 2;
   function customRead(reg) {
     switch (reg) {
       // Strobe-Register loesen auch beim Lesen aus (COPJMP1/2)
@@ -2269,16 +2285,12 @@ function makeMachine() {
       case R.INTENAR: return intena;
       case R.INTREQR: return intreq;
       case R.SERDATR: return 0x3000;             // TBE und TSRE gesetzt
-      case R.JOY0DAT: return ((M.mouseY & 0xff) << 8) | (M.mouseX & 0xff);
-      case R.JOY1DAT: {                          // Joystick in Port 2
-        // Bit1 = rechts, Bit9 = links; runter = Bit1 XOR Bit0, hoch = Bit9 XOR Bit8
-        const j = M.joy;
-        let v = (j.right ? 0x0002 : 0) | (j.left ? 0x0200 : 0);
-        if (j.right !== j.down) v |= 0x0001;
-        if (j.left !== j.up) v |= 0x0100;
-        return v;
+      case R.JOY0DAT: return M.joyPort === 1 ? joyDat() : ((M.mouseY & 0xff) << 8) | (M.mouseX & 0xff);
+      case R.JOY1DAT: return M.joyPort === 1 ? ((M.mouseY & 0xff) << 8) | (M.mouseX & 0xff) : joyDat();
+      case R.POTGOR: {                           // Bit 10: zweite Taste Port 1, Bit 14: Port 2 (beide aktiv low)
+        const rmb = (M.mouseButtons & 2) !== 0;
+        return 0xbb00 | (M.joyPort === 1 ? (0x0400 | (rmb ? 0 : 0x4000)) : ((rmb ? 0 : 0x0400) | 0x4000));
       }
-      case R.POTGOR: return 0xbb00 | ((M.mouseButtons & 2) ? 0 : 0x0400) | 0x4000;   // Bit 10: rechte Maustaste Port 1, Bit 14: Port 2 (beide aktiv low)
       case R.DSKDATR: return floppy.readDSKDATR();
       case 0x00e: { const v = clxdat; clxdat = 0; return v; }         // CLXDAT, loescht sich beim Lesen
       case 0x01a: return floppy.readDSKBYTR();   // DSKBYTR
@@ -2492,6 +2504,12 @@ function makeMachine() {
   // --- Denise: eine Rasterzeile zeichnen ----------------------------------
   const fb = new Uint32Array(FB_W * FB_H);
   M.framebuffer = fb;
+  // Zeilensprung: beide Halbbilder ineinander verschraenkt, doppelte Zeilenzahl.
+  // Das lange Halbbild (LOF) liefert die geraden Zeilen, das kurze die ungeraden.
+  const laceFB = new Uint32Array(FB_W * FB_H * 2);
+  M.laceFB = laceFB;
+  M.laceActive = false;
+  let laceSeen = false;
   M.FB_W = FB_W; M.FB_H = FB_H;
 
   // Bitplane-DMA laeuft in Einheiten von 8 Farbtakten ab DDFSTRT. Trifft DDFSTOP
@@ -2722,6 +2740,11 @@ function makeMachine() {
     renderLine();
     renderSprites();
     colorEventCount = 0;
+    if (cst[0x100 >> 1] & 4) {
+      laceSeen = true;
+      const src = vpos * FB_W;
+      laceFB.set(fb.subarray(src, src + FB_W), (vpos * 2 + (lof ? 0 : 1)) * FB_W);
+    }
     eclkAcc += CYC_PER_LINE;
     const eticks = Math.floor(eclkAcc / 10);
     eclkAcc -= eticks * 10;
@@ -2748,6 +2771,7 @@ function makeMachine() {
     vpos++;
     if (vpos >= LINES_PAL) {
       vpos = 0; frame++;
+      M.laceActive = laceSeen; laceSeen = false;
       // LOF wechselt nur im Zeilensprungbetrieb; sonst ist jedes Bild ein langes.
       lof = (cst[0x100 >> 1] & 4) ? !lof : true;
       setINTREQ(1 << 5);               // VERTB
@@ -3060,12 +3084,22 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   const img32 = new Uint32Array(img.data.buffer);
 
   function draw() {
-    const fb = machine.framebuffer, W = machine.FB_W;
-    for (let y = 0; y < CROP_H; y++) {
-      const s = (y + CROP_Y) * W + CROP_X;
-      const row = fb.subarray(s, s + CROP_W);
-      img32.set(row, (y * 2) * CROP_W);
-      img32.set(row, (y * 2 + 1) * CROP_W);
+    const W = machine.FB_W;
+    if (machine.laceActive) {
+      // Zeilensprung: beide Halbbilder liegen bereits verschraenkt vor, keine Zeilenverdopplung
+      const lf = machine.laceFB;
+      for (let y = 0; y < CROP_H * 2; y++) {
+        const s = (y + CROP_Y * 2) * W + CROP_X;
+        img32.set(lf.subarray(s, s + CROP_W), y * CROP_W);
+      }
+    } else {
+      const fb = machine.framebuffer;
+      for (let y = 0; y < CROP_H; y++) {
+        const s = (y + CROP_Y) * W + CROP_X;
+        const row = fb.subarray(s, s + CROP_W);
+        img32.set(row, (y * 2) * CROP_W);
+        img32.set(row, (y * 2 + 1) * CROP_W);
+      }
     }
     ctx.putImageData(img, 0, 0);
   }
@@ -3269,8 +3303,10 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
       return;
     }
     if (document.pointerLockElement !== canvas && canvas.requestPointerLock) {
+      // Der Klick, der den Zeiger einfaengt, geht nicht an den Amiga
       canvas.requestPointerLock();
       log('Maus eingefangen – mittlere Maustaste oder Esc gibt sie wieder frei.');
+      return;
     }
     if (e.button === 0) machine.mouseButtons |= 1;
     if (e.button === 2) machine.mouseButtons |= 2;
@@ -3407,6 +3443,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     };
   }
   $('wprot').onchange = () => { for (let u = 0; u < 4; u++) machine.floppy.setWriteProtect(u, $('wprot').checked); };
+  $('joyPort').onchange = () => { machine.joyPort = parseInt($('joyPort').value, 10); };
   $('turbo').onchange = () => { machine.floppy.turbo = $('turbo').checked; };
   $('blitTiming').onchange = () => { machine.blitTiming = $('blitTiming').checked; };
   $('dmaContention').onchange = () => { machine.dmaContention = $('dmaContention').checked; };
@@ -3473,7 +3510,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     }
     st.blobList = list;
     st.ui = { chipSize: $('chipSize').value, slowRam: $('slowRam').checked, speed: $('speed').value,
-              turbo: $('turbo').checked, wprot: $('wprot').checked, joyKeys: $('joyKeys').checked,
+              turbo: $('turbo').checked, wprot: $('wprot').checked, joyKeys: $('joyKeys').checked, joyPort: machine.joyPort,
               blitTiming: $('blitTiming').checked, dmaContention: $('dmaContention').checked, keyMode: $('keyMode').value, romName };
     const json = new TextEncoder().encode(JSON.stringify(st));
     const head = new Uint8Array(16);
@@ -3560,6 +3597,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     if (ui.speed !== undefined) { $('speed').value = ui.speed; speed = parseInt(ui.speed, 10); }
     $('turbo').checked = !!ui.turbo; $('wprot').checked = !!ui.wprot;
     $('joyKeys').checked = ui.joyKeys !== false;
+    machine.joyPort = ui.joyPort === 1 ? 1 : 2; $('joyPort').value = String(machine.joyPort);
     $('blitTiming').checked = ui.blitTiming !== false; machine.blitTiming = ui.blitTiming !== false;
     $('dmaContention').checked = ui.dmaContention !== false; machine.dmaContention = ui.dmaContention !== false;
     if (ui.keyMode) $('keyMode').value = ui.keyMode;
@@ -3907,7 +3945,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     if (auto) auto.remove();
     $('chipSize').value = '512'; $('slowRam').checked = false; $('speed').value = '1'; speed = 1;
     $('turbo').checked = false; machine.floppy.turbo = false;
-    $('wprot').checked = false; $('joyKeys').checked = true;
+    $('wprot').checked = false; $('joyKeys').checked = true; $('joyPort').value = '2'; machine.joyPort = 2;
     $('blitTiming').checked = true; machine.blitTiming = true;
     $('dmaContention').checked = true; machine.dmaContention = true;
     $('sound').checked = true; machine.paula.muted = false; $('volume').value = '70';
