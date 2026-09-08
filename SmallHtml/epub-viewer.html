@@ -106,6 +106,11 @@
     background:#7a2b2b; color:#fff; padding:.5rem .8rem; border-radius:5px;
     font-size:12px; max-width:80%; z-index:10; display:none; }
 
+  #note{ position:absolute; left:50%; bottom:1rem; transform:translateX(-50%);
+    background:var(--ink-2); color:var(--fg); border:1px solid var(--brass-dim);
+    padding:.5rem .8rem; border-radius:5px; font-size:12px; max-width:80%;
+    z-index:9; display:none; }
+
   @media (max-width:640px){
     #toc{ position:absolute; z-index:6; top:0; bottom:0; left:0; box-shadow:0 0 30px rgba(0,0,0,.4); }
     #author{ display:none; }
@@ -134,6 +139,7 @@
       <button class="btn theme" data-theme="sepia">Sepia</button>
       <button class="btn theme" data-theme="night">Nacht</button>
     </div>
+    <button class="btn" id="btnSave" disabled title="Buch als eigenständige HTML-Datei speichern (s)">Speichern</button>
     <span class="seg">
       <button class="btn" id="prev" title="Zurück (←)">‹</button>
       <button class="btn" id="next" title="Weiter (→)">›</button>
@@ -159,6 +165,7 @@
     </div>
   </div>
   <div id="err"></div>
+  <div id="note"></div>
 
 <script>
 "use strict";
@@ -200,6 +207,27 @@ function showError(msg){
   showError._t = setTimeout(() => (el.style.display = "none"), 6000);
   console.error(msg);
 }
+
+function showNote(msg, ms){
+  const el = $("#note");
+  clearTimeout(showNote._t);
+  if (msg === null){ el.style.display = "none"; return; }
+  el.textContent = msg; el.style.display = "block";
+  if (ms !== 0) showNote._t = setTimeout(() => (el.style.display = "none"), ms || 5000);
+}
+
+/* Unveränderte, buchlose Kopie dieser Seite – Vorlage für den Export.
+   Wird ganz früh gezogen, bevor irgendetwas am DOM verändert wurde. */
+const SELF_TEMPLATE = (() => {
+  // In einer bereits gesicherten Datei: Rohtext der Buchdaten vorher freigeben.
+  // window.__BAKED ist zu diesem Zeitpunkt schon geparst, das <script> hat
+  // bereits gelaufen und wird durch die Änderung nicht erneut ausgeführt.
+  const live = document.getElementById("__baked");
+  if (live) live.textContent = "";
+  const clone = document.documentElement.cloneNode(true);
+  clone.querySelectorAll("script#__baked").forEach(s => s.remove());
+  return clone;
+})();
 
 /* ========================================================================
    ZIP: EOCD -> Central Directory -> Local Header -> deflate-raw
@@ -268,6 +296,7 @@ function parseZip(buf){
 let book = null;   // { zip, opfDir, spine[], toc[], title, author }
 let cur = 0;
 let dataCache, cssCache;
+let baked = null;  // im gesicherten Einzel-HTML: { title, author, toc, chapters:[{path,html}], … }
 
 function xml(text, type){
   const doc = new DOMParser().parseFromString(text, type || "application/xml");
@@ -287,6 +316,56 @@ async function dataURLFor(path){
   const url = `data:${guessMime(path)};base64,${btoa(bin)}`;
   dataCache.set(path, url);
   return url;
+}
+
+/* ------------------------------------------------------------------
+   Asset-Referenzen
+
+   Beim normalen Lesen liefern assetRef/cssRef genau das, was sie früher
+   auch geliefert haben: eine data:-URL bzw. den fertigen CSS-Text.
+
+   Während des Exports (bake ≠ null) wandern Bilder, Schriften und
+   Stylesheets stattdessen EINMAL in gemeinsame Tabellen; das Kapitel
+   bekommt nur eine kurze Marke. Sonst läge ein 4-MB-Schriftpaket in
+   jedem einzelnen Kapitel erneut in der Datei.
+   ------------------------------------------------------------------ */
+let bake = null;   // { assets[], assetIdx, styles[], styleIdx } – nur während des Exports
+
+/* Marken aus dem Private-Use-Bereich: gültige XML-Zeichen (Steuerzeichen
+   wären es nicht) und in echtem Buchtext praktisch ausgeschlossen. */
+const MARK_A = (i) => "\uE000A" + i + "\uE001";   // Asset (data:-URL)
+const MARK_S = (i) => "\uE000S" + i + "\uE001";   // Stylesheet (CSS-Text)
+
+async function assetRef(path){
+  const url = await dataURLFor(path);
+  if (!bake) return url;
+  let i = bake.assetIdx.get(path);
+  if (i === undefined){ i = bake.assets.push(url) - 1; bake.assetIdx.set(path, i); }
+  return MARK_A(i);
+}
+
+async function cssRef(path){
+  if (!bake){
+    if (cssCache.has(path)) return cssCache.get(path);
+    const css = await inlineCss(path);
+    cssCache.set(path, css);
+    return css;
+  }
+  let i = bake.styleIdx.get(path);
+  if (i === undefined){
+    i = bake.styles.push(await inlineCss(path)) - 1;
+    bake.styleIdx.set(path, i);
+  }
+  return MARK_S(i);
+}
+
+/* Marken im gesicherten Kapitel wieder zu echten Inhalten machen.
+   Erst die Stylesheets, denn die enthalten ihrerseits Asset-Marken. */
+function expandBaked(html){
+  const S = (baked && baked.styles) || [], A = (baked && baked.assets) || [];
+  return html
+    .replace(/\uE000S(\d+)\uE001/g, (m, i) => S[+i] !== undefined ? S[+i] : "")
+    .replace(/\uE000A(\d+)\uE001/g, (m, i) => A[+i] !== undefined ? A[+i] : m);
 }
 
 async function inlineCss(path, seen){
@@ -309,7 +388,7 @@ async function inlineCss(path, seen){
     const raw = m[2].trim();
     if (/^(data:|https?:)/i.test(raw)) continue;
     const t = resolvePath(base, normHref(raw));
-    if (book.zip.entries.has(t)) reps.push([m[0], `url("${await dataURLFor(t)}")`]);
+    if (book.zip.entries.has(t)) reps.push([m[0], `url("${await assetRef(t)}")`]);
   }
   for (const [f, to] of reps) css = css.split(f).join(to);
   return css;
@@ -343,7 +422,7 @@ async function buildChapterHTML(path){
   // <img src>
   for (const img of d.querySelectorAll("img[src]")){
     const t = resolvePath(base, normHref(img.getAttribute("src")));
-    if (book.zip.entries.has(t)) img.setAttribute("src", await dataURLFor(t));
+    if (book.zip.entries.has(t)) img.setAttribute("src", await assetRef(t));
   }
   // SVG <image href / xlink:href>
   for (const im of d.querySelectorAll("image")){
@@ -351,7 +430,7 @@ async function buildChapterHTML(path){
     if (!href) continue;
     const t = resolvePath(base, normHref(href));
     if (book.zip.entries.has(t)){
-      const u = await dataURLFor(t);
+      const u = await assetRef(t);
       im.setAttribute("href", u); im.setAttribute("xlink:href", u);
     }
   }
@@ -361,7 +440,7 @@ async function buildChapterHTML(path){
     const t = resolvePath(base, normHref(href));
     if (!book.zip.entries.has(t)){ link.remove(); continue; }
     const style = d.createElement("style");
-    style.textContent = await inlineCss(t);
+    style.textContent = await cssRef(t);
     link.replaceWith(style);
   }
 
@@ -470,13 +549,19 @@ function spineIndexForPath(path){
   return book ? book.spine.findIndex(s => s.path === path) : -1;
 }
 
+/* Kapitel entweder frisch aus dem ZIP bauen oder aus den eingebackenen Daten nehmen */
+async function chapterHTML(index){
+  if (baked) return expandBaked(baked.chapters[index].html);
+  return await buildChapterHTML(book.spine[index].path);
+}
+
 async function goTo(index, frag){
   if (!book) return;
   index = Math.max(0, Math.min(book.spine.length - 1, index));
   cur = index;
   frame.classList.add("fade");
   let html;
-  try { html = await buildChapterHTML(book.spine[index].path); }
+  try { html = await chapterHTML(index); }
   catch (e){ showError("Kapitel konnte nicht geladen werden: " + e.message); frame.classList.remove("fade"); return; }
 
   frame.onload = () => {
@@ -484,6 +569,9 @@ async function goTo(index, frag){
     const idoc = frame.contentDocument;
     if (!idoc) return;
     idoc.documentElement.style.setProperty("--rfs", state.fontPx + "px");
+    // Thema angleichen (wichtig für eingebackene Kapitel)
+    const th = idoc.getElementById("__theme");
+    if (th) th.textContent = THEMES[state.theme];
     // Sprungmarke
     if (frag){ try { idoc.getElementById(frag)?.scrollIntoView(); } catch(_){} }
     else { try { idoc.documentElement.scrollTop = 0; idoc.body && (idoc.body.scrollTop = 0); } catch(_){} }
@@ -555,6 +643,7 @@ async function openFile(fileOrBuffer){
     if (!("DecompressionStream" in window))
       throw new Error("Browser ohne DecompressionStream – bitte aktuellen Chrome/Firefox/Safari verwenden.");
     const buf = fileOrBuffer instanceof ArrayBuffer ? fileOrBuffer : await fileOrBuffer.arrayBuffer();
+    baked = null;
     dataCache = new Map(); cssCache = new Map();
     const zip = parseZip(buf);
     // mimetype-Sanitycheck (optional, nicht fatal)
@@ -566,6 +655,7 @@ async function openFile(fileOrBuffer){
     await loadBook(zip);
     renderToc();
     $("#drop").classList.add("gone");
+    $("#btnSave").disabled = false;
     document.title = book.title + " · EPUB Viewer";
     await goTo(0);
   } catch (e){
@@ -575,12 +665,148 @@ async function openFile(fileOrBuffer){
 window.__openFile = openFile;
 
 /* ========================================================================
+   Export: Buch + Viewer in EINE eigenständige HTML-Datei backen
+   ==================================================================== */
+
+/* Kurz an den Browser abgeben, damit Fortschritt sichtbar wird
+   (setTimeout statt requestAnimationFrame: läuft auch im Hintergrund-Tab weiter) */
+const breathe = () => new Promise(r => setTimeout(r, 0));
+
+/* JSON so escapen, dass es gefahrlos in einem <script>-Block stehen kann */
+function jsLiteral(obj){
+  return JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+/* Liefert die fertige Datei als Teilstücke (Blob mag ein Array) – so muss
+   der Buchinhalt nicht zusätzlich in einen Riesen-String kopiert werden. */
+function buildStandaloneParts(data){
+  const MARK = "__EPUB_BAKED_PLACEHOLDER__";
+  const root = SELF_TEMPLATE.cloneNode(true);
+  // eventuell schon vorhandene Buchdaten (Re-Export) entfernen
+  root.querySelectorAll("script#__baked").forEach(s => s.remove());
+
+  const s = document.createElement("script");
+  s.id = "__baked";
+  s.textContent = MARK;
+  (root.querySelector("head") || root).appendChild(s);
+
+  const t = root.querySelector("title");
+  if (t) t.textContent = data.title + (data.author ? " – " + data.author : "");
+
+  const shell = "<!DOCTYPE html>\n" + root.outerHTML + "\n";
+  const payload = "window.__BAKED=" + jsLiteral(data) + ";";
+  const i = shell.indexOf(MARK);
+  if (i < 0) return [shell.replace(MARK, payload)];        // Notnagel
+  return [shell.slice(0, i), payload, shell.slice(i + MARK.length)];
+}
+
+function safeFileName(name){
+  return (name || "buch")
+    .replace(/[\\/:*?"<>|\u0000-\u001f]+/g, "_")
+    .replace(/\s+/g, " ").trim().slice(0, 90) || "buch";
+}
+
+async function exportHTML(){
+  if (!book || exportHTML._busy) return;
+  exportHTML._busy = true;
+  const btn = $("#btnSave");
+  const label = btn.textContent;
+  btn.disabled = true;
+
+  try {
+    let chapters, assets, styles;
+    if (baked){
+      // Re-Export: alles liegt bereits in Marken-Form vor
+      chapters = baked.chapters;
+      assets   = baked.assets || [];
+      styles   = baked.styles || [];
+    } else {
+      bake = { assets:[], assetIdx:new Map(), styles:[], styleIdx:new Map() };
+      chapters = [];
+      const n = book.spine.length;
+      for (let i = 0; i < n; i++){
+        btn.textContent = (i + 1) + "/" + n;
+        showNote("Kapitel werden eingebettet … " + (i + 1) + " / " + n, 0);
+        await breathe();                              // UI atmen lassen
+        chapters.push({ path: book.spine[i].path,
+                        html: await buildChapterHTML(book.spine[i].path) });
+      }
+      assets = bake.assets; styles = bake.styles;
+      bake = null;
+    }
+
+    showNote("HTML wird zusammengesetzt …", 0);
+    await breathe();
+
+    const parts = buildStandaloneParts({
+      v: 2,
+      title: book.title, author: book.author,
+      toc: book.toc, chapters, assets, styles,
+      theme: state.theme, fontPx: state.fontPx
+    });
+
+    const blob = new Blob(parts, { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = safeFileName(book.title) + ".html";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+
+    const mb = blob.size / 1048576;
+    showNote("Gespeichert: " + a.download + " (" +
+             (mb >= 1 ? mb.toFixed(1) + " MB" : (blob.size / 1024).toFixed(0) + " kB") + ")", 8000);
+  } catch (e){
+    showNote(null);
+    showError("Speichern fehlgeschlagen: " + (e.message || e));
+  } finally {
+    bake = null;
+    btn.textContent = label;
+    btn.disabled = false;
+    exportHTML._busy = false;
+  }
+}
+
+/* ========================================================================
+   Start im gesicherten Einzel-HTML
+   ==================================================================== */
+function startBaked(b){
+  baked = b;
+  state.theme  = b.theme  || state.theme;
+  state.fontPx = b.fontPx || state.fontPx;
+
+  book = {
+    zip: null, opfDir: "",
+    spine: b.chapters.map(c => ({ path: c.path, mime: "application/xhtml+xml", props: "" })),
+    toc: b.toc || [], title: b.title || "EPUB", author: b.author || ""
+  };
+
+  document.querySelectorAll(".btn.theme").forEach(x =>
+    x.classList.toggle("active", x.dataset.theme === state.theme));
+  $("#reader").style.background = READER_BG[state.theme];
+
+  renderToc();
+  $("#drop").classList.add("gone");
+  $("#btnSave").disabled = false;
+  document.title = book.title + (book.author ? " – " + book.author : "");
+  goTo(0);
+}
+
+/* ========================================================================
    Steuerung / Events
    ==================================================================== */
 function onKey(e){
   if (e.key === "ArrowLeft"){ if (cur > 0) goTo(cur - 1); }
   else if (e.key === "ArrowRight"){ if (book && cur < book.spine.length - 1) goTo(cur + 1); }
   else if (e.key.toLowerCase() === "t"){ $("#toc").classList.toggle("hidden"); }
+  else if (e.key.toLowerCase() === "s" && !e.ctrlKey && !e.metaKey && !e.altKey){
+    e.preventDefault(); exportHTML();
+  }
 }
 document.addEventListener("keydown", onKey);
 
@@ -624,6 +850,11 @@ document.addEventListener("drop", (e) => {
   const f = e.dataTransfer?.files?.[0];
   if (f) openFile(f);
 });
+
+$("#btnSave").onclick = exportHTML;
+
+// Enthält die Seite bereits ein eingebackenes Buch? Dann direkt anzeigen.
+if (window.__BAKED) startBaked(window.__BAKED);
 </script>
 </body>
 </html>
