@@ -265,6 +265,23 @@ start P U
   }
   #losfahren:focus-visible { outline: 3px solid var(--schrift); outline-offset: 3px; }
 
+  /* ---------- Lenkrad ---------- */
+
+  #lenkradfeld {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(560px, 92vw);
+    background: var(--grund-hell); border-left: 4px solid var(--gelb);
+    padding: 22px 26px; font-size: 15px; line-height: 1.5;
+  }
+  #lenkradfeld .schritt { font-size: 18px; }
+  #lenkradfeld .meta { color: var(--gedaempft); }
+  #lenkradfeld .achsen { color: var(--gedaempft); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  #lenkradfeld button {
+    font: inherit; color: var(--schrift); background: var(--grund);
+    border: 1px solid var(--linie); padding: 8px 14px; cursor: pointer; margin-right: 6px;
+  }
+  #lenkradfeld button:hover { border-color: var(--gelb); }
+
   /* ---------- Protokoll ---------- */
 
   #protokoll {
@@ -362,9 +379,14 @@ start P U
     <dt>K</dt><dd>Straßenkarte ein- oder ausblenden</dd>
     <dt>L</dt><dd>Übungen auswählen</dd>
     <dt>M</dt><dd>Ton an oder aus</dd>
+    <dt>G</dt><dd>USB-Lenkrad und Pedale einrichten</dd>
     <dt>H</dt><dd>Diese Hinweise ausblenden</dd>
   </dl>
   <div class="fuss">Kein Schalten, kein Kuppeln. Lenken, Gas, Bremse.</div>
+</div>
+
+<div id="lenkradfeld" class="fenster" hidden>
+  <div class="inhalt"></div>
 </div>
 
 <div id="protokoll" hidden>
@@ -1653,9 +1675,15 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           Math.atan(RADSTAND * 9.0 / Math.max(vAbs * vAbs, 4.5)),
           grad(3.0), grad(30));
         const lenkZiel = eingabe.lenken * maxEinschlag;
-        const lenkTempo = misch(2.6, 1.1, klemme(vAbs / 22, 0, 1));
-        this.lenkwinkel += klemme(lenkZiel - this.lenkwinkel,
-                                 -lenkTempo * dt, lenkTempo * dt);
+        if (eingabe.lenkDirekt) {
+          // Lenkrad: der Einschlag folgt dem Rad unmittelbar, nur ganz
+          // leicht geglättet gegen Zittern der Achse
+          this.lenkwinkel += (lenkZiel - this.lenkwinkel) * klemme(dt * 25, 0, 1);
+        } else {
+          const lenkTempo = misch(2.6, 1.1, klemme(vAbs / 22, 0, 1));
+          this.lenkwinkel += klemme(lenkZiel - this.lenkwinkel,
+                                   -lenkTempo * dt, lenkTempo * dt);
+        }
 
         // Längsdynamik
         let a = 0;
@@ -4603,7 +4631,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const zustand = { gas: 0, bremse: 0, lenken: 0, handbremse: false, blick: 0 };
     let blickSeite = 0;
     const merker = { kameraWechsel: false, zuruecksetzen: false, pause: false, hilfe: false,
-                     blinkerLinks: false, blinkerRechts: false, bewertung: false, karte: false, uebungen: false, ton: false };
+                     blinkerLinks: false, blinkerRechts: false, bewertung: false, karte: false, uebungen: false, ton: false, lenkrad: false };
 
     function nummer(e) { return e.code || e.key; }
 
@@ -4621,6 +4649,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (c === 'KeyK') merker.karte = true;
       if (c === 'KeyL') merker.uebungen = true;
       if (c === 'KeyM') merker.ton = true;
+      if (c === 'KeyG') merker.lenkrad = true;
       if (c === 'Period') merker.blinkerRechts = true;
     });
     window.addEventListener('keyup', e => tasten.delete(nummer(e)));
@@ -4641,9 +4670,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     knopf('tastLinks', 'lenken', 1);
     knopf('tastRechts', 'lenken', -1);
 
+    const lenkrad = Lenkrad();
+
     return {
       zustand: zustand,
       merker: merker,
+      lenkrad: lenkrad,
       lesen() {
         const vor = tasten.has('ArrowUp') || tasten.has('KeyW');
         const zur = tasten.has('ArrowDown') || tasten.has('KeyS');
@@ -4653,7 +4685,24 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         zustand.gas    = (vor ? 1 : 0) || zeiger.gas;
         zustand.bremse = (zur ? 1 : 0) || zeiger.bremse;
         zustand.lenken = ((li ? 1 : 0) - (re ? 1 : 0)) || zeiger.lenken;
+        zustand.lenkDirekt = false;
         zustand.handbremse = tasten.has('Space');
+
+        // Lenkrad und Pedale: Tasten haben Vorrang, sonst gilt das Rad.
+        // Beim Rad wird der Einschlag direkt übernommen, ohne die
+        // Glättung, die die Tasten brauchen.
+        const rad = lenkrad.inEinrichtung ? null : lenkrad.lesen();
+        if (rad) {
+          if (!li && !re && !zeiger.lenken) { zustand.lenken = rad.lenken; zustand.lenkDirekt = true; }
+          zustand.gas = Math.max(zustand.gas, rad.gas);
+          zustand.bremse = Math.max(zustand.bremse, rad.bremse);
+          const k = rad.knoepfe;
+          if (k.blinkerLinks && k.blinkerLinks.neu) merker.blinkerLinks = true;
+          if (k.blinkerRechts && k.blinkerRechts.neu) merker.blinkerRechts = true;
+          const sl = k.schulterLinks && k.schulterLinks.gedrueckt, sr = k.schulterRechts && k.schulterRechts.gedrueckt;
+          if (sl || sr) zustand.blickRad = sl && sr ? 180 : (sl ? 72 : -72);
+          else zustand.blickRad = 0;
+        } else zustand.blickRad = 0;
         // Schulterblick: gehalten, nicht umgeschaltet. Mit Umschalt weiter
         // über die Schulter, Q und E zusammen ist der Blick nach hinten.
         // Werden beide gedrückt, dreht der Blick in die Richtung der zuerst
@@ -4665,7 +4714,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (q && e) zustand.blick = 180 * (blickSeite || 1);
         else if (q) zustand.blick = weit ? 150 : 72;
         else if (e) zustand.blick = weit ? -150 : -72;
-        else zustand.blick = 0;
+        else zustand.blick = zustand.blickRad || 0;
         return zustand;
       },
       merkerLesen(name) {
@@ -4673,6 +4722,154 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         merker[name] = false;
         return w;
       }
+    };
+  }
+
+  /* ---------------------------------------------------------------------
+     10b. Lenkrad und Pedale über die Gamepad-Schnittstelle
+
+     Ein USB-Lenkrad meldet sich im Browser als Gamepad mit Achsen und
+     Knöpfen. Welche Achse was ist, unterscheidet sich je Gerät, deshalb
+     wird es einmal eingerichtet: Lenkrad drehen, Gas treten, Bremse
+     treten, Blinkertasten drücken. Die Zuordnung landet im Browser-
+     speicher.
+     --------------------------------------------------------------------- */
+
+  function Lenkrad() {
+    const SCHLUESSEL = 'fahrschule.lenkrad';
+    let belegung = null;          // { lenkung:{achse,ruhe,voll}, gas:{...}, bremse:{...}, knoepfe:{blinkerLinks, blinkerRechts, schulterLinks, schulterRechts, kamera} }
+    let geraet = null, ruheLage = null, einrichtung = null;
+    const knopfZustand = {};
+
+    try {
+      const roh = window.localStorage && window.localStorage.getItem(SCHLUESSEL);
+      if (roh) belegung = JSON.parse(roh);
+    } catch (e) { belegung = null; }
+
+    function aktuellesGeraet() {
+      if (!navigator.getGamepads) return null;
+      const liste = navigator.getGamepads();
+      for (let i = 0; i < liste.length; i++) {
+        const g = liste[i];
+        if (g && g.connected && g.axes.length >= 2) return g;
+      }
+      return null;
+    }
+
+    function achseWert(a, gp) {
+      if (!a || a.achse === undefined || a.achse >= gp.axes.length) return 0;
+      const roh = gp.axes[a.achse];
+      const spanne = a.voll - a.ruhe;
+      if (Math.abs(spanne) < 0.2) return 0;
+      return klemme((roh - a.ruhe) / spanne, a.symmetrisch ? -1 : 0, 1);
+    }
+
+    function speichern() {
+      try { window.localStorage.setItem(SCHLUESSEL, JSON.stringify(belegung)); } catch (e) { /* egal */ }
+    }
+
+    // Einrichtungsschritte: jeder wartet auf die Achse, die sich am meisten
+    // bewegt, oder auf einen Knopf.
+    const SCHRITTE = [
+      { feld: 'lenkung', art: 'achse', text: 'Lenkrad ganz nach links drehen und halten', symmetrisch: true },
+      { feld: 'gas', art: 'achse', text: 'Gaspedal ganz durchtreten' },
+      { feld: 'bremse', art: 'achse', text: 'Bremspedal ganz durchtreten' },
+      { feld: 'blinkerLinks', art: 'knopf', text: 'Taste für Blinker links drücken (oder überspringen)' },
+      { feld: 'blinkerRechts', art: 'knopf', text: 'Taste für Blinker rechts drücken (oder überspringen)' },
+      { feld: 'schulterLinks', art: 'knopf', text: 'Taste für Schulterblick links (oder überspringen)' },
+      { feld: 'schulterRechts', art: 'knopf', text: 'Taste für Schulterblick rechts (oder überspringen)' }
+    ];
+
+    function einrichtungStarten() {
+      const gp = aktuellesGeraet();
+      if (!gp) return false;
+      ruheLage = gp.axes.slice();
+      einrichtung = { schritt: 0, neu: { knoepfe: {} }, ruhe: gp.axes.slice(), knoepfeVorher: gp.buttons.map(b => b.pressed) };
+      return true;
+    }
+    function einrichtungUeberspringen() {
+      if (!einrichtung) return;
+      einrichtung.schritt++;
+      einrichtungAbschliessen();
+    }
+    function einrichtungAbschliessen() {
+      if (!einrichtung || einrichtung.schritt < SCHRITTE.length) return;
+      belegung = einrichtung.neu;
+      einrichtung = null;
+      speichern();
+    }
+    function einrichtungSchritt() {
+      if (!einrichtung) return null;
+      const s = SCHRITTE[einrichtung.schritt];
+      return s ? { nummer: einrichtung.schritt + 1, gesamt: SCHRITTE.length, text: s.text } : null;
+    }
+    function einrichtungRechnen() {
+      if (!einrichtung) return;
+      const gp = aktuellesGeraet();
+      if (!gp) return;
+      const s = SCHRITTE[einrichtung.schritt];
+      if (!s) { einrichtungAbschliessen(); return; }
+      if (s.art === 'achse') {
+        let beste = -1, ausschlag = 0;
+        for (let i = 0; i < gp.axes.length; i++) {
+          const d = Math.abs(gp.axes[i] - einrichtung.ruhe[i]);
+          if (d > ausschlag) { ausschlag = d; beste = i; }
+        }
+        if (beste >= 0 && ausschlag > 0.6) {
+          einrichtung.neu[s.feld] = { achse: beste, ruhe: einrichtung.ruhe[beste], voll: gp.axes[beste], symmetrisch: !!s.symmetrisch };
+          einrichtung.wartetLoslassen = true;
+          einrichtung.schritt++;
+        }
+      } else {
+        for (let i = 0; i < gp.buttons.length; i++) {
+          if (gp.buttons[i].pressed && !einrichtung.knoepfeVorher[i]) {
+            einrichtung.neu.knoepfe[s.feld] = i;
+            einrichtung.schritt++;
+            break;
+          }
+        }
+      }
+      einrichtung.knoepfeVorher = gp.buttons.map(b => b.pressed);
+      einrichtungAbschliessen();
+    }
+
+    // Liefert die aktuellen Werte, oder null ohne Gerät oder Belegung
+    function lesen() {
+      const gp = aktuellesGeraet();
+      geraet = gp;
+      if (!gp || !belegung || !belegung.lenkung) return null;
+      // Ein 900-Grad-Rad ganz durchzudrehen wäre unhandlich: der volle
+      // Einschlag liegt bei 40 % des Achswegs, also etwa einer halben
+      // Umdrehung je Seite.
+      const w = {
+        lenken: klemme(achseWert(belegung.lenkung, gp) * 2.5, -1, 1),   // +1 = links, wie die Tasten
+        gas: achseWert(belegung.gas, gp),
+        bremse: achseWert(belegung.bremse, gp),
+        knoepfe: {}
+      };
+      // Totzone und leichte Kennlinie ums Zentrum, damit das Rad ruhig steht
+      const tz = 0.03;
+      const l = Math.abs(w.lenken) < tz ? 0 : (w.lenken - Math.sign(w.lenken) * tz) / (1 - tz);
+      w.lenken = Math.sign(l) * Math.pow(Math.abs(l), 1.15);
+      const kn = belegung.knoepfe || {};
+      Object.keys(kn).forEach(name => {
+        const i = kn[name];
+        const jetzt = i < gp.buttons.length && gp.buttons[i].pressed;
+        w.knoepfe[name] = { gedrueckt: jetzt, neu: jetzt && !knopfZustand[name] };
+        knopfZustand[name] = jetzt;
+      });
+      return w;
+    }
+
+    return {
+      lesen: lesen,
+      get geraet() { return geraet || aktuellesGeraet(); },
+      get belegung() { return belegung; },
+      get eingerichtet() { return !!(belegung && belegung.lenkung); },
+      einrichtungStarten: einrichtungStarten, einrichtungRechnen: einrichtungRechnen,
+      einrichtungSchritt: einrichtungSchritt, einrichtungUeberspringen: einrichtungUeberspringen,
+      get inEinrichtung() { return !!einrichtung; },
+      loeschen() { belegung = null; try { window.localStorage.removeItem(SCHLUESSEL); } catch (e) { /* egal */ } }
     };
   }
 
@@ -4888,19 +5085,75 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // --- Ton ----------------------------------------------------------
     // Blinkerklick und ein leises Motorbrummen über WebAudio. Der Ton
     // startet erst nach der ersten Taste, so wollen es die Browser.
-    const ton = { an: true, ctx: null, motor: null, motorGain: null };
+    const ton = { an: true, ctx: null, motor: null, motorGain: null, reifenGain: null, stimmen: [] };
+    function motorStimme(ctx, ziel) {
+      // Zwei Oszillatoren (Grundton und Oberton) durch einen Tiefpass,
+      // dann Lautstärke und Stereolage
+      const g = ctx.createGain(); g.gain.value = 0;
+      const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 260;
+      const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 45;
+      const o2 = ctx.createOscillator(); o2.type = 'square'; o2.frequency.value = 90;
+      const g2 = ctx.createGain(); g2.gain.value = 0.35;
+      o1.connect(filter); o2.connect(g2); g2.connect(filter); filter.connect(g);
+      let panner = null;
+      if (ctx.createStereoPanner) { panner = ctx.createStereoPanner(); g.connect(panner); panner.connect(ziel); }
+      else g.connect(ziel);
+      o1.start(); o2.start();
+      return { o1: o1, o2: o2, filter: filter, gain: g, panner: panner, fahrzeug: null };
+    }
     function tonStarten() {
       if (ton.ctx || !window.AudioContext) return;
       try {
         ton.ctx = new AudioContext();
-        const osz = ton.ctx.createOscillator();
-        osz.type = 'sawtooth'; osz.frequency.value = 45;
-        const filter = ton.ctx.createBiquadFilter();
-        filter.type = 'lowpass'; filter.frequency.value = 220;
-        ton.motorGain = ton.ctx.createGain(); ton.motorGain.gain.value = 0;
-        osz.connect(filter); filter.connect(ton.motorGain); ton.motorGain.connect(ton.ctx.destination);
-        osz.start(); ton.motor = osz;
+        const summe = ton.ctx.createGain(); summe.gain.value = 1; summe.connect(ton.ctx.destination);
+        // Eigener Motor
+        const eigen = motorStimme(ton.ctx, summe);
+        ton.motor = eigen; ton.motorGain = eigen.gain;
+        // Abrollgeräusch: gefiltertes Rauschen, mit dem Tempo lauter
+        const laenge = ton.ctx.sampleRate * 2;
+        const puffer = ton.ctx.createBuffer(1, laenge, ton.ctx.sampleRate);
+        const daten = puffer.getChannelData(0);
+        for (let i = 0; i < laenge; i++) daten[i] = Math.random() * 2 - 1;
+        const rauschen = ton.ctx.createBufferSource(); rauschen.buffer = puffer; rauschen.loop = true;
+        const rf = ton.ctx.createBiquadFilter(); rf.type = 'bandpass'; rf.frequency.value = 900; rf.Q.value = 0.6;
+        ton.reifenGain = ton.ctx.createGain(); ton.reifenGain.gain.value = 0;
+        rauschen.connect(rf); rf.connect(ton.reifenGain); ton.reifenGain.connect(summe);
+        rauschen.start();
+        // Sechs Stimmen für die nächsten Fremdfahrzeuge
+        for (let i = 0; i < 6; i++) ton.stimmen.push(motorStimme(ton.ctx, summe));
       } catch (e) { ton.ctx = null; }
+    }
+    // Fremdfahrzeuge hörbar machen: die nächsten sechs bekommen je eine
+    // Stimme, Lautstärke nach Abstand, Tonhöhe nach Tempo und Doppler,
+    // Stereolage nach der Seite, auf der sie sind.
+    function fremdeHoeren() {
+      if (!ton.ctx || !ton.stimmen.length) return;
+      const cos = Math.cos(fahrzeug.psi), sin = Math.sin(fahrzeug.psi);
+      const rx = -sin, rz = cos;
+      const kandidaten = [];
+      verkehr.fahrzeuge.forEach(f => {
+        const dx = f.x - fahrzeug.x, dz = f.z - fahrzeug.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 70) kandidaten.push({ f: f, d: d, dx: dx, dz: dz });
+      });
+      kandidaten.sort((a, b) => a.d - b.d);
+      ton.stimmen.forEach((st, i) => {
+        const k = kandidaten[i];
+        if (!k || !ton.an || !laeuft) { st.gain.gain.value = 0; return; }
+        const f = k.f;
+        // Annäherungsgeschwindigkeit entlang der Sichtlinie
+        const ex = k.dx / Math.max(k.d, 0.5), ez = k.dz / Math.max(k.d, 0.5);
+        const vEigen = (cos * ex + sin * ez) * fahrzeug.v;
+        const vFremd = (Math.cos(f.psi) * ex + Math.sin(f.psi) * ez) * f.v;
+        const naeherung = vEigen - vFremd;             // > 0: kommt näher
+        const doppler = klemme(1 + naeherung / 340 * 6, 0.85, 1.15);
+        const grund = (42 + f.v * 5.5 + (f.a > 0.3 ? 8 : 0)) * doppler;
+        st.o1.frequency.value = grund; st.o2.frequency.value = grund * 2;
+        const naehe = 1 / (1 + Math.pow(k.d / 9, 2));
+        st.gain.gain.value = naehe * (0.05 + Math.min(f.v, 25) * 0.003);
+        st.filter.frequency.value = 180 + naehe * 500;
+        if (st.panner) st.panner.pan.value = klemme((k.dx * rx + k.dz * rz) / Math.max(k.d, 1), -1, 1) * 0.8;
+      });
     }
     function klick(hoch) {
       if (!ton.ctx || !ton.an) return;
@@ -4914,6 +5167,57 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     window.addEventListener('keydown', tonStarten, { once: true });
     window.addEventListener('pointerdown', tonStarten, { once: true });
     let blinkAnVorher = false;
+
+    // --- Lenkrad-Einrichtung ------------------------------------------
+    const lenkradFeld = document.getElementById('lenkradfeld');
+    const lenkradInhalt = lenkradFeld.querySelector('.inhalt');
+    let lenkradOffen = false, liefVorLenkrad = true;
+    function lenkradFeldUmschalten() {
+      lenkradOffen = !lenkradOffen;
+      lenkradFeld.hidden = !lenkradOffen;
+      if (lenkradOffen) { liefVorLenkrad = laeuft; laeuft = false; }
+      else { laeuft = liefVorLenkrad; }
+    }
+    lenkradFeld.addEventListener('click', ev => {
+      const knopf = ev.target.closest('button');
+      if (!knopf) return;
+      const was = knopf.dataset.aktion;
+      if (was === 'einrichten') eingabe.lenkrad.einrichtungStarten();
+      if (was === 'ueberspringen') eingabe.lenkrad.einrichtungUeberspringen();
+      if (was === 'loeschen') eingabe.lenkrad.loeschen();
+      if (was === 'schliessen') lenkradFeldUmschalten();
+    });
+    let lenkradTakt = 0;
+    function lenkradFeldAktualisieren(dt) {
+      const lr = eingabe.lenkrad;
+      if (lr.inEinrichtung) lr.einrichtungRechnen();
+      if (!lenkradOffen) return;
+      lenkradTakt += dt;
+      if (lenkradTakt < 0.1) return;
+      lenkradTakt = 0;
+      const gp = lr.geraet;
+      const teile = [];
+      if (!gp) {
+        teile.push('<p>Kein Lenkrad erkannt. Schließ es an und beweg das Rad oder drück eine Taste daran, dann meldet es sich beim Browser.</p>');
+      } else {
+        teile.push('<p class="meta">Erkannt: ' + gp.id.replace(/[<>]/g, '') + ' (' + gp.axes.length + ' Achsen, ' + gp.buttons.length + ' Tasten)</p>');
+        const schritt = lr.einrichtungSchritt();
+        if (schritt) {
+          teile.push('<p class="schritt">Schritt ' + schritt.nummer + ' von ' + schritt.gesamt + ': <b>' + schritt.text + '</b></p>');
+          teile.push('<p><button type="button" data-aktion="ueberspringen">Überspringen</button></p>');
+        } else if (lr.eingerichtet) {
+          const w = lr.lesen();
+          teile.push('<p>Eingerichtet. Lenkung ' + (w ? (w.lenken * 100).toFixed(0) : '-') + ' %, Gas ' + (w ? (w.gas * 100).toFixed(0) : '-') + ' %, Bremse ' + (w ? (w.bremse * 100).toFixed(0) : '-') + ' %</p>');
+          teile.push('<p><button type="button" data-aktion="einrichten">Neu einrichten</button> <button type="button" data-aktion="loeschen">Belegung löschen</button></p>');
+        } else {
+          teile.push('<p>Noch nicht eingerichtet. Die Einrichtung fragt nacheinander Lenkrad, Gas, Bremse und Tasten ab.</p>');
+          teile.push('<p><button type="button" data-aktion="einrichten">Einrichten</button></p>');
+        }
+        teile.push('<p class="achsen">' + Array.prototype.map.call(gp.axes, (a, i) => 'Achse ' + i + ': ' + a.toFixed(2)).join(' · ') + '</p>');
+      }
+      teile.push('<p class="meta">Tasten der Tastatur behalten Vorrang. G schließt dieses Fenster.</p>');
+      lenkradInhalt.innerHTML = teile.join('');
+    }
 
     // --- Eigener Blinker ----------------------------------------------
     let blinker = null, blinkerPsi = 0, blinkerStueck = null;
@@ -5118,6 +5422,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (eingabe.merkerLesen('bewertung')) { if (protokollOffen) protokollSchliessen(); else protokollZeigen(); }
       if (eingabe.merkerLesen('karte')) { karteSichtbar = !karteSichtbar; kartenFeld.hidden = !karteSichtbar; }
       if (eingabe.merkerLesen('ton')) ton.an = !ton.an;
+      if (eingabe.merkerLesen('lenkrad')) lenkradFeldUmschalten();
+      lenkradFeldAktualisieren(dt);
       if (eingabe.merkerLesen('uebungen')) {
         if (startFeld.hidden) { startFeld.hidden = false; laeuft = false; }
         else { startFeld.hidden = true; laeuft = true; pauseFeld.hidden = true; }
@@ -5183,8 +5489,11 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       blinkAnVorher = blinkAn;
       if (ton.motor) {
         const vAbs = Math.abs(fahrzeug.v);
-        ton.motor.frequency.value = 42 + vAbs * 5.5 + (steuerung.gas ? 8 : 0);
+        const grund = 42 + vAbs * 5.5 + (steuerung.gas ? 8 : 0);
+        ton.motor.o1.frequency.value = grund; ton.motor.o2.frequency.value = grund * 2;
         ton.motorGain.gain.value = ton.an && laeuft ? 0.012 + Math.min(vAbs, 30) * 0.0009 + (steuerung.gas ? 0.01 : 0) : 0;
+        ton.reifenGain.gain.value = ton.an && laeuft ? Math.min(vAbs, 30) * 0.0016 : 0;
+        fremdeHoeren();
       }
 
       fussgaenger.leute.forEach(p => {
@@ -5364,7 +5673,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     Spurfinder: Spurfinder, Spurverfolger: Spurverfolger, Hindernisfeld: Hindernisfeld,
     Fahrzeug: Fahrzeug, Verkehr: Verkehr, fremdfahrzeugBauen: fremdfahrzeugBauen,
     Fusswege: Fusswege, Fussgaenger: Fussgaenger, fussgaengerBauen: fussgaengerBauen,
-    Bewertung: Bewertung, FEHLERARTEN: FEHLERARTEN, Strassenkarte: Strassenkarte, Lernmodus: Lernmodus, gruppeVereinen: gruppeVereinen,
+    Bewertung: Bewertung, FEHLERARTEN: FEHLERARTEN, Strassenkarte: Strassenkarte, Lernmodus: Lernmodus, gruppeVereinen: gruppeVereinen, Lenkrad: Lenkrad,
     strasseBauen: strasseBauen, umgebungBauen: umgebungBauen,
     schilderBauen: schilderBauen, ampelnBauen: ampelnBauen, fahrzeugBauen: fahrzeugBauen,
     masse: { SPURBREITE: SPURBREITE, HALBBREITE: HALBBREITE, RADSTAND: RADSTAND, ECKRADIUS: ECKRADIUS }
