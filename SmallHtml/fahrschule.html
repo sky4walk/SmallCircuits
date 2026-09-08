@@ -19,9 +19,11 @@
        strasse NAME tempo ZAHL                zulässige Höchstgeschwindigkeit
        start KNOTEN KNOTEN                    Beginn auf der Spur vom ersten zum zweiten
        parken KNOTEN KNOTEN ABSTAND           geparktes Auto rechts, ABSTAND m hinter dem ersten Knoten
+       vierspurig KNOTEN KNOTEN               zwei Spuren je Richtung zwischen den Knoten
+       abbiegespur KREUZUNG NACHBAR           Linksabbiegespur auf dem Arm vom Nachbarn her
      ===================================================================== -->
 <script type="text/plain" id="karte">
-# Übungsplatz: Ring mit sechs Querstraßen
+# Übungsplatz: Ring mit sechs Querstraßen, vierspurigem Abschnitt und Abbiegespuren
 knoten A  -150.0 -110.0  r 46
 knoten S  -102.5 -115.0
 knoten P   -55.0 -120.0
@@ -60,8 +62,12 @@ strasse Quer   U I O W
 
 parken K O 90
 parken K O 101.8
-parken L R 30
-parken L R 41.8
+parken B C 60
+parken B C 71.8
+
+vierspurig T I
+abbiegespur L R
+abbiegespur L X
 
 start P U
 </script>
@@ -381,7 +387,8 @@ start P U
   <p>Frei fahren, oder eine Übung wählen: jede setzt dich vor eine Situation, sagt an,
      wohin es geht, und bewertet nur diese Fahrt.</p>
   <p>Der Platz hat Kreuzungen mit rechts vor links, Vorfahrtstraße mit Stoppschild,
-     abknickender Vorfahrt, drei Ampeln, vier Stoppschildern und zwei Zebrastreifen, sechzehn Kreuzungen insgesamt. Über dreißig andere Fahrzeuge
+     abknickender Vorfahrt, drei Ampeln, vier Stoppschildern und zwei Zebrastreifen, sechzehn Kreuzungen insgesamt,
+     dazu ein vierspuriger Abschnitt und zwei Linksabbiegespuren. Über dreißig andere Fahrzeuge
      und neunzig Fußgänger sind unterwegs und halten sich an dieselben Regeln. Die
      anderen lesen deinen Blinker: ohne Blinker rechnen sie damit, dass du geradeaus fährst.
      Zwei Autos parken am Straßenrand. Während der Fahrt wird nichts eingeblendet; die
@@ -579,6 +586,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
        strasse NAME KNOTEN KNOTEN ...        Verlauf; letzter = erster schließt
        strasse NAME tempo ZAHL               zulässige Höchstgeschwindigkeit
        start KNOTEN KNOTEN                   Beginn auf der Spur vom ersten zum zweiten
+       vierspurig KNOTEN KNOTEN              die Straße zwischen beiden Knoten hat zwei
+                                             Spuren je Richtung, mit Verziehung an den Enden
+       abbiegespur KREUZUNG NACHBAR          Linksabbiegespur auf dem Arm, der vom Nachbarn
+                                             her an der Kreuzung ankommt
        parken KNOTEN KNOTEN ABSTAND          geparktes Auto am rechten Rand, in Richtung
                                              vom ersten zum zweiten Knoten, ABSTAND Meter
                                              hinter dem ersten
@@ -587,7 +598,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
      --------------------------------------------------------------------- */
 
   const STANDARDKARTE = [
-    '# Übungsplatz: Ring mit sechs Querstraßen',
+    '# Übungsplatz: Ring mit sechs Querstraßen, vierspurigem Abschnitt und Abbiegespuren',
     'knoten A  -150.0 -110.0  r 46',
     'knoten S  -102.5 -115.0',
     'knoten P   -55.0 -120.0',
@@ -626,14 +637,18 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     '',
     'parken K O 90',
     'parken K O 101.8',
-    'parken L R 30',
-    'parken L R 41.8',
+    'parken B C 60',
+    'parken B C 71.8',
+    '',
+    'vierspurig T I',
+    'abbiegespur L R',
+    'abbiegespur L X',
     '',
     'start P U'
   ].join('\n');
 
   function karteLesen(text) {
-    const karte = { knoten: [], strassen: [], start: null, geparkt: [] };
+    const karte = { knoten: [], strassen: [], start: null, geparkt: [], vierspurig: [], abbiegespuren: [] };
     const zeilen = text.split(/\r?\n/);
     const bekannt = new Map();
 
@@ -702,6 +717,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           karte.strassen.push({ name: name, knoten: knoten, tempo: TEMPO_STANDARD, zeile: nr });
         }
 
+      } else if (befehl === 'vierspurig') {
+        if (t.length < 3) fehler(nr, 'vierspurig braucht zwei Knoten');
+        karte.vierspurig.push({ von: t[1], bis: t[2], zeile: nr });
+
+      } else if (befehl === 'abbiegespur') {
+        if (t.length < 3) fehler(nr, 'abbiegespur braucht Kreuzung und Nachbarknoten');
+        karte.abbiegespuren.push({ knoten: t[1], von: t[2], zeile: nr });
+
       } else if (befehl === 'parken') {
         if (t.length < 4) fehler(nr, 'parken braucht zwei Knoten und einen Abstand');
         const abstand = parseFloat(t[3]);
@@ -751,13 +774,18 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return k;
     }
 
+    // Ein Segment hat je Richtung eine oder zwei Spuren. Der rechte Rand
+    // liegt bei +randR, der linke bei -randL; beide können sich entlang des
+    // Segments ändern (Verziehung). Spuren haben am Anfang und Ende des
+    // nutzbaren Bereichs je einen Versatz, dazwischen wird interpoliert.
     function segmentAnlegen(von, bis, geometrie, strasse, nachbarn) {
       if (geometrie.laenge < 0.05) return null;
       const seg = { id: netz.segmente.length, von: von, bis: bis, geometrie: geometrie,
                     strasse: strasse, nachbarn: nachbarn, spuren: [],
-                    rueckzugVon: 0, rueckzugBis: 0 };
-      seg.spuren.push(spurAnlegen(seg, +1, +SPURBREITE / 2));
-      seg.spuren.push(spurAnlegen(seg, -1, -SPURBREITE / 2));
+                    rueckzugVon: 0, rueckzugBis: 0,
+                    nR: 1, nL: 1, randR0: HALBBREITE, randR1: HALBBREITE, randL0: HALBBREITE, randL1: HALBBREITE };
+      seg.spuren.push(spurAnlegen(seg, +1, +SPURBREITE / 2, +SPURBREITE / 2));
+      seg.spuren.push(spurAnlegen(seg, -1, -SPURBREITE / 2, -SPURBREITE / 2));
       netz.segmente.push(seg);
       von.segmente.push(seg);
       bis.segmente.push(seg);
@@ -765,11 +793,41 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return seg;
     }
 
-    function spurAnlegen(segment, richtung, versatz) {
+    // versatz0 gilt am Segmentanfang (s0), versatz1 am Segmentende (s1),
+    // unabhängig von der Fahrtrichtung der Spur.
+    function spurAnlegen(segment, richtung, versatz0, versatz1) {
       const spur = { id: netz.spuren.length, typ: 'spur', segment: segment, richtung: richtung,
-                     versatz: versatz, breite: SPURBREITE, aus: [], ein: [], proben: [] };
+                     versatz0: versatz0, versatz1: versatz1, versatz: (versatz0 + versatz1) / 2,
+                     rolle: 'durch', breite: SPURBREITE, aus: [], ein: [], proben: [], parallel: [] };
       netz.spuren.push(spur);
       return spur;
+    }
+
+    // Rand eines Segments bei Bogenlänge s, zwischen den beiden Enden
+    // des nutzbaren Bereichs interpoliert
+    function randBei(seg, s) {
+      const L = seg.geometrie.laenge;
+      const s0 = seg.rueckzugVon, s1 = L - seg.rueckzugBis;
+      const t = s1 - s0 > 1e-6 ? klemme((s - s0) / (s1 - s0), 0, 1) : 0;
+      return { R: misch(seg.randR0, seg.randR1, t), L: misch(seg.randL0, seg.randL1, t) };
+    }
+
+    // Ein gerades Segment an Bogenlänge s in zwei teilen. Liefert [erstes, zweites].
+    function segmentTeilen(seg, s) {
+      const L = seg.geometrie.laenge;
+      if (s < 0.5 || s > L - 0.5) return null;
+      const p = seg.geometrie.punktBei(s);
+      const k = knotenAnlegen(p.x, p.z, 'uebergang');
+      const p0 = seg.geometrie.punktBei(0), p1 = seg.geometrie.punktBei(L);
+      // Altes Segment aus allen Listen lösen
+      netz.segmente.splice(netz.segmente.indexOf(seg), 1);
+      seg.von.segmente.splice(seg.von.segmente.indexOf(seg), 1);
+      seg.bis.segmente.splice(seg.bis.segmente.indexOf(seg), 1);
+      seg.strasse.segmente.splice(seg.strasse.segmente.indexOf(seg), 1);
+      seg.spuren.forEach(sp => netz.spuren.splice(netz.spuren.indexOf(sp), 1));
+      const a = segmentAnlegen(seg.von, k, Gerade(p0.x, p0.z, p.x, p.z), seg.strasse, seg.nachbarn);
+      const b = segmentAnlegen(k, seg.bis, Gerade(p.x, p.z, p1.x, p1.z), seg.strasse, seg.nachbarn);
+      return [a, b];
     }
 
     function verbindungAnlegen(vonSpur, nachSpur, knoten, art, geometrie) {
@@ -853,6 +911,92 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       }
     });
 
+    // --- 3b2. Vierspurige Abschnitte und Abbiegespuren -----------------
+    const VERZIEHUNG = 14, ABBIEGELAENGE = 32;
+
+    function geradesSegment(a, b, zeile) {
+      const seg = netz.segmente.find(s => s.geometrie.art === 'gerade' &&
+        ((s.nachbarn[0] === a && s.nachbarn[1] === b) || (s.nachbarn[0] === b && s.nachbarn[1] === a)));
+      if (!seg) throw new Error('Karte, Zeile ' + zeile + ': keine gerade Straße zwischen ' + a + ' und ' + b);
+      return seg;
+    }
+
+    // Spuren eines Segments neu anlegen: nR in Segmentrichtung, nL dagegen.
+    // schraegR/schraegL: 'auf' (außen wächst von innen heraus), 'ab'
+    // (außen läuft nach innen zusammen) oder null (konstant).
+    function spurenSetzen(seg, nR, nL, schraegR, schraegL) {
+      seg.spuren.forEach(sp => netz.spuren.splice(netz.spuren.indexOf(sp), 1));
+      seg.spuren = [];
+      seg.nR = nR; seg.nL = nL;
+      const innen = SPURBREITE / 2, aussen = SPURBREITE * 1.5;
+      // rechts (Richtung +1)
+      seg.spuren.push(spurAnlegen(seg, +1, innen, innen));
+      if (nR === 2) {
+        if (schraegR === 'auf') seg.spuren.push(spurAnlegen(seg, +1, innen, aussen));
+        else if (schraegR === 'ab') seg.spuren.push(spurAnlegen(seg, +1, aussen, innen));
+        else seg.spuren.push(spurAnlegen(seg, +1, aussen, aussen));
+      }
+      // links (Richtung -1): fährt von s1 nach s0
+      seg.spuren.push(spurAnlegen(seg, -1, -innen, -innen));
+      if (nL === 2) {
+        if (schraegL === 'auf') seg.spuren.push(spurAnlegen(seg, -1, -aussen, -innen));   // wächst zum Anfang hin
+        else if (schraegL === 'ab') seg.spuren.push(spurAnlegen(seg, -1, -innen, -aussen));
+        else seg.spuren.push(spurAnlegen(seg, -1, -aussen, -aussen));
+      }
+      seg.randR0 = SPURBREITE * (schraegR === 'auf' ? 1 : nR);
+      seg.randR1 = SPURBREITE * (schraegR === 'ab' ? 1 : nR);
+      seg.randL0 = SPURBREITE * (schraegL === 'ab' ? 1 : nL);
+      seg.randL1 = SPURBREITE * (schraegL === 'auf' ? 1 : nL);
+    }
+
+    // Vierspurig: [Verziehung][voll][Verziehung], Rest bleibt zweispurig.
+    // Die Rückzüge an den Kreuzungen sind noch nicht bekannt, deshalb
+    // bleibt an beiden Enden Platz dafür (Schätzung 14 m).
+    karte.vierspurig.forEach(v => {
+      const seg = geradesSegment(v.von, v.bis, v.zeile);
+      const L = seg.geometrie.laenge, rand = 20;
+      if (L < 2 * rand + 2 * VERZIEHUNG + 30) throw new Error('Karte, Zeile ' + v.zeile + ': vierspurig braucht mindestens ' + (2 * rand + 2 * VERZIEHUNG + 30) + ' m zwischen ' + v.von + ' und ' + v.bis);
+      const teile = segmentTeilen(seg, rand);                     // [Anfangsstück, Rest]
+      const t2 = segmentTeilen(teile[1], VERZIEHUNG);             // [Verziehung auf, Rest]
+      const t3 = segmentTeilen(t2[1], t2[1].geometrie.laenge - rand - VERZIEHUNG);   // [voll, Rest]
+      const t4 = segmentTeilen(t3[1], VERZIEHUNG);                // [Verziehung ab, Endstück]
+      spurenSetzen(t2[0], 2, 2, 'auf', 'ab');
+      spurenSetzen(t3[0], 2, 2, null, null);
+      spurenSetzen(t4[0], 2, 2, 'ab', 'auf');
+    });
+
+    // Abbiegespur: auf dem Arm, der vom Nachbarn her an der Kreuzung
+    // ankommt, die letzten Meter mit zwei ankommenden Spuren, davor die
+    // Verziehung.
+    karte.abbiegespuren.forEach(a => {
+      const seg = geradesSegment(a.von, a.knoten, a.zeile);
+      const zurKreuzung = seg.nachbarn[1] === a.knoten;            // Segmentrichtung zeigt zur Kreuzung?
+      const L = seg.geometrie.laenge, rand = 20;
+      const noetig = rand + ABBIEGELAENGE + VERZIEHUNG + 6;
+      if (L < noetig) throw new Error('Karte, Zeile ' + a.zeile + ': abbiegespur braucht mindestens ' + noetig + ' m zwischen ' + a.von + ' und ' + a.knoten);
+      let ab, verz;
+      if (zurKreuzung) {
+        const t1 = segmentTeilen(seg, L - rand - ABBIEGELAENGE);   // [davor, Abbiegeteil]
+        const t0 = segmentTeilen(t1[0], t1[0].geometrie.laenge - VERZIEHUNG);   // [davor, Verziehung]
+        verz = t0[1]; ab = t1[1];
+        spurenSetzen(verz, 2, 1, 'auf', null);
+        spurenSetzen(ab, 2, 1, null, null);
+        ab.spuren.find(sp => sp.richtung > 0 && sp.versatz0 < SPURBREITE).rolle = 'links';
+      } else {
+        const t1 = segmentTeilen(seg, rand + ABBIEGELAENGE);       // [Abbiegeteil, danach]
+        const t2 = segmentTeilen(t1[1], VERZIEHUNG);               // [Verziehung, danach]
+        ab = t1[0]; verz = t2[0];
+        spurenSetzen(verz, 1, 2, null, 'auf');
+        spurenSetzen(ab, 1, 2, null, null);
+        ab.spuren.find(sp => sp.richtung < 0 && sp.versatz0 > -SPURBREITE).rolle = 'links';
+      }
+    });
+
+    netz.segmente.forEach(seg => { seg.randBei = s => randBei(seg, s); });
+    netz.spuren.forEach(sp => {
+      sp.parallel = sp.segment.spuren.filter(x => x.richtung === sp.richtung);
+    });
+
     // --- 3c. Arme je Knoten, Knotentyp --------------------------------
     netz.knoten.forEach(k => {
       k.arme = k.segmente.map(seg => {
@@ -861,8 +1005,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (seg.von === k) psi = seg.geometrie.winkelBei(0);
         else psi = winkelNormiert(seg.geometrie.winkelBei(L) + Math.PI);
         const nachbar = seg.nachbarn[0] === k.name ? seg.nachbarn[1] : seg.nachbarn[0];
+        const amAnfang = seg.von === k;
+        // Breite der ankommenden Seite (links des Arms) und der abgehenden
+        // (rechts des Arms), aus den Rändern des Segments am Knoten
+        const breiteEin = amAnfang ? seg.randL0 : seg.randR1;
+        const breiteAus = amAnfang ? seg.randR0 : seg.randL1;
         return { segment: seg, psi: psi, d: { x: Math.cos(psi), z: Math.sin(psi) },
-                 r: rechtsVon(psi), amAnfang: seg.von === k, nachbar: nachbar, rueckzug: 0 };
+                 r: rechtsVon(psi), amAnfang: amAnfang, nachbar: nachbar, rueckzug: 0,
+                 breiteEin: breiteEin, breiteAus: breiteAus };
       });
       k.arme.sort((a, b) => a.psi - b.psi);
       if (k.typ === 'uebergang') return;
@@ -924,8 +1074,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
     function eckeBerechnen(k, a, b) {
       // Rechte Kante von a und linke Kante von b
-      const Pa = { x: k.x + a.r.x * HALBBREITE, z: k.z + a.r.z * HALBBREITE };
-      const Pb = { x: k.x - b.r.x * HALBBREITE, z: k.z - b.r.z * HALBBREITE };
+      const Pa = { x: k.x + a.r.x * a.breiteAus, z: k.z + a.r.z * a.breiteAus };
+      const Pb = { x: k.x - b.r.x * b.breiteEin, z: k.z - b.r.z * b.breiteEin };
       const X = geradenSchnitt(Pa, a.d, Pb, b.d);
       const theta = winkelNormiert(b.psi - a.psi);
       const offen = theta <= 0 ? theta + TAU : theta;   // Öffnungswinkel a -> b
@@ -950,13 +1100,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       for (let i = 0; i <= schritte; i++) {
         const t = i / schritte;
         const sSeg = spur.richtung > 0 ? s0 + nutz * t : s1 - nutz * t;
-        const p = seg.geometrie.punktBei(sSeg);
-        const psiSeg = seg.geometrie.winkelBei(sSeg);
-        const psi = spur.richtung > 0 ? psiSeg : winkelNormiert(psiSeg + Math.PI);
-        const n = rechtsVon(psiSeg);
+        const q = spurPunkt(spur, nutz * t);
         spur.proben.push({
-          x: p.x + n.x * spur.versatz, z: p.z + n.z * spur.versatz,
-          psi: psi, nx: -Math.sin(psi), nz: Math.cos(psi),
+          x: q.x, z: q.z,
+          psi: q.psi, nx: -Math.sin(q.psi), nz: Math.cos(q.psi),
           s: nutz * t, sSeg: sSeg, stueck: spur, index: i
         });
       }
@@ -970,11 +1117,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       const ankommend = [], abgehend = [];
       k.arme.forEach(a => {
         const seg = a.segment;
-        // Spur, die hier ankommt, und Spur, die hier abgeht
-        ankommend.push({ spur: a.amAnfang ? seg.spuren[1] : seg.spuren[0], arm: a });
-        abgehend.push({ spur: a.amAnfang ? seg.spuren[0] : seg.spuren[1], arm: a });
+        // Alle Spuren, die hier ankommen, und alle, die hier abgehen
+        seg.spuren.forEach(sp => {
+          const kommt = a.amAnfang ? sp.richtung < 0 : sp.richtung > 0;
+          (kommt ? ankommend : abgehend).push({ spur: sp, arm: a });
+        });
       });
 
+      const kinderJeArm = new Map();
       ankommend.forEach(an => {
         const kinder = [];
         abgehend.forEach(ab => {
@@ -986,8 +1136,17 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           else if (delta < -grad(25)) art = 'links';
           let geo;
           if (k.direkt) {
+            // Übergang: nur Spuren verbinden, die aneinander anschließen.
+            // Zwei Spuren, die am selben Punkt beginnen, sind eine
+            // Verzweigung; zwei, die am selben Punkt enden, eine Einmündung.
+            if (Math.hypot(e.x - s.x, e.z - s.z) > 0.6) return;
             geo = Gerade(e.x, e.z, s.x, s.z);
           } else {
+            // An der Kreuzung: die Linksabbiegespur biegt nur links ab, die
+            // Spur daneben nicht mehr links
+            const nebenLinks = an.spur.parallel.some(x => x !== an.spur && x.rolle === 'links');
+            if (an.spur.rolle === 'links' && art !== 'links') return;
+            if (nebenLinks && art === 'links') return;
             const P0 = { x: e.x, z: e.z }, P2 = { x: s.x, z: s.z };
             const dIn = { x: Math.cos(e.psi), z: Math.sin(e.psi) };
             const dOut = { x: Math.cos(s.psi), z: Math.sin(s.psi) };
@@ -1000,7 +1159,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           }
           kinder.push(verbindungAnlegen(an.spur, ab.spur, k, art, geo));
         });
-        kinder.forEach(v => { v.geschwister = kinder; });
+        // Geschwister sind alle Kurven, die vom selben Arm ausgehen, auch
+        // von der Nachbarspur: physisch kann ein Fahrer jede davon nehmen.
+        let alle = kinderJeArm.get(an.arm);
+        if (!alle) { alle = []; kinderJeArm.set(an.arm, alle); }
+        kinder.forEach(v => alle.push(v));
+        alle.forEach(v => { v.geschwister = alle; });
       });
     });
 
@@ -1030,17 +1194,15 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
     // --- 3i. Geparkte Fahrzeuge ---------------------------------------
     netz.geparkt = karte.geparkt.map(g => {
-      const seg = netz.segmente.find(s => s.geometrie.art === 'gerade' &&
-        ((s.nachbarn[0] === g.von && s.nachbarn[1] === g.bis) || (s.nachbarn[0] === g.bis && s.nachbarn[1] === g.von)));
-      if (!seg) throw new Error('Karte, Zeile ' + g.zeile + ': keine gerade Straße zwischen ' + g.von + ' und ' + g.bis);
-      const richtung = seg.nachbarn[0] === g.von ? +1 : -1;
-      const spur = richtung > 0 ? seg.spuren[0] : seg.spuren[1];
-      const L = seg.geometrie.laenge;
-      const s = richtung > 0 ? g.abstand - seg.rueckzugVon : (L - g.abstand) - seg.rueckzugBis;
+      const lage = spurAufStrecke(netz, g.von, g.bis, g.abstand);
+      if (!lage) throw new Error('Karte, Zeile ' + g.zeile + ': keine gerade Straße zwischen ' + g.von + ' und ' + g.bis);
+      const spur = lage.spur, s = lage.s;
+      if (spur.parallel.length > 1 || spur.segment.nR > 1 || spur.segment.nL > 1) {
+        throw new Error('Karte, Zeile ' + g.zeile + ': parken ' + g.von + ' ' + g.bis + ' liegt auf einem mehrspurigen Abschnitt');
+      }
       if (s < 18 || s > spur.laenge - 24) {
-        throw new Error('Karte, Zeile ' + g.zeile + ': parken ' + g.von + ' ' + g.bis + ' liegt zu nah an einer Kreuzung (erlaubt ' +
-          (richtung > 0 ? (seg.rueckzugVon + 18).toFixed(0) + ' bis ' + (seg.rueckzugVon + spur.laenge - 24).toFixed(0)
-                        : (seg.rueckzugBis + 18).toFixed(0) + ' bis ' + (seg.rueckzugBis + spur.laenge - 24).toFixed(0)) + ' m)');
+        throw new Error('Karte, Zeile ' + g.zeile + ': parken ' + g.von + ' ' + g.bis + ' liegt zu nah an einer Kreuzung oder Verziehung (dieses Stück erlaubt ' +
+          Math.round(18) + ' bis ' + Math.round(spur.laenge - 24) + ' m ab seinem Anfang)');
       }
       const p = spurPunkt(spur, s);
       const r = rechtsVon(p.psi);
@@ -1102,17 +1264,50 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     return r;
   }
 
+  // Alle geraden Teilstücke zwischen zwei benannten Knoten, geordnet von a
+  // nach b, mit der Bogenlänge, bei der jedes beginnt.
+  function streckeZwischen(netz, a, b) {
+    const A = netz.benannt.get(a);
+    if (!A) return null;
+    const stuecke = netz.segmente.filter(s => s.geometrie.art === 'gerade' &&
+      ((s.nachbarn[0] === a && s.nachbarn[1] === b) || (s.nachbarn[0] === b && s.nachbarn[1] === a)));
+    if (!stuecke.length) return null;
+    const liste = stuecke.map(seg => {
+      const p0 = seg.geometrie.punktBei(0), p1 = seg.geometrie.punktBei(seg.geometrie.laenge);
+      const d0 = Math.hypot(p0.x - A.x, p0.z - A.z), d1 = Math.hypot(p1.x - A.x, p1.z - A.z);
+      return { seg: seg, beginn: Math.min(d0, d1), vorwaerts: d0 <= d1 };   // vorwaerts: Segmentrichtung zeigt von a nach b
+    }).sort((u, v) => u.beginn - v.beginn);
+    const laenge = liste.reduce((n, e) => n + e.seg.geometrie.laenge, 0);
+    return { teile: liste, laenge: laenge };
+  }
+  // Spur und Bogenlänge auf der Spur, die 'abstand' Meter hinter a in
+  // Richtung b liegt (oder, bei negativem Abstand, vor b).
+  function spurAufStrecke(netz, a, b, abstand) {
+    const strecke = streckeZwischen(netz, a, b);
+    if (!strecke) return null;
+    const ziel = abstand >= 0 ? abstand : strecke.laenge + abstand;
+    let teil = strecke.teile[strecke.teile.length - 1];
+    for (let i = 0; i < strecke.teile.length; i++) {
+      if (ziel < strecke.teile[i].beginn + strecke.teile[i].seg.geometrie.laenge) { teil = strecke.teile[i]; break; }
+    }
+    const seg = teil.seg, L = seg.geometrie.laenge;
+    const sSeg = klemme(ziel - teil.beginn, 0, L);
+    const richtung = teil.vorwaerts ? +1 : -1;
+    // äußerste rechte Spur dieser Richtung (die normale Fahrspur)
+    const spuren = seg.spuren.filter(sp => sp.richtung === richtung && sp.rolle !== 'links');
+    const spur = spuren.sort((u, v) => Math.abs(v.versatz0) - Math.abs(u.versatz0))[0];
+    const s = richtung > 0 ? sSeg - seg.rueckzugVon : (L - seg.rueckzugBis) - sSeg;
+    return { spur: spur, s: s, segment: seg, strecke: strecke };
+  }
+
   function startBestimmen(netz, start) {
     let seg = null, richtung = +1;
     if (start) {
-      const [a, b] = start;
-      seg = netz.segmente.find(s => s.geometrie.art === 'gerade' &&
-        ((s.nachbarn[0] === a && s.nachbarn[1] === b) || (s.nachbarn[0] === b && s.nachbarn[1] === a)));
-      if (!seg) throw new Error('start ' + a + ' ' + b + ': keine Straße zwischen diesen Knoten');
-      richtung = seg.nachbarn[0] === a ? +1 : -1;
-    } else {
-      seg = netz.segmente.find(s => s.geometrie.art === 'gerade') || netz.segmente[0];
+      const lage = spurAufStrecke(netz, start[0], start[1], 0);
+      if (!lage) throw new Error('start ' + start[0] + ' ' + start[1] + ': keine Straße zwischen diesen Knoten');
+      return { spur: lage.spur, s: Math.min(15, lage.spur.laenge * 0.4) };
     }
+    seg = netz.segmente.find(s => s.geometrie.art === 'gerade') || netz.segmente[0];
     const spur = richtung > 0 ? seg.spuren[0] : seg.spuren[1];
     return { spur: spur, s: Math.min(15, spur.laenge * 0.4) };
   }
@@ -1121,13 +1316,21 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
   // der Spur, ab dem Rückzug gerechnet).
   function spurPunkt(spur, s) {
     const seg = spur.segment, L = seg.geometrie.laenge;
-    const sSeg = spur.richtung > 0 ? seg.rueckzugVon + s : L - seg.rueckzugBis - s;
+    const s0 = seg.rueckzugVon, s1 = L - seg.rueckzugBis;
+    const sSeg = spur.richtung > 0 ? s0 + s : s1 - s;
     const p = seg.geometrie.punktBei(sSeg);
     const psiSeg = seg.geometrie.winkelBei(sSeg);
     const n = rechtsVon(psiSeg);
+    const t = s1 - s0 > 1e-6 ? klemme((sSeg - s0) / (s1 - s0), 0, 1) : 0;
+    const versatz = misch(spur.versatz0, spur.versatz1, t);
+    // Schräge Spuren: Richtung um die Neigung des Versatzes korrigieren
+    let psi = psiSeg;
+    if (Math.abs(spur.versatz1 - spur.versatz0) > 1e-6 && s1 - s0 > 1e-6) {
+      psi = psiSeg + Math.atan2(spur.versatz1 - spur.versatz0, s1 - s0);
+    }
     return {
-      x: p.x + n.x * spur.versatz, z: p.z + n.z * spur.versatz,
-      psi: spur.richtung > 0 ? psiSeg : winkelNormiert(psiSeg + Math.PI), sSeg: sSeg
+      x: p.x + n.x * versatz, z: p.z + n.z * versatz,
+      psi: spur.richtung > 0 ? psi : winkelNormiert(psi + Math.PI), sSeg: sSeg, versatz: versatz
     };
   }
 
@@ -1191,11 +1394,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const seitlich = (x - p.x) * n.x + (z - p.z) * n.z;   // + = rechts der Segmentrichtung
     const mitLauf = Math.cos(psiFahrzeug - psiSeg) >= 0;
     const eigen = mitLauf ? seitlich : -seitlich;
+    const rand = seg.randBei ? seg.randBei(sSeg) : { R: HALBBREITE, L: HALBBREITE };
     let lage;
-    if (Math.abs(seitlich) > HALBBREITE) lage = 'abseits';
-    else if (eigen >= 0)                lage = 'eigene';
-    else                                lage = 'gegen';
-    return { lage: lage, seitlich: eigen, abstandMitte: Math.abs(seitlich), mitLauf: mitLauf };
+    if (seitlich > rand.R || seitlich < -rand.L) lage = 'abseits';
+    else if (eigen >= 0)                         lage = 'eigene';
+    else                                         lage = 'gegen';
+    return { lage: lage, seitlich: eigen, abstandMitte: Math.abs(seitlich), mitLauf: mitLauf, rand: rand };
   }
 
   function Spurverfolger(netz, finder) {
@@ -1239,9 +1443,13 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (!stueck) return { lage: 'abseits', stueck: null };
 
         // Auf einer Verbindung immer alle Geschwister vergleichen: erst
-        // im Verlauf der Kreuzung zeigt sich, wohin die Fahrt geht.
+        // im Verlauf der Kreuzung zeigt sich, wohin die Fahrt geht. Auf
+        // Spuren mit Nachbarspuren derselben Richtung ebenso.
         if (stueck.typ === 'verbindung' && stueck.geschwister && stueck.geschwister.length > 1) {
           const w = besterKandidat(stueck.geschwister, x, z);
+          if (w) { stueck = w.stueck; index = w.index; }
+        } else if (stueck.typ === 'spur' && stueck.parallel && stueck.parallel.length > 1) {
+          const w = besterKandidat(stueck.parallel, x, z);
           if (w) { stueck = w.stueck; index = w.index; }
         }
 
@@ -1254,7 +1462,13 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         // Verbindungen an Übergängen werden übersprungen.
         if (index === stueck.proben.length - 1 && laengs > 0.3) {
           if (stueck.typ === 'spur') {
-            const kandidaten = stueck.aus.map(v => v.direkt ? v.nachSpur : v);
+            // Auch die Kurven der Nachbarspur kommen in Frage
+            let quelle = stueck.aus;
+            if (stueck.parallel && stueck.parallel.length > 1) {
+              quelle = [];
+              stueck.parallel.forEach(sp => sp.aus.forEach(v => quelle.push(v)));
+            }
+            const kandidaten = quelle.map(v => v.direkt ? v.nachSpur : v);
             const w = kandidaten.length ? besterKandidat(kandidaten, x, z) : null;
             if (w) { stueck = w.stueck; index = w.index; }
           } else {
@@ -1514,6 +1728,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         for (let j = i + 1; j < vs.length; j++) {
           const a = vs[i], b = vs[j];
           if (a.vonSpur === b.vonSpur) continue;          // gleicher Arm: Abstand regelt es
+          if (a.vonSpur.segment === b.vonSpur.segment) continue;   // Nachbarspuren desselben Arms
+          // Zwei Linksabbieger aus Gegenrichtungen fahren voreinander vorbei
+          if (a.art === 'links' && b.art === 'links') {
+            const armA = armFuerSpur(k, a.vonSpur), armB = armFuerSpur(k, b.vonSpur);
+            if (armA && armB && armLage(armA, armB) === 'gegenueber') continue;
+          }
           let nah = false;
           for (let p = 0; p < a.proben.length && !nah; p += 2) {
             for (let q = 0; q < b.proben.length; q += 2) {
@@ -1577,13 +1797,45 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let saat = 4711;
     function zufall() { saat = (saat * 1103515245 + 12345) & 0x7fffffff; return saat / 0x7fffffff; }
 
-    function naechsteVerbindung(spur) {
+    // Kreuzungsverbindungen, die von einer Spur aus über höchstens drei
+    // direkte Übergänge erreichbar sind: so weiß ein Fahrzeug vor einer
+    // Verziehung, welche Spur wohin führt.
+    function erreichbareKreuzungen(spur, tiefe) {
+      if (tiefe > 3) return [];
+      const kreuz = spur.aus.filter(v => !v.direkt);
+      if (kreuz.length) return kreuz;
+      let liste = [];
+      spur.aus.forEach(v => { liste = liste.concat(erreichbareKreuzungen(v.nachSpur, tiefe + 1)); });
+      return liste;
+    }
+    function zufaelligeWahl(liste) {
+      const gerade = liste.filter(v => v.art === 'geradeaus');
+      if (gerade.length && zufall() < 0.55) return gerade[Math.floor(zufall() * gerade.length)];
+      return liste[Math.floor(zufall() * liste.length)];
+    }
+    function naechsteVerbindung(spur, f) {
       const aus = spur.aus;
       if (!aus.length) return null;
       if (aus.length === 1) return aus[0];
-      const gerade = aus.filter(v => v.art === 'geradeaus');
-      if (gerade.length && zufall() < 0.55) return gerade[Math.floor(zufall() * gerade.length)];
-      return aus[Math.floor(zufall() * aus.length)];
+      const direkt = aus.filter(v => v.direkt);
+      if (direkt.length === aus.length) {
+        // Verzweigung in parallele Spuren: nach dem Wunsch für die nächste
+        // Kreuzung wählen, sonst zufällig
+        const alle = erreichbareKreuzungen(spur, 0);
+        if (alle.length) {
+          if (!f || !f.wunsch || alle.indexOf(f.wunsch) < 0) {
+            const w = zufaelligeWahl(alle);
+            if (f) f.wunsch = w;
+            return aus.find(v => erreichbareKreuzungen(v.nachSpur, 1).indexOf(w) >= 0) || aus[0];
+          }
+          return aus.find(v => erreichbareKreuzungen(v.nachSpur, 1).indexOf(f.wunsch) >= 0) || aus[0];
+        }
+        return aus[Math.floor(zufall() * aus.length)];
+      }
+      // An der Kreuzung: den Wunsch einlösen, wenn er hier erfüllbar ist
+      if (f && f.wunsch && aus.indexOf(f.wunsch) >= 0) { const w = f.wunsch; f.wunsch = null; return w; }
+      if (f) f.wunsch = null;
+      return zufaelligeWahl(aus);
     }
 
     function kurvenTempo(stueck) {
@@ -1607,13 +1859,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     function einsetzen(spur, s) {
       const f = {
         id: naechsteId++, stueck: spur, s: s, v: 0,
-        naechste: naechsteVerbindung(spur), tempoFaktor: 0.88 + zufall() * 0.18,
+        naechste: null, wunsch: null, tempoFaktor: 0.88 + zufall() * 0.18,
         warteZeit: 0, angehalten: false, blinker: null, farbe: Math.floor(zufall() * 6),
         x: 0, z: 0, psi: 0, a: 0, seitlich: 0, seitlichZiel: 0, ueberholt: null, schatten: { v: 0, schatten: true }, freigabe: 0
       };
       const p = lageVon(spur, s);
       f.x = p.x; f.z = p.z; f.psi = p.psi;
       f.v = Math.min(kurvenTempo(spur), spur.segment.strasse.tempo / 3.6) * 0.6;
+      f.naechste = naechsteVerbindung(spur, f);
       fahrzeuge.push(f);
       return f;
     }
@@ -1635,6 +1888,39 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           });
         });
       }
+      // Parallele Spur, die am selben Punkt einmündet: auf den letzten
+      // Metern zählt, wer dort neben oder knapp vor mir ist. Bei Gleichstand
+      // hat die kleinere Nummer Vorrang, damit nicht beide bremsen.
+      if (f.stueck.typ === 'spur' && f.stueck.parallel.length > 1 && f.stueck.laenge - f.s < 40) {
+        f.stueck.parallel.forEach(sp => {
+          if (sp === f.stueck) return;
+          // Münden beide Spuren am Ende in dieselbe, oder erst ihre
+          // Nachfolger? Dann muss die Reihenfolge schon hier feststehen,
+          // bevor die Spuren zusammenlaufen.
+          const zielVon = x => (x.aus.length && x.aus[0].direkt) ? x.aus[0].nachSpur : null;
+          const zA = zielVon(sp), zB = zielVon(f.stueck);
+          let gleichesEnde = zA && zB && zA === zB;
+          if (!gleichesEnde && zA && zB) {
+            const zzA = zielVon(zA), zzB = zielVon(zB);
+            gleichesEnde = zzA && zzB && zzA === zzB && zA.laenge < 20;
+          }
+          if (!gleichesEnde) return;
+          function pruefen(liste, versatz) {
+            (liste || []).forEach(e => {
+              const abstand = e.s + versatz - f.s;
+              if (abstand < -0.3 || abstand > 28) return;               // wer hinter mir ist, wartet auf mich
+              if (abstand <= 0.3 && e.fahrzeug.id !== undefined && f.id < e.fahrzeug.id) return;   // gleichauf: kleinere Nummer fährt
+              // Der Nachbar zählt wie ein Vordermann, hinter dem man ganz
+              // bleiben muss, weil die Spuren zusammenlaufen
+              const a = Math.max(abstand, 0.2);
+              if (!bester || a < bester.abstand) bester = { abstand: a, fahrzeug: e.fahrzeug };
+            });
+          }
+          pruefen(belegung.get(sp), 0);
+          // Wer schon auf dem nächsten Stück der Nachbarspur ist, zählt mit
+          if (zA && zA !== zB) pruefen(belegung.get(zA), f.stueck.laenge);
+        });
+      }
       // Auf der Gegenspur: was dort vor uns steht oder entgegenkommt
       if (f.seitlich < -0.8 && f.stueck.typ === 'spur') {
         const L2 = gegenspur(f.stueck);
@@ -1645,7 +1931,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           if (!bester || abstand < bester.abstand) bester = { abstand: abstand, fahrzeug: { v: -e.fahrzeug.v } };
         });
       }
-      for (let schritt = 0; schritt < 3 && stueck; schritt++) {
+      for (let schritt = 0; schritt < 5 && stueck; schritt++) {
         const liste = belegung.get(stueck);
         if (liste) {
           liste.forEach(e => {
@@ -1674,7 +1960,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             });
           });
           if (bester) break;
-          stueck = (stueck === f.stueck ? f.naechste : null);
+          if (stueck === f.stueck) stueck = f.naechste;
+          else if (stueck.aus.length === 1) stueck = stueck.aus[0];      // eindeutiger Weiterweg
+          else if (f.wunsch && stueck.aus.indexOf(f.wunsch) >= 0) stueck = f.wunsch;
+          else stueck = null;
         } else stueck = stueck.nachSpur;
         if (stueck && stueck.direkt) stueck = stueck.nachSpur;
       }
@@ -1747,7 +2036,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             continue;
           }
         }
-        else if (dY / Math.max(y.v, 0.5) > 5.0) continue;      // kommt spät genug
+        else if (dY / Math.max(y.v, 0.5) > (c.art === 'rechts' ? 4.5 : 6.0)) continue;   // kommt spät genug
         f.wartetAuf = y;
         return 'vorfahrt';
       }
@@ -1793,7 +2082,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return true;
     }
 
+    let letzterSpieler = null;
     function rechnen(dt, spieler, fussgaenger) {
+      letzterSpieler = spieler || null;
       // Belegung je Stück: Fremdfahrzeuge, Schüler, geparkte Fahrzeuge und
       // die Schatten der Überholenden auf der Gegenspur
       const belegung = new Map();
@@ -1888,6 +2179,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
         // Vordermann
         const vorn = vorausfahrer(f, belegung);
+        f.vorn = vorn ? vorn.fahrzeug : null;
         let luecke = Infinity, dv = 0, S0 = 1.8;
         if (vorn) { luecke = vorn.abstand - FZ_LAENGE; dv = f.v - vorn.fahrzeug.v; }
         if (haltAbstand < luecke) { luecke = haltAbstand; dv = f.v; S0 = 0.5; }
@@ -1917,7 +2209,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           } else {
             f.stueck = f.stueck.nachSpur;
           }
-          if (f.stueck.typ === 'spur') f.naechste = naechsteVerbindung(f.stueck);
+          if (f.stueck.typ === 'spur') f.naechste = naechsteVerbindung(f.stueck, f);
         }
 
         f.warteZeit = f.v < 0.3 ? f.warteZeit + dt : 0;
@@ -1938,15 +2230,18 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const p = spurPunkt(spur, s);
         if (meidePunkt && Math.hypot(p.x - meidePunkt.x, p.z - meidePunkt.z) < 60) continue;
         if (fahrzeuge.some(f => Math.hypot(f.x - p.x, f.z - p.z) < 18)) continue;
+        if (geparkt.some(g => Math.hypot(g.x - p.x, g.z - p.z) < 16)) continue;    // nicht in einer Parklücke
+        if (spur.parallel && spur.parallel.length > 1 && spur.rolle === 'links') continue;
         einsetzen(spur, s);
       }
     }
 
     // Für Übungen: ein Fahrzeug an eine bestimmte Stelle setzen, mit
     // Geschwindigkeit und gewünschtem Ausgang an der nächsten Kreuzung.
-    function einsetzenAuf(spur, s, v, nachName) {
+    function einsetzenAuf(spur, s, v, nachName, tempoFaktor) {
       const f = einsetzen(spur, klemme(s, 0.5, spur.laenge - 0.5));
       f.v = v;
+      if (tempoFaktor) f.tempoFaktor = tempoFaktor;
       if (nachName) {
         const w = spur.aus.find(x => x.nachSpur.segment.nachbarn.indexOf(nachName) >= 0);
         if (w) f.naechste = w;
@@ -1960,6 +2255,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
 
     return { fahrzeuge: fahrzeuge, geparkt: geparkt, engstellen: engstellen, rechnen: rechnen, anlegen: anlegen, konflikt: konflikt,
+             get spieler() { return letzterSpieler; },
              einsetzenAuf: einsetzenAuf, entfernenAlle: entfernenAlle,
              mussWarten: mussWarten, armLage: armLage, gegenspur: gegenspur, armFuerSpur: armFuerSpur };
   }
@@ -2015,8 +2311,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (s1 - s0 < 0.5) return;
       const pr = probenEntlang(seg.geometrie, s0, s1, 2.0);
       [1, -1].forEach(seite => {
-        wegAnlegen('gehweg', pr.map(p => ({ x: p.x + p.nx * seite * GEHMITTE, z: p.z + p.nz * seite * GEHMITTE })),
-                   { segment: seg, seite: seite });
+        wegAnlegen('gehweg', pr.map(p => {
+          const rand = seg.randBei(p.s), abst = (seite > 0 ? rand.R : rand.L) + BORDSTEINBREITE + GEHWEGBREITE / 2;
+          return { x: p.x + p.nx * seite * abst, z: p.z + p.nz * seite * abst };
+        }), { segment: seg, seite: seite });
       });
     });
 
@@ -2026,8 +2324,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const N = { x: k.x, z: k.z };
         k.ecken.forEach(ecke => {
           const a = ecke.a, b = ecke.b;
-          const Ra = { x: N.x + a.d.x * a.rueckzug + a.r.x * HALBBREITE, z: N.z + a.d.z * a.rueckzug + a.r.z * HALBBREITE };
-          const Lb = { x: N.x + b.d.x * b.rueckzug - b.r.x * HALBBREITE, z: N.z + b.d.z * b.rueckzug - b.r.z * HALBBREITE };
+          const Ra = { x: N.x + a.d.x * a.rueckzug + a.r.x * a.breiteAus, z: N.z + a.d.z * a.rueckzug + a.r.z * a.breiteAus };
+          const Lb = { x: N.x + b.d.x * b.rueckzug - b.r.x * b.breiteEin, z: N.z + b.d.z * b.rueckzug - b.r.z * b.breiteEin };
           let pfad;
           if (ecke.gerade) pfad = streckePunkte(Lb, Ra, 1.0);
           else {
@@ -2055,10 +2353,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         });
         k.arme.forEach(arm => {
           const e = arm.rueckzug;
-          const P = { x: N.x + arm.d.x * e - arm.r.x * GEHMITTE, z: N.z + arm.d.z * e - arm.r.z * GEHMITTE };
-          const Q = { x: N.x + arm.d.x * e + arm.r.x * GEHMITTE, z: N.z + arm.d.z * e + arm.r.z * GEHMITTE };
+          const gE = arm.breiteEin + BORDSTEINBREITE + GEHWEGBREITE / 2;
+          const gA = arm.breiteAus + BORDSTEINBREITE + GEHWEGBREITE / 2;
+          const P = { x: N.x + arm.d.x * e - arm.r.x * gE, z: N.z + arm.d.z * e - arm.r.z * gE };
+          const Q = { x: N.x + arm.d.x * e + arm.r.x * gA, z: N.z + arm.d.z * e + arm.r.z * gA };
           const w = wegAnlegen('furt', streckePunkte(P, Q, 1.5), { knoten: k, arm: arm });
-          if (w) arm.furt = w;
+          if (w) { arm.furt = w; w.mitte = gE; }   // Fahrbahnmitte ab dem Anfang der Furt
         });
       } else if (k.typ === 'zebra') {
         const arm = k.arme[0];
@@ -2200,7 +2500,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         p.schritt += p.v * dt * 2.2;
         // In der Mitte einer Furt die zweite Hälfte prüfen
         if (p.weg.typ === 'furt') {
-          const mitte = p.weg.laenge / 2;
+          const mitte = p.weg.mitte !== undefined ? p.weg.mitte : p.weg.laenge / 2;
           const ueberschritten = p.richtung > 0 ? (sVorher < mitte && p.s >= mitte) : (sVorher > mitte && p.s <= mitte);
           if (ueberschritten && !frei(p.weg, autos, p.richtung > 0 ? 'aus' : 'ein')) {
             p.s = mitte; p.zustand = 'wartet'; p.naechster = null;
@@ -2240,7 +2540,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return leute.some(p => {
         if (p.weg === weg) {
           if (!haelfte || weg.typ !== 'furt') return true;
-          const mitte = weg.laenge / 2;
+          const mitte = weg.mitte !== undefined ? weg.mitte : weg.laenge / 2;
           // In der Mitte Wartende zählen nicht: sie lassen den Verkehr durch
           if (p.zustand === 'wartet' && !p.naechster) return false;
           return haelfte === 'ein' ? p.s <= mitte + 0.8 : p.s >= mitte - 0.8;
@@ -2292,7 +2592,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     gegen:       { klasse: 'leicht', text: 'Auf der Gegenfahrbahn gefahren' },
     bordstein:   { klasse: 'leicht', text: 'Fahrbahn verlassen' },
     tempo:       { klasse: 'leicht', text: 'Geschwindigkeit überschritten' },
-    route:       { klasse: 'leicht', text: 'Nicht der Anweisung gefolgt' }
+    route:       { klasse: 'leicht', text: 'Nicht der Anweisung gefolgt' },
+    einordnen:   { klasse: 'leicht', text: 'Falsch eingeordnet' },
+    spurwechsel: { klasse: 'leicht', text: 'Spurwechsel ohne Blinker' }
   };
 
   function Bewertung(netz, verkehr, ampeln, fussgaenger) {
@@ -2307,7 +2609,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let einfahrt = null;              // Zustand im Moment der Einfahrt, wird später bewertet
     let engstelleGemeldet = null;
     let zebraGemeldet = null, zebraMerker = {};
-    let vAlt = 0, beschleunigung = 0;
+    let vAlt = 0, beschleunigung = 0, letzterSpurwechsel = -10;
 
     function melden(art, ort, zusatz) {
       const def = FEHLERARTEN[art];
@@ -2321,6 +2623,35 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     }
 
     function endKnoten(spur) { return spur.richtung > 0 ? spur.segment.bis : spur.segment.von; }
+
+    // Fahrzeuge, denen man bei der Einfahrt hätte Vorrang lassen müssen,
+    // bezogen auf eine Menge möglicher Kurven. Jeder Eintrag merkt sich
+    // Arm und Kurve des anderen, damit die Prüfung später wiederholbar ist.
+    function pflichtBestimmen(k, arm, kurven) {
+      const liste = [];
+      verkehr.fahrzeuge.forEach(y => {
+        if (!y.stueck) return;
+        let armY = null, cY = null, tY = 0;
+        if (y.stueck.typ === 'spur') {
+          if (endKnoten(y.stueck) !== k) return;
+          const dY = y.stueck.laenge - y.s;
+          if (dY > 45 || y.v < 0.5) return;
+          tY = dY / Math.max(y.v, 0.5);
+          armY = verkehr.armFuerSpur(k, y.stueck); cY = y.naechste;
+        } else if (y.stueck.typ === 'verbindung' && y.stueck.knoten === k) {
+          if (y.stueck.laenge - y.s < 1.5 || y.v < 0.5) return;
+          armY = verkehr.armFuerSpur(k, y.stueck.vonSpur); cY = y.stueck;
+        } else return;
+        if (!armY || armY === arm || tY >= 5.0) return;
+        const e = { fahrzeug: y, arm: armY, kurve: cY };
+        if (kurven.some(c => passtZuKurve(k, arm, c, e))) liste.push(e);
+      });
+      return liste;
+    }
+    function passtZuKurve(k, arm, c, e) {
+      if (e.kurve && !verkehr.konflikt(k, c, e.kurve)) return false;
+      return verkehr.mussWarten(k, arm, c, e.arm, e.kurve, ampeln);
+    }
 
     function rechnen(dt, fahrzeug, lage, blinker) {
       zeit += dt;
@@ -2373,6 +2704,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         }
       } else { gegenSeit = 0; gegenGemeldet = false; if (lage.lage !== 'gegen') engstelleGemeldet = null; }
 
+      /* --- Spurwechsel zwischen Nachbarspuren ----------------------- */
+      if (st && vorherStueck && st.typ === 'spur' && vorherStueck.typ === 'spur' && st !== vorherStueck &&
+          st.segment === vorherStueck.segment && st.richtung === vorherStueck.richtung && !blinker &&
+          zeit - letzterSpurwechsel > 3) {
+        letzterSpurwechsel = zeit;
+        melden('spurwechsel', lage.strasse ? lage.strasse.name : '');
+      }
+
       /* --- Annäherung an eine Kreuzung ------------------------------ */
       if (st && st.typ === 'spur') {
         const k = endKnoten(st);
@@ -2412,12 +2751,19 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       // ist, welche Abbiegekurve es geworden ist. Direkt am Kreuzungsrand
       // liegen alle Kurven noch übereinander.
       if (st && st.typ === 'verbindung' && !st.direkt && vorherStueck && vorherStueck.typ === 'spur' &&
-          st.knoten.typ === 'kreuzung' && st.vonSpur === vorherStueck) {
+          st.knoten.typ === 'kreuzung' &&
+          (st.vonSpur === vorherStueck || (st.vonSpur.segment === vorherStueck.segment && st.vonSpur.richtung === vorherStueck.richtung))) {
         const k = st.knoten, arm = verkehr.armFuerSpur(k, vorherStueck);
         const m = gelbMerker[arm.segment.id];
-        einfahrt = { knoten: k, arm: arm, blinker: blinker, angehalten: angehalten,
+        einfahrt = { knoten: k, arm: arm, blinker: blinker, angehalten: angehalten, vonSpur: vorherStueck,
                      ampel: k.regelung.art === 'ampel' ? ampeln.zustandFuer(arm) : null,
                      gelbKonnteHalten: !!(m && m.konnteHalten), bewertet: false };
+        // Die Vorfahrtbeobachtung beginnt sofort: wem hätte man Vorrang
+        // lassen müssen? Solange die Kurve nicht feststeht, zählt jede
+        // Kurve dieses Arms als möglich.
+        const kurven = st.geschwister || [st];
+        kreuzungsfahrt = { knoten: k, arm: arm, pflicht: pflichtBestimmen(k, arm, kurven),
+                           vorfahrtGemeldet: false, fussGemeldet: false, verdacht: null, fest: false };
       }
       if (einfahrt && !einfahrt.bewertet && st && st.typ === 'verbindung' && st.knoten === einfahrt.knoten &&
           lage.sGenau >= Math.min(6, 0.45 * st.laenge)) {
@@ -2428,29 +2774,24 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (einfahrt.ampel === 'rot' || einfahrt.ampel === 'rotgelb') melden('rot', ort);
         else if (einfahrt.ampel === 'gelb' && einfahrt.gelbKonnteHalten) melden('gelb', ort);
         if (reg && reg.linie === 'halten' && k.regelung.art !== 'ampel' && !einfahrt.angehalten) melden('stopp', ort);
+        // Aus der Linksabbiegespur nur links, aus der Spur daneben nicht links
+        if (einfahrt.vonSpur && einfahrt.vonSpur.parallel.length > 1) {
+          const abbieger = einfahrt.vonSpur.rolle === 'links';
+          if ((abbieger && st.art !== 'links') || (!abbieger && st.art === 'links')) melden('einordnen', ort, '(' + st.art + ' aus der ' + (abbieger ? 'Abbiegespur' : 'Geradeausspur') + ')');
+        }
         if (st.art !== 'geradeaus' && einfahrt.blinker !== st.art) melden('blinker', ort, '(' + st.art + ')');
         if (st.art === 'geradeaus' && einfahrt.blinker) melden('blinkerFalsch', ort);
-        // Wem hätte man bei der Einfahrt Vorrang lassen müssen? Nur diese
-        // Fahrzeuge zählen später, wenn sie hart bremsen oder nahe kommen.
-        const pflicht = verkehr.fahrzeuge.filter(y => {
-          if (!y.stueck) return false;
-          let armY = null, cY = null, tY = 0;
-          if (y.stueck.typ === 'spur') {
-            if (endKnoten(y.stueck) !== k) return false;
-            const dY = y.stueck.laenge - y.s;
-            if (dY > 45 || y.v < 0.5) return false;
-            tY = dY / Math.max(y.v, 0.5);
-            armY = verkehr.armFuerSpur(k, y.stueck); cY = y.naechste;
-          } else if (y.stueck.typ === 'verbindung' && y.stueck.knoten === k) {
-            armY = verkehr.armFuerSpur(k, y.stueck.vonSpur); cY = y.stueck;
-          } else return false;
-          if (!armY || armY === arm) return false;
-          if (cY && !verkehr.konflikt(k, st, cY)) return false;
-          if (!verkehr.mussWarten(k, arm, st, armY, cY, ampeln)) return false;
-          return tY < 5.0;
-        });
-        kreuzungsfahrt = { knoten: k, arm: arm, verbindung: st, pflicht: pflicht,
-                           vorfahrtGemeldet: false, fussGemeldet: false };
+        // Jetzt steht die Kurve fest: Verdacht aus der Anfahrt prüfen und
+        // die Pflichtliste auf diese Kurve einengen
+        if (kreuzungsfahrt && kreuzungsfahrt.knoten === k) {
+          kreuzungsfahrt.pflicht = kreuzungsfahrt.pflicht.filter(e => passtZuKurve(k, arm, st, e));
+          if (kreuzungsfahrt.verdacht && !kreuzungsfahrt.vorfahrtGemeldet &&
+              passtZuKurve(k, arm, st, kreuzungsfahrt.verdacht)) {
+            kreuzungsfahrt.vorfahrtGemeldet = true; melden('vorfahrt', ort);
+          }
+          kreuzungsfahrt.verdacht = null;
+          kreuzungsfahrt.fest = true;
+        }
       }
 
       if (einfahrt && (!st || st.typ !== 'verbindung' || st.knoten !== einfahrt.knoten)) einfahrt = null;
@@ -2459,14 +2800,23 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (kreuzungsfahrt && st && st.typ === 'verbindung' && st.knoten === kreuzungsfahrt.knoten) {
         const k = kreuzungsfahrt.knoten, arm = kreuzungsfahrt.arm, c = st;
         if (!kreuzungsfahrt.vorfahrtGemeldet && kreuzungsfahrt.pflicht.length) {
-          const opfer = kreuzungsfahrt.pflicht.find(y => {
-            const nah = Math.hypot(y.x - fahrzeug.x, y.z - fahrzeug.z) < 6;
-            const bremst = y.v > 1.0 && y.a < -2.5 && (y.grund === 'belegt' || y.grund === 'vorfahrt' || y.grund === null);
+          const opfer = kreuzungsfahrt.pflicht.find(e => {
+            const y = e.fahrzeug;
+            // Nähe zählt nur, solange der andere noch vor der Kreuzung ist;
+            // wer schon hinter uns eingeschert ist, folgt uns bloß
+            const nochDavor = y.stueck && y.stueck.typ === 'spur' && endKnoten(y.stueck) === k;
+            const nah = nochDavor && Math.hypot(y.x - fahrzeug.x, y.z - fahrzeug.z) < 6;
+            // Nur wer wegen der Kreuzung oder wegen uns bremst, zählt
+            const wegenUns = y.grund === 'belegt' || y.grund === 'vorfahrt' || (verkehr.spieler && y.vorn === verkehr.spieler);
+            const bremst = y.v > 1.0 && y.a < -2.5 && wegenUns;
             return bremst || nah;
           });
-          if (opfer) { kreuzungsfahrt.vorfahrtGemeldet = true; melden('vorfahrt', ortName(k)); }
+          if (opfer) {
+            if (kreuzungsfahrt.fest) { kreuzungsfahrt.vorfahrtGemeldet = true; melden('vorfahrt', ortName(k)); }
+            else if (!kreuzungsfahrt.verdacht) kreuzungsfahrt.verdacht = opfer;   // wird geprüft, sobald die Kurve feststeht
+          }
         }
-        if (!kreuzungsfahrt.fussGemeldet && v > 2.0 && !bremst) {
+        if (!kreuzungsfahrt.fussGemeldet && v > 2.5 && !bremst) {
           const ausArm = verkehr.armFuerSpur(k, c.nachSpur);
           const furten = [arm.furt, ausArm && ausArm.furt].filter(Boolean);
           const fx = Math.cos(fahrzeug.psi), fz = Math.sin(fahrzeug.psi);
@@ -2508,7 +2858,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     function zuruecksetzen() {
       ereignisse = []; zeit = 0; vorherStueck = null; angehalten = false; gelbMerker = {}; vAlt = 0; beschleunigung = 0;
       tempoEpisode = null; gegenSeit = 0; gegenGemeldet = false; kreuzungsfahrt = null; einfahrt = null;
-      engstelleGemeldet = null; zebraGemeldet = null; zebraMerker = {};
+      engstelleGemeldet = null; zebraGemeldet = null; zebraMerker = {}; letzterSpurwechsel = -10;
     }
 
     return { rechnen: rechnen, melden: melden, zusammenfassung: zusammenfassung, zuruecksetzen: zuruecksetzen,
@@ -2530,11 +2880,17 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let uebung = null, routenIndex = 0, ausgeloest = null, fertig = null, vorherStueck = null;
 
     // --- Hilfen, die eine Übung beim Aufbau benutzt ------------------
-    function spurZwischen(a, b) {
-      const seg = netz.segmente.find(s => s.geometrie.art === 'gerade' &&
-        ((s.nachbarn[0] === a && s.nachbarn[1] === b) || (s.nachbarn[0] === b && s.nachbarn[1] === a)));
-      if (!seg) throw new Error('Übung: keine Straße zwischen ' + a + ' und ' + b);
-      return seg.nachbarn[0] === a ? seg.spuren[0] : seg.spuren[1];
+    // Spur zwischen zwei benannten Knoten; bei geteilten Straßen das
+    // Teilstück, in dem 'abstand' (ab a, negativ: vor b) liegt
+    function spurZwischen(a, b, abstand) {
+      const lage = spurAufStrecke(netz, a, b, abstand === undefined ? 0 : abstand);
+      if (!lage) throw new Error('Übung: keine Straße zwischen ' + a + ' und ' + b);
+      return lage.spur;
+    }
+    function lageZwischen(a, b, abstand) {
+      const lage = spurAufStrecke(netz, a, b, abstand);
+      if (!lage) throw new Error('Übung: keine Straße zwischen ' + a + ' und ' + b);
+      return lage;
     }
     function armVon(knotenName, nachbarName) {
       const k = netz.benannt.get(knotenName);
@@ -2562,7 +2918,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return verkehr.einsetzenAuf(spur, spur.laenge - abstand, v, weiterNach);
     }
 
-    const hilfen = { spurZwischen, spurZu, armVon, armRechtsVon, armGegenueber, autoVor,
+    const hilfen = { spurZwischen, lageZwischen, spurZu, armVon, armRechtsVon, armGegenueber, autoVor,
                      verkehr, fussgaenger, ampeln, netz };
 
     // --- Der Katalog --------------------------------------------------
@@ -2632,11 +2988,29 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         } }]
       },
       {
+        id: 'einordnen', titel: 'Einordnen zum Linksabbiegen',
+        text: 'Auf der Mittelstraße von R zur Ampel L. Vor der Kreuzung beginnt eine Linksabbiegespur. Ordne dich rechtzeitig links ein, blink, und bieg bei Grün links ab.',
+        start: ['R', 'L', 95], route: [{ knoten: 'L', art: 'links' }],
+        ausloeser: [{ knoten: 'L', abstand: 80, aktion: h => {
+          const gegen = h.armGegenueber('L', 'R');
+          if (gegen) { h.autoVor('L', gegen.nachbar, 55, 8, null); h.autoVor('L', gegen.nachbar, 95, 8, null); }
+        } }]
+      },
+      {
+        id: 'spurwechsel', titel: 'Überholen auf vier Spuren',
+        text: 'Die Oststraße zwischen T und I ist vierspurig. Vor dir fährt ein langsames Auto. Wechsel mit Blinker nach links, überhol es und ordne dich vor der Ampel I wieder rechts ein. Dort geht es geradeaus Richtung M.',
+        start: ['T', 'I', -22], route: [{ knoten: 'I', nach: 'M' }],
+        aufbau: h => {
+          const lage = h.lageZwischen('T', 'I', 55);
+          h.verkehr.einsetzenAuf(lage.spur, lage.s, 5, 'M', 0.36);
+        }
+      },
+      {
         id: 'einparken', titel: 'Rückwärts einparken',
         text: 'Auf der Mittelstraße hinter K stehen zwei Autos mit einer Lücke dazwischen. Fahr neben das vordere Auto, setz mit Blick nach hinten rückwärts in die Lücke und richte dich parallel zum Bordstein aus.',
         start: ['K', 'O', -40],
         pruefen: (h, lage, fahrzeug, dt, zustand) => {
-          const spur = h.spurZwischen('K', 'O');
+          const spur = h.spurZwischen('K', 'O', 90);
           const eng = h.verkehr.engstellen.find(e => e.spur === spur && e.parker.length >= 2);
           if (!eng) return { ansage: 'Keine Parklücke auf dieser Straße' };
           const luecke = [eng.parker[0].s + FZ_LAENGE / 2, eng.parker[1].s - FZ_LAENGE / 2];
@@ -2676,10 +3050,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       fussgaenger.entfernenAlle(rueckrufe.personWeg);
       bewertung.zuruecksetzen();
       if (u.aufbau) u.aufbau(hilfen);
-      // start[2]: Meter vor dem Ende der Spur; negativ: Meter hinter ihrem Anfang
-      const spur = spurZwischen(u.start[0], u.start[1]);
-      const s = klemme(u.start[2] >= 0 ? spur.laenge - u.start[2] : -u.start[2], 2, spur.laenge - 2);
-      return { spur: spur, s: s };
+      // start[2]: Meter vor dem zweiten Knoten; negativ: Meter hinter dem ersten
+      const lage = lageZwischen(u.start[0], u.start[1], -u.start[2]);
+      return { spur: lage.spur, s: klemme(lage.s, 2, lage.spur.laenge - 2) };
     }
 
     function beenden() { uebung = null; fertig = null; ausgeloest = null; }
@@ -2717,9 +3090,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             const ende = st.richtung > 0 ? st.segment.bis : st.segment.von;
             const dEnde = st.laenge - lage.sGenau;
             if (ende === k) {
-              const c = st.aus.find(v => v.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0);
-              const art = c ? c.art : 'geradeaus';
+              const c = schritt.art ? null : st.aus.find(v => v.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0);
+              const art = schritt.art || (c ? c.art : 'geradeaus');
               ansage = 'Kreuzung ' + k.name + ' in ' + Math.max(0, Math.round(dEnde)) + ' m: ' + RICHTUNGSTEXT[art];
+              if (art === 'links' && st.parallel.length > 1 && st.rolle !== 'links') ansage += ', links einordnen';
             } else if (ende.typ === 'kreuzung') {
               ansage = 'Du bist von der Route abgekommen.';
             } else ansage = 'Weiter geradeaus';
@@ -2727,9 +3101,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             // Stimmt die Richtung? Erst ein paar Meter in der Kreuzung ist
             // sicher, welche Kurve es geworden ist.
             if (lage.sGenau >= Math.min(6, 0.45 * st.laenge)) {
-              const richtig = st.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0;
+              const richtig = schritt.art ? st.art === schritt.art : st.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0;
               if (!richtig) {
-                bewertung.melden('route', 'Kreuzung ' + k.name, '(' + RICHTUNGSTEXT[st.art] + ' statt Richtung ' + schritt.nach + ')');
+                bewertung.melden('route', 'Kreuzung ' + k.name, '(' + RICHTUNGSTEXT[st.art] + ' statt ' + (schritt.art ? RICHTUNGSTEXT[schritt.art] : 'Richtung ' + schritt.nach) + ')');
                 fertig = 'abgekommen';
               } else {
                 routenIndex++;
@@ -2747,8 +3121,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
       // Festes Ziel (Übungen ohne Kreuzung)
       if (uebung.ende && st && st.typ === 'spur') {
-        const ziel = spurZwischen(uebung.ende.spur[0], uebung.ende.spur[1]);
-        if (st === ziel && lage.sGenau >= uebung.ende.s) fertig = 'geschafft';
+        const ziel = lageZwischen(uebung.ende.spur[0], uebung.ende.spur[1], uebung.ende.s);
+        if (st === ziel.spur && lage.sGenau >= ziel.s) fertig = 'geschafft';
         if (!ansage) ansage = 'Weiter geradeaus';
       }
 
@@ -2837,6 +3211,41 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     return geo;
   }
 
+  // Wie bandGeometrie, aber die Versätze kommen aus Funktionen der Probe
+  function bandGeometrieVar(proben, fa, fb, y) {
+    const eck = [], idx = [];
+    const nP = proben.length;
+    for (let i = 0; i < nP; i++) {
+      const p = proben[i], a = fa(p), b = fb(p);
+      eck.push(p.x + p.nx * a, y, p.z + p.nz * a);
+      eck.push(p.x + p.nx * b, y, p.z + p.nz * b);
+    }
+    for (let i = 0; i < nP - 1; i++) {
+      const i0 = i * 2, i1 = i * 2 + 1, j0 = i0 + 2, j1 = i0 + 3;
+      idx.push(i0, i1, j0, i1, j1, j0);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(eck, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+  }
+  function seitenflaecheVar(proben, fv, y0, y1) {
+    const eck = [], idx = [];
+    const nP = proben.length;
+    for (let i = 0; i < nP; i++) {
+      const p = proben[i], v = fv(p);
+      eck.push(p.x + p.nx * v, y0, p.z + p.nz * v);
+      eck.push(p.x + p.nx * v, y1, p.z + p.nz * v);
+    }
+    for (let i = 0; i < nP - 1; i++) idx.push(i * 2, i * 2 + 2, i * 2 + 1, i * 2 + 1, i * 2 + 2, i * 2 + 3);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(eck, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    return geo;
+  }
+
   function seitenflaeche(proben, versatz, y0, y1, geschlossen) {
     const eck = [], idx = [];
     const nP = proben.length;
@@ -2917,16 +3326,18 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const asphaltFlaechen = FlaechenSammler(0.01);
     const markierungen = FlaechenSammler(0.03);
 
+    // Bordstein und Gehweg entlang eines Segments; der Rand kommt je Probe
+    // aus p.rand (R rechts, L links), damit Verziehungen mitgehen.
     function bordsteinUndGehweg(proben, seite) {
-      // seite +1: rechts der Proben, -1: links
-      const bA = seite > 0 ? HALBBREITE : -(HALBBREITE + BORDSTEINBREITE);
-      const bB = seite > 0 ? HALBBREITE + BORDSTEINBREITE : -HALBBREITE;
-      gruppe.add(new THREE.Mesh(bandGeometrie(proben, bA, bB, BORDSTEINHOEHE, false), matBordstein));
-      gruppe.add(new THREE.Mesh(seitenflaeche(proben, seite * HALBBREITE, 0, BORDSTEINHOEHE, false), matBordstein));
-      const gA = seite > 0 ? HALBBREITE + BORDSTEINBREITE : -(HALBBREITE + GEHWEGBREITE);
-      const gB = seite > 0 ? HALBBREITE + GEHWEGBREITE : -(HALBBREITE + BORDSTEINBREITE);
-      gruppe.add(new THREE.Mesh(bandGeometrie(proben, gA, gB, BORDSTEINHOEHE, false), matGehweg));
-      gruppe.add(new THREE.Mesh(seitenflaeche(proben, seite * (HALBBREITE + GEHWEGBREITE), 0, BORDSTEINHOEHE, false), matGehweg));
+      const rand = p => seite > 0 ? p.rand.R : p.rand.L;
+      const bA = p => seite > 0 ? rand(p) : -(rand(p) + BORDSTEINBREITE);
+      const bB = p => seite > 0 ? rand(p) + BORDSTEINBREITE : -rand(p);
+      gruppe.add(new THREE.Mesh(bandGeometrieVar(proben, bA, bB, BORDSTEINHOEHE), matBordstein));
+      gruppe.add(new THREE.Mesh(seitenflaecheVar(proben, p => seite * rand(p), 0, BORDSTEINHOEHE), matBordstein));
+      const gA = p => seite > 0 ? rand(p) + BORDSTEINBREITE : -(rand(p) + GEHWEGBREITE);
+      const gB = p => seite > 0 ? rand(p) + GEHWEGBREITE : -(rand(p) + BORDSTEINBREITE);
+      gruppe.add(new THREE.Mesh(bandGeometrieVar(proben, gA, gB, BORDSTEINHOEHE), matGehweg));
+      gruppe.add(new THREE.Mesh(seitenflaecheVar(proben, p => seite * (rand(p) + GEHWEGBREITE), 0, BORDSTEINHOEHE), matGehweg));
     }
 
     // Eckband: Bordstein und Gehweg entlang eines Pfades, dessen Normalen
@@ -2943,27 +3354,62 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       const L = seg.geometrie.laenge;
       const s0 = seg.rueckzugVon, s1 = L - seg.rueckzugBis;
       if (s1 - s0 < 0.2) return;
-      const proben = probenEntlang(seg.geometrie, s0, s1, seg.geometrie.art === 'gerade' ? 4 : 1.5);
+      const verzogen = seg.randR0 !== seg.randR1 || seg.randL0 !== seg.randL1;
+      const proben = probenEntlang(seg.geometrie, s0, s1, seg.geometrie.art === 'gerade' && !verzogen ? 4 : 1.5);
+      proben.forEach(p => { p.rand = seg.randBei(p.s); });
       seg.proben = proben;
 
-      gruppe.add(new THREE.Mesh(bandGeometrie(proben, -HALBBREITE, HALBBREITE, 0.01, false), matAsphalt));
+      gruppe.add(new THREE.Mesh(bandGeometrieVar(proben, p => -p.rand.L, p => p.rand.R, 0.01), matAsphalt));
       bordsteinUndGehweg(proben, +1);
       bordsteinUndGehweg(proben, -1);
 
-      // Fahrbahnbegrenzung
-      gruppe.add(new THREE.Mesh(bandGeometrie(proben, HALBBREITE - 0.08 - RANDLINIE, HALBBREITE - 0.08, 0.03, false), matMarkierung));
-      gruppe.add(new THREE.Mesh(bandGeometrie(proben, -HALBBREITE + 0.08, -HALBBREITE + 0.08 + RANDLINIE, 0.03, false), matMarkierung));
+      // Fahrbahnbegrenzung, folgt dem Rand
+      gruppe.add(new THREE.Mesh(bandGeometrieVar(proben, p => p.rand.R - 0.08 - RANDLINIE, p => p.rand.R - 0.08, 0.03), matMarkierung));
+      gruppe.add(new THREE.Mesh(bandGeometrieVar(proben, p => -p.rand.L + 0.08, p => -p.rand.L + 0.08 + RANDLINIE, 0.03), matMarkierung));
 
-      // Leitlinie: 4 m Strich, 8 m Lücke, ab Segmentanfang
+      // Leitlinie in der Mitte: 4 m Strich, 8 m Lücke. Auf Abschnitten mit
+      // Abbiegespur ist die Mitte durchgezogen.
       const halb = LEITLINIE / 2;
-      for (let s = s0 + 2; s + 4 <= s1; s += 12) {
-        const p0 = seg.geometrie.punktBei(s), p1 = seg.geometrie.punktBei(s + 4);
-        const n0 = rechtsVon(seg.geometrie.winkelBei(s)), n1 = rechtsVon(seg.geometrie.winkelBei(s + 4));
-        markierungen.viereck(
-          { x: p0.x - n0.x * halb, z: p0.z - n0.z * halb }, { x: p0.x + n0.x * halb, z: p0.z + n0.z * halb },
-          { x: p1.x + n1.x * halb, z: p1.z + n1.z * halb }, { x: p1.x - n1.x * halb, z: p1.z - n1.z * halb });
+      function strichlinie(versatz, strich, luecke, durchgezogen) {
+        if (durchgezogen) {
+          gruppe.add(new THREE.Mesh(bandGeometrie(proben, versatz - halb, versatz + halb, 0.03, false), matMarkierung));
+          return;
+        }
+        for (let s = s0 + 2; s + strich <= s1; s += strich + luecke) {
+          const p0 = seg.geometrie.punktBei(s), p1 = seg.geometrie.punktBei(s + strich);
+          const n0 = rechtsVon(seg.geometrie.winkelBei(s)), n1 = rechtsVon(seg.geometrie.winkelBei(s + strich));
+          markierungen.viereck(
+            { x: p0.x + n0.x * (versatz - halb), z: p0.z + n0.z * (versatz - halb) }, { x: p0.x + n0.x * (versatz + halb), z: p0.z + n0.z * (versatz + halb) },
+            { x: p1.x + n1.x * (versatz + halb), z: p1.z + n1.z * (versatz + halb) }, { x: p1.x + n1.x * (versatz - halb), z: p1.z + n1.z * (versatz - halb) });
+        }
       }
+      const hatAbbieger = seg.spuren.some(sp => sp.rolle === 'links');
+      strichlinie(0, 4, 8, hatAbbieger);
+      // Trennung zwischen zwei Spuren derselben Richtung: kurze Striche
+      if (seg.nR === 2 && !verzogen) strichlinie(SPURBREITE, 3, 3, false);
+      if (seg.nL === 2 && !verzogen) strichlinie(-SPURBREITE, 3, 3, false);
+
+      // Pfeile auf der Linksabbiegespur
+      seg.spuren.filter(sp => sp.rolle === 'links').forEach(sp => {
+        for (let s = 6; s < sp.laenge - 4; s += 12) pfeil(sp, s, 'links');
+      });
     });
+
+    // Richtungspfeil auf einer Spur bei Bogenlänge s: Schaft in Fahrtrichtung,
+    // Kopf zur Seite abgeknickt
+    function pfeil(spur, s, art) {
+      const p = spurPunkt(spur, s), p2 = spurPunkt(spur, s + 3.2);
+      const psi = p.psi, c = Math.cos(psi), sn = Math.sin(psi);
+      const links = { x: Math.sin(psi), z: -Math.cos(psi) };       // links der Fahrtrichtung
+      const seite = art === 'links' ? 1 : -1;
+      function P(vor, quer) { return { x: p.x + c * vor + links.x * quer * seite, z: p.z + sn * vor + links.z * quer * seite }; }
+      // Schaft
+      markierungen.viereck(P(0, -0.15), P(0, 0.15), P(3.2, 0.15), P(3.2, -0.15));
+      // abgeknickter Teil
+      markierungen.viereck(P(3.0, -0.15), P(3.0, 0.15), P(3.9, 1.1), P(3.9, 0.8));
+      // Spitze
+      markierungen.dreieck(P(3.5, 1.35), P(4.5, 0.65), P(4.3, 1.7));
+    }
 
     /* --- Kreuzungen ----------------------------------------------- */
     netz.knoten.forEach(k => {
@@ -2973,8 +3419,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
       k.ecken.forEach(ecke => {
         const a = ecke.a, b = ecke.b;
-        const Ra = { x: N.x + a.d.x * a.rueckzug + a.r.x * HALBBREITE, z: N.z + a.d.z * a.rueckzug + a.r.z * HALBBREITE };
-        const Lb = { x: N.x + b.d.x * b.rueckzug - b.r.x * HALBBREITE, z: N.z + b.d.z * b.rueckzug - b.r.z * HALBBREITE };
+        const Ra = { x: N.x + a.d.x * a.rueckzug + a.r.x * a.breiteAus, z: N.z + a.d.z * a.rueckzug + a.r.z * a.breiteAus };
+        const Lb = { x: N.x + b.d.x * b.rueckzug - b.r.x * b.breiteEin, z: N.z + b.d.z * b.rueckzug - b.r.z * b.breiteEin };
 
         let pfad;
         if (ecke.gerade) {
@@ -3007,13 +3453,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         }
         // Die Linie liegt 2 m vor dem Segmentende, dazwischen bleibt Platz
         // für die Fußgängerfurt.
-        const h = z0 + HALTEABSTAND;
+        const h = z0 + HALTEABSTAND, bE = arm.breiteEin;
         if (r.linie === 'halten') {
-          markierungen.viereck(P(h, -HALBBREITE + 0.15), P(h, -0.15), P(h + 0.5, -0.15), P(h + 0.5, -HALBBREITE + 0.15));
+          markierungen.viereck(P(h, -bE + 0.15), P(h, -0.15), P(h + 0.5, -0.15), P(h + 0.5, -bE + 0.15));
         } else {
           // Wartelinie: Dreiecke, Spitze zur Kreuzung
-          for (let i = 0; i < 5; i++) {
-            const q = -HALBBREITE + 0.35 + i * 0.62;
+          const anzahl = Math.round((bE - 0.7) / 0.62);
+          for (let i = 0; i < anzahl; i++) {
+            const q = -bE + 0.35 + i * 0.62;
             markierungen.dreieck(P(h + 0.6, q), P(h + 0.6, q + 0.5), P(h, q + 0.25));
           }
         }
@@ -3029,6 +3476,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         return { x: N.x + d.x * entfernung + n.x * quer, z: N.z + d.z * entfernung + n.z * quer };
       }
       // Streifen 0,5 m breit, 4 m lang, im Abstand von 1 m über die ganze Fahrbahn
+      const rz = arm.segment.randBei(arm.amAnfang ? 0 : arm.segment.geometrie.laenge);
       for (let q = -HALBBREITE + 0.25; q < HALBBREITE - 0.2; q += 1.0) {
         markierungen.viereck(P(-2, q), P(-2, q + 0.5), P(2, q + 0.5), P(2, q));
       }
@@ -3231,7 +3679,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (!liste.length) return;
         // Rechts der ankommenden Fahrbahn, kurz vor der Haltelinie
         const e = arm.rueckzug + HALTEABSTAND + 1.4;
-        const q = -(HALBBREITE + 1.1);
+        const q = -(arm.breiteEin + 1.1);
         schildAufstellen(gruppe, hindernisse,
           N.x + arm.d.x * e + arm.r.x * q, N.z + arm.d.z * e + arm.r.z * q,
           arm.d, liste, pfostenMat);
@@ -3243,7 +3691,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (!tempo || tempo === TEMPO_STANDARD) return;
         const e = arm.rueckzug + 9;
         if (e > arm.segment.geometrie.laenge - 6) return;
-        const q = HALBBREITE + 1.1;
+        const q = arm.breiteAus + 1.1;
         schildAufstellen(gruppe, hindernisse,
           N.x + arm.d.x * e + arm.r.x * q, N.z + arm.d.z * e + arm.r.z * q,
           { x: -arm.d.x, z: -arm.d.z },
@@ -3304,7 +3752,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const gruppeNr = r.gruppe;
         const mats = anlage.materialien[gruppeNr];
         const e = arm.rueckzug + HALTEABSTAND + 0.6;
-        const q = -(HALBBREITE + 0.9);
+        const q = -(arm.breiteEin + 0.9);
         const x = N.x + arm.d.x * e + arm.r.x * q, z = N.z + arm.d.z * e + arm.r.z * q;
 
         const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 3.6, 8), mastMat);
@@ -3439,8 +3887,11 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const bahnen = netz.segmente.map(seg => {
       const L = seg.geometrie.laenge;
       const s0 = seg.rueckzugVon, s1 = L - seg.rueckzugBis;
-      return { seg: seg, s0: s0, s1: s1, proben: probenEntlang(seg.geometrie, s0, s1, 2.0) };
+      const proben = probenEntlang(seg.geometrie, s0, s1, 2.0);
+      proben.forEach(p => { p.rand = seg.randBei(p.s); });
+      return { seg: seg, s0: s0, s1: s1, proben: proben };
     });
+    function randVon(seg, s, seite) { const r = seg.randBei(s); return seite > 0 ? r.R : r.L; }
 
 
     let saat = 20260906;
@@ -3508,7 +3959,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const tiefe  = 8 + zufall() * 8;
         const geschosse = 2 + Math.floor(zufall() * 4);
         const hoehe  = geschosse * 3.0;
-        const weg    = HALBBREITE + 3.4 + tiefe / 2 + zufall() * 7;
+        const weg    = (seite > 0 ? p.rand.R : p.rand.L) + 3.4 + tiefe / 2 + zufall() * 7;
 
         const mx = p.x + p.nx * weg * seite;
         const mz = p.z + p.nz * weg * seite;
@@ -3568,13 +4019,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     bahnen.forEach(bahn => {
       for (let s = bahn.s0 + 8; s < bahn.s1 - 4; s += 42) {
         const q = bahn.seg.geometrie.punktBei(s), psi = bahn.seg.geometrie.winkelBei(s);
-        laternenOrte.push({ x: q.x, z: q.z, psi: psi, nx: -Math.sin(psi), nz: Math.cos(psi) });
+        const seiteL = laternenOrte.length % 2 === 0 ? 1 : -1;
+        laternenOrte.push({ x: q.x, z: q.z, psi: psi, nx: -Math.sin(psi), nz: Math.cos(psi), rand: randVon(bahn.seg, s, seiteL) });
       }
     });
     for (let i = 0; i < laternenOrte.length; i++, n++) {
       const p = laternenOrte[i];
       const seite = n % 2 === 0 ? 1 : -1;
-      const d = (HALBBREITE + 2.3) * seite;
+      const d = (p.rand + 2.3) * seite;
       const fx = p.x + p.nx * d, fz = p.z + p.nz * d;
 
       const mast = new THREE.Mesh(mastGeo, mastMat);
@@ -3620,7 +4072,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const q = bahn.seg.geometrie.punktBei(s), psi = bahn.seg.geometrie.winkelBei(s);
         const nrm = rechtsVon(psi);
         const seite = nb % 2 === 0 ? -1 : 1;
-        const d = (HALBBREITE + 2.4) * seite;
+        const d = (randVon(bahn.seg, s, seite) + 2.4) * seite;
         baum(q.x + nrm.x * d, q.z + nrm.z * d, 0.85 + zufall() * 0.3);
       }
     });
@@ -4041,8 +4493,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           const p = seg.geometrie.punktBei(L * i / n);
           if (i === 0) s.moveTo(X(p.x), Y(p.z)); else s.lineTo(X(p.x), Y(p.z));
         }
-        s.strokeStyle = '#8f8b83'; s.lineWidth = Math.max(2, FAHRBAHNBREITE * massstab + 2); s.stroke();
-        s.strokeStyle = '#3a3d42'; s.lineWidth = Math.max(1.5, FAHRBAHNBREITE * massstab); s.stroke();
+        const breite = (seg.randR0 + seg.randL0 + seg.randR1 + seg.randL1) / 2;
+        s.strokeStyle = '#8f8b83'; s.lineWidth = Math.max(2, breite * massstab + 2); s.stroke();
+        s.strokeStyle = '#3a3d42'; s.lineWidth = Math.max(1.5, breite * massstab); s.stroke();
       });
 
       // Straßennamen an der Mitte des längsten Segments
