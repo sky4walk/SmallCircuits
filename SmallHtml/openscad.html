@@ -6820,7 +6820,7 @@ Object.assign(Interpreter.prototype, {
     return { solid: new Solid(solids.flatMap(s => s.polygons)), regions };
   },
 
-  execBlock(block, scope) {
+  execBlock(block, scope, grouped = false) {
     // 1. Definitionen hochziehen
     for (const st of block.stmts) {
       if (!st) continue;
@@ -6837,15 +6837,38 @@ Object.assign(Interpreter.prototype, {
       }
     }
     // 3. Instanziierungen
+    // grouped=true liefert je Anweisung eine eigene Liste (für
+    // difference/intersection, wo jede Kind-Anweisung ein Operand ist).
     const out = [];
     for (const st of block.stmts) {
       if (!st) continue;
       if (st.type === 'Assign' || st.type === 'ModuleDef' ||
           st.type === 'FunctionDef' || st.type === 'Include') continue;
-      out.push(...this.execStatement(st, scope));
+      const items = this.execStatement(st, scope);
+      if (grouped) out.push(items); else out.push(...items);
     }
     this.dyn = dynSave;
     return out;
+  },
+
+  // Kinder als Operanden: ein Eintrag pro Kind-Anweisung. Ein for()
+  // oder ein Modulaufruf mit mehreren Körpern zählt in OpenSCAD als
+  // EIN Kind (implizite Vereinigung), nicht als n Kinder.
+  execGroups(st, scope) {
+    if (!st) return [];
+    if (st.type === 'Block') return this.execBlock(st, new Scope(scope), true);
+    return [this.execStatement(st, scope)];
+  },
+
+  // Jede Gruppe zu je einem 3D- und einem 2D-Operanden vereinigen.
+  groupOperands(st, scope) {
+    const S = [], R = [];
+    for (const g of this.execGroups(st, scope)) {
+      const [s3, r2] = splitItems(g);
+      if (s3.length) S.push(s3.length === 1 ? s3[0] : KERNEL.unionAll3(s3));
+      if (r2.length) R.push(r2.length === 1 ? r2[0] : KERNEL.unionAll2(r2));
+    }
+    return [S, R];
   },
 
   execStatement(st, scope) {
@@ -7156,7 +7179,7 @@ Object.assign(Interpreter.prototype, {
 
       // ---------- Minkowski-Summe ----------
       case 'minkowski': {
-        const [S, R] = splitItems(kids());
+        const [S, R] = this.groupOperands(st.children, scope);
         const out = [];
         if (S.length) {
           out.push(S.length === 1 ? S[0]
@@ -7341,7 +7364,7 @@ Object.assign(Interpreter.prototype, {
         return out;
       }
       case 'difference': {
-        const [S, R] = splitItems(kids());
+        const [S, R] = this.groupOperands(st.children, scope);
         const out = [];
         // Alle Subtrahenden zuerst zusammenfassen: ein BSP-Durchlauf statt n.
         if (S.length) out.push(S.length === 1 ? S[0] : KERNEL.subtract3(S[0], KERNEL.unionAll3(S.slice(1))));
@@ -7349,7 +7372,7 @@ Object.assign(Interpreter.prototype, {
         return out;
       }
       case 'intersection': {
-        const [S, R] = splitItems(kids());
+        const [S, R] = this.groupOperands(st.children, scope);
         const out = [];
         if (S.length) out.push(S.reduce((a, b) => KERNEL.intersect3(a, b)));
         if (R.length) out.push(R.reduce((a, b) => KERNEL.intersect2(a, b)));
