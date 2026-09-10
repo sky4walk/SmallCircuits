@@ -62,22 +62,20 @@ h1{
 /* Reiter */
 nav.tabs{
   display:flex;
-  gap:2px;
+  flex-wrap:wrap;           /* alle Reiter bleiben sichtbar, auch wenn es mehr werden */
+  gap:2px 2px;
   margin:28px 0 0;
-  overflow-x:auto;
-  scrollbar-width:none;
   border-bottom:2px solid var(--panel-edge);
 }
-nav.tabs::-webkit-scrollbar{display:none}
 nav.tabs button{
   font:inherit;
-  font-size:.95rem;
+  font-size:.9rem;
   color:var(--ink-soft);
   background:transparent;
   border:none;
   border-bottom:2px solid transparent;
   margin-bottom:-2px;
-  padding:10px 16px;
+  padding:10px 13px;
   white-space:nowrap;
   cursor:pointer;
   border-radius:var(--radius) var(--radius) 0 0;
@@ -197,6 +195,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-reihe-parallel" aria-controls="panel-reihe-parallel" data-tab="reihe-parallel" aria-selected="false">Reihe &amp; Parallel</button>
     <button role="tab" id="tab-spannungsteiler" aria-controls="panel-spannungsteiler" data-tab="spannungsteiler" aria-selected="false">Spannungsteiler</button>
     <button role="tab" id="tab-led" aria-controls="panel-led" data-tab="led" aria-selected="false">LED-Vorwiderstand</button>
+    <button role="tab" id="tab-rc" aria-controls="panel-rc" data-tab="rc" aria-selected="false">RC-Glied</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -524,10 +523,77 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: RC-Glied ============================ -->
+<section class="panel" id="panel-rc" data-tab="rc" role="tabpanel" aria-labelledby="tab-rc" hidden>
+  <h2>RC-Glied und Zeitkonstante</h2>
+  <p class="lead">Wie schnell ein Kondensator &uuml;ber einen Widerstand geladen wird &ndash; und was das als Filter bedeutet. Der zweite Modus geht r&uuml;ckw&auml;rts: gew&uuml;nschte Zeit oder Grenzfrequenz hinein, passender Widerstand heraus.</p>
+
+  <div class="split">
+    <div>
+      <div class="seg" role="group" aria-label="Modus">
+        <button type="button" class="ghost on" id="rc-mode-rechnen">RC rechnen</button>
+        <button type="button" class="ghost" id="rc-mode-planen">RC auslegen</button>
+      </div>
+
+      <div id="rc-rechnen">
+        <div class="field">
+          <label for="rc-R">Widerstand in Ohm</label>
+          <input id="rc-R" type="text" inputmode="decimal" autocomplete="off" value="10k">
+        </div>
+        <div class="field">
+          <label for="rc-C">Kapazit&auml;t in Farad</label>
+          <input id="rc-C" type="text" inputmode="decimal" autocomplete="off" value="100n">
+          <div class="note">100n, 4u7, 22p &ndash; die Vors&auml;tze gelten hier genauso.</div>
+        </div>
+        <div class="field">
+          <label for="rc-U">Spannung in Volt</label>
+          <input id="rc-U" type="text" inputmode="decimal" autocomplete="off" value="5">
+        </div>
+        <div class="field">
+          <label for="rc-t">Zeitpunkt <span class="sym">optional</span></label>
+          <input id="rc-t" type="text" inputmode="decimal" autocomplete="off" placeholder="z. B. 250u oder 1m">
+          <div class="note">Zeigt die Spannung genau zu diesem Zeitpunkt.</div>
+        </div>
+        <div class="row">
+          <button type="button" class="ghost" id="rc-i2c">Beispiel: I&sup2;C-Flanke</button>
+        </div>
+      </div>
+
+      <div id="rc-planen" hidden>
+        <div class="field">
+          <label for="rc-dC">vorhandene Kapazit&auml;t in Farad</label>
+          <input id="rc-dC" type="text" inputmode="decimal" autocomplete="off" value="100n">
+        </div>
+        <div class="field">
+          <label for="rc-dZiel">Was soll getroffen werden</label>
+          <select id="rc-dZiel">
+            <option value="tau" selected>Zeitkonstante &tau; in Sekunden</option>
+            <option value="f">Grenzfrequenz in Hertz</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="rc-dWert">Zielwert</label>
+          <input id="rc-dWert" type="text" inputmode="decimal" autocomplete="off" value="1m">
+        </div>
+        <div class="field">
+          <label for="rc-dSeries">Aus welcher Reihe darf gew&auml;hlt werden</label>
+          <select id="rc-dSeries">
+            <option value="E12">E12 &ndash; &plusmn;10 %</option>
+            <option value="E24" selected>E24 &ndash; &plusmn;5 %</option>
+            <option value="E96">E96 &ndash; &plusmn;1 %</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="lcd" id="rc-lcd" aria-live="polite"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: RC-Glied, Netzwerkanalyse mit Matrix.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Spule und Schaltregler, Netzwerkanalyse mit Matrix.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -1579,6 +1645,169 @@ document.getElementById("led-weiss33").addEventListener("click", function(){
 });
 
 updateLed();
+
+/* ---------- Reiter: RC-Glied ---------- */
+
+var rcMode = "rechnen";
+var rcLcd = document.getElementById("rc-lcd");
+var rcR = document.getElementById("rc-R");
+var rcC = document.getElementById("rc-C");
+var rcU = document.getElementById("rc-U");
+var rcT = document.getElementById("rc-t");
+var rcDC = document.getElementById("rc-dC");
+var rcDZiel = document.getElementById("rc-dZiel");
+var rcDWert = document.getElementById("rc-dWert");
+var rcDSeries = document.getElementById("rc-dSeries");
+
+function rcCalc(R, C, U, t){
+  if(!(R > 0) || !(C > 0)) return {error:"Widerstand und Kapazit\u00e4t m\u00fcssen gr\u00f6\u00dfer als null sein."};
+  var tau = R * C;
+  var res = {tau:tau, fg:1 / (2 * Math.PI * tau), Q:C * U, E:0.5 * C * U * U, U:U};
+  res.stufen = [1, 2, 3, 4, 5].map(function(k){
+    return {k:k, t:k * tau, lade:U * (1 - Math.exp(-k)), ent:U * Math.exp(-k)};
+  });
+  res.marken = [
+    {name:"halbe Spannung, 50 %", t:tau * Math.LN2},
+    {name:"eine Zeitkonstante, 63 %", t:tau},
+    {name:"90 %", t:tau * Math.log(10)},
+    {name:"99 %, praktisch fertig", t:tau * Math.log(100)}
+  ];
+  if(t !== null && !isNaN(t) && t >= 0){
+    res.t = t;
+    res.uT = U * (1 - Math.exp(-t / tau));
+    res.uTent = U * Math.exp(-t / tau);
+    res.iT = (U / R) * Math.exp(-t / tau);
+  }
+  return res;
+}
+
+function rcDesign(C, ziel, wert, seriesName){
+  if(!(C > 0)) return {error:"Kapazit\u00e4t muss gr\u00f6\u00dfer als null sein."};
+  if(!(wert > 0)) return {error:"Der Zielwert muss gr\u00f6\u00dfer als null sein."};
+  var ideal = ziel === "tau" ? wert / C : 1 / (2 * Math.PI * wert * C);
+  var out = {ideal:ideal, optionen:[]};
+  var kand = [eStep(ideal, seriesName, 1), eStep(ideal, seriesName, -1)];
+  if(kand[0] === kand[1]) kand = [kand[0]];
+  kand.forEach(function(R, i){
+    if(R === null || R <= 0) return;
+    var tau = R * C;
+    out.optionen.push({
+      R:R, tau:tau, fg:1 / (2 * Math.PI * tau),
+      richtung:kand.length === 1 ? "trifft die Reihe genau" : (i === 0 ? "aufgerundet" : "abgerundet")
+    });
+  });
+  return out;
+}
+
+/* Ladekurve als kleine Zeichnung */
+function rcCurveSVG(){
+  var x0 = 38, x1 = 292, y0 = 122, y1 = 14, i, p = [];
+  for(i = 0; i <= 60; i++){
+    var k = i / 60 * 5;
+    var x = x0 + (x1 - x0) * (k / 5);
+    var y = y0 - (y0 - y1) * (1 - Math.exp(-k));
+    p.push((i ? "L" : "M") + x.toFixed(1) + " " + y.toFixed(1));
+  }
+  var svg = '<svg class="resistor" viewBox="0 0 300 140" role="img" aria-label="Ladekurve des Kondensators">';
+  svg += '<line x1="' + x0 + '" y1="' + y0 + '" x2="' + x1 + '" y2="' + y0 + '" stroke="currentColor" stroke-width="1"/>';
+  svg += '<line x1="' + x0 + '" y1="' + y0 + '" x2="' + x0 + '" y2="' + y1 + '" stroke="currentColor" stroke-width="1"/>';
+  for(i = 1; i <= 5; i++){
+    var gx = x0 + (x1 - x0) * (i / 5);
+    svg += '<line x1="' + gx + '" y1="' + y0 + '" x2="' + gx + '" y2="' + y1 + '" stroke="currentColor" stroke-width="0.5" opacity="0.25"/>';
+    svg += '<text x="' + gx + '" y="136" font-size="9" text-anchor="middle" fill="currentColor" opacity="0.75">' + i + '\u03c4</text>';
+  }
+  var y63 = y0 - (y0 - y1) * 0.632;
+  svg += '<line x1="' + x0 + '" y1="' + y63.toFixed(1) + '" x2="' + x1 + '" y2="' + y63.toFixed(1) +
+         '" stroke="currentColor" stroke-width="0.8" stroke-dasharray="3 3" opacity="0.55"/>';
+  svg += '<text x="4" y="' + (y63 + 3).toFixed(1) + '" font-size="9" fill="currentColor" opacity="0.75">63 %</text>';
+  svg += '<text x="4" y="' + (y1 + 8) + '" font-size="9" fill="currentColor" opacity="0.75">100 %</text>';
+  svg += '<path d="' + p.join(" ") + '" fill="none" stroke="currentColor" stroke-width="2"/>';
+  svg += "</svg>";
+  return svg;
+}
+
+function updateRc(){
+  var html = "";
+  if(rcMode === "rechnen"){
+    var R = parseValue(rcR.value), C = parseValue(rcC.value), U = parseValue(rcU.value);
+    var t = rcT.value.trim() === "" ? null : parseValue(rcT.value);
+    if(R === null || C === null || U === null || isNaN(R) || isNaN(C) || isNaN(U)){
+      rcLcd.innerHTML = '<p class="empty">Widerstand, Kapazit\u00e4t und Spannung eintragen.<br>Vors\u00e4tze wie 100n oder 4u7 werden verstanden.</p>';
+      return;
+    }
+    var r = rcCalc(R, C, U, t);
+    if(r.error){ rcLcd.innerHTML = '<p class="empty">' + r.error + "</p>"; return; }
+
+    html += rcCurveSVG();
+    html += '<div class="readout"><span class="what">Zeitkonstante \u03c4</span><span><span class="val">' +
+            fmt(r.tau, "s") + '</span><span class="tag">\u03c4 = R \u00b7 C</span></span></div>';
+    html += '<div class="readout given"><span class="what">Grenzfrequenz</span><span><span class="val">' +
+            fmt(r.fg, "Hz") + '</span><span class="tag">als Tiefpass, 1 / (2\u03c0RC)</span></span></div>';
+    if(r.t !== undefined){
+      html += '<div class="readout"><span class="what">nach ' + fmt(r.t, "s") + '</span><span><span class="val">' +
+              fmt(r.uT, "V") + '</span><span class="tag">beim Laden \u2013 entladen: ' + fmt(r.uTent, "V") + "</span></span></div>";
+    }
+
+    html += '<div class="hint"><table class="eserie"><tr><th>Zeit</th><th class="num">geladen auf</th><th class="num">entladen auf</th></tr>';
+    r.stufen.forEach(function(s){
+      html += "<tr><td>" + s.k + "\u03c4 = " + fmt(s.t, "s") + '</td><td class="num">' + fmt(s.lade, "V") +
+              '</td><td class="num">' + fmt(s.ent, "V") + "</td></tr>";
+    });
+    html += "</table></div>";
+
+    html += '<div class="hint"><table class="eserie"><tr><th>Marke</th><th class="num">Zeit</th></tr>';
+    r.marken.forEach(function(m){
+      html += "<tr><td>" + m.name + '</td><td class="num">' + fmt(m.t, "s") + "</td></tr>";
+    });
+    html += '<tr><td>Ladung Q = C \u00b7 U</td><td class="num">' + fmt(r.Q, "C") + "</td></tr>";
+    html += '<tr><td>Energie E = \u00bd C U\u00b2</td><td class="num">' + fmt(r.E, "J") + "</td></tr></table></div>";
+
+    html += '<p class="work">\u03c4 = ' + fmt(R, "\u03a9") + " \u00b7 " + fmt(C, "F") + " = " + fmt(r.tau, "s") +
+            "\nNach 5\u03c4 gilt der Vorgang als abgeschlossen.</p>";
+  } else {
+    var C2 = parseValue(rcDC.value), wert = parseValue(rcDWert.value);
+    if(C2 === null || wert === null || isNaN(C2) || isNaN(wert)){
+      rcLcd.innerHTML = '<p class="empty">Kapazit\u00e4t und Zielwert eintragen.</p>';
+      return;
+    }
+    var d = rcDesign(C2, rcDZiel.value, wert, rcDSeries.value);
+    if(d.error){ rcLcd.innerHTML = '<p class="empty">' + d.error + "</p>"; return; }
+    if(!d.optionen.length){ rcLcd.innerHTML = '<p class="empty">Dazu finde ich keinen passenden Widerstand.</p>'; return; }
+
+    html += '<div class="readout"><span class="what">Rechnerisch n\u00f6tig</span><span><span class="val">' +
+            fmt(d.ideal, "\u03a9") + '</span><span class="tag">' +
+            (rcDZiel.value === "tau" ? "f\u00fcr \u03c4 = " + fmt(wert, "s") : "f\u00fcr " + fmt(wert, "Hz")) + "</span></span></div>";
+    d.optionen.forEach(function(o, i){
+      html += '<div class="readout' + (i ? " given" : "") + '"><span class="what">' + o.richtung +
+              '</span><span><span class="val">' + fmt(o.R, "\u03a9") + '</span><span class="tag">\u03c4 = ' +
+              fmt(o.tau, "s") + ", " + fmt(o.fg, "Hz") + "</span></span></div>";
+    });
+    html += '<p class="work">' + (rcDZiel.value === "tau" ? "R = \u03c4 / C" : "R = 1 / (2\u03c0 \u00b7 f \u00b7 C)") +
+            "\n  = " + fmt(d.ideal, "\u03a9") + "\nEin Widerstand ist leichter zu w\u00e4hlen als ein Kondensator,\ndeshalb wird die Kapazit\u00e4t vorgegeben.</p>";
+  }
+  rcLcd.innerHTML = html;
+}
+
+function setRcMode(mode){
+  rcMode = mode;
+  document.getElementById("rc-rechnen").hidden = mode !== "rechnen";
+  document.getElementById("rc-planen").hidden = mode !== "planen";
+  document.getElementById("rc-mode-rechnen").classList.toggle("on", mode === "rechnen");
+  document.getElementById("rc-mode-planen").classList.toggle("on", mode === "planen");
+  updateRc();
+}
+
+document.getElementById("rc-mode-rechnen").addEventListener("click", function(){ setRcMode("rechnen"); });
+document.getElementById("rc-mode-planen").addEventListener("click", function(){ setRcMode("planen"); });
+document.getElementById("rc-i2c").addEventListener("click", function(){
+  rcR.value = "4k7"; rcC.value = "400p"; rcU.value = "3,3"; rcT.value = "";
+  setRcMode("rechnen");
+});
+[rcR, rcC, rcU, rcT, rcDC, rcDWert].forEach(function(el){ el.addEventListener("input", updateRc); });
+rcDZiel.addEventListener("change", updateRc);
+rcDSeries.addEventListener("change", updateRc);
+
+updateRc();
 </script>
 </body>
 </html>
