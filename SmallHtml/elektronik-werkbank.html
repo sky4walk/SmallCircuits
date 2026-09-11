@@ -199,6 +199,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-led" aria-controls="panel-led" data-tab="led" aria-selected="false">LED-Vorwiderstand</button>
     <button role="tab" id="tab-rc" aria-controls="panel-rc" data-tab="rc" aria-selected="false">RC-Glied</button>
     <button role="tab" id="tab-flanke" aria-controls="panel-flanke" data-tab="flanke" aria-selected="false">Bus-Flanke</button>
+    <button role="tab" id="tab-spule" aria-controls="panel-spule" data-tab="spule" aria-selected="false">Spule</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -663,10 +664,67 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: Spule ============================ -->
+<section class="panel" id="panel-spule" data-tab="spule" role="tabpanel" aria-labelledby="tab-spule" hidden>
+  <h2>Spule, Abschaltvorgang und Freilaufdiode</h2>
+  <p class="lead">Einschalten l&auml;sst den Strom langsam steigen. Ausschalten ist das Interessante: Der Strom will weiterflie&szlig;en, findet keinen Weg mehr und erzeugt eine Spannungsspitze. Die Diode gibt ihm einen Weg &ndash; zum Vergleich einfach umschalten.</p>
+
+  <div class="split">
+    <div>
+      <div class="field">
+        <label>Schalter</label>
+        <div class="seg" role="group" aria-label="Schalter">
+          <button type="button" class="ghost" id="sp-btn-ein">Ein</button>
+          <button type="button" class="ghost on" id="sp-btn-aus">Aus</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Freilaufdiode</label>
+        <div class="seg" role="group" aria-label="Freilaufdiode">
+          <button type="button" class="ghost on" id="sp-btn-ohne">ohne</button>
+          <button type="button" class="ghost" id="sp-btn-mit">mit</button>
+        </div>
+        <div class="note">Erst einschalten, warten bis der Strom steht, dann ausschalten &ndash; einmal ohne, einmal mit.</div>
+      </div>
+      <div class="field">
+        <label for="sp-U">Betriebsspannung in Volt</label>
+        <input id="sp-U" type="text" inputmode="decimal" autocomplete="off" value="12">
+      </div>
+      <div class="field">
+        <label for="sp-L">Induktivit&auml;t in Henry</label>
+        <input id="sp-L" type="text" inputmode="decimal" autocomplete="off" value="100m">
+        <div class="note">Ein Relais liegt bei etwa 100 mH, eine Drossel im Schaltregler bei 100 &micro;H.</div>
+      </div>
+      <div class="field">
+        <label for="sp-R">Widerstand der Wicklung in Ohm</label>
+        <input id="sp-R" type="text" inputmode="decimal" autocomplete="off" value="200">
+      </div>
+      <div class="field">
+        <label for="sp-C">Kapazit&auml;t am offenen Schalter in Farad</label>
+        <input id="sp-C" type="text" inputmode="decimal" autocomplete="off" value="20p">
+        <div class="note">Die unvermeidliche Streukapazit&auml;t. Sie ist es, in die der Strom ausweicht.</div>
+      </div>
+      <div class="field">
+        <label for="sp-speed">Zeitraffer</label>
+        <select id="sp-speed">
+          <option value="0.5">schnell &ndash; 0,5 s je &tau;</option>
+          <option value="2" selected>normal &ndash; 2 s je &tau;</option>
+          <option value="5">langsam &ndash; 5 s je &tau;</option>
+        </select>
+      </div>
+      <div class="row">
+        <button type="button" class="ghost" id="sp-reset">Messung zur&uuml;cksetzen</button>
+      </div>
+    </div>
+
+    <div class="lcd" id="sp-lcd" aria-live="off"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Spule und Schaltregler, Netzwerkanalyse mit Matrix.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Schaltregler, Diode und Gleichrichter, Netzwerkanalyse mit Matrix.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -2222,9 +2280,12 @@ var SimFlanke = {
         s.u = w.U + (s.u - w.U) * Math.exp(-h / w.tau);
         s.i = (w.U - s.u) / w.R;
         /* Flankenzeit messen: Durchgang durch 30 % und 70 % */
-        if(vor < 0.3 * w.U && s.u >= 0.3 * w.U) s.merk = s.t;
+        /* Durchgang innerhalb des Schritts linear interpolieren, sonst haengt
+           die Messgenauigkeit an der Bildwiederholrate */
+        if(vor < 0.3 * w.U && s.u >= 0.3 * w.U) s.merk = s.t + h * (0.3 * w.U - vor) / (s.u - vor);
         if(vor < 0.7 * w.U && s.u >= 0.7 * w.U && s.merk !== null){
-          s.tr = s.t - s.merk; s.erreicht = true; s.nichtErreicht = false;
+          s.tr = s.t + h * (0.7 * w.U - vor) / (s.u - vor) - s.merk;
+          s.erreicht = true; s.nichtErreicht = false;
         }
       }
       s.zieht = zieht;
@@ -2266,6 +2327,195 @@ var SimFlanke = {
   }
 };
 
+/* ============================================================================
+   Simulation 3: Spule, Abschaltvorgang und Freilaufdiode
+   ----------------------------------------------------------------------------
+   Geschlossener Schalter:  exakter Exponentialschritt gegen I = U/R.
+   Offener Schalter ohne Diode: der Strom laedt die Schalterkapazitaet, es
+   entsteht ein LC-Schwingkreis. Gerechnet wird mit symplektischem Euler in
+   feinen Unterschritten, die Spitzenspannung wird aus dem Verlauf ABGELESEN.
+   Offener Schalter mit Diode: der Strom kreist weiter, die Spannung ist auf
+   die Flussspannung der Diode begrenzt.
+   ========================================================================== */
+
+var SimSpule = {
+  lcd:"sp-lcd",
+  fehltext:"Spannung, Induktivit\u00e4t und Widerstand eintragen.",
+  i:0, uc:0, uL:0, t:0, buf:[], zu:false, peak:0, peakU:0, uskala:1,
+
+  svg:'<svg viewBox="0 0 300 172" role="img" aria-label="Spule mit Schalter und Freilaufdiode">' +
+    /* Batterie */
+    '<line x1="24" y1="30" x2="24" y2="76" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="14" y1="76" x2="34" y2="76" stroke="currentColor" stroke-width="2.5"/>' +
+    '<line x1="19" y1="82" x2="29" y2="82" stroke="currentColor" stroke-width="1.5"/>' +
+    '<line x1="14" y1="88" x2="34" y2="88" stroke="currentColor" stroke-width="2.5"/>' +
+    '<line x1="19" y1="94" x2="29" y2="94" stroke="currentColor" stroke-width="1.5"/>' +
+    '<line x1="24" y1="94" x2="24" y2="148" stroke="currentColor" stroke-width="2"/>' +
+    '<text id="s-ub" x="2" y="24" font-size="9" fill="currentColor" opacity="0.8">U_b</text>' +
+    /* obere Leitung mit Schalter */
+    '<line x1="24" y1="30" x2="104" y2="30" stroke="currentColor" stroke-width="2"/>' +
+    '<circle cx="108" cy="30" r="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<circle cx="144" cy="30" r="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<line id="s-blade" x1="108" y1="30" x2="140" y2="18" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>' +
+    '<line x1="148" y1="30" x2="250" y2="30" stroke="currentColor" stroke-width="2"/>' +
+    '<text id="s-uswitch" x="106" y="14" font-size="8" fill="currentColor" opacity="0.75"></text>' +
+    /* Widerstand */
+    '<line x1="250" y1="30" x2="250" y2="54" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="238" y="54" width="24" height="26" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text id="s-rlabel" x="268" y="70" font-size="9" fill="currentColor">R</text>' +
+    '<line x1="250" y1="80" x2="250" y2="96" stroke="currentColor" stroke-width="2"/>' +
+    /* Spule */
+    '<path d="M250 96 a7 7 0 0 1 0 10 a7 7 0 0 1 0 10 a7 7 0 0 1 0 10 a7 7 0 0 1 0 10" ' +
+      'fill="none" stroke="currentColor" stroke-width="2"/>' +
+    '<text id="s-llabel" x="268" y="120" font-size="9" fill="currentColor">L</text>' +
+    '<line x1="250" y1="136" x2="250" y2="148" stroke="currentColor" stroke-width="2"/>' +
+    /* Freilaufdiode */
+    '<g id="s-diode" opacity="0.2">' +
+      '<line x1="250" y1="96" x2="198" y2="96" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="198" y1="96" x2="198" y2="108" stroke="currentColor" stroke-width="2"/>' +
+      '<polygon points="192,122 204,122 198,110" fill="none" stroke="currentColor" stroke-width="1.8"/>' +
+      '<line x1="190" y1="110" x2="206" y2="110" stroke="currentColor" stroke-width="2.2"/>' +
+      '<line x1="198" y1="122" x2="198" y2="136" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="198" y1="136" x2="250" y2="136" stroke="currentColor" stroke-width="2"/>' +
+    '</g>' +
+    /* Masse */
+    '<line x1="24" y1="148" x2="250" y2="148" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="137" y1="148" x2="137" y2="156" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="129" y1="156" x2="145" y2="156" stroke="currentColor" stroke-width="2"/>' +
+    /* Stromfluss */
+    '<path id="s-flow" d="M148 30 L250 30 L250 148" fill="none" stroke="currentColor" ' +
+      'stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity="0"/>' +
+    /* Energiebalken */
+    '<rect x="80" y="96" width="12" height="52" rx="2" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.6"/>' +
+    '<rect id="s-fill" x="80" y="148" width="12" height="0" rx="2" fill="currentColor" opacity="0.75"/>' +
+    '<text x="60" y="92" font-size="8" fill="currentColor" opacity="0.7">Strom</text>' +
+  '</svg>',
+
+  zusatz:
+    '<div class="readout"><span class="what">Strom durch die Spule</span><span>' +
+      '<span class="val" id="s-i">0 A</span><span class="tag" id="s-ipct">0 % vom Endwert</span></span></div>' +
+    '<div class="readout"><span class="what">Spannung an der Spule</span><span>' +
+      '<span class="val" id="s-ul">0 V</span><span class="tag" id="s-uldir"></span></span></div>' +
+    '<div class="readout"><span class="what">gemessene Spitze</span><span>' +
+      '<span class="val" id="s-peak">0 V</span><span class="tag" id="s-peakrel">beim Abschalten</span></span></div>' +
+    '<div class="readout given"><span class="what">gespeicherte Energie</span><span>' +
+      '<span class="val" id="s-e">0 J</span><span class="tag">\u00bd \u00b7 L \u00b7 I\u00b2</span></span></div>' +
+    '<p class="work" id="s-note"></p>',
+
+  bau:function(){ SimSpule.schalter(SimSpule.zu); SimSpule.diodeAn(SimSpule.diode); },
+  tempo:function(){ return parseFloat(document.getElementById("sp-speed").value); },
+  leeren:function(){ var s = SimSpule; s.i = 0; s.uc = 0; s.uL = 0; s.t = 0; s.buf = []; s.peak = 0; s.peakU = 0; s.uskala = 1; },
+
+  schalter:function(zu){
+    SimSpule.zu = zu;
+    var a = document.getElementById("sp-btn-ein"), b = document.getElementById("sp-btn-aus");
+    if(a) a.classList.toggle("on", zu);
+    if(b) b.classList.toggle("on", !zu);
+    if(SimSpule.el && SimSpule.el.blade){
+      SimSpule.el.blade.setAttribute("x2", zu ? 144 : 140);
+      SimSpule.el.blade.setAttribute("y2", zu ? 30 : 18);
+    }
+    if(!zu) SimSpule.peak = 0;      /* jede Abschaltung wird neu gemessen */
+  },
+
+  diodeAn:function(an){
+    SimSpule.diode = an;
+    var a = document.getElementById("sp-btn-mit"), b = document.getElementById("sp-btn-ohne");
+    if(a) a.classList.toggle("on", an);
+    if(b) b.classList.toggle("on", !an);
+    if(SimSpule.el && SimSpule.el.diode) SimSpule.el.diode.setAttribute("opacity", an ? 1 : 0.18);
+  },
+
+  werte:function(){
+    var U = parseValue(document.getElementById("sp-U").value);
+    var L = parseValue(document.getElementById("sp-L").value);
+    var R = parseValue(document.getElementById("sp-R").value);
+    var Cp = parseValue(document.getElementById("sp-C").value);
+    if(U === null || L === null || R === null || Cp === null) return null;
+    if(isNaN(U) || isNaN(L) || isNaN(R) || isNaN(Cp) || L <= 0 || R <= 0 || Cp <= 0) return null;
+    return {U:U, L:L, R:R, Cp:Cp, uf:0.7, tau:L / R, Iend:U / R, basis:L / R,
+            wellig:2 * Math.PI * Math.sqrt(L * Cp)};
+  },
+
+  schritt:function(w, dt){
+    var s = SimSpule, k, n, h;
+    if(s.zu){
+      s.i = w.Iend + (s.i - w.Iend) * Math.exp(-dt / w.tau);
+      s.uc = 0;
+      s.uL = w.U;                                 /* Klemmenspannung am Bauteil */
+      s.t += dt;
+    } else if(s.diode){
+      var ziel = -w.uf / w.R;                       /* Abklingen gegen die Diodenschwelle */
+      var neu = ziel + (s.i - ziel) * Math.exp(-dt / w.tau);
+      s.i = neu < 0 ? 0 : neu;                      /* die Diode sperrt bei Nulldurchgang */
+      s.uL = s.i > 0 ? -w.uf : 0;                 /* die Diode klemmt die Klemmenspannung */
+      s.uc = w.U;
+      s.t += dt;
+      if(Math.abs(s.uL) > s.peak) s.peak = Math.abs(s.uL);   /* nur im offenen Zustand */
+    } else {
+      /* ausgeschwungen? dann keine feinen Schritte mehr noetig */
+      if(Math.abs(s.i) < w.Iend * 1e-6 && Math.abs(s.uc - w.U) < w.U * 1e-6){
+        s.i = 0; s.uc = w.U; s.uL = 0; s.t += dt;
+      } else {
+        h = Math.min(dt, w.wellig / 24);
+        n = Math.min(Math.ceil(dt / h), 4000);
+        h = dt / n;
+        for(k = 0; k < n; k++){
+          s.i += h * (w.U - s.uc - s.i * w.R) / w.L;   /* symplektisch: erst Strom, */
+          s.uc += h * s.i / w.Cp;                      /* dann Spannung             */
+          s.uL = w.U - s.uc;                      /* was ein Tastkopf am Bauteil saehe */
+          if(Math.abs(s.uL) > s.peak) s.peak = Math.abs(s.uL);
+          if(Math.abs(s.uc) > s.peakU) s.peakU = Math.abs(s.uc);
+          s.t += h;
+        }
+      }
+    }
+    if(s.peak > s.uskala) s.uskala = s.peak;
+    s.buf.push([s.t, s.i, s.uL]);
+    var fenster = 6 * w.tau;
+    while(s.buf.length > 3000 || (s.buf.length > 2 && s.buf[0][0] < s.t - fenster)) s.buf.shift();
+  },
+
+  zeichne:function(w, dtReal){
+    var s = SimSpule, e = s.el;
+    e.i.textContent = fmt(s.i, "A");
+    e.ipct.textContent = (s.i / w.Iend * 100).toFixed(1).replace(".", ",") + " % von " + fmt(w.Iend, "A");
+    e.ul.textContent = fmt(s.uL, "V");
+    e.uldir.textContent = s.uL > 0.01 ? "treibt den Strom hoch"
+                        : (s.uL < -0.01 ? "h\u00e4lt den Strom aufrecht" : "keine \u00c4nderung");
+    e.peak.textContent = fmt(s.peak, "V");
+    e.peakrel.textContent = s.peak > 0 ? "das " + (s.peak / w.U).toFixed(1).replace(".", ",") +
+                            "-fache der Betriebsspannung" : "beim Abschalten";
+    e.e.textContent = fmt(0.5 * w.L * s.i * s.i, "J");
+    e.rlabel.textContent = fmt(w.R, "\u03a9");
+    e.llabel.textContent = fmt(w.L, "H");
+    e.ub.textContent = fmt(w.U, "V");
+    e.uswitch.textContent = s.zu ? "" : "am Schalter: " + fmt(s.uc, "V");
+    Sim.balken(e.fill, s.i / w.Iend, 148, 52);
+    Sim.fluss(s, e.flow, Math.abs(s.i) / w.Iend, 1, dtReal);
+    e.note.textContent =
+      "\u03c4 = L / R = " + fmt(w.tau, "s") + ", Endstrom " + fmt(w.Iend, "A") +
+      "\ndurchgezogen: Strom \u2013 gestrichelt: Spulenspannung, Ma\u00dfstab " + fmt(s.uskala, "V") +
+      "\nZeitraffer \u00d7" + fmt(SimSpule.tempo() / w.tau, "").replace(/\s/g, "");
+
+    var fenster = 6 * w.tau;
+    var t1 = s.buf.length ? s.buf[s.buf.length - 1][0] : 0, t0 = Math.max(0, t1 - fenster);
+    Sim.plot(s.cv, {
+      xmax:fenster, ymax:1, yTop:"max", yBot:"0",
+      kurven:[
+        {p:s.buf.map(function(p){ return [p[0] - t0, Math.abs(p[2]) / s.uskala]; }), dash:true, alpha:0.45},
+        {p:s.buf.map(function(p){ return [p[0] - t0, p[1] / w.Iend]; })}
+      ]
+    });
+  }
+};
+
+document.getElementById("sp-btn-ein").addEventListener("click", function(){ SimSpule.schalter(true); });
+document.getElementById("sp-btn-aus").addEventListener("click", function(){ SimSpule.schalter(false); });
+document.getElementById("sp-btn-mit").addEventListener("click", function(){ SimSpule.diodeAn(true); });
+document.getElementById("sp-btn-ohne").addEventListener("click", function(){ SimSpule.diodeAn(false); });
+document.getElementById("sp-reset").addEventListener("click", function(){ SimSpule.leeren(); });
+
 /* --- Anbindung ------------------------------------------------------------ */
 
 function simStart(){ Sim.start(SimRC); }
@@ -2280,6 +2530,7 @@ document.getElementById("fl-reset").addEventListener("click", function(){ SimFla
 /* Reiterwechsel: Simulation des jeweiligen Reiters starten oder anhalten */
 Sim.tabWechsel = function(name){
   if(name === "flanke") Sim.start(SimFlanke);
+  else if(name === "spule") Sim.start(SimSpule);
   else if(name === "rc" && rcMode === "sim") Sim.start(SimRC);
   else Sim.stop();
 };
