@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Schaltplan-Editor</title>
+<style>
+  :root{
+    --chrome:#e9ebee; --chrome-2:#dfe2e6; --line:#c5c9cf; --ink:#1f2933; --ink-2:#5c6670;
+    --paper:#f8f8f5; --sym:#8b0000; --wire:#0a8a0a; --wire-soft:#7fc27f; --net:#0000c0;
+    --accent:#0a6e8a; --warn:#c98a00;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0;font:14px/1.4 "Segoe UI","Noto Sans","DejaVu Sans",sans-serif;color:var(--ink);background:var(--chrome)}
+  body{display:grid;grid-template-rows:auto 1fr auto;grid-template-columns:200px 1fr 260px;height:100vh}
+  header{grid-column:1/4;display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid var(--line);background:var(--chrome)}
+  header h1{font-size:15px;font-weight:600;margin:0 14px 0 0;letter-spacing:.2px}
+  header .sep{width:1px;height:22px;background:var(--line);margin:0 6px}
+  button{font:inherit;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:4px;padding:4px 10px;cursor:pointer}
+  button:hover{border-color:#9aa1a9}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
+  label.tog{display:flex;align-items:center;gap:5px;padding:0 6px;user-select:none}
+  #palette{overflow:auto;border-right:1px solid var(--line);padding:6px}
+  #palette h2{font-size:12px;font-weight:600;color:var(--ink-2);margin:10px 4px 4px}
+  #palette h2:first-child{margin-top:2px}
+  .pal{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:3px 6px;margin:1px 0;background:transparent;border-color:transparent}
+  .pal:hover{background:#fff;border-color:var(--line)}
+  .pal.on{background:#fff;border-color:var(--ink)}
+  .pal svg{width:44px;height:30px;flex:none}
+  #canvasWrap{position:relative;overflow:hidden;background:var(--paper)}
+  #svg{width:100%;height:100%;display:block;cursor:default;touch-action:none}
+  #svg.tool-wire,#svg.tool-place,#svg.tool-junction,#svg.tool-text{cursor:crosshair}
+  #svg.panning{cursor:grabbing}
+  #side{overflow:auto;border-left:1px solid var(--line);padding:10px 12px}
+  #side h2{font-size:13px;font-weight:600;margin:0 0 8px}
+  #side .row{display:grid;grid-template-columns:82px 1fr;gap:6px;align-items:center;margin:5px 0}
+  #side input{font:inherit;padding:3px 6px;border:1px solid var(--line);border-radius:4px;width:100%}
+  #side .btns{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+  #side .muted{color:var(--ink-2);font-size:13px}
+  #help{margin-top:18px;border-top:1px solid var(--line);padding-top:10px;font-size:12.5px;color:var(--ink-2)}
+  #help dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:2px 8px}
+  #help dt{font-family:Consolas,"DejaVu Sans Mono",monospace;color:var(--ink)}
+  #help dd{margin:0}
+  footer{grid-column:1/4;display:flex;gap:18px;align-items:center;padding:3px 12px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-2);background:var(--chrome)}
+  footer #hint{flex:1}
+  footer .mono{font-family:Consolas,"DejaVu Sans Mono",monospace;color:var(--ink)}
+  #warn{color:var(--warn)}
+  input[type=file]{display:none}
+  #side textarea{font:12px/1.35 Consolas,"DejaVu Sans Mono",monospace;width:100%;min-height:52px;padding:3px 6px;border:1px solid var(--line);border-radius:4px;resize:vertical}
+  dialog{border:1px solid var(--line);border-radius:6px;padding:14px 18px;max-width:min(900px,90vw);max-height:85vh;color:var(--ink)}
+  dialog::backdrop{background:rgba(0,0,0,.25)}
+  dialog h2{margin:0 0 8px;font-size:15px}
+  dialog pre{font:12.5px/1.45 Consolas,"DejaVu Sans Mono",monospace;background:#f8f8f5;border:1px solid var(--line);padding:10px;max-height:60vh;overflow:auto;white-space:pre}
+  dialog .row{display:grid;grid-template-columns:70px 260px;gap:6px;align-items:center;margin:5px 0}
+  dialog input[type=text],dialog input:not([type]){font:inherit;padding:3px 6px;border:1px solid var(--line);border-radius:4px}
+  dialog .btns{display:flex;gap:6px;margin-top:10px;justify-content:flex-end}
+  #dlgWarn{color:var(--warn);font-size:13px;white-space:pre-line;margin:6px 0}
+</style>
+</head>
+<body>
+<header>
+  <h1>Schaltplan-Editor</h1>
+  <button id="bNew">Neu</button>
+  <button id="bLoad">Laden</button>
+  <button id="bSave">Speichern</button>
+  <button id="bSvg">SVG exportieren</button>
+  <button id="bLib" title="Eigene Symbolbibliothek (JSON) hinzuladen">Bibliothek laden</button>
+  <button id="bLibSave" title="Alle eigenen Symbole als JSON sichern">Bibliothek speichern</button>
+  <button id="bSheet" title="Titel, Autor, Version, Rahmen">Blatt</button>
+  <button id="bPrint">Drucken</button>
+  <span class="sep"></span>
+  <button id="bUndo" title="Strg+Z">Rückgängig</button>
+  <button id="bRedo" title="Strg+Y">Wiederholen</button>
+  <span class="sep"></span>
+  <button id="bSelect" class="on">Auswählen</button>
+  <button id="bWire">Leitung</button>
+  <button id="bJunction">Verbindungspunkt</button>
+  <button id="bText">Text</button>
+  <span class="sep"></span>
+  <label class="tog"><input type="checkbox" id="rubber"> Gummiband</label>
+  <span class="sep"></span>
+  <button id="bZoomOut">−</button><button id="bZoomFit">Einpassen</button><button id="bZoomIn">+</button>
+  <span class="sep"></span>
+  <button id="bNet">Netzliste</button>
+  <button id="bBom">Stückliste</button>
+  <input type="file" id="fileLoad" accept=".json,.svg">
+  <input type="file" id="fileLib" accept=".json">
+</header>
+
+<nav id="palette"></nav>
+
+<div id="canvasWrap">
+  <svg id="svg" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse"><circle cx="0" cy="0" r=".7" fill="#b9bcbf"/></pattern>
+    </defs>
+    <g id="world">
+      <rect id="gridRect" fill="url(#grid)"/>
+      <g id="scene"></g>
+      <g id="overlay"></g>
+    </g>
+  </svg>
+</div>
+
+<aside id="side">
+  <h2 id="propTitle">Nichts ausgewählt</h2>
+  <div id="props"><p class="muted">Bauteil, Leitung oder Text anklicken.</p></div>
+  <div id="help">
+    <dl>
+      <dt>Klick</dt><dd>auswählen, ziehen = verschieben; Rahmen aufziehen oder Shift+Klick = mehrere</dd>
+      <dt>Strg+Z/Y</dt><dd>rückgängig / wiederholen</dd>
+      <dt>Strg+C/V/D</dt><dd>kopieren / einfügen an der Maus / duplizieren</dd>
+      <dt>R / X</dt><dd>drehen / spiegeln</dd>
+      <dt>Entf</dt><dd>löschen</dd>
+      <dt>W</dt><dd>Leitung zeichnen; Klick setzt Knick, Leertaste kippt den Bogen, Shift = schräg, Doppelklick oder Klick auf Pin/Leitung beendet, Esc nimmt zurück</dd>
+      <dt>Dbl-Klick</dt><dd>auf Leitung: Knick einfügen; auf Knick: entfernen</dd>
+      <dt>Segment</dt><dd>bei markierter Leitung ziehen = parallel verschieben</dd>
+      <dt>Esc</dt><dd>zurück zur Auswahl (auch Rechtsklick)</dd>
+      <dt>Rad</dt><dd>zoomen; mittlere/rechte Taste oder Strg+Ziehen = verschieben</dd>
+    </dl>
+    <p>Offene Pins zeigen einen kleinen Kreis. Verbindungspunkte entstehen automatisch, wo eine Leitung auf einer anderen endet. Kreuzungen ohne Punkt sind keine Verbindung.</p>
+  </div>
+</aside>
+
+<dialog id="sheetDlg"><h2>Blatt</h2>
+  <div class="row"><span>Titel</span><input id="shTitle"></div>
+  <div class="row"><span>Autor</span><input id="shAuthor"></div>
+  <div class="row"><span>Version</span><input id="shRev"></div>
+  <div class="row"><span>Datum</span><input id="shDate" placeholder="leer = heute"></div>
+  <label class="tog" style="margin-top:8px"><input type="checkbox" id="shFrame"> Rahmen und Titelfeld beim Export und Drucken</label>
+  <div class="btns"><button id="shOk">Übernehmen</button><button id="shCancel">Abbrechen</button></div></dialog>
+<dialog id="dlg"><h2 id="dlgTitle"></h2><div id="dlgWarn"></div><pre id="dlgPre"></pre><div class="btns"><button id="dlgDl">Herunterladen</button><button id="dlgClose">Schließen</button></div></dialog>
+
+<footer><span id="hint">Bauteil links wählen oder W für Leitung.</span><span class="mono" id="coord">0, 0</span><span class="mono" id="zoomLbl">100 %</span></footer>
+
+<script>
+'use strict';
+/* ============================================================
+   Symbolbibliothek. Koordinaten lokal, Raster 10.
+   Formen: ['l',x1,y1,x2,y2] ['r',x,y,w,h,fill?] ['c',cx,cy,r,fill?]
+           ['p',[x,y,...],fill?] ['d',pfad,fill?] ['t',x,y,text,size,anchor?]
+   ============================================================ */
+const GRID = 10;
+const DIODE = [['l',-30,0,-10,0],['p',[-10,-8,-10,8,10,0]],['l',10,-8,10,8],['l',10,0,30,0]];
+const CONTACT = [['l',-30,0,-20,0],['c',-20,0,2.5],['l',-18,-1,18,-11],['c',20,-10,2.5],['l',22,-10,30,-10],['c',20,10,2.5],['l',22,10,30,10]];
+const CONTACT_PINS = [{id:'COM',x:-30,y:0},{id:'NC',x:30,y:-10},{id:'NO',x:30,y:10}];
+const COIL = {shapes:[['l',0,-30,0,-20],['r',-10,-20,20,40],['l',0,20,0,30]],pins:[{id:'1',x:0,y:-30},{id:'2',x:0,y:30}],refOff:[24,-6],valOff:[24,12]};
+const MOS = [['l',-30,0,-12,0],['l',-12,-10,-12,10],['l',-6,-14,-6,-6],['l',-6,-4,-6,4],['l',-6,6,-6,14],['l',-6,-10,10,-10],['l',10,-10,10,-30],['l',-6,10,10,10],['l',10,10,10,30],['l',-6,0,10,0],['c',2,0,19]];
+const BUILTIN = {
+  battery:{name:'Batterie',prefix:'BT',group:'Quellen',value:'12V',units:{main:{shapes:[['l',0,-30,0,-6],['l',-15,-6,15,-6],['r',-6,-2,12,3,1],['l',-15,5,15,5],['r',-6,9,12,3,1],['l',0,12,0,30],['t',-24,-12,'+',13]],pins:[{id:'+',x:0,y:-30},{id:'-',x:0,y:30}],refOff:[30,-10],valOff:[30,10]}}},
+  vsource:{name:'Spannungsquelle',prefix:'V',group:'Quellen',value:'12V',units:{main:{shapes:[['l',0,-30,0,-16],['c',0,0,16],['t',0,-3,'+',13],['t',0,12,'−',13],['l',0,16,0,30]],pins:[{id:'+',x:0,y:-30},{id:'-',x:0,y:30}],refOff:[30,-10],valOff:[30,10]}}},
+  power:{name:'Versorgung (+V)',prefix:'#PWR',group:'Quellen',value:'+12V',showRef:false,units:{main:{shapes:[['l',0,0,0,-20],['p',[0,-30,-6,-20,6,-20]]],pins:[{id:'1',x:0,y:0}],valOff:[0,-36]}}},
+  gnd:{name:'Masse (GND)',prefix:'#GND',group:'Quellen',value:'GND',showRef:false,units:{main:{shapes:[['l',0,0,0,12],['l',-14,12,14,12],['l',-9,17,9,17],['l',-4,22,4,22]],pins:[{id:'1',x:0,y:0}],valOff:[0,38]}}},
+  netlabel:{name:'Netzname',prefix:'#NET',group:'Quellen',value:'A',showRef:false,units:{main:{shapes:[['l',0,0,10,0],['p',[10,-7,10,7,32,7,38,0,32,-7]]],pins:[{id:'1',x:0,y:0}],valOff:[24,4],labelAnchor:'start',keepY:true}}},
+  resistor:{name:'Widerstand',prefix:'R',group:'Passiv',value:'1k',units:{main:{shapes:[['l',-30,0,-20,0],['r',-20,-8,40,16],['l',20,0,30,0]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-16],valOff:[0,24]}}},
+  pot:{name:'Potentiometer',prefix:'RV',group:'Passiv',value:'10k',units:{main:{shapes:[['l',-30,0,-20,0],['r',-20,-8,40,16],['l',20,0,30,0],['l',0,-30,0,-16],['p',[0,-8,-4,-16,4,-16],1]],pins:[{id:'1',x:-30,y:0},{id:'2',x:0,y:-30},{id:'3',x:30,y:0}],refOff:[22,-20],valOff:[0,24]}}},
+  capacitor:{name:'Kondensator',prefix:'C',group:'Passiv',value:'100n',units:{main:{shapes:[['l',0,-30,0,-4],['l',-15,-4,15,-4],['l',-15,4,15,4],['l',0,4,0,30]],pins:[{id:'1',x:0,y:-30},{id:'2',x:0,y:30}],refOff:[30,-6],valOff:[30,12]}}},
+  capacitor_pol:{name:'Elko',prefix:'C',group:'Passiv',value:'100u',units:{main:{shapes:[['l',0,-30,0,-4],['l',-15,-4,15,-4],['r',-15,3,30,4,1],['l',0,7,0,30],['t',-24,-8,'+',13]],pins:[{id:'+',x:0,y:-30},{id:'-',x:0,y:30}],refOff:[30,-6],valOff:[30,12]}}},
+  inductor:{name:'Spule',prefix:'L',group:'Passiv',value:'10m',units:{main:{shapes:[['l',0,-30,0,-20],['d','M0,-20 a5,5 0 0 1 0,10 a5,5 0 0 1 0,10 a5,5 0 0 1 0,10 a5,5 0 0 1 0,10'],['l',0,20,0,30]],pins:[{id:'1',x:0,y:-30},{id:'2',x:0,y:30}],refOff:[26,-6],valOff:[26,12]}}},
+  fuse:{name:'Sicherung',prefix:'F',group:'Passiv',value:'1A',units:{main:{shapes:[['r',-20,-6,40,12],['l',-30,0,30,0]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-14],valOff:[0,22]}}},
+  diode:{name:'Diode',prefix:'D',group:'Halbleiter',value:'1N4007',units:{main:{shapes:DIODE,pins:[{id:'A',x:-30,y:0},{id:'K',x:30,y:0}],refOff:[0,-16],valOff:[0,24]}}},
+  zener:{name:'Z-Diode',prefix:'D',group:'Halbleiter',value:'5V1',units:{main:{shapes:DIODE.concat([['l',6,-8,10,-8],['l',10,8,14,8]]),pins:[{id:'A',x:-30,y:0},{id:'K',x:30,y:0}],refOff:[0,-16],valOff:[0,24]}}},
+  schottky:{name:'Schottky-Diode',prefix:'D',group:'Halbleiter',value:'1N5819',units:{main:{shapes:DIODE.concat([['l',6,-8,10,-8],['l',6,-8,6,-5],['l',10,8,14,8],['l',14,8,14,5]]),pins:[{id:'A',x:-30,y:0},{id:'K',x:30,y:0}],refOff:[0,-16],valOff:[0,24]}}},
+  led:{name:'LED',prefix:'LED',group:'Halbleiter',value:'rot',units:{main:{shapes:DIODE.concat([['l',2,-10,10,-18],['p',[10,-18,4,-16,8,-12],1],['l',10,-10,18,-18],['p',[18,-18,12,-16,16,-12],1]]),pins:[{id:'A',x:-30,y:0},{id:'K',x:30,y:0}],refOff:[-2,-26],valOff:[0,24]}}},
+  npn:{name:'Transistor NPN',prefix:'Q',group:'Halbleiter',value:'BC547',units:{main:{shapes:[['c',2,0,19],['l',-30,0,-6,0],['l',-6,-12,-6,12],['l',-6,-4,10,-14],['l',10,-14,10,-30],['l',-6,4,10,14],['l',10,14,10,30],['p',[10,14,1,11,6,5],1]],pins:[{id:'B',x:-30,y:0},{id:'C',x:10,y:-30},{id:'E',x:10,y:30}],refOff:[26,-12],valOff:[26,6],labelAnchor:'start'}}},
+  pnp:{name:'Transistor PNP',prefix:'Q',group:'Halbleiter',value:'BC557',units:{main:{shapes:[['c',2,0,19],['l',-30,0,-6,0],['l',-6,-12,-6,12],['l',-6,-4,10,-14],['l',10,-14,10,-30],['l',-6,4,10,14],['l',10,14,10,30],['p',[-6,4,3,7,-1,13],1]],pins:[{id:'B',x:-30,y:0},{id:'C',x:10,y:-30},{id:'E',x:10,y:30}],refOff:[26,-12],valOff:[26,6],labelAnchor:'start'}}},
+  nmos:{name:'MOSFET N-Kanal',prefix:'Q',group:'Halbleiter',value:'IRLZ44',units:{main:{shapes:MOS.concat([['p',[-6,0,2,-4,2,4],1]]),pins:[{id:'G',x:-30,y:0},{id:'D',x:10,y:-30},{id:'S',x:10,y:30}],refOff:[26,-12],valOff:[26,6],labelAnchor:'start'}}},
+  pmos:{name:'MOSFET P-Kanal',prefix:'Q',group:'Halbleiter',value:'IRF9540',units:{main:{shapes:MOS.concat([['p',[2,0,-6,-4,-6,4],1]]),pins:[{id:'G',x:-30,y:0},{id:'D',x:10,y:-30},{id:'S',x:10,y:30}],refOff:[26,-12],valOff:[26,6],labelAnchor:'start'}}},
+  switch:{name:'Kippschalter',prefix:'S',group:'Schalter',value:'',units:{main:{shapes:[['l',-30,0,-22,0],['c',-20,0,2.5],['l',-18,-1,16,-13],['c',20,0,2.5],['l',22,0,30,0]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-22],valOff:[0,22]}}},
+  button_no:{name:'Taster (Schließer)',prefix:'S',group:'Schalter',value:'',units:{main:{shapes:[['l',-30,0,-22,0],['c',-20,0,2.5],['c',20,0,2.5],['l',22,0,30,0],['l',-22,-8,22,-8],['l',0,-8,0,-20]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-26],valOff:[0,22]}}},
+  button_nc:{name:'Taster (Öffner)',prefix:'S',group:'Schalter',value:'',units:{main:{shapes:[['l',-30,0,-22,0],['c',-20,0,2.5],['c',20,0,2.5],['l',22,0,30,0],['l',-22,-3,22,-3],['l',0,-3,0,-16]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-22],valOff:[0,22]}}},
+  switch_spdt:{name:'Umschalter',prefix:'S',group:'Schalter',value:'',units:{main:{shapes:CONTACT,pins:[{id:'COM',x:-30,y:0},{id:'1',x:30,y:-10},{id:'2',x:30,y:10}],refOff:[0,-22],valOff:[0,24]}}},
+  relay_spdt:{name:'Relais 1 Wechsler',prefix:'K',group:'Relais',value:'12V',block:{coil:[0,0],a:[80,0]},units:{coil:COIL,a:{label:'a',shapes:CONTACT,pins:CONTACT_PINS,refOff:[0,-22],pinNames:true}}},
+  relay_dpdt:{name:'Relais 2 Wechsler',prefix:'K',group:'Relais',value:'12V',block:{coil:[0,0],a:[80,-30],b:[80,30]},units:{coil:COIL,a:{label:'a',shapes:CONTACT,pins:CONTACT_PINS,refOff:[0,-22],pinNames:true},b:{label:'b',shapes:CONTACT,pins:CONTACT_PINS,refOff:[0,-22],pinNames:true}}},
+  lamp:{name:'Lampe',prefix:'LA',group:'Sonstiges',value:'12V',units:{main:{shapes:[['l',-30,0,-15,0],['c',0,0,15],['l',-10,-10,10,10],['l',-10,10,10,-10],['l',15,0,30,0]],pins:[{id:'1',x:-30,y:0},{id:'2',x:30,y:0}],refOff:[0,-24],valOff:[0,30]}}},
+  ic:{name:'IC / Block',prefix:'U',group:'Sonstiges',value:'NE555',dynamic:true,icon:[['r',-20,-24,40,48],['l',-30,-14,-20,-14],['l',-30,0,-20,0],['l',-30,14,-20,14],['l',20,-14,30,-14],['l',20,0,30,0],['l',20,14,30,14]],units:{main:{}},
+    defaultIc:{left:['1 GND','2 TRIG','3 OUT','4 RESET'],right:['8 VCC','7 DIS','6 THR','5 CV'],top:[],bottom:[]}},
+};
+const GROUPS = ['Quellen','Passiv','Halbleiter','Schalter','Relais','Sonstiges'];
+let LIB = Object.assign({}, BUILTIN);
+
+/* IC-Block: Geometrie aus der Pinliste des Bauteils */
+function parsePins(list){ return (list||[]).map(s => String(s).trim()).filter(Boolean).map(s => { const m = s.match(/^(\S+)\s+(.+)$/); return m ? {id:m[1], name:m[2].trim()} : {id:s, name:''}; }); }
+function icDef(comp){
+  const ic = comp.ic || {left:[],right:[],top:[],bottom:[]}, L = parsePins(ic.left), R = parsePins(ic.right), T = parsePins(ic.top), B = parsePins(ic.bottom), P = 20;
+  const h = Math.max(40, P * Math.max(L.length, R.length) + 20), w = Math.max(60, P * Math.max(T.length, B.length) + 40);
+  const hw = Math.ceil(w/20)*10, hh = Math.ceil(h/20)*10, shapes = [['r',-hw,-hh,2*hw,2*hh]], pins = [];
+  const put = (arr, side) => arr.forEach((p, i) => {
+    const off = (i - (arr.length-1)/2) * P; let x, y, l;
+    if(side==='L'){ x = -hw-20; y = off; l = ['l',-hw-20,y,-hw,y]; shapes.push(['t',-hw+4,y+4,p.name,10,'start'], ['t',-hw-10,y-3,p.id,8]); }
+    if(side==='R'){ x = hw+20; y = off; l = ['l',hw,y,hw+20,y]; shapes.push(['t',hw-4,y+4,p.name,10,'end'], ['t',hw+10,y-3,p.id,8]); }
+    if(side==='T'){ x = off; y = -hh-20; l = ['l',x,-hh-20,x,-hh]; shapes.push(['t',x,-hh+12,p.name,10], ['t',x+8,-hh-10,p.id,8,'start']); }
+    if(side==='B'){ x = off; y = hh+20; l = ['l',x,hh,x,hh+20]; shapes.push(['t',x,hh-4,p.name,10], ['t',x+8,hh+14,p.id,8,'start']); }
+    shapes.push(l); pins.push({id:p.id, x, y});
+  });
+  put(L,'L'); put(R,'R'); put(T,'T'); put(B,'B');
+  return {shapes, pins, refOff:[-hw, -hh-8], valOff:[-hw, hh+16], labelAnchor:'start'};
+}
+function udef(comp, ukey){ const d = LIB[comp.type]; return d.dynamic ? icDef(comp) : d.units[ukey]; }
+
+/* ============================================================ Zustand */
+let S = newDoc();
+let view = {x:80, y:80, z:1};
+let tool = 'select', placeType = null, ghost = {rot:0, mirror:false, pos:null};
+let selection = [], drag = null, draft = null, bendFlip = false, mouse = [0,0], shiftDown = false, marquee = null;
+let idSeq = 1;
+const uid = () => 'w' + (idSeq++);
+function newDoc(){ return {version:1, library:{}, sheet:{title:'', author:'', rev:'', date:'', frame:false}, components:[], wires:[], junctions:[], texts:[]}; }
+
+/* Undo / Redo */
+const hist = [], redoStack = [];
+function snapshot(){ return JSON.stringify({components:S.components, wires:S.wires, junctions:S.junctions, texts:S.texts}); }
+function commit(){ hist.push(snapshot()); if(hist.length > 100) hist.shift(); redoStack.length = 0; updateUndo(); }
+function restore(js){ const o = JSON.parse(js); S.components = o.components; S.wires = o.wires; S.junctions = o.junctions; S.texts = o.texts; selection = []; render(); showProps(); updateUndo(); }
+function undo(){ if(!hist.length) return; redoStack.push(snapshot()); restore(hist.pop()); }
+function redo(){ if(!redoStack.length) return; hist.push(snapshot()); restore(redoStack.pop()); }
+function updateUndo(){ document.getElementById('bUndo').disabled = !hist.length; document.getElementById('bRedo').disabled = !redoStack.length; }
+
+/* ============================================================ Geometrie */
+const snap = v => Math.round(v / GRID) * GRID;
+const key = p => p[0] + ',' + p[1];
+function toWorld(sx, sy){ return [(sx - view.x) / view.z, (sy - view.y) / view.z]; }
+function unitXf(u, px, py){
+  const r = u.rot * Math.PI / 180, x = u.mirror ? -px : px, y = py, c = Math.cos(r), s = Math.sin(r);
+  return [Math.round(u.x + x * c - y * s), Math.round(u.y + x * s + y * c)];
+}
+function unitPins(comp, ukey){ const d = udef(comp, ukey); if(!d) return []; const u = comp.units[ukey]; return d.pins.map(p => ({id:p.id, pos:unitXf(u, p.x, p.y)})); }
+function allPins(){ const out = []; for(const c of S.components) for(const k in c.units) for(const p of unitPins(c, k)) out.push({comp:c, unit:k, id:p.id, pos:p.pos}); return out; }
+function onSegInterior(p, a, b){
+  const cross = (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0]); if(Math.abs(cross) > 0.5) return false;
+  const dot = (p[0]-a[0])*(b[0]-a[0]) + (p[1]-a[1])*(b[1]-a[1]), len2 = (b[0]-a[0])**2 + (b[1]-a[1])**2;
+  return dot > 0.5 && dot < len2 - 0.5;
+}
+function distSeg(p, a, b){
+  const dx = b[0]-a[0], dy = b[1]-a[1], l2 = dx*dx + dy*dy; let t = l2 ? ((p[0]-a[0])*dx + (p[1]-a[1])*dy) / l2 : 0; t = Math.max(0, Math.min(1, t));
+  return Math.hypot(p[0] - (a[0]+t*dx), p[1] - (a[1]+t*dy));
+}
+function onWireInner(w, p){
+  for(let i = 1; i < w.points.length-1; i++) if(key(w.points[i]) === key(p)) return true;
+  for(let i = 0; i < w.points.length-1; i++) if(onSegInterior(p, w.points[i], w.points[i+1])) return true;
+  return false;
+}
+const isEnd = (w, p) => key(w.points[0]) === key(p) || key(w.points[w.points.length-1]) === key(p);
+function pointOnAnyWire(p, exceptId){ for(const w of S.wires){ if(w.id === exceptId) continue; if(isEnd(w, p) || onWireInner(w, p)) return true; } return false; }
+function pinAt(p){ return allPins().find(q => key(q.pos) === key(p)); }
+function unitBBox(comp, ukey){
+  const def = udef(comp, ukey), u = comp.units[ukey]; let xs = [], ys = [];
+  for(const s of def.shapes){
+    let pts = [];
+    if(s[0]==='l') pts = [[s[1],s[2]],[s[3],s[4]]];
+    else if(s[0]==='r') pts = [[s[1],s[2]],[s[1]+s[3],s[2]+s[4]]];
+    else if(s[0]==='c') pts = [[s[1]-s[3],s[2]-s[3]],[s[1]+s[3],s[2]+s[3]]];
+    else if(s[0]==='p'){ for(let i=0;i<s[1].length;i+=2) pts.push([s[1][i],s[1][i+1]]); }
+    else if(s[0]==='t') pts = [[s[1]-6,s[2]-10],[s[1]+6,s[2]+2]];
+    else if(s[0]==='d') pts = [[-10,-20],[10,20]];
+    for(const q of pts){ const w = unitXf(u, q[0], q[1]); xs.push(w[0]); ys.push(w[1]); }
+  }
+  for(const p of def.pins){ const w = unitXf(u, p.x, p.y); xs.push(w[0]); ys.push(w[1]); }
+  if(!xs.length) return [u.x-10,u.y-10,u.x+10,u.y+10];
+  return [Math.min(...xs)-3, Math.min(...ys)-3, Math.max(...xs)+3, Math.max(...ys)+3];
+}
+function labelPos(comp, ukey, which){
+  const u = comp.units[ukey], def = udef(comp, ukey);
+  if(u[which+'Off']) return [u.x + u[which+'Off'][0], u.y + u[which+'Off'][1]];
+  const off = def[which+'Off'] || [0, which==='ref' ? -20 : 20], w = unitXf(u, off[0], off[1]);
+  return def.keepY && u.rot % 180 === 0 ? [w[0], u.y + off[1]] : w;   // Netzname: Text bleibt in der Fahne
+}
+function labelAnchor(comp, ukey, which){
+  const d = udef(comp, ukey), a = d.labelAnchor || 'middle'; if(a === 'middle') return a;
+  const u = comp.units[ukey], lp = labelPos(comp, ukey, which || 'ref'); return lp[0] < u.x - 1 ? 'end' : 'start';
+}
+function wireBBox(w){ const xs = w.points.map(p=>p[0]), ys = w.points.map(p=>p[1]); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; }
+
+/* ============================================================ Verbindungsanalyse */
+function connectivity(){
+  const ends = {}, inter = {}, pins = {}; const add = (m, p) => { m[key(p)] = (m[key(p)] || 0) + 1; };
+  for(const w of S.wires){ add(ends, w.points[0]); add(ends, w.points[w.points.length-1]); }
+  for(const k in ends){ const p = k.split(',').map(Number); for(const w of S.wires) if(onWireInner(w, p)) add(inter, p); }
+  for(const q of allPins()) add(pins, q.pos);
+  const dots = new Set();
+  for(const k in ends){ const e = ends[k], i = inter[k]||0, n = pins[k]||0; if(e + i + n >= 3 || (i >= 1 && e >= 1)) dots.add(k); }
+  for(const j of S.junctions) dots.add(key(j));
+  const connectedPins = new Set();
+  for(const q of allPins()){ const k = key(q.pos); if(ends[k] || inter[k] || (pins[k] > 1) || S.junctions.some(j => key(j)===k)) connectedPins.add(k); }
+  return {dots, connectedPins};
+}
+const isLabelType = t => t === 'power' || t === 'gnd' || t === 'netlabel';
+function pinName(q){ const d = udef(q.comp, q.unit); return q.comp.id + (d.label || '') + '.' + q.id; }
+function computeNets(){
+  const parent = {}; const find = k => { if(parent[k] === undefined) parent[k] = k; while(parent[k] !== k){ parent[k] = parent[parent[k]]; k = parent[k]; } return k; };
+  const union = (a, b) => { parent[find(a)] = find(b); };
+  for(const w of S.wires) for(const p of w.points) union(key(p), key(w.points[0]));
+  for(const w of S.wires) for(const e of [w.points[0], w.points[w.points.length-1]]) for(const v of S.wires) if(v !== w && onWireInner(v, e)) union(key(e), key(v.points[0]));
+  for(const j of S.junctions) for(const w of S.wires) if(isEnd(w, j) || onWireInner(w, j)) union(key(j), key(w.points[0]));
+  const pins = allPins(), byName = {};
+  for(const q of pins){ find(key(q.pos)); if(isLabelType(q.comp.type)){ const n = (q.comp.value||'').trim() || '?'; if(byName[n]) union(key(q.pos), byName[n]); else byName[n] = key(q.pos); } }
+  const groups = {};
+  for(const q of pins){ const r = find(key(q.pos)); const g = groups[r] || (groups[r] = {pins:[], names:new Set()}); if(isLabelType(q.comp.type)) g.names.add((q.comp.value||'').trim() || '?'); else g.pins.push(q); }
+  const nets = [], warnings = [], open = []; let n = 1;
+  for(const r in groups){ const g = groups[r]; if(!g.pins.length && !g.names.size) continue;
+    const name = g.names.size ? [...g.names].join('/') : 'N' + (n++);
+    if(g.names.size > 1) warnings.push('Netz ' + name + ': mehrere Netznamen sind direkt verbunden.');
+    if(g.pins.length === 0){ warnings.push('Netzname ' + name + ' ist mit keinem Bauteil verbunden.'); continue; }
+    if(g.pins.length === 1 && !g.names.size){ open.push(pinName(g.pins[0])); n--; continue; }
+    if(g.pins.length === 1) warnings.push(pinName(g.pins[0]) + ' hängt allein im Netz ' + name + '.');
+    nets.push({name, pins:g.pins.map(pinName).sort()}); }
+  if(open.length) warnings.push('Nicht angeschlossen: ' + open.sort().join(', '));
+  const auto = x => /^N\d+$/.test(x.name); nets.sort((a,b) => auto(a) - auto(b) || (auto(a) ? +a.name.slice(1) - +b.name.slice(1) : a.name.localeCompare(b.name)));
+  return {nets, warnings};
+}
+function netlistText(){
+  const {nets, warnings} = computeNets(); const w = Math.max(6, ...nets.map(x=>x.name.length));
+  let t = 'Netzliste\n' + 'Netz'.padEnd(w+2) + 'Anschlüsse\n' + '-'.repeat(w+40) + '\n';
+  for(const x of nets) t += x.name.padEnd(w+2) + x.pins.join('  ') + '\n';
+  return {text:t, warnings};
+}
+function bomText(){
+  const rows = {}; for(const c of S.components){ if(isLabelType(c.type)) continue; const d = LIB[c.type], k = d.name + '|' + c.value; (rows[k] = rows[k] || {type:d.name, value:c.value, refs:[]}).refs.push(c.id); }
+  const list = Object.values(rows).sort((a,b) => a.type.localeCompare(b.type) || a.value.localeCompare(b.value));
+  const wT = Math.max(3, ...list.map(r=>r.type.length)), wV = Math.max(4, ...list.map(r=>r.value.length));
+  let t = 'Stückliste\n' + 'Anz.  ' + 'Typ'.padEnd(wT+2) + 'Wert'.padEnd(wV+2) + 'Bezeichner\n' + '-'.repeat(wT+wV+30) + '\n';
+  for(const r of list) t += String(r.refs.length).padStart(3) + '   ' + r.type.padEnd(wT+2) + r.value.padEnd(wV+2) + r.refs.sort().join(', ') + '\n';
+  let csv = 'Anzahl;Typ;Wert;Bezeichner\n'; for(const r of list) csv += `${r.refs.length};${r.type};${r.value};${r.refs.join(' ')}\n`;
+  return {text:t, csv, warnings:[]};
+}
+
+/* ============================================================ Rendering */
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs, parent){ const e = document.createElementNS(NS, tag); for(const k in attrs) if(attrs[k] !== undefined) e.setAttribute(k, attrs[k]); if(parent) parent.appendChild(e); return e; }
+const FONT = 'Consolas, "DejaVu Sans Mono", monospace';
+function drawShapes(g, shapes, color, sw){
+  for(const s of shapes){
+    if(s[0]==='l') el('line', {x1:s[1],y1:s[2],x2:s[3],y2:s[4],stroke:color,'stroke-width':sw,'stroke-linecap':'round'}, g);
+    else if(s[0]==='r') el('rect', {x:s[1],y:s[2],width:s[3],height:s[4],fill:s[5]?color:'none',stroke:color,'stroke-width':sw}, g);
+    else if(s[0]==='c') el('circle', {cx:s[1],cy:s[2],r:s[3],fill:s[4]?color:'none',stroke:color,'stroke-width':sw}, g);
+    else if(s[0]==='p'){ const pts=[]; for(let i=0;i<s[1].length;i+=2) pts.push(s[1][i]+','+s[1][i+1]); el('polygon',{points:pts.join(' '),fill:s[2]?color:'none',stroke:color,'stroke-width':sw,'stroke-linejoin':'round'},g); }
+    else if(s[0]==='d') el('path', {d:s[1],fill:s[2]?color:'none',stroke:color,'stroke-width':sw}, g);
+    else if(s[0]==='t'){ const t = el('text',{x:s[1],y:s[2],fill:color,'font-size':s[4]||13,'font-family':FONT,'text-anchor':s[5]||'middle'},g); t.textContent = s[3]; }
+  }
+}
+function text(g, x, y, str, color, size, anchor, weight){ const t = el('text', {x, y, fill:color, 'font-size':size, 'font-family':FONT, 'text-anchor':anchor||'middle', 'font-weight':weight||'normal'}, g); t.textContent = str; return t; }
+function drawUnit(g, comp, ukey, color){
+  const def = LIB[comp.type], ud = udef(comp, ukey), u = comp.units[ukey];
+  const gg = el('g', {transform:`translate(${u.x} ${u.y}) rotate(${u.rot}) scale(${u.mirror?-1:1} 1)`}, g);
+  if(!def.dynamic) drawShapes(gg, ud.shapes, color, 2.2);
+  else { // IC-Block: Pintexte bleiben aufrecht, auch wenn der Block gedreht ist
+    drawShapes(gg, ud.shapes.filter(s => s[0] !== 't'), color, 2.2);
+    const flip = {start:'end', end:'start', middle:'middle'};
+    for(const s of ud.shapes) if(s[0] === 't'){ const w = unitXf(u, s[1], s[2]); let an = s[5] || 'middle'; if(u.rot % 180) an = 'middle'; else if(u.mirror) an = flip[an]; text(g, w[0], w[1], s[3], color, s[4] || 10, an); }
+  }
+  if(def.showRef !== false){ const p = labelPos(comp, ukey, 'ref'); text(g, p[0], p[1], comp.id + (ud.label||''), color, 14, labelAnchor(comp, ukey, 'ref'), 'bold'); }
+  if(def.showValue !== false && comp.value && ukey === Object.keys(comp.units)[0]){ const p = labelPos(comp, ukey, 'val'); text(g, p[0], p[1], comp.value, isLabelType(comp.type) ? '#0000c0' : color, 13, labelAnchor(comp, ukey, 'val')); }
+  if(ud.pinNames) for(const p of ud.pins){ const w = unitXf(u, p.x, p.y), dx = w[0]-u.x, dy = w[1]-u.y;
+    if(Math.abs(dx) >= Math.abs(dy)) text(g, w[0] + (dx<0?-6:6), w[1] + 4, p.id, '#5c6670', 9, dx<0?'end':'start'); else text(g, w[0] + 6, w[1] + (dy<0?-4:10), p.id, '#5c6670', 9, 'start'); }
+}
+const isSel = (kind, id, unit) => selection.some(s => s.kind===kind && s.id===id && (kind!=='comp' || s.unit===unit));
+function renderScene(root, forExport){
+  root.innerHTML = '';
+  const conn = connectivity();
+  for(const w of S.wires) el('polyline', {points:w.points.map(p=>p.join(',')).join(' '), fill:'none', stroke:(!forExport && isSel('wire', w.id)) ? '#0a6e8a' : '#0a8a0a', 'stroke-width':2.4, 'stroke-linejoin':'round', 'stroke-linecap':'round'}, root);
+  for(const c of S.components) for(const k in c.units) drawUnit(root, c, k, (!forExport && isSel('comp', c.id, k)) ? '#0a6e8a' : '#8b0000');
+  for(const k of conn.dots){ const p = k.split(','); el('circle', {cx:p[0], cy:p[1], r:4.5, fill:'#0a8a0a'}, root); }
+  for(const q of allPins()) if(!conn.connectedPins.has(key(q.pos))) el('circle', {cx:q.pos[0], cy:q.pos[1], r:2.6, fill:'none', stroke:'#c00000', 'stroke-width':1.2}, root);
+  for(const t of S.texts) text(root, t.x, t.y, t.text, (!forExport && isSel('text', t.id)) ? '#0a6e8a' : '#1f2933', t.size||13, 'start');
+  if(forExport) return;
+  for(const s of selection){
+    if(s.kind==='comp'){ const c = S.components.find(x=>x.id===s.id); if(!c) continue; const b = unitBBox(c, s.unit); el('rect', {x:b[0],y:b[1],width:b[2]-b[0],height:b[3]-b[1],fill:'none',stroke:'#0a6e8a','stroke-dasharray':'4 3','stroke-width':1}, root); }
+    if(s.kind==='wire'){ const w = S.wires.find(x=>x.id===s.id); if(w) for(const p of w.points) el('rect', {x:p[0]-3.5,y:p[1]-3.5,width:7,height:7,fill:'#fff',stroke:'#0a6e8a','stroke-width':1.2}, root); }
+  }
+}
+const svg = document.getElementById('svg'), world = document.getElementById('world'), scene = document.getElementById('scene'), overlay = document.getElementById('overlay'), gridRect = document.getElementById('gridRect');
+function applyView(){
+  world.setAttribute('transform', `translate(${view.x} ${view.y}) scale(${view.z})`);
+  const r = svg.getBoundingClientRect(), a = toWorld(0,0), b = toWorld(r.width, r.height);
+  gridRect.setAttribute('x', snap(a[0])-GRID); gridRect.setAttribute('y', snap(a[1])-GRID); gridRect.setAttribute('width', b[0]-a[0]+3*GRID); gridRect.setAttribute('height', b[1]-a[1]+3*GRID);
+  document.getElementById('zoomLbl').textContent = Math.round(view.z*100) + ' %';
+}
+function render(){ renderScene(scene, false); renderOverlay(); }
+function renderOverlay(){
+  overlay.innerHTML = '';
+  if(tool === 'place' && placeType && ghost.pos){ const c = makeComp(placeType, ghost.pos[0], ghost.pos[1], ghost.rot, ghost.mirror, '?'); const g = el('g', {opacity:.55}, overlay); for(const k in c.units) drawUnit(g, c, k, '#8b0000'); }
+  if(draft){
+    el('polyline', {points:draft.points.map(p=>p.join(',')).join(' '), fill:'none', stroke:'#0a8a0a', 'stroke-width':2.4, 'stroke-linejoin':'round'}, overlay);
+    const prev = previewPoints(draft.points[draft.points.length-1], mouse);
+    el('polyline', {points:[draft.points[draft.points.length-1]].concat(prev).map(p=>p.join(',')).join(' '), fill:'none', stroke:'#7fc27f', 'stroke-width':2.4, 'stroke-dasharray':'5 4'}, overlay);
+  }
+  if(tool === 'wire' || tool === 'junction'){ const p = [snap(mouse[0]), snap(mouse[1])]; el('circle', {cx:p[0], cy:p[1], r:3, fill:'none', stroke:'#0a8a0a', 'stroke-width':1}, overlay); }
+  if(marquee){ const x = Math.min(marquee.a[0], marquee.b[0]), y = Math.min(marquee.a[1], marquee.b[1]); el('rect', {x, y, width:Math.abs(marquee.b[0]-marquee.a[0]), height:Math.abs(marquee.b[1]-marquee.a[1]), fill:'rgba(10,110,138,.08)', stroke:'#0a6e8a', 'stroke-width':1/view.z, 'stroke-dasharray':'4 3'}, overlay); }
+}
+
+/* ============================================================ Bauteile */
+function nextRef(prefix){ let n = 1; const used = new Set(S.components.map(c=>c.id)); while(used.has(prefix+n)) n++; return prefix+n; }
+function makeComp(type, x, y, rot, mirror, id){
+  const def = LIB[type], units = {};
+  for(const k of Object.keys(def.units)){ const off = (def.block && def.block[k]) || [0,0]; units[k] = {x:x+off[0], y:y+off[1], rot:rot||0, mirror:!!mirror}; }
+  const c = {id: id || nextRef(def.prefix), type, value: def.value || '', units};
+  if(def.dynamic) c.ic = JSON.parse(JSON.stringify(def.defaultIc || {left:['1 A'],right:['2 B'],top:[],bottom:[]}));
+  return c;
+}
+function rotateUnit(u){ u.rot = (u.rot + 90) % 360; }
+function deleteSelection(){
+  if(!selection.length) return; commit();
+  for(const s of selection){
+    if(s.kind==='comp') S.components = S.components.filter(c=>c.id!==s.id);
+    else if(s.kind==='wire') S.wires = S.wires.filter(w=>w.id!==s.id);
+    else if(s.kind==='text') S.texts = S.texts.filter(t=>t.id!==s.id);
+    else if(s.kind==='junction') S.junctions = S.junctions.filter(j=>key(j)!==s.id);
+  }
+  selection = []; render(); showProps();
+}
+function cleanWire(w){
+  let pts = w.points.filter((p,i,a)=> i===0 || key(p)!==key(a[i-1]));
+  for(let i=1;i<pts.length-1;){ const a=pts[i-1],b=pts[i],c=pts[i+1]; if((b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0])===0 && (c[0]-b[0])*(b[0]-a[0])+(c[1]-b[1])*(b[1]-a[1])>=0) pts.splice(i,1); else i++; }
+  w.points = pts; return pts.length >= 2;
+}
+
+/* ============================================================ Treffer */
+function hitTest(p){
+  const tol = 7 / view.z;
+  for(const s of selection) if(s.kind==='wire'){ const w = S.wires.find(x=>x.id===s.id); if(!w) continue;
+    for(let i=0;i<w.points.length;i++) if(Math.hypot(p[0]-w.points[i][0], p[1]-w.points[i][1]) < tol) return {kind:'corner', id:w.id, idx:i};
+    for(let i=0;i<w.points.length-1;i++) if(distSeg(p, w.points[i], w.points[i+1]) < tol) return {kind:'segment', id:w.id, idx:i}; }
+  for(const c of S.components) for(const k in c.units) for(const which of ['ref','val']){
+    if(LIB[c.type].showRef===false && which==='ref') continue; if(which==='val' && (!c.value || k!==Object.keys(c.units)[0])) continue;
+    const lp = labelPos(c, k, which), len = (which==='ref' ? c.id.length+1 : c.value.length) * 8.5, an = labelAnchor(c, k, which);
+    if(Math.abs(p[1]-lp[1]+5) < 9 && (an==='start' ? p[0] > lp[0]-2 && p[0] < lp[0]+len : an==='end' ? p[0] < lp[0]+2 && p[0] > lp[0]-len : Math.abs(p[0]-lp[0]) < len/2+2)) return {kind:'label', id:c.id, unit:k, which};
+  }
+  for(const c of S.components) for(const k in c.units){ const b = unitBBox(c, k); if(p[0]>=b[0]&&p[0]<=b[2]&&p[1]>=b[1]&&p[1]<=b[3]) return {kind:'comp', id:c.id, unit:k}; }
+  for(const j of S.junctions) if(Math.hypot(p[0]-j[0], p[1]-j[1]) < tol) return {kind:'junction', id:key(j)};
+  for(const w of S.wires) for(let i=0;i<w.points.length-1;i++) if(distSeg(p, w.points[i], w.points[i+1]) < tol) return {kind:'wire', id:w.id};
+  for(const t of S.texts) if(p[0]>=t.x-2 && p[0]<=t.x+t.text.length*8 && p[1]<=t.y+3 && p[1]>=t.y-14) return {kind:'text', id:t.id};
+  return null;
+}
+
+/* ============================================================ Leitungen */
+function previewPoints(last, cur){
+  const c = [snap(cur[0]), snap(cur[1])];
+  if(shiftDown || last[0]===c[0] || last[1]===c[1]) return [c];
+  return bendFlip ? [[last[0], c[1]], c] : [[c[0], last[1]], c];
+}
+function finishDraft(){ if(!draft) return; const w = {id:uid(), points:draft.points}; draft = null; if(cleanWire(w)){ commit(); S.wires.push(w); } render(); }
+function wireClick(p){
+  if(!draft){ draft = {points:[p]}; return; }
+  const last = draft.points[draft.points.length-1]; if(key(last)===key(p)) return;
+  for(const q of previewPoints(last, p)) draft.points.push(q);
+  if(pinAt(p) || pointOnAnyWire(p)) finishDraft();
+}
+
+/* ============================================================ Auswahl & Ziehen */
+function setSelection(list){ selection = list; render(); showProps(); }
+function toggleSel(item){ const i = selection.findIndex(s => s.kind===item.kind && s.id===item.id && (item.kind!=='comp' || s.unit===item.unit)); if(i >= 0) selection.splice(i, 1); else selection.push(item); }
+function startMove(sp){
+  const items = [], rubber = document.getElementById('rubber').checked, attached = [], seen = new Set();
+  for(const s of selection){
+    if(s.kind==='comp'){ const c = S.components.find(x=>x.id===s.id); if(!c) continue; const u = c.units[s.unit]; items.push({kind:'comp', u, orig:[u.x, u.y]});
+      if(rubber) for(const q of unitPins(c, s.unit)) for(const w of S.wires){ if(isSel('wire', w.id) || seen.has(w.id + key(q.pos))) continue; const n = w.points.length;
+        if(key(w.points[0])===key(q.pos)) attached.push({w, idx:0, orig:w.points.map(z=>z.slice())}); else if(key(w.points[n-1])===key(q.pos)) attached.push({w, idx:n-1, orig:w.points.map(z=>z.slice())}); seen.add(w.id + key(q.pos)); } }
+    else if(s.kind==='wire'){ const w = S.wires.find(x=>x.id===s.id); if(w) items.push({kind:'wire', w, orig:w.points.map(q=>q.slice())}); }
+    else if(s.kind==='text'){ const t = S.texts.find(x=>x.id===s.id); if(t) items.push({kind:'text', t, orig:[t.x, t.y]}); }
+    else if(s.kind==='junction'){ const j = S.junctions.find(x=>key(x)===s.id); if(j) items.push({kind:'junction', j, orig:j.slice()}); }
+  }
+  // Was auf dem verschobenen Endsegment liegt (Enden anderer Leitungen, Verbindungspunkte), rutscht mit
+  const deps = [], jdeps = [], seenD = new Set();
+  for(const a of attached){ const n = a.orig.length; if(n < 2) continue; const i = a.idx, j = i===0 ? 1 : n-2, A = a.orig[i], B = a.orig[j], axisH = A[1]===B[1], axisV = A[0]===B[0]; if(!axisH && !axisV) continue;
+    for(const v of S.wires){ if(v === a.w || isSel('wire', v.id)) continue; for(const e of [0, v.points.length-1]) if(onSegInterior(v.points[e], A, B) && !seenD.has(v.id+':'+e)){ seenD.add(v.id+':'+e); deps.push({w:v, idx:e, orig:v.points.map(z=>z.slice()), axisH}); } }
+    for(const jn of S.junctions) if(onSegInterior(jn, A, B) && !seenD.has('j'+key(jn))){ seenD.add('j'+key(jn)); jdeps.push({j:jn, orig:jn.slice(), axisH}); } }
+  commit(); drag = {kind:'move', start:sp, items, attached, deps, jdeps, moved:false};
+}
+function applyMove(dx, dy){
+  for(const it of drag.items){
+    if(it.kind==='comp'){ it.u.x = it.orig[0]+dx; it.u.y = it.orig[1]+dy; }
+    else if(it.kind==='wire') it.w.points = it.orig.map(q=>[q[0]+dx, q[1]+dy]);
+    else if(it.kind==='text'){ it.t.x = it.orig[0]+dx; it.t.y = it.orig[1]+dy; }
+    else if(it.kind==='junction'){ it.j[0] = it.orig[0]+dx; it.j[1] = it.orig[1]+dy; }
+  }
+  for(const a of drag.attached){ const pts = a.orig.map(q=>q.slice()), i = a.idx, n = pts.length; pts[i] = [pts[i][0]+dx, pts[i][1]+dy];
+    const j = i===0 ? 1 : n-2; if(n >= 2){ if(a.orig[i][1]===a.orig[j][1]) pts[j][1] += dy; else if(a.orig[i][0]===a.orig[j][0]) pts[j][0] += dx; } a.w.points = pts; }
+  for(const d of drag.deps || []){ const sx = d.axisH ? 0 : dx, sy = d.axisH ? dy : 0, pts = d.orig.map(q=>q.slice()), i = d.idx, n = pts.length; pts[i] = [pts[i][0]+sx, pts[i][1]+sy];
+    const j = i===0 ? 1 : n-2; if(n >= 2){ if(d.orig[i][1]===d.orig[j][1]) pts[j][1] += sy; else if(d.orig[i][0]===d.orig[j][0]) pts[j][0] += sx; } d.w.points = pts; }
+  for(const d of drag.jdeps || []){ d.j[0] = d.orig[0] + (d.axisH ? 0 : dx); d.j[1] = d.orig[1] + (d.axisH ? dy : 0); }
+}
+function marqueeSelect(a, b, add){
+  const x1 = Math.min(a[0],b[0]), y1 = Math.min(a[1],b[1]), x2 = Math.max(a[0],b[0]), y2 = Math.max(a[1],b[1]), inside = bb => bb[0]>=x1 && bb[2]<=x2 && bb[1]>=y1 && bb[3]<=y2;
+  const list = add ? selection.slice() : [];
+  for(const c of S.components) for(const k in c.units) if(inside(unitBBox(c,k)) && !list.some(s=>s.kind==='comp'&&s.id===c.id&&s.unit===k)) list.push({kind:'comp', id:c.id, unit:k});
+  for(const w of S.wires) if(inside(wireBBox(w)) && !list.some(s=>s.kind==='wire'&&s.id===w.id)) list.push({kind:'wire', id:w.id});
+  for(const t of S.texts) if(inside([t.x, t.y-12, t.x+t.text.length*8, t.y]) && !list.some(s=>s.kind==='text'&&s.id===t.id)) list.push({kind:'text', id:t.id});
+  setSelection(list);
+}
+
+/* ============================================================ Eingabe */
+let panState = null;
+svg.addEventListener('contextmenu', e => e.preventDefault());
+svg.addEventListener('pointerdown', e => {
+  const r = svg.getBoundingClientRect(); const p = toWorld(e.clientX - r.left, e.clientY - r.top); mouse = p;
+  if(e.button === 1 || e.button === 2 || (e.button === 0 && e.ctrlKey)){ panState = {sx:e.clientX, sy:e.clientY, vx:view.x, vy:view.y}; svg.classList.add('panning'); svg.setPointerCapture(e.pointerId); return; }
+  if(e.button !== 0) return;
+  const sp = [snap(p[0]), snap(p[1])];
+  if(tool === 'wire'){ wireClick(sp); renderOverlay(); return; }
+  if(tool === 'junction'){ if(!S.junctions.some(j=>key(j)===key(sp))){ commit(); S.junctions.push(sp); render(); } return; }
+  if(tool === 'text'){ commit(); const t = {id:uid(), x:sp[0], y:sp[1], text:'Text', size:13}; S.texts.push(t); selection = [{kind:'text', id:t.id}]; setTool('select'); render(); showProps(true); return; }
+  if(tool === 'place'){ if(placeType){ commit(); const c = makeComp(placeType, sp[0], sp[1], ghost.rot, ghost.mirror); S.components.push(c); selection = [{kind:'comp', id:c.id, unit:Object.keys(c.units)[0]}]; setTool('select'); render(); showProps(); document.getElementById('hint').textContent = c.id + ' gesetzt. W für Leitung, Palette für das nächste Bauteil.'; } return; }
+  const h = hitTest(p);
+  if(!h){ svg.setPointerCapture(e.pointerId); marquee = {a:p, b:p, add:e.shiftKey}; return; }
+  svg.setPointerCapture(e.pointerId);
+  if(h.kind === 'corner'){ const w = S.wires.find(x=>x.id===h.id); commit(); drag = {kind:'corner', w, idx:h.idx, start:sp, orig:w.points.map(q=>q.slice()), moved:false}; return; }
+  if(h.kind === 'segment'){ const w = S.wires.find(x=>x.id===h.id); commit(); let i = h.idx;
+    if(i === 0){ w.points.unshift(w.points[0].slice()); i = 1; } if(i === w.points.length-2){ w.points.push(w.points[w.points.length-1].slice()); }
+    drag = {kind:'segment', w, idx:i, start:sp, orig:w.points.map(q=>q.slice()), moved:false}; return; }
+  if(h.kind === 'label'){ const c = S.components.find(x=>x.id===h.id); selection = [{kind:'comp', id:c.id, unit:h.unit}]; const lp = labelPos(c, h.unit, h.which); commit(); drag = {kind:'label', c, unit:h.unit, which:h.which, start:p, orig:[lp[0]-c.units[h.unit].x, lp[1]-c.units[h.unit].y], moved:false}; render(); showProps(); return; }
+  const item = h.kind === 'comp' ? {kind:'comp', id:h.id, unit:h.unit} : {kind:h.kind, id:h.id};
+  if(e.shiftKey){ toggleSel(item); render(); showProps(); return; }
+  if(!isSel(item.kind, item.id, item.unit)) selection = [item];
+  startMove(sp); render(); showProps();
+});
+svg.addEventListener('pointermove', e => {
+  const r = svg.getBoundingClientRect();
+  if(panState){ view.x = panState.vx + e.clientX - panState.sx; view.y = panState.vy + e.clientY - panState.sy; applyView(); return; }
+  const p = toWorld(e.clientX - r.left, e.clientY - r.top); mouse = p; const sp = [snap(p[0]), snap(p[1])];
+  document.getElementById('coord').textContent = sp[0] + ', ' + sp[1];
+  if(tool === 'place'){ ghost.pos = sp; renderOverlay(); return; }
+  if(tool === 'wire' || tool === 'junction'){ renderOverlay(); return; }
+  if(marquee){ marquee.b = p; renderOverlay(); return; }
+  if(!drag) return;
+  const dx = sp[0]-drag.start[0], dy = sp[1]-drag.start[1]; if(dx || dy) drag.moved = true;
+  if(drag.kind === 'move') applyMove(dx, dy);
+  else if(drag.kind === 'corner') drag.w.points[drag.idx] = [drag.orig[drag.idx][0]+dx, drag.orig[drag.idx][1]+dy];
+  else if(drag.kind === 'segment'){ const i = drag.idx, a = drag.orig[i], b = drag.orig[i+1]; let mx = dx, my = dy; if(a[1]===b[1]) mx = 0; else if(a[0]===b[0]) my = 0; drag.w.points[i] = [a[0]+mx, a[1]+my]; drag.w.points[i+1] = [b[0]+mx, b[1]+my]; }
+  else if(drag.kind === 'label'){ const u = drag.c.units[drag.unit]; u[drag.which+'Off'] = [Math.round(drag.orig[0] + p[0]-drag.start[0]), Math.round(drag.orig[1] + p[1]-drag.start[1])]; drag.moved = true; }
+  render();
+});
+svg.addEventListener('pointerup', e => {
+  if(panState){ const moved = Math.hypot(e.clientX - panState.sx, e.clientY - panState.sy) > 3; panState = null; svg.classList.remove('panning');
+    if(e.button === 2 && !moved){ draft = null; if(tool !== 'select') setTool('select'); else setSelection([]); } }
+  if(marquee){ const m = marquee; marquee = null; if(Math.hypot(m.b[0]-m.a[0], m.b[1]-m.a[1]) * view.z < 4){ if(!m.add) setSelection([]); else renderOverlay(); } else marqueeSelect(m.a, m.b, m.add); }
+  if(drag){ const d = drag; drag = null; if(!d.moved) hist.pop(); else if(d.kind === 'segment' || d.kind === 'corner'){ if(!cleanWire(d.w)) S.wires = S.wires.filter(w=>w!==d.w); } updateUndo(); render(); showProps(); }
+});
+svg.addEventListener('dblclick', e => {
+  if(tool === 'wire' && draft){ finishDraft(); return; }
+  if(tool !== 'select') return;
+  const r = svg.getBoundingClientRect(), p = toWorld(e.clientX - r.left, e.clientY - r.top), h = hitTest(p);
+  if(h && h.kind === 'corner'){ const w = S.wires.find(x=>x.id===h.id); if(w.points.length > 2 && h.idx > 0 && h.idx < w.points.length-1){ commit(); w.points.splice(h.idx, 1); render(); showProps(); } return; }
+  if(h && (h.kind === 'wire' || h.kind === 'segment')){ const w = S.wires.find(x=>x.id===h.id), sp = [snap(p[0]), snap(p[1])]; let best = -1, bd = 1e9;
+    for(let i=0;i<w.points.length-1;i++){ const d = distSeg(p, w.points[i], w.points[i+1]); if(d < bd){ bd = d; best = i; } }
+    if(best >= 0 && key(sp)!==key(w.points[best]) && key(sp)!==key(w.points[best+1])){ commit(); w.points.splice(best+1, 0, sp); selection = [{kind:'wire', id:w.id}]; render(); showProps(); } return; }
+  if(h && h.kind === 'comp'){ const i = document.getElementById('pVal'); if(i){ i.focus(); i.select(); } }
+});
+svg.addEventListener('wheel', e => {
+  e.preventDefault(); const r = svg.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  const f = e.deltaY < 0 ? 1.12 : 1/1.12, z = Math.max(.2, Math.min(6, view.z * f));
+  view.x = sx - (sx - view.x) * z / view.z; view.y = sy - (sy - view.y) * z / view.z; view.z = z; applyView();
+}, {passive:false});
+document.addEventListener('keydown', e => {
+  if(e.key === 'Shift') shiftDown = true;
+  const inField = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
+  if(inField){ if(e.key === 'Escape') e.target.blur(); return; }
+  if(document.getElementById('dlg').open || document.getElementById('sheetDlg').open) return;
+  if((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); return; }
+  if((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')){ e.preventDefault(); redo(); return; }
+  if((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')){ e.preventDefault(); marqueeSelect([-1e9,-1e9],[1e9,1e9],false); return; }
+  if(e.key === 'Escape'){ if(draft){ draft.points.pop(); if(draft.points.length < 1) draft = null; renderOverlay(); } else if(tool !== 'select') setTool('select'); else setSelection([]); }
+  else if(e.key === ' '){ if(tool === 'wire'){ bendFlip = !bendFlip; renderOverlay(); e.preventDefault(); } }
+  else if(e.key === 'w' || e.key === 'W') setTool('wire');
+  else if(e.key === 'r' || e.key === 'R'){ if(tool === 'place'){ ghost.rot = (ghost.rot+90)%360; renderOverlay(); } else if(selection.some(s=>s.kind==='comp')){ commit(); for(const s of selection) if(s.kind==='comp'){ const c = S.components.find(x=>x.id===s.id); if(c) rotateUnit(c.units[s.unit]); } render(); showProps(); } }
+  else if(e.key === 'x' || e.key === 'X'){ if(tool === 'place'){ ghost.mirror = !ghost.mirror; renderOverlay(); } else if(selection.some(s=>s.kind==='comp')){ commit(); for(const s of selection) if(s.kind==='comp'){ const c = S.components.find(x=>x.id===s.id); if(c) c.units[s.unit].mirror = !c.units[s.unit].mirror; } render(); showProps(); } }
+  else if(e.key === 'Delete' || e.key === 'Backspace') deleteSelection();
+  else if((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')){ copySelection(); }
+  else if((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')){ e.preventDefault(); pasteClipboard(mouseOnCanvas ? [snap(mouse[0]), snap(mouse[1])] : null); }
+  else if((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')){ e.preventDefault(); if(copySelection()) pasteClipboard(null, 20); }
+});
+let clipboard = null, mouseOnCanvas = false;
+svg.addEventListener('pointerenter', () => mouseOnCanvas = true); svg.addEventListener('pointerleave', () => mouseOnCanvas = false);
+function copySelection(){
+  if(!selection.length) return false;
+  const compIds = new Set(selection.filter(s=>s.kind==='comp').map(s=>s.id));
+  const comps = S.components.filter(c => compIds.has(c.id)), wires = S.wires.filter(w => isSel('wire', w.id)), texts = S.texts.filter(t => isSel('text', t.id)), junctions = S.junctions.filter(j => isSel('junction', key(j)));
+  clipboard = JSON.parse(JSON.stringify({comps, wires, texts, junctions}));
+  let xs = [], ys = []; for(const c of comps) for(const k in c.units){ xs.push(c.units[k].x); ys.push(c.units[k].y); } for(const w of wires) for(const p of w.points){ xs.push(p[0]); ys.push(p[1]); } for(const t of texts){ xs.push(t.x); ys.push(t.y); } for(const j of junctions){ xs.push(j[0]); ys.push(j[1]); }
+  clipboard.origin = [Math.min(...xs), Math.min(...ys)];
+  document.getElementById('hint').textContent = 'Kopiert. Strg+V fügt an der Mausposition ein.'; return true;
+}
+function pasteClipboard(at, offset){
+  if(!clipboard) return; commit();
+  const dx = at ? at[0] - clipboard.origin[0] : (offset || 20), dy = at ? at[1] - clipboard.origin[1] : (offset || 20);
+  const cb = JSON.parse(JSON.stringify(clipboard)), newSel = [];
+  for(const c of cb.comps){ c.id = S.components.some(x=>x.id===c.id) ? nextRef((LIB[c.type]||{}).prefix || c.id.replace(/\d+$/,'')) : c.id; for(const k in c.units){ c.units[k].x += dx; c.units[k].y += dy; } S.components.push(c); newSel.push({kind:'comp', id:c.id, unit:Object.keys(c.units)[0]}); }
+  for(const w of cb.wires){ w.id = uid(); w.points = w.points.map(p=>[p[0]+dx, p[1]+dy]); S.wires.push(w); newSel.push({kind:'wire', id:w.id}); }
+  for(const t of cb.texts){ t.id = uid(); t.x += dx; t.y += dy; S.texts.push(t); newSel.push({kind:'text', id:t.id}); }
+  for(const j of cb.junctions){ const p = [j[0]+dx, j[1]+dy]; if(!S.junctions.some(q=>key(q)===key(p))){ S.junctions.push(p); newSel.push({kind:'junction', id:key(p)}); } }
+  if(!at){ clipboard.origin = [clipboard.origin[0]+dx, clipboard.origin[1]+dy]; }
+  setSelection(newSel);
+}
+document.addEventListener('keyup', e => { if(e.key === 'Shift'){ shiftDown = false; if(draft) renderOverlay(); } });
+
+/* ============================================================ Werkzeuge & Palette */
+const HINTS = {select:'Klick wählt aus, Ziehen verschiebt, Rahmen aufziehen wählt mehrere. R dreht, X spiegelt, Entf löscht.', wire:'Klick setzt Start und Knicke, Leertaste kippt den Bogen, Shift = schräg. Klick auf Pin oder Leitung beendet, sonst Doppelklick. Esc nimmt den letzten Knick zurück.', place:'Klick platziert und wechselt zurück zur Auswahl. R dreht, X spiegelt, Esc oder Rechtsklick bricht ab.', junction:'Klick setzt einen Verbindungspunkt auf eine Leitungskreuzung.', text:'Klick platziert einen Text, danach rechts bearbeiten.'};
+function setTool(t, type){
+  if(draft) finishDraft();
+  tool = t; placeType = type || null; ghost = {rot:0, mirror:false, pos:null};
+  svg.setAttribute('class', 'tool-' + t);
+  for(const b of document.querySelectorAll('#palette .pal, #bSelect, #bWire, #bJunction, #bText')) b.classList.remove('on');
+  const map = {select:'bSelect', wire:'bWire', junction:'bJunction', text:'bText'}; if(map[t]) document.getElementById(map[t]).classList.add('on');
+  if(t === 'place'){ const b = document.querySelector(`.pal[data-type="${type}"]`); if(b) b.classList.add('on'); }
+  document.getElementById('hint').textContent = t === 'place' ? LIB[type].name + ': ' + HINTS.place : HINTS[t];
+  renderOverlay();
+}
+function iconFor(type){
+  const def = LIB[type], s = document.createElementNS(NS, 'svg'); s.setAttribute('viewBox', '-36 -32 72 64');
+  const g = el('g', {}, s); drawShapes(g, def.icon || def.units[Object.keys(def.units)[0]].shapes, '#8b0000', 3); return s;
+}
+function buildPalette(){
+  const pal = document.getElementById('palette'); pal.innerHTML = '';
+  const groups = GROUPS.slice(); for(const t in LIB) if(!groups.includes(LIB[t].group||'Eigene')) groups.push(LIB[t].group||'Eigene');
+  for(const gname of groups){
+    const types = Object.keys(LIB).filter(t => (LIB[t].group||'Eigene') === gname); if(!types.length) continue;
+    const h = document.createElement('h2'); h.textContent = gname; pal.appendChild(h);
+    for(const t of types){ const b = document.createElement('button'); b.className = 'pal'; b.dataset.type = t; b.appendChild(iconFor(t)); b.appendChild(document.createTextNode(LIB[t].name)); b.onclick = () => setTool('place', t); pal.appendChild(b); }
+  }
+}
+document.getElementById('bSelect').onclick = () => setTool('select');
+document.getElementById('bWire').onclick = () => setTool('wire');
+document.getElementById('bJunction').onclick = () => setTool('junction');
+document.getElementById('bText').onclick = () => setTool('text');
+document.getElementById('bUndo').onclick = undo; document.getElementById('bRedo').onclick = redo;
+
+/* ============================================================ Eigenschaften */
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+function showProps(focus){
+  const box = document.getElementById('props'), title = document.getElementById('propTitle');
+  selection = selection.filter(s => s.kind==='comp' ? S.components.some(c=>c.id===s.id && c.units[s.unit]) : s.kind==='wire' ? S.wires.some(w=>w.id===s.id) : s.kind==='text' ? S.texts.some(t=>t.id===s.id) : S.junctions.some(j=>key(j)===s.id));
+  if(!selection.length){ title.textContent = 'Nichts ausgewählt'; box.innerHTML = '<p class="muted">Bauteil, Leitung oder Text anklicken oder einen Rahmen aufziehen.</p>'; return; }
+  if(selection.length > 1){ title.textContent = selection.length + ' Elemente ausgewählt'; box.innerHTML = '<p class="muted">Ziehen verschiebt alles gemeinsam, R dreht und X spiegelt die Bauteile, Entf löscht.</p><div class="btns"><button id="pDel">Löschen</button></div>'; document.getElementById('pDel').onclick = deleteSelection; return; }
+  const sel = selection[0]; let edited = false; const once = () => { if(!edited){ commit(); edited = true; } };
+  if(sel.kind === 'comp'){
+    const c = S.components.find(x=>x.id===sel.id), def = LIB[c.type], u = c.units[sel.unit], multi = Object.keys(c.units).length > 1;
+    title.textContent = def.name + (multi ? ' – Einheit ' + (udef(c, sel.unit).label || sel.unit) : '');
+    box.innerHTML = `<div class="row"><span>Bezeichner</span><input id="pRef" value="${esc(c.id)}"></div>
+      <div class="row"><span>Wert</span><input id="pVal" value="${esc(c.value)}"></div>
+      <div class="row"><span>Position</span><span class="muted">${u.x}, ${u.y} · ${u.rot}°${u.mirror?' gespiegelt':''}</span></div>
+      ${multi ? '<p class="muted">Jede Einheit lässt sich einzeln verschieben und drehen; Bezeichner und Wert gelten für das ganze Bauteil.</p>' : ''}
+      ${def.dynamic ? `<p class="muted">Pins je Seite, eine Zeile pro Pin: <b>Nummer Name</b> (z. B. "8 VCC").</p>
+        <div class="row"><span>links</span><textarea id="icL">${esc(c.ic.left.join('\n'))}</textarea></div>
+        <div class="row"><span>rechts</span><textarea id="icR">${esc(c.ic.right.join('\n'))}</textarea></div>
+        <div class="row"><span>oben</span><textarea id="icT">${esc(c.ic.top.join('\n'))}</textarea></div>
+        <div class="row"><span>unten</span><textarea id="icB">${esc(c.ic.bottom.join('\n'))}</textarea></div>` : ''}
+      <div class="btns"><button id="pRot">Drehen (R)</button><button id="pMir">Spiegeln (X)</button><button id="pDel">Löschen</button>${def.dynamic ? '<button id="pAdopt">In Bibliothek übernehmen</button>' : ''}</div>
+      <div id="warn"></div>`;
+    if(def.dynamic) document.getElementById('pAdopt').onclick = () => adoptSymbol(c);
+    document.getElementById('pRef').onchange = e => { const v = e.target.value.trim(); if(!v || v === c.id) return; if(S.components.some(x=>x!==c && x.id===v)){ document.getElementById('warn').textContent = 'Bezeichner ' + v + ' ist schon vergeben.'; e.target.value = c.id; return; } once(); c.id = v; sel.id = v; render(); showProps(); };
+    document.getElementById('pVal').oninput = e => { once(); c.value = e.target.value; render(); };
+    document.getElementById('pRot').onclick = () => { commit(); rotateUnit(u); render(); showProps(); };
+    document.getElementById('pMir').onclick = () => { commit(); u.mirror = !u.mirror; render(); showProps(); };
+    document.getElementById('pDel').onclick = deleteSelection;
+    if(def.dynamic) for(const [id, side] of [['icL','left'],['icR','right'],['icT','top'],['icB','bottom']]) document.getElementById(id).oninput = e => { once(); c.ic[side] = e.target.value.split('\n'); render(); };
+    if(focus){ const i = document.getElementById('pVal'); i.focus(); i.select(); }
+  } else if(sel.kind === 'wire'){
+    const w = S.wires.find(x=>x.id===sel.id);
+    title.textContent = 'Leitung'; box.innerHTML = `<p class="muted">${w.points.length} Punkte, ${w.points.length-1} Segmente. Knickpunkte ziehen mit der Maus, ein Segment ziehen verschiebt es parallel. Doppelklick auf ein Segment fügt einen Knick ein, auf einen Knick entfernt ihn.</p><div class="btns"><button id="pDel">Löschen</button></div>`;
+    document.getElementById('pDel').onclick = deleteSelection;
+  } else if(sel.kind === 'text'){
+    const t = S.texts.find(x=>x.id===sel.id);
+    title.textContent = 'Text'; box.innerHTML = `<div class="row"><span>Text</span><input id="pTxt" value="${esc(t.text)}"></div><div class="row"><span>Größe</span><input id="pSize" type="number" min="8" max="40" value="${t.size||13}"></div><div class="btns"><button id="pDel">Löschen</button></div>`;
+    document.getElementById('pTxt').oninput = e => { once(); t.text = e.target.value; render(); };
+    document.getElementById('pSize').oninput = e => { once(); t.size = +e.target.value || 13; render(); };
+    document.getElementById('pDel').onclick = deleteSelection;
+    if(focus){ const i = document.getElementById('pTxt'); i.focus(); i.select(); }
+  } else if(sel.kind === 'junction'){
+    title.textContent = 'Verbindungspunkt'; box.innerHTML = `<p class="muted">Manuell gesetzter Punkt bei ${sel.id}.</p><div class="btns"><button id="pDel">Löschen</button></div>`;
+    document.getElementById('pDel').onclick = deleteSelection;
+  }
+}
+
+/* ============================================================ Dialog (Netzliste, Stückliste) */
+let dlgFile = null;
+function openDialog(title, text, warnings, fname, mime){
+  document.getElementById('dlgTitle').textContent = title; document.getElementById('dlgPre').textContent = text;
+  document.getElementById('dlgWarn').textContent = warnings.length ? 'Hinweise:\n' + warnings.map(w=>'• '+w).join('\n') : '';
+  dlgFile = {name:fname, data:text, mime}; document.getElementById('dlg').showModal();
+}
+document.getElementById('dlgClose').onclick = () => document.getElementById('dlg').close();
+document.getElementById('dlgDl').onclick = () => { if(dlgFile) download(dlgFile.name, dlgFile.data, dlgFile.mime); };
+document.getElementById('bNet').onclick = () => { const n = netlistText(); openDialog('Netzliste', n.text, n.warnings, docName() + '-netzliste.txt', 'text/plain'); };
+document.getElementById('bBom').onclick = () => { const b = bomText(); openDialog('Stückliste', b.text, [], docName() + '-stueckliste.csv', 'text/csv'); dlgFile.data = b.csv; };
+
+/* ============================================================ Dateien */
+function download(name, data, mime){ const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], {type:mime})); a.download = name; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 2000); }
+function docJSON(){
+  const lib = {}; for(const c of S.components) if(!BUILTIN[c.type] && LIB[c.type]) lib[c.type] = LIB[c.type];
+  return JSON.stringify({version:1, library:lib, sheet:S.sheet, components:S.components, wires:S.wires, junctions:S.junctions, texts:S.texts, view}, null, 1);
+}
+function loadDoc(obj){
+  if(!obj || !Array.isArray(obj.components)) throw new Error('Keine Schaltungsdatei.');
+  for(const t in (obj.library||{})) if(!BUILTIN[t]) LIB[t] = obj.library[t];
+  S = {version:1, library:{}, sheet:Object.assign(newDoc().sheet, obj.sheet||{}), components:obj.components.filter(c => LIB[c.type]), wires:obj.wires||[], junctions:obj.junctions||[], texts:obj.texts||[]};
+  for(const c of S.components) if(LIB[c.type].dynamic && !c.ic) c.ic = {left:[],right:[],top:[],bottom:[]};
+  idSeq = 1 + S.wires.concat(S.texts).reduce((m,w)=>Math.max(m, parseInt(String(w.id).replace(/\D/g,''))||0), 0);
+  if(obj.view) view = obj.view; selection = []; hist.length = 0; redoStack.length = 0; updateUndo(); buildPalette(); setTool('select'); applyView(); render(); showProps();
+}
+function contentBBox(){
+  let xs=[], ys=[]; for(const w of S.wires) for(const p of w.points){ xs.push(p[0]); ys.push(p[1]); }
+  for(const c of S.components) for(const k in c.units){ const b = unitBBox(c,k); xs.push(b[0],b[2]); ys.push(b[1],b[3]); for(const which of ['ref','val']){ const lp = labelPos(c,k,which); xs.push(lp[0]-40, lp[0]+40); ys.push(lp[1]-14, lp[1]+4); } }
+  for(const t of S.texts){ xs.push(t.x, t.x + t.text.length*8); ys.push(t.y-14, t.y+4); }
+  if(!xs.length) return [0,0,400,300];
+  return [Math.min(...xs)-30, Math.min(...ys)-30, Math.max(...xs)+30, Math.max(...ys)+30];
+}
+function buildSVG(){
+  const sh = S.sheet, frame = !!sh.frame; let b = contentBBox();
+  if(frame){ b = [b[0]-20, b[1]-20, Math.max(b[2]+20, b[0]+420), b[3]+80]; }
+  const w = b[2]-b[0], h = b[3]-b[1];
+  const out = document.createElementNS(NS, 'svg'); out.setAttribute('width', w); out.setAttribute('height', h); out.setAttribute('viewBox', `${b[0]} ${b[1]} ${w} ${h}`);
+  el('rect', {x:b[0], y:b[1], width:w, height:h, fill:'#f8f8f5'}, out);
+  const g = el('g', {}, out); renderScene(g, true);
+  if(frame){
+    el('rect', {x:b[0]+6, y:b[1]+6, width:w-12, height:h-12, fill:'none', stroke:'#1f2933', 'stroke-width':1.5}, out);
+    const tx = b[2]-6-400, ty = b[3]-6-54, date = (sh.date||'').trim() || new Date().toLocaleDateString('de-DE');
+    el('rect', {x:tx, y:ty, width:400, height:54, fill:'#fff', stroke:'#1f2933', 'stroke-width':1.5}, out);
+    el('line', {x1:tx, y1:ty+30, x2:tx+400, y2:ty+30, stroke:'#1f2933', 'stroke-width':1}, out);
+    el('line', {x1:tx+200, y1:ty+30, x2:tx+200, y2:ty+54, stroke:'#1f2933', 'stroke-width':1}, out);
+    el('line', {x1:tx+300, y1:ty+30, x2:tx+300, y2:ty+54, stroke:'#1f2933', 'stroke-width':1}, out);
+    text(out, tx+8, ty+21, sh.title || 'Schaltplan', '#1f2933', 15, 'start', 'bold');
+    text(out, tx+8, ty+46, sh.author || '', '#1f2933', 11, 'start');
+    text(out, tx+208, ty+46, date, '#1f2933', 11, 'start');
+    text(out, tx+308, ty+46, sh.rev ? 'Version ' + sh.rev : '', '#1f2933', 11, 'start');
+  }
+  const meta = el('metadata', {}, out); meta.textContent = docJSON();
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(out);
+}
+function exportSVG(){ download(docName() + '.svg', buildSVG(), 'image/svg+xml'); }
+function printSheet(){
+  const svgText = buildSVG().replace(/^<\?xml[^>]*>\s*/, ''), win = window.open('', '_blank');
+  if(!win){ alert('Das Druckfenster wurde vom Browser blockiert. Bitte Pop-ups für diese Seite erlauben.'); return; }
+  win.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>' + esc(S.sheet.title || 'Schaltplan') + '</title><style>@page{size:landscape;margin:10mm}html,body{margin:0}svg{width:100%;height:auto;max-height:95vh}</style></head><body>' + svgText + '</body></html>');
+  win.document.close(); win.focus(); setTimeout(() => { win.print(); }, 300);
+}
+document.getElementById('bPrint').onclick = printSheet;
+document.getElementById('bSheet').onclick = () => { const sh = S.sheet; for(const [id,k] of [['shTitle','title'],['shAuthor','author'],['shRev','rev'],['shDate','date']]) document.getElementById(id).value = sh[k] || ''; document.getElementById('shFrame').checked = !!sh.frame; document.getElementById('sheetDlg').showModal(); };
+document.getElementById('shOk').onclick = () => { const sh = S.sheet; for(const [id,k] of [['shTitle','title'],['shAuthor','author'],['shRev','rev'],['shDate','date']]) sh[k] = document.getElementById(id).value.trim(); sh.frame = document.getElementById('shFrame').checked; document.getElementById('sheetDlg').close(); document.getElementById('hint').textContent = 'Blattdaten übernommen.'; };
+document.getElementById('shCancel').onclick = () => document.getElementById('sheetDlg').close();
+function docName(){ const t = (S.sheet.title||'').trim().toLowerCase().replace(/[äöüß]/g, m=>({ä:'ae',ö:'oe',ü:'ue',ß:'ss'})[m]).replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); return t || 'schaltplan'; }
+document.getElementById('bNew').onclick = () => { if(S.components.length || S.wires.length){ if(!confirm('Aktuelle Schaltung verwerfen? Nicht gespeicherte Änderungen gehen verloren.')) return; } S = newDoc(); selection = []; hist.length = 0; redoStack.length = 0; updateUndo(); view = {x:80,y:80,z:1}; setTool('select'); applyView(); render(); showProps(); };
+document.getElementById('bSave').onclick = () => download(docName() + '.json', docJSON(), 'application/json');
+document.getElementById('bSvg').onclick = exportSVG;
+document.getElementById('bLoad').onclick = () => document.getElementById('fileLoad').click();
+document.getElementById('bLib').onclick = () => document.getElementById('fileLib').click();
+document.getElementById('fileLoad').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return; e.target.value = '';
+  try { let txt = await f.text();
+    if(f.name.toLowerCase().endsWith('.svg') || txt.trim().startsWith('<')){ const m = txt.match(/<metadata>([\s\S]*?)<\/metadata>/); if(!m) throw new Error('Das SVG enthält keine eingebettete Schaltung.'); txt = m[1].replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&'); }
+    loadDoc(JSON.parse(txt)); document.getElementById('hint').textContent = f.name + ' geladen.';
+  } catch(err){ alert('Laden fehlgeschlagen: ' + err.message); }
+};
+document.getElementById('fileLib').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return; e.target.value = '';
+  try { const lib = JSON.parse(await f.text()); let n = 0;
+    for(const t in lib){ const d = lib[t]; if(!d.units || !d.prefix) continue; if(!d.group) d.group = 'Eigene'; LIB[t] = d; n++; }
+    buildPalette(); document.getElementById('hint').textContent = n + ' Symbole aus ' + f.name + ' übernommen.';
+  } catch(err){ alert('Bibliothek nicht lesbar: ' + err.message); }
+};
+document.getElementById('bLibSave').onclick = () => { const lib = {}; for(const t in LIB) if(!BUILTIN[t]) lib[t] = LIB[t]; if(!Object.keys(lib).length){ alert('Es gibt noch keine eigenen Symbole. Ein IC-Block lässt sich über "In Bibliothek übernehmen" zu einem Symbol machen.'); return; } download('bibliothek.json', JSON.stringify(lib, null, 1), 'application/json'); };
+function adoptSymbol(c){
+  const name = prompt('Name des neuen Symbols (so erscheint es in der Palette):', c.value || 'Mein IC'); if(!name) return;
+  const typeKey = 'user_' + name.toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'');
+  if(LIB[typeKey] && !confirm('Symbol "' + name + '" gibt es schon. Überschreiben?')) return;
+  const d = icDef(c); LIB[typeKey] = {name, prefix:'U', group:'Eigene', value:c.value, icon:BUILTIN.ic.icon, units:{main:{shapes:d.shapes, pins:d.pins, refOff:d.refOff, valOff:d.valOff, labelAnchor:d.labelAnchor}}};
+  buildPalette(); document.getElementById('hint').textContent = 'Symbol "' + name + '" ist jetzt in der Palette unter Eigene. Mit "Bibliothek speichern" sicherst du es für andere Schaltungen.';
+}
+document.getElementById('bZoomIn').onclick = () => zoomBy(1.25);
+document.getElementById('bZoomOut').onclick = () => zoomBy(1/1.25);
+function zoomBy(f){ const r = svg.getBoundingClientRect(), sx = r.width/2, sy = r.height/2, z = Math.max(.2, Math.min(6, view.z*f)); view.x = sx-(sx-view.x)*z/view.z; view.y = sy-(sy-view.y)*z/view.z; view.z = z; applyView(); }
+document.getElementById('bZoomFit').onclick = () => { const b = contentBBox(), r = svg.getBoundingClientRect(); const z = Math.max(.2, Math.min(4, Math.min(r.width/(b[2]-b[0]), r.height/(b[3]-b[1])))); view.z = z; view.x = (r.width - (b[2]-b[0])*z)/2 - b[0]*z; view.y = (r.height - (b[3]-b[1])*z)/2 - b[1]*z; applyView(); };
+window.addEventListener('resize', applyView);
+window.addEventListener('beforeunload', e => { if(S.components.length || S.wires.length){ e.preventDefault(); e.returnValue = ''; } });
+
+buildPalette(); setTool('select'); applyView(); render(); showProps(); updateUndo();
+
+</script>
+</body>
+</html>
