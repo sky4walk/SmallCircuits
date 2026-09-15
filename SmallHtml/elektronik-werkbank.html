@@ -202,6 +202,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-spule" aria-controls="panel-spule" data-tab="spule" aria-selected="false">Spule</button>
     <button role="tab" id="tab-gleichrichter" aria-controls="panel-gleichrichter" data-tab="gleichrichter" aria-selected="false">Gleichrichter</button>
     <button role="tab" id="tab-halbleiter" aria-controls="panel-halbleiter" data-tab="halbleiter" aria-selected="false">Halbleiter</button>
+    <button role="tab" id="tab-transistor" aria-controls="panel-transistor" data-tab="transistor" aria-selected="false">Transistor</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -814,10 +815,62 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: Transistor ============================ -->
+<section class="panel" id="panel-transistor" data-tab="transistor" role="tabpanel" aria-labelledby="tab-transistor" hidden>
+  <h2>Transistor: Kennlinienfeld und Arbeitsgerade</h2>
+  <p class="lead">Erst zusehen, wie ein Kennlinienfeld entsteht &ndash; Basisstrom festhalten, U_CE durchfahren, Kollektorstrom aufzeichnen. Dann dieselbe Kennlinie benutzen, um den Arbeitspunkt zu finden und den Basiswiderstand zu bestimmen.</p>
+
+  <div class="split">
+    <div>
+      <div class="seg" role="group" aria-label="Ansicht">
+        <button type="button" class="ghost" id="tr-mode-kennlinie">Kennlinie aufnehmen</button>
+        <button type="button" class="ghost on" id="tr-mode-punkt">Arbeitspunkt</button>
+      </div>
+
+      <div class="field">
+        <label for="tr-Ub">Betriebsspannung in Volt</label>
+        <input id="tr-Ub" type="text" inputmode="decimal" autocomplete="off" value="12">
+      </div>
+      <div class="field">
+        <label for="tr-Rc">Last am Kollektor in Ohm</label>
+        <input id="tr-Rc" type="text" inputmode="decimal" autocomplete="off" value="200">
+        <div class="note">Relaisspule, LED-Zweig, Motor &ndash; alles, was geschaltet werden soll.</div>
+      </div>
+      <div class="field">
+        <label for="tr-Ust">Steuerspannung in Volt</label>
+        <input id="tr-Ust" type="text" inputmode="decimal" autocomplete="off" value="3,3">
+        <div class="note">Was der GPIO-Pin im eingeschalteten Zustand liefert.</div>
+      </div>
+      <div class="field">
+        <label for="tr-Rb">Basiswiderstand in Ohm</label>
+        <input id="tr-Rb" type="text" inputmode="decimal" autocomplete="off" value="820">
+      </div>
+      <div class="field">
+        <label for="tr-beta">Stromverst&auml;rkung &beta;</label>
+        <input id="tr-beta" type="text" inputmode="decimal" autocomplete="off" value="100">
+        <div class="note">Streut stark. Im Datenblatt steht eine Spanne &ndash; f&uuml;r Schalter rechnet man mit dem kleinsten Wert.</div>
+      </div>
+      <div class="field" id="tr-speedfeld" hidden>
+        <label for="tr-speed">Tempo der Aufnahme</label>
+        <select id="tr-speed">
+          <option value="0.7">schnell</option>
+          <option value="2" selected>normal</option>
+          <option value="5">langsam</option>
+        </select>
+      </div>
+      <div class="row">
+        <button type="button" class="ghost" id="tr-dim">Basiswiderstand vorschlagen</button>
+      </div>
+    </div>
+
+    <div class="lcd" id="tr-lcd" aria-live="off"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Transistor als Schalter, Schaltregler, Netzwerkanalyse mit Matrix.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: MOSFET und Schaltregler, Netzwerkanalyse mit Matrix.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -2152,6 +2205,11 @@ var Sim = {
       if(h.text) g.fillText(h.text, 4, py(h.y) + 3);
     });
 
+    (o.punkte || []).forEach(function(pt){
+      g.globalAlpha = 1; g.fillStyle = farbe;
+      g.beginPath(); g.arc(px(pt.x), py(pt.y), pt.r || 4, 0, 2 * Math.PI); g.fill();
+      if(pt.text){ g.globalAlpha = 0.8; g.fillText(pt.text, px(pt.x) + 7, py(pt.y) - 5); }
+    });
     (o.kurven || []).forEach(function(k){
       if(!k.p || k.p.length < 2) return;
       g.globalAlpha = k.alpha === undefined ? 1 : k.alpha;
@@ -2949,6 +3007,254 @@ document.getElementById("hl-mode-farbe").addEventListener("click", function(){ s
 document.getElementById("hl-mode-leck").addEventListener("click", function(){ setHlMode("leck"); });
 updateHl();
 
+/* ============================================================================
+   Reiter: Transistor - Kennlinienfeld, Arbeitsgerade, Dimensionierung
+   ----------------------------------------------------------------------------
+   Modell des NPN im Ausgangskennlinienfeld:
+     I_C = beta * I_B * (1 - e^(-U_CE / U_knick)) * (1 + U_CE / U_Early)
+   Der erste Faktor macht den steilen Anstieg bei kleinen U_CE (Saettigung),
+   der zweite die leichte Steigung im aktiven Bereich (Early-Effekt).
+   Der Arbeitspunkt wird NICHT aus einer Formel gesetzt, sondern als
+   Schnittpunkt von Kennlinie und Arbeitsgerade numerisch gesucht.
+   ========================================================================== */
+
+var TR_KNICK = 0.15, TR_EARLY = 80, TR_UBE = 0.7;
+
+function trIC(w, ib, uce){
+  if(ib <= 0 || uce <= 0) return 0;
+  return w.beta * ib * (1 - Math.exp(-uce / TR_KNICK)) * (1 + uce / TR_EARLY);
+}
+
+/* Schnittpunkt von Kennlinie und Arbeitsgerade: I_C(U_CE) = (U_b - U_CE) / R_C */
+function trArbeitspunkt(w, ib){
+  var lo = 0, hi = w.Ub, k, m;
+  for(k = 0; k < 60; k++){
+    m = (lo + hi) / 2;
+    if(trIC(w, ib, m) - (w.Ub - m) / w.Rc < 0) lo = m; else hi = m;
+  }
+  m = (lo + hi) / 2;
+  return {uce:m, ic:(w.Ub - m) / w.Rc};
+}
+
+function trWerte(){
+  var Ub = parseValue(document.getElementById("tr-Ub").value);
+  var Rc = parseValue(document.getElementById("tr-Rc").value);
+  var Rb = parseValue(document.getElementById("tr-Rb").value);
+  var Ust = parseValue(document.getElementById("tr-Ust").value);
+  var beta = parseValue(document.getElementById("tr-beta").value);
+  if(Ub === null || Rc === null || Rb === null || Ust === null || beta === null) return null;
+  if(isNaN(Ub) || isNaN(Rc) || isNaN(Rb) || isNaN(Ust) || isNaN(beta)) return null;
+  if(Ub <= 0 || Rc <= 0 || Rb <= 0 || beta <= 0) return null;
+  var ib = Math.max(0, (Ust - TR_UBE) / Rb);
+  var icSat = (Ub - 0.2) / Rc;
+  return {Ub:Ub, Rc:Rc, Rb:Rb, Ust:Ust, beta:beta, ib:ib, icSat:icSat,
+          icMax:Ub / Rc, ibMax:1.6 * icSat / beta, basis:1};
+}
+
+/* Kennlinienschar: fuenf Basisstroeme rund um den eingestellten Wert */
+function trIbListe(w){
+  var l = [], k;
+  for(k = 1; k <= 5; k++) l.push(w.ibMax * k / 5);
+  return l;
+}
+
+function trKurve(w, ib, bis){
+  var p = [], n = 80, k, uce;
+  for(k = 0; k <= n; k++){
+    uce = w.Ub * k / n;
+    if(bis !== undefined && uce > bis) break;
+    p.push([uce, trIC(w, ib, uce)]);
+  }
+  return p;
+}
+
+/* ---------------------------------------------------------------- Ansicht 1:
+   Die Kennlinie wird aufgenommen - Basisstrom einstellen, U_CE durchfahren.  */
+
+var SimTrans = {
+  lcd:"tr-lcd",
+  fehltext:"Betriebsspannung, Widerst\u00e4nde und Stromverst\u00e4rkung eintragen.",
+  idx:0, fort:0, fertig:[],
+
+  svg:"", zusatz:"",   /* wird in bau() gesetzt, damit beide Ansichten dasselbe Bild nutzen */
+
+  tempo:function(){ return parseFloat(document.getElementById("tr-speed").value); },
+  werte:trWerte,
+  leeren:function(){ SimTrans.idx = 0; SimTrans.fort = 0; SimTrans.fertig = []; },
+
+  schritt:function(w, dt){
+    var s = SimTrans;
+    s.fort += dt;
+    if(s.fort >= 1){
+      s.fertig.push(s.idx);
+      s.fort = 0;
+      s.idx = (s.idx + 1) % 5;
+      if(s.idx === 0) s.fertig = [];
+    }
+  },
+
+  zeichne:function(w){
+    var s = SimTrans, e = s.el, liste = trIbListe(w), kurven = [], i;
+    var bis = w.Ub * s.fort;
+    s.fertig.forEach(function(k){ kurven.push({p:trKurve(w, liste[k]), alpha:0.45}); });
+    kurven.push({p:trKurve(w, liste[s.idx], bis)});
+    kurven.push({p:[[0, w.Ub / w.Rc], [w.Ub, 0]], dash:true, alpha:0.3});
+
+    var ibNow = liste[s.idx], icNow = trIC(w, ibNow, bis);
+    e.ib.textContent = fmt(ibNow, "A");
+    e.uce.textContent = fmt(bis, "V");
+    e.ic.textContent = fmt(icNow, "A");
+    e.beta.textContent = "I_C / I_B = " + (ibNow > 0 ? (icNow / ibNow).toFixed(0) : "0");
+    e.note.textContent =
+      "Kennlinie " + (s.idx + 1) + " von 5: Basisstrom festhalten, U_CE von null bis " + fmt(w.Ub, "V") + " durchfahren." +
+      "\nGenau so nimmt ein Kennlinienschreiber das Feld auf." +
+      "\ngestrichelt: die Arbeitsgerade der Last " + fmt(w.Rc, "\u03a9");
+
+    Sim.plot(s.cv, {
+      xmax:w.Ub, ymax:w.Ub / w.Rc * 1.05, yTop:fmt(w.Ub / w.Rc, "A"), yBot:"0",
+      kurven:kurven,
+      punkte:bis > 0 ? [{x:bis, y:icNow, r:3.5}] : []
+    });
+  }
+};
+
+/* ---------------------------------------------------------------- Ansicht 2:
+   Arbeitspunkt und Dimensionierung.                                          */
+
+function trStatisch(){
+  var lcd = document.getElementById("tr-lcd");
+  var w = trWerte();
+  if(!w){ lcd.innerHTML = '<p class="empty">Betriebsspannung, Widerst\u00e4nde und Stromverst\u00e4rkung eintragen.</p>'; return; }
+
+  var ap = trArbeitspunkt(w, w.ib);
+  var uebersteuerung = w.icSat > 0 ? (w.beta * w.ib) / w.icSat : 0;
+  var pTrans = ap.uce * ap.ic, pLast = ap.ic * ap.ic * w.Rc;
+  var betrieb = w.ib <= 0 ? "gesperrt" : (ap.uce < 0.4 ? "ges\u00e4ttigt \u2013 voll durchgeschaltet" : "aktiv \u2013 der Transistor regelt");
+
+  /* In der Praxis: erzwungenes Stromverhaeltnis von etwa I_C/20, aber mindestens
+     fuenffache Uebersteuerung, falls beta klein ist. */
+  var ibSoll = Math.max(w.icSat / 20, 5 * w.icSat / w.beta);
+  var rbIdeal = (w.Ust - TR_UBE) / ibSoll;
+  var rbE24 = eStep(rbIdeal, "E24", -1);       /* abrunden: kleinerer Widerstand, mehr Basisstrom */
+  var ibE24 = rbE24 ? (w.Ust - TR_UBE) / rbE24 : 0;
+
+  var html = "";
+  html += '<canvas class="sim-plot" style="height:150px"></canvas>';
+  html += '<div class="readout"><span class="what">Arbeitspunkt</span><span><span class="val">' +
+          fmt(ap.uce, "V") + " / " + fmt(ap.ic, "A") + '</span><span class="tag">' + betrieb + "</span></span></div>";
+  html += '<div class="readout"><span class="what">Basisstrom</span><span><span class="val">' +
+          fmt(w.ib, "A") + '</span><span class="tag">\u00fcber ' + fmt(w.Rb, "\u03a9") + " aus " + fmt(w.Ust, "V") + "</span></span></div>";
+  html += '<div class="readout"><span class="what">\u00dcbersteuerungsfaktor</span><span><span class="val">' +
+          uebersteuerung.toFixed(1).replace(".", ",") + '\u00d7</span><span class="tag">\u03b2\u00b7I_B gegen\u00fcber dem n\u00f6tigen I_C</span></span></div>';
+  html += '<div class="readout given"><span class="what">Verlustleistung</span><span><span class="val">' +
+          fmt(pTrans, "W") + '</span><span class="tag">im Transistor \u2013 in der Last: ' + fmt(pLast, "W") + "</span></span></div>";
+
+  html += '<div class="hint"><table class="eserie"><tr><th>Basiswiderstand</th><th class="num">Wert</th><th class="num">ergibt</th></tr>' +
+          "<tr><td>empfohlen: I_C/20, mind. 5-fach</td><td class=\"num\">" + fmt(rbIdeal, "\u03a9") + '</td><td class="num">' + fmt(ibSoll, "A") + "</td></tr>" +
+          (rbE24 ? "<tr class=\"exact\"><td>n\u00e4chster E24-Wert darunter</td><td class=\"num\">" + fmt(rbE24, "\u03a9") +
+           '</td><td class="num">' + fmt(ibE24, "A") + "</td></tr>" : "") +
+          "<tr><td>aktuell eingestellt</td><td class=\"num\">" + fmt(w.Rb, "\u03a9") + '</td><td class="num">' + fmt(w.ib, "A") + "</td></tr></table>";
+
+  var warn = [];
+  if(w.ib <= 0) warn.push("Die Steuerspannung liegt unter 0,7 V \u2013 der Transistor bleibt gesperrt.");
+  else if(uebersteuerung < 3) warn.push("Weniger als dreifache \u00dcbersteuerung: Der Transistor bleibt im aktiven Bereich und verheizt " +
+    fmt(pTrans, "W") + ". Als Schalter geh\u00f6rt der Basiswiderstand kleiner.");
+  else if(uebersteuerung > 40) warn.push("Sehr hohe \u00dcbersteuerung: Das kostet unn\u00f6tig Steuerstrom und verl\u00e4ngert das Ausschalten.");
+  if(w.ib > 0.005) warn.push("\u00dcber 5 mA Basisstrom \u2013 f\u00fcr einen GPIO-Pin meist zu viel.");
+  if(pTrans > 0.3) warn.push("\u00dcber 0,3 W im Transistor \u2013 Geh\u00e4use und K\u00fchlung pr\u00fcfen.");
+  if(warn.length) html += '<p style="margin:10px 0 0">' + warn.join(" ") + "</p>";
+  html += "</div>";
+
+  html += '<p class="work">Arbeitsgerade: I_C = (' + fmt(w.Ub, "V") + " \u2212 U_CE) / " + fmt(w.Rc, "\u03a9") +
+          "\nDer Arbeitspunkt ist ihr Schnittpunkt mit der Kennlinie zu I_B = " + fmt(w.ib, "A") +
+          "\nVoll durchgeschaltet flie\u00dfen h\u00f6chstens " + fmt(w.icSat, "A") + "</p>";
+  lcd.innerHTML = html;
+
+  var liste = trIbListe(w), kurven = [], i;
+  for(i = 0; i < liste.length; i++) kurven.push({p:trKurve(w, liste[i]), alpha:0.3});
+  kurven.push({p:trKurve(w, w.ib)});
+  kurven.push({p:[[0, w.Ub / w.Rc], [w.Ub, 0]], dash:true, alpha:0.6});
+  Sim.plot(lcd.querySelector("canvas"), {
+    xmax:w.Ub, ymax:w.Ub / w.Rc * 1.05, yTop:fmt(w.Ub / w.Rc, "A"), yBot:"0",
+    kurven:kurven,
+    punkte:[{x:ap.uce, y:ap.ic, text:"Arbeitspunkt"}]
+  });
+}
+
+/* --- Umschaltung ---------------------------------------------------------- */
+
+var trMode = "punkt";
+
+function setTrMode(m){
+  trMode = m;
+  document.getElementById("tr-speedfeld").hidden = m !== "kennlinie";
+  document.getElementById("tr-mode-kennlinie").classList.toggle("on", m === "kennlinie");
+  document.getElementById("tr-mode-punkt").classList.toggle("on", m === "punkt");
+  if(m === "kennlinie"){ SimTrans.leeren(); Sim.start(SimTrans); }
+  else { Sim.stop(); trStatisch(); }
+}
+
+SimTrans.svg =
+  '<svg viewBox="0 0 300 160" role="img" aria-label="Transistor als Schalter">' +
+    '<text id="s-ublabel" x="8" y="18" font-size="9" fill="currentColor" opacity="0.8">U_b</text>' +
+    '<line x1="40" y1="22" x2="212" y2="22" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="212" y1="22" x2="212" y2="40" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="200" y="40" width="24" height="28" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text id="s-rclabel" x="230" y="58" font-size="9" fill="currentColor">R_C</text>' +
+    '<line x1="212" y1="68" x2="212" y2="84" stroke="currentColor" stroke-width="2"/>' +
+    /* Transistor */
+    '<line x1="186" y1="60" x2="186" y2="104" stroke="currentColor" stroke-width="2.6"/>' +
+    '<line x1="186" y1="70" x2="212" y2="84" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="186" y1="94" x2="212" y2="108" stroke="currentColor" stroke-width="2"/>' +
+    '<polygon points="204,100 210,110 198,108" fill="currentColor"/>' +
+    '<line x1="212" y1="108" x2="212" y2="134" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="222" y="86" font-size="8" fill="currentColor" opacity="0.7">C</text>' +
+    '<text x="222" y="116" font-size="8" fill="currentColor" opacity="0.7">E</text>' +
+    '<text x="170" y="78" font-size="8" fill="currentColor" opacity="0.7">B</text>' +
+    /* Basiszweig */
+    '<line x1="100" y1="82" x2="186" y2="82" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="112" y="70" width="32" height="24" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text id="s-rblabel" x="128" y="66" font-size="9" text-anchor="middle" fill="currentColor">R_B</text>' +
+    '<line x1="60" y1="82" x2="112" y2="82" stroke="currentColor" stroke-width="2"/>' +
+    '<circle cx="56" cy="82" r="3.5" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text id="s-ustlabel" x="16" y="86" font-size="9" fill="currentColor" opacity="0.8">Steuer</text>' +
+    /* Masse */
+    '<line x1="40" y1="134" x2="212" y2="134" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="126" y1="134" x2="126" y2="142" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="118" y1="142" x2="134" y2="142" stroke="currentColor" stroke-width="2"/>' +
+  "</svg>";
+
+SimTrans.zusatz =
+  '<canvas class="sim-plot" style="height:150px"></canvas>' +
+  '<div class="readout"><span class="what">eingestellter Basisstrom</span><span>' +
+    '<span class="val" id="s-ib">0 A</span><span class="tag">wird festgehalten</span></span></div>' +
+  '<div class="readout"><span class="what">U_CE wird durchgefahren</span><span>' +
+    '<span class="val" id="s-uce">0 V</span><span class="tag">von null bis zur Betriebsspannung</span></span></div>' +
+  '<div class="readout"><span class="what">gemessener Kollektorstrom</span><span>' +
+    '<span class="val" id="s-ic">0 A</span><span class="tag" id="s-beta"></span></span></div>' +
+  '<p class="work" id="s-note"></p>';
+
+/* Der Plotter der Simulation sitzt im zusatz, nicht im Standard-Canvas */
+SimTrans.bau = function(){
+  SimTrans.cv = document.getElementById("tr-lcd").querySelectorAll("canvas")[1] ||
+                document.getElementById("tr-lcd").querySelector("canvas");
+};
+
+document.getElementById("tr-mode-kennlinie").addEventListener("click", function(){ setTrMode("kennlinie"); });
+document.getElementById("tr-mode-punkt").addEventListener("click", function(){ setTrMode("punkt"); });
+["tr-Ub", "tr-Rc", "tr-Rb", "tr-Ust", "tr-beta"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", function(){
+    if(trMode === "punkt") trStatisch();
+  });
+});
+document.getElementById("tr-dim").addEventListener("click", function(){
+  var w = trWerte();
+  if(!w) return;
+  var r = eStep((w.Ust - TR_UBE) / Math.max(w.icSat / 20, 5 * w.icSat / w.beta), "E24", -1);
+  if(r) document.getElementById("tr-Rb").value = String(r).replace(".", ",");
+  if(trMode === "punkt") trStatisch();
+});
+
 /* --- Anbindung ------------------------------------------------------------ */
 
 function simStart(){ Sim.start(SimRC); }
@@ -2965,6 +3271,7 @@ Sim.tabWechsel = function(name){
   if(name === "flanke") Sim.start(SimFlanke);
   else if(name === "spule") Sim.start(SimSpule);
   else if(name === "gleichrichter") Sim.start(SimGleich);
+  else if(name === "transistor"){ if(trMode === "kennlinie") Sim.start(SimTrans); else { Sim.stop(); trStatisch(); } }
   else if(name === "rc" && rcMode === "sim") Sim.start(SimRC);
   else Sim.stop();
 };
