@@ -203,6 +203,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-gleichrichter" aria-controls="panel-gleichrichter" data-tab="gleichrichter" aria-selected="false">Gleichrichter</button>
     <button role="tab" id="tab-halbleiter" aria-controls="panel-halbleiter" data-tab="halbleiter" aria-selected="false">Halbleiter</button>
     <button role="tab" id="tab-transistor" aria-controls="panel-transistor" data-tab="transistor" aria-selected="false">Transistor</button>
+    <button role="tab" id="tab-logik" aria-controls="panel-logik" data-tab="logik" aria-selected="false">Logik</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -867,10 +868,66 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: Logik ============================ -->
+<section class="panel" id="panel-logik" data-tab="logik" role="tabpanel" aria-labelledby="tab-logik" hidden>
+  <h2>CMOS-Logik: Inverter und Leistungsbilanz</h2>
+  <p class="lead">Zwei Transistoren ergeben ein Gatter. Die erste Ansicht f&auml;hrt den Eingang langsam durch und zeichnet dabei auf, was der Ausgang macht &ndash; samt des Stroms, der nur w&auml;hrend des Umschaltens flie&szlig;t. Die zweite rechnet aus, was daraus f&uuml;r einen ganzen Chip folgt.</p>
+
+  <div class="split">
+    <div>
+      <div class="seg" role="group" aria-label="Ansicht">
+        <button type="button" class="ghost on" id="lg-mode-inverter">Inverter</button>
+        <button type="button" class="ghost" id="lg-mode-leistung">Leistung</button>
+      </div>
+
+      <div id="lg-invfeld">
+        <div class="field">
+          <label for="lg-vdd">Betriebsspannung in Volt</label>
+          <input id="lg-vdd" type="text" inputmode="decimal" autocomplete="off" value="3,3">
+        </div>
+        <div class="field">
+          <label for="lg-speed">Tempo des Durchlaufs</label>
+          <select id="lg-speed">
+            <option value="1">schnell</option>
+            <option value="3" selected>normal</option>
+            <option value="8">langsam</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="lg-leistfeld" hidden>
+        <div class="field">
+          <label for="lg-C">wirksame Schaltkapazit&auml;t in Farad</label>
+          <input id="lg-C" type="text" inputmode="decimal" autocomplete="off" value="25n">
+          <div class="note">Alle Knoten zusammen, die je Takt tats&auml;chlich umgeladen werden.</div>
+        </div>
+        <div class="field">
+          <label for="lg-f">Takt in Hertz</label>
+          <input id="lg-f" type="text" inputmode="decimal" autocomplete="off" value="4G">
+        </div>
+        <div class="field">
+          <label for="lg-V">Kernspannung in Volt</label>
+          <input id="lg-V" type="text" inputmode="decimal" autocomplete="off" value="1,0">
+        </div>
+        <div class="field">
+          <label for="lg-leck">Leckstrom gesamt in Ampere</label>
+          <input id="lg-leck" type="text" inputmode="decimal" autocomplete="off" value="8">
+        </div>
+        <div class="field">
+          <label for="lg-budget">Leistungsbudget in Watt</label>
+          <input id="lg-budget" type="text" inputmode="decimal" autocomplete="off" value="125">
+        </div>
+      </div>
+    </div>
+
+    <div class="lcd" id="lg-lcd" aria-live="off"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: MOSFET und Schaltregler, Netzwerkanalyse mit Matrix.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Schwingkreis, Verstärker, Netzwerkanalyse mit Matrix.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -3255,6 +3312,220 @@ document.getElementById("tr-dim").addEventListener("click", function(){
   if(trMode === "punkt") trStatisch();
 });
 
+/* ============================================================================
+   Reiter: Logik - CMOS-Inverter und Leistungsbilanz
+   ----------------------------------------------------------------------------
+   MOSFET-Modell (quadratische Naeherung mit Kanallaengenmodulation):
+     gesperrt:   U_GS < U_th                     -> I = 0
+     Saettigung: U_DS >= U_GS - U_th             -> I = k/2 (U_GS-U_th)^2 (1+lambda U_DS)
+     linear:     sonst                           -> I = k ((U_GS-U_th) U_DS - U_DS^2/2)
+   Der Ausgangspegel wird NICHT gesetzt, sondern als der Punkt gesucht, an dem
+   der Strom durch den n-Kanal gleich dem durch den p-Kanal ist.
+   ========================================================================== */
+
+var LG_K = 2e-4, LG_LAMBDA = 0.05;
+
+function lgStrom(ugs, uds, uth, k){
+  if(ugs <= uth || uds <= 0) return 0;
+  var ueff = ugs - uth;
+  if(uds >= ueff) return k / 2 * ueff * ueff * (1 + LG_LAMBDA * uds);
+  return k * (ueff * uds - uds * uds / 2);
+}
+
+/* Ausgangsspannung: dort, wo n-Kanal und p-Kanal denselben Strom fuehren */
+function lgAusgang(w, uin){
+  var lo = 0, hi = w.vdd, m, k;
+  for(k = 0; k < 50; k++){
+    m = (lo + hi) / 2;
+    var inn = lgStrom(uin, m, w.uth, LG_K);
+    var ip = lgStrom(w.vdd - uin, w.vdd - m, w.uth, LG_K);
+    if(inn - ip < 0) lo = m; else hi = m;
+  }
+  m = (lo + hi) / 2;
+  return {uout:m, i:lgStrom(uin, m, w.uth, LG_K)};
+}
+
+function lgWerte(){
+  var vdd = parseValue(document.getElementById("lg-vdd").value);
+  if(vdd === null || isNaN(vdd) || vdd <= 0) return null;
+  return {vdd:vdd, uth:0.3 * vdd, basis:1};
+}
+
+/* ------------------------------------------------- Ansicht 1: der Inverter */
+
+var SimLogik = {
+  lcd:"lg-lcd",
+  fehltext:"Betriebsspannung eintragen.",
+  uin:0, richtung:1, kurve:[],
+
+  svg:'<svg viewBox="0 0 300 150" role="img" aria-label="CMOS-Inverter">' +
+    '<text id="s-vddlabel" x="118" y="14" font-size="9" fill="currentColor" opacity="0.8">VDD</text>' +
+    '<line x1="140" y1="18" x2="140" y2="34" stroke="currentColor" stroke-width="2"/>' +
+    /* p-Kanal oben */
+    '<line x1="140" y1="34" x2="140" y2="42" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="128" y="42" width="24" height="22" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text x="158" y="57" font-size="8" fill="currentColor" opacity="0.75">p-Kanal</text>' +
+    '<circle cx="118" cy="53" r="3" fill="none" stroke="currentColor" stroke-width="1.4"/>' +
+    '<line x1="121" y1="53" x2="128" y2="53" stroke="currentColor" stroke-width="1.6"/>' +
+    '<line x1="140" y1="64" x2="140" y2="82" stroke="currentColor" stroke-width="2"/>' +
+    /* Ausgang */
+    '<line x1="140" y1="74" x2="212" y2="74" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="216" y="70" font-size="9" fill="currentColor">Ausgang</text>' +
+    '<line x1="212" y1="74" x2="212" y2="92" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="200" y1="92" x2="224" y2="92" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="200" y1="100" x2="224" y2="100" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="212" y1="100" x2="212" y2="124" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="228" y="100" font-size="8" fill="currentColor" opacity="0.75">C_Last</text>' +
+    /* n-Kanal unten */
+    '<rect x="128" y="82" width="24" height="22" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/>' +
+    '<text x="158" y="97" font-size="8" fill="currentColor" opacity="0.75">n-Kanal</text>' +
+    '<line x1="121" y1="93" x2="128" y2="93" stroke="currentColor" stroke-width="1.6"/>' +
+    '<line x1="140" y1="104" x2="140" y2="124" stroke="currentColor" stroke-width="2"/>' +
+    /* Eingang */
+    '<line x1="80" y1="53" x2="118" y2="53" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="80" y1="93" x2="121" y2="93" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="80" y1="53" x2="80" y2="93" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="52" y1="73" x2="80" y2="73" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="14" y="70" font-size="9" fill="currentColor">Eingang</text>' +
+    /* Masse */
+    '<line x1="140" y1="124" x2="212" y2="124" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="172" y1="124" x2="172" y2="132" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="164" y1="132" x2="180" y2="132" stroke="currentColor" stroke-width="2"/>' +
+    /* Querstrom sichtbar */
+    '<path id="s-flow" d="M140 34 L140 124" fill="none" stroke="currentColor" ' +
+      'stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity="0"/>' +
+  "</svg>",
+
+  zusatz:
+    '<canvas class="sim-plot" style="height:150px"></canvas>' +
+    '<div class="readout"><span class="what">Eingang</span><span>' +
+      '<span class="val" id="s-uin">0 V</span><span class="tag" id="s-inlvl"></span></span></div>' +
+    '<div class="readout"><span class="what">Ausgang</span><span>' +
+      '<span class="val" id="s-uout">0 V</span><span class="tag" id="s-outlvl"></span></span></div>' +
+    '<div class="readout"><span class="what">Querstrom</span><span>' +
+      '<span class="val" id="s-iq">0 A</span><span class="tag">flie\u00dft nur w\u00e4hrend des Umschaltens</span></span></div>' +
+    '<p class="work" id="s-note"></p>',
+
+  bau:function(){ SimLogik.cv = document.getElementById("lg-lcd").querySelector("canvas"); },
+  tempo:function(){ return parseFloat(document.getElementById("lg-speed").value); },
+  werte:lgWerte,
+  leeren:function(){ SimLogik.uin = 0; SimLogik.richtung = 1; SimLogik.kurve = []; },
+
+  schritt:function(w, dt){
+    var s = SimLogik;
+    s.uin += s.richtung * dt * w.vdd;
+    if(s.uin > w.vdd){ s.uin = w.vdd; s.richtung = -1; }
+    if(s.uin < 0){ s.uin = 0; s.richtung = 1; s.kurve = []; }
+    var r = lgAusgang(w, s.uin);
+    s.uout = r.uout; s.iq = r.i;
+    if(s.richtung > 0) s.kurve.push([s.uin, r.uout, r.i]);
+  },
+
+  zeichne:function(w, dtReal){
+    var s = SimLogik, e = s.el;
+    var imax = LG_K / 2 * Math.pow(w.vdd / 2 - w.uth, 2) * 1.3 + 1e-12;
+    e.uin.textContent = fmt(s.uin, "V");
+    e.uout.textContent = fmt(s.uout, "V");
+    e.iq.textContent = fmt(s.iq, "A");
+    e.inlvl.textContent = s.uin < w.vdd * 0.3 ? "wird als 0 gelesen"
+                        : (s.uin > w.vdd * 0.7 ? "wird als 1 gelesen" : "verbotener Bereich");
+    e.outlvl.textContent = s.uout < w.vdd * 0.3 ? "sauberes 0"
+                         : (s.uout > w.vdd * 0.7 ? "sauberes 1" : "unentschieden");
+    e.vddlabel.textContent = fmt(w.vdd, "V");
+    Sim.fluss(s, e.flow, s.iq / imax, 1, dtReal);
+    e.note.textContent =
+      "Der Ausgangspegel wird gesucht, nicht gesetzt: dort, wo beide Transistoren\n" +
+      "denselben Strom f\u00fchren. Schwellspannung " + fmt(w.uth, "V") + " je Kanal." +
+      "\ndurchgezogen: Ausgang \u2013 gestrichelt: Querstrom, Ma\u00dfstab " + fmt(imax, "A");
+
+    var kurven = [
+      {p:s.kurve.map(function(p){ return [p[0], p[2] / imax * w.vdd]; }), dash:true, alpha:0.45},
+      {p:s.kurve.map(function(p){ return [p[0], p[1]]; })}
+    ];
+    Sim.plot(s.cv, {
+      xmax:w.vdd, ymax:w.vdd, yTop:fmt(w.vdd, "V"),
+      hlinien:[{y:w.vdd * 0.7, text:"70 %"}, {y:w.vdd * 0.3, text:"30 %"}],
+      kurven:kurven,
+      punkte:[{x:s.uin, y:s.uout, r:3.5}]
+    });
+  }
+};
+
+/* ------------------------------------------- Ansicht 2: Leistungsbilanz */
+
+function lgLeistung(){
+  var lcd = document.getElementById("lg-lcd");
+  var C = parseValue(document.getElementById("lg-C").value);
+  var f = parseValue(document.getElementById("lg-f").value);
+  var V = parseValue(document.getElementById("lg-V").value);
+  var Il = parseValue(document.getElementById("lg-leck").value);
+  var Pmax = parseValue(document.getElementById("lg-budget").value);
+  if([C, f, V, Il, Pmax].some(function(x){ return x === null || isNaN(x); }) || C <= 0 || V <= 0){
+    lcd.innerHTML = '<p class="empty">Schaltkapazit\u00e4t, Takt, Spannung und Leckstrom eintragen.</p>';
+    return;
+  }
+  var pdyn = C * V * V * f, pstat = Il * V, ges = pdyn + pstat;
+  var fmoegl = (Pmax - pstat) / (C * V * V);
+
+  var html = '<canvas class="sim-plot" style="height:140px"></canvas>';
+  html += '<div class="readout"><span class="what">Schaltleistung</span><span><span class="val">' +
+          fmt(pdyn, "W") + '</span><span class="tag">C \u00b7 U\u00b2 \u00b7 f \u2013 nur beim Umladen</span></span></div>';
+  html += '<div class="readout"><span class="what">Leckleistung</span><span><span class="val">' +
+          fmt(pstat, "W") + '</span><span class="tag">flie\u00dft auch im Leerlauf</span></span></div>';
+  html += '<div class="readout"><span class="what">zusammen</span><span><span class="val">' +
+          fmt(ges, "W") + '</span><span class="tag">' + (pstat / ges * 100).toFixed(0) + " % davon Leckstrom</span></span></div>";
+  html += '<div class="readout given"><span class="what">m\u00f6glicher Takt im Budget</span><span><span class="val">' +
+          (fmoegl > 0 ? fmt(fmoegl, "Hz") : "\u2013") + '</span><span class="tag">bei ' + fmt(Pmax, "W") +
+          " und " + fmt(V, "V") + "</span></span></div>";
+
+  html += '<div class="hint"><table class="eserie"><tr><th>Spannung</th><th class="num">Schalten</th>' +
+          '<th class="num">Leckstrom</th><th class="num">gesamt</th></tr>';
+  [0.7, 0.85, 1.0, 1.2, 1.4].forEach(function(v){
+    var pd = C * v * v * f, ps = Il * v;
+    html += "<tr" + (Math.abs(v - V) < 0.03 ? ' class="exact"' : "") + "><td>" + v.toFixed(2).replace(".", ",") +
+            ' V</td><td class="num">' + fmt(pd, "W") + '</td><td class="num">' + fmt(ps, "W") +
+            '</td><td class="num">' + fmt(pd + ps, "W") + "</td></tr>";
+  });
+  html += "</table><p style=\"margin:10px 0 0\">Das Quadrat in der Formel macht die Spannung zum st\u00e4rksten Hebel \u2013 und der Leckstrom setzt die Untergrenze, ab der Absenken nichts mehr bringt.</p></div>";
+  html += '<p class="work">P = C \u00b7 U\u00b2 \u00b7 f + I_Leck \u00b7 U\n  = ' + fmt(C, "F") + " \u00b7 (" + fmt(V, "V") +
+          ")\u00b2 \u00b7 " + fmt(f, "Hz") + " + " + fmt(Il, "A") + " \u00b7 " + fmt(V, "V") + "\n  = " + fmt(ges, "W") + "</p>";
+  lcd.innerHTML = html;
+
+  var p1 = [], p2 = [], i, v, ymax = 0;
+  for(i = 0; i <= 60; i++){
+    v = 0.5 + i * 0.02;
+    var tot = C * v * v * f + Il * v;
+    if(tot > ymax) ymax = tot;
+    p1.push([v - 0.5, tot]); p2.push([v - 0.5, Il * v]);
+  }
+  Sim.plot(lcd.querySelector("canvas"), {
+    xmax:1.2, ymax:ymax * 1.05, yTop:fmt(ymax, "W"),
+    marken:[{x:V - 0.5, text:fmt(V, "V")}],
+    kurven:[{p:p2, dash:true, alpha:0.5}, {p:p1}]
+  });
+}
+
+/* --- Umschaltung ---------------------------------------------------------- */
+
+var lgMode = "inverter";
+
+function setLgMode(m){
+  lgMode = m;
+  document.getElementById("lg-invfeld").hidden = m !== "inverter";
+  document.getElementById("lg-leistfeld").hidden = m !== "leistung";
+  document.getElementById("lg-mode-inverter").classList.toggle("on", m === "inverter");
+  document.getElementById("lg-mode-leistung").classList.toggle("on", m === "leistung");
+  if(m === "inverter"){ SimLogik.leeren(); Sim.start(SimLogik); }
+  else { Sim.stop(); lgLeistung(); }
+}
+
+document.getElementById("lg-mode-inverter").addEventListener("click", function(){ setLgMode("inverter"); });
+document.getElementById("lg-mode-leistung").addEventListener("click", function(){ setLgMode("leistung"); });
+["lg-C", "lg-f", "lg-V", "lg-leck", "lg-budget"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", function(){ if(lgMode === "leistung") lgLeistung(); });
+});
+document.getElementById("lg-vdd").addEventListener("input", function(){ SimLogik.leeren(); });
+
 /* --- Anbindung ------------------------------------------------------------ */
 
 function simStart(){ Sim.start(SimRC); }
@@ -3271,6 +3542,7 @@ Sim.tabWechsel = function(name){
   if(name === "flanke") Sim.start(SimFlanke);
   else if(name === "spule") Sim.start(SimSpule);
   else if(name === "gleichrichter") Sim.start(SimGleich);
+  else if(name === "logik"){ if(lgMode === "inverter") Sim.start(SimLogik); else { Sim.stop(); lgLeistung(); } }
   else if(name === "transistor"){ if(trMode === "kennlinie") Sim.start(SimTrans); else { Sim.stop(); trStatisch(); } }
   else if(name === "rc" && rcMode === "sim") Sim.start(SimRC);
   else Sim.stop();
