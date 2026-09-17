@@ -50,6 +50,26 @@
   .dfname{font-family:var(--mono); font-weight:bold; width:2.6em}
   .disk{font-family:var(--mono); font-size:.82rem; padding:3px 8px; border-radius:3px; background:#1a2a44; color:var(--matt)}
   .disk.on{background:var(--akzent); color:#000}
+  .disk[draggable=true]{cursor:grab}
+  .drive.over{outline:2px dashed var(--akzent); outline-offset:2px}
+
+  /* Diskettenbox: Ablage fuer beliebig viele ADFs, per Ziehen in die Laufwerke */
+  .diskbox{width:100%; border:1px dashed var(--kante); padding:8px; margin-top:4px}
+  .diskbox.over{border-color:var(--akzent); background:#0f1d33}
+  .boxhead{display:flex; flex-wrap:wrap; gap:8px; align-items:center}
+  .boxtitle{font-weight:600}
+  .boxcount{font-family:var(--mono); font-size:.82rem; color:var(--matt)}
+  .boxlist{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; min-height:1.6em}
+  .boxlist:empty::before{content:'leer – ADF-Dateien hierher ziehen oder »In die Box legen«'; font-size:.8rem; color:var(--matt)}
+  .boxdisk{display:flex; align-items:center; gap:6px; background:#1a2a44; border:1px solid var(--kante);
+           padding:3px 6px 3px 8px; font-family:var(--mono); font-size:.82rem; cursor:grab; user-select:none}
+  .boxdisk:hover{border-color:var(--akzent)}
+  .boxdisk.dragging{opacity:.4}
+  .boxdisk .ico{display:inline-block; width:12px; height:12px; background:var(--matt); border-radius:1px;
+                box-shadow:inset 0 -4px 0 #0a1526, inset 3px 0 0 #1a2a44; flex:none}
+  .boxdisk .nm{color:var(--schrift)}
+  .boxdisk .sz{color:var(--matt)}
+  .boxdisk button{padding:0 6px; font-size:.8rem; line-height:1.5}
   .status{margin:10px 0 0; font-family:var(--mono); font-size:.82rem; color:var(--matt)}
   .log{margin:4px 0 0; font-size:.86rem; color:var(--akzent); min-height:1.4em}
 
@@ -101,6 +121,7 @@
       <button id="btnStep100">100 Schritte</button>
       <button id="btnFrame">Ein Bild</button>
       <label class="file">ROM laden<input type="file" id="romFile" accept=".rom"></label>
+      <button id="btnSaveRom" title="Das geladene ROM als Datei sichern – z. B. aus einem Schnappschuss oder einer Seite mit Zustand">ROM speichern</button>
       <label>Chip-RAM
         <select id="chipSize">
           <option value="512">512 KB</option>
@@ -154,6 +175,15 @@
       <span class="hint">Häkchen = Laufwerk angeschlossen; wirkt beim nächsten Zurücksetzen. Manche Spiele vertragen keine vier Laufwerke.</span>
       <label><input type="checkbox" id="wprot"> Schreibschutz</label>
       <label><input type="checkbox" id="turbo"> Turbo-Diskette</label>
+      <div class="diskbox" id="diskBox">
+        <div class="boxhead">
+          <span class="boxtitle">Diskettenbox</span><span class="boxcount" id="boxCount"></span>
+          <label class="file">In die Box legen<input type="file" id="boxFiles" accept=".adf" multiple></label>
+          <button id="btnBoxClear">Box leeren</button>
+          <span class="hint">Diskette auf ein Laufwerk ziehen (oder anklicken: freies Laufwerk). »Auswerfen« legt sie zurück in die Box. Doppelklick benennt um.</span>
+        </div>
+        <div class="boxlist" id="boxList"></div>
+      </div>
     </div>
     <div class="controls">
       <label><input type="checkbox" id="joyKeys" checked> Ziffernblock = Joystick, Feuer: 0 oder Enter</label>
@@ -178,7 +208,7 @@
     <div class="controls">
       <button id="btnSaveSnap">Zustand sichern</button>
       <label class="file">Zustand laden<input type="file" id="snapFile" accept=".a500"></label>
-      <span class="hint">Ein Schnappschuss enthält Speicher, Chipsatz, ROM, Diskette und Einstellungen; Datei .a500</span>
+      <span class="hint">Ein Schnappschuss enthält Speicher, Chipsatz, ROM, Disketten (Laufwerke und Box) und Einstellungen; Datei .a500</span>
       <button id="btnSavePage">Seite mit Zustand sichern</button>
       <button id="btnFactory">Alles zurücksetzen</button>
       <span class="hint">Die Seite speichert nichts im Browser: nach dem Schließen oder Neuladen ist alles weg. Zum Aufbewahren dienen Schnappschuss und »Seite mit Zustand sichern«.</span>
@@ -1868,6 +1898,7 @@ function makeMachine() {
     romMask = rom.length - 1;
   };
   M.hasROM = () => rom !== null;
+  M.getROM = () => rom;
   M.romSize = () => (rom ? rom.length : 0);
   M.chipRAM = () => chip;
 
@@ -3403,6 +3434,21 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     f.arrayBuffer().then((b) => loadROMBuffer(b, f.name));
     e.target.value = '';
   });
+  // Das geladene ROM wieder als Datei herausgeben. Ein 256-KB-ROM liegt intern
+  // verdoppelt im Speicher; sind beide Haelften gleich, wird nur eine gesichert.
+  $('btnSaveRom').onclick = () => {
+    let rom = machine.getROM();
+    if (!rom) { log('Kein ROM geladen – nichts zu speichern.'); return; }
+    const half = rom.length >> 1;
+    let same = rom.length === 512 * 1024;
+    for (let i = 0; same && i < half; i++) if (rom[i] !== rom[half + i]) same = false;
+    if (same) rom = rom.subarray(0, half);
+    let name = (romName || '').replace(/\s*\(\d+ KB\)$/, '').trim();
+    if (!name || name === 'ROM aus Schnappschuss') name = 'kickstart.rom';
+    if (!/\.rom$/i.test(name)) name += '.rom';
+    download(new Blob([rom], { type: 'application/octet-stream' }), name);
+    log(`ROM gespeichert: ${name} (${(rom.length / 1024) | 0} KB).`);
+  };
 
   // Nichts wird im Browser gespeichert: Beim Laden der Seite ist alles leer.
   // Reste einer frueheren Version, die IndexedDB benutzt hat, werden entfernt.
@@ -3440,9 +3486,136 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   $('btnNewDisk').onclick = () => {
     const name = (prompt('Name der neuen Diskette', 'Leer') || '').trim();
     if (!name) return;
-    const unit = freeDrive();
-    insertADF(unit, makeEmptyADF(name).buffer, name + '.adf');
+    if (allDrivesFull()) { boxAdd(name + '.adf', makeEmptyADF(name)); return; }
+    insertADF(freeDrive(), makeEmptyADF(name).buffer, name + '.adf');
   };
+
+  // --- Diskettenbox -----------------------------------------------------------
+  // Ablage fuer beliebig viele ADFs. Eine Diskette ist entweder in der Box oder
+  // in einem Laufwerk, nie an beiden Orten: Ziehen verschiebt, Auswerfen legt
+  // sie (samt Aenderungen) zurueck. Die Box wandert mit in den Schnappschuss.
+  const diskBox = [];              // { id, name, data: Uint8Array }
+  let boxNextId = 1;
+  const DRAG_BOX = 'text/x-a500-box', DRAG_DRIVE = 'text/x-a500-drive';
+  const kb = (n) => `${Math.round(n / 1024)} KB`;
+  function boxAdd(name, data, quiet) {
+    const entry = { id: boxNextId++, name: name || 'diskette.adf', data: new Uint8Array(data) };
+    diskBox.push(entry);
+    if (!quiet) log(`Box: ${entry.name} abgelegt.`);
+    renderBox();
+    return entry;
+  }
+  function boxTake(id) {
+    const i = diskBox.findIndex((d) => d.id === id);
+    return i < 0 ? null : diskBox.splice(i, 1)[0];
+  }
+  // Diskette aus dem Laufwerk in die Box legen (mit dem aktuellen Inhalt)
+  function driveToBox(unit, quiet) {
+    const st = machine.floppy.state(unit), adf = machine.floppy.getADF(unit);
+    if (!adf) return null;
+    const entry = boxAdd(st.name, adf, true);
+    machine.floppy.eject(unit);
+    if (!quiet) log(`DF${unit}: ${entry.name} ausgeworfen und in die Box gelegt.`);
+    updateDisk();
+    return entry;
+  }
+  // Diskette aus der Box ins Laufwerk; eine dort liegende wandert in die Box
+  function boxToDrive(id, unit) {
+    const entry = boxTake(id);
+    if (!entry) return;
+    if (machine.floppy.getADF(unit)) driveToBox(unit, true);
+    insertADF(unit, entry.data.buffer, entry.name);
+    renderBox();
+  }
+  function renderBox() {
+    const list = $('boxList');
+    list.innerHTML = '';
+    for (const d of diskBox) {
+      const el = document.createElement('div');
+      el.className = 'boxdisk'; el.draggable = true; el.dataset.id = d.id;
+      el.title = 'Auf ein Laufwerk ziehen · Klick: ins freie Laufwerk · Doppelklick: umbenennen';
+      const ico = document.createElement('span'); ico.className = 'ico';
+      const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = d.name;
+      const sz = document.createElement('span'); sz.className = 'sz'; sz.textContent = kb(d.data.length);
+      const bSave = document.createElement('button'); bSave.textContent = '⤓'; bSave.title = 'Als Datei speichern';
+      const bDel = document.createElement('button'); bDel.textContent = '×'; bDel.title = 'Aus der Box entfernen';
+      el.append(ico, nm, sz, bSave, bDel);
+      el.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData(DRAG_BOX, String(d.id)); e.dataTransfer.effectAllowed = 'move';
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', () => el.classList.remove('dragging'));
+      el.addEventListener('click', (e) => { if (e.target.tagName === 'BUTTON') return; boxToDrive(d.id, freeDrive()); });
+      el.addEventListener('dblclick', (e) => {
+        if (e.target.tagName === 'BUTTON') return;
+        const n = (prompt('Neuer Name', d.name) || '').trim();
+        if (n) { d.name = /\.adf$/i.test(n) ? n : n + '.adf'; renderBox(); }
+      });
+      bSave.onclick = (e) => { e.stopPropagation(); download(new Blob([d.data], { type: 'application/octet-stream' }), d.name); };
+      bDel.onclick = (e) => { e.stopPropagation(); boxTake(d.id); log(`Box: ${d.name} entfernt.`); renderBox(); };
+      list.appendChild(el);
+    }
+    $('boxCount').textContent = diskBox.length ? `${diskBox.length} · ${kb(diskBox.reduce((n, d) => n + d.data.length, 0))}` : '';
+  }
+  $('boxFiles').addEventListener('change', async (e) => {
+    for (const f of [...e.target.files]) if (/\.adf$/i.test(f.name)) boxAdd(f.name, await f.arrayBuffer());
+    e.target.value = '';
+  });
+  $('btnBoxClear').onclick = () => {
+    if (!diskBox.length) return;
+    if (!confirm(`Alle ${diskBox.length} Disketten aus der Box entfernen?`)) return;
+    diskBox.length = 0; renderBox(); log('Box geleert.');
+  };
+  // Ziel Box: Diskette aus einem Laufwerk oder ADF-Dateien vom Rechner
+  {
+    const box = $('diskBox');
+    const wants = (e) => e.dataTransfer.types.includes(DRAG_DRIVE) || e.dataTransfer.types.includes('Files');
+    box.addEventListener('dragover', (e) => { if (!wants(e)) return; e.preventDefault(); e.stopPropagation(); box.classList.add('over'); });
+    box.addEventListener('dragleave', () => box.classList.remove('over'));
+    box.addEventListener('drop', async (e) => {
+      box.classList.remove('over');
+      const fromDrive = e.dataTransfer.getData(DRAG_DRIVE);
+      if (fromDrive !== '') { e.preventDefault(); e.stopPropagation(); driveToBox(parseInt(fromDrive, 10)); return; }
+      const adfs = [...e.dataTransfer.files].filter((x) => /\.adf$/i.test(x.name));
+      if (!adfs.length) return;                                  // andere Dateien: an die Seite weiterreichen
+      e.preventDefault(); e.stopPropagation();
+      for (const x of adfs) boxAdd(x.name, await x.arrayBuffer());
+    });
+  }
+  // Ziel Laufwerk: Diskette aus der Box, aus einem anderen Laufwerk oder eine ADF-Datei
+  for (const row of document.querySelectorAll('.drive')) {
+    const unit = parseInt(row.querySelector('.drvOn').dataset.unit, 10);
+    row.addEventListener('dragover', (e) => {
+      const t = e.dataTransfer.types;
+      if (!(t.includes(DRAG_BOX) || t.includes(DRAG_DRIVE) || t.includes('Files'))) return;
+      e.preventDefault(); e.stopPropagation(); row.classList.add('over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('over'));
+    row.addEventListener('drop', async (e) => {
+      row.classList.remove('over');
+      const fromBox = e.dataTransfer.getData(DRAG_BOX), fromDrive = e.dataTransfer.getData(DRAG_DRIVE);
+      if (fromBox !== '') { e.preventDefault(); e.stopPropagation(); boxToDrive(parseInt(fromBox, 10), unit); return; }
+      if (fromDrive !== '') {
+        e.preventDefault(); e.stopPropagation();
+        const src = parseInt(fromDrive, 10);
+        if (src === unit) return;
+        const moving = driveToBox(src, true);
+        if (moving) boxToDrive(moving.id, unit);
+        return;
+      }
+      const f = [...e.dataTransfer.files].find((x) => /\.adf$/i.test(x.name));
+      if (!f) return;
+      e.preventDefault(); e.stopPropagation();
+      if (machine.floppy.getADF(unit)) driveToBox(unit, true);
+      insertADF(unit, await f.arrayBuffer(), f.name);
+    });
+    // Quelle Laufwerk: die Anzeige der eingelegten Diskette laesst sich wegziehen
+    const disk = row.querySelector('.disk');
+    disk.addEventListener('dragstart', (e) => {
+      if (!machine.floppy.getADF(unit)) { e.preventDefault(); return; }
+      e.dataTransfer.setData(DRAG_DRIVE, String(unit)); e.dataTransfer.effectAllowed = 'move';
+    });
+  }
 
   // --- Disketten ------------------------------------------------------------
   function insertADF(unit, buf, name) {
@@ -3459,6 +3632,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     for (let u = 0; u < 4; u++) if (!machine.floppy.state(u).name) return u;
     return 0;
   }
+  const allDrivesFull = () => [0, 1, 2, 3].every((u) => !!machine.floppy.state(u).name);
   function updateDisk() {
     for (let u = 0; u < 4; u++) {
       const st = machine.floppy.state(u);
@@ -3467,6 +3641,8 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
         ? `${st.name} · Zyl ${st.cyl} · Seite ${st.side} · Motor ${st.motor ? 'an' : 'aus'}${st.dirty ? ' · geändert' : ''}`
         : 'keine Diskette';
       el.classList.toggle('on', st.motor && !!st.name);
+      el.draggable = !!st.name;
+      el.title = st.name ? 'In die Box oder auf ein anderes Laufwerk ziehen' : '';
       const chk = document.querySelector(`.drvOn[data-unit="${u}"]`);
       if (chk) chk.checked = st.present;
     }
@@ -3488,7 +3664,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     });
   }
   for (const btn of document.querySelectorAll('.btnEject')) {
-    btn.onclick = () => { const u = parseInt(btn.dataset.unit, 10); machine.floppy.eject(u); log(`DF${u}: Diskette ausgeworfen.`); updateDisk(); };
+    btn.onclick = () => { const u = parseInt(btn.dataset.unit, 10); if (!driveToBox(u)) log(`DF${u}: keine Diskette eingelegt.`); };
   }
   for (const btn of document.querySelectorAll('.btnSaveADF')) {
     btn.onclick = () => {
@@ -3569,6 +3745,8 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
       const b = blobs[name]; if (!b) continue;
       list.push({ name, length: b.length }); parts.push(b);
     }
+    // Diskettenbox: jede Diskette als eigener Block box0, box1, ...
+    st.box = diskBox.map((d, i) => { list.push({ name: 'box' + i, length: d.data.length }); parts.push(d.data); return d.name; });
     st.blobList = list;
     st.ui = { chipSize: $('chipSize').value, slowRam: $('slowRam').checked, speed: $('speed').value, scale: $('scale').value,
               turbo: $('turbo').checked, wprot: $('wprot').checked, joyKeys: $('joyKeys').checked, joyPort: machine.joyPort,
@@ -3664,6 +3842,9 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     $('dmaContention').checked = ui.dmaContention !== false; machine.dmaContention = ui.dmaContention !== false;
     if (ui.keyMode) $('keyMode').value = ui.keyMode;
     machine.setState(st, blobs);
+    diskBox.length = 0;
+    (st.box || []).forEach((name, i) => { if (blobs['box' + i]) boxAdd(name, blobs['box' + i], true); });
+    renderBox();
     romName = ui.romName || 'ROM aus Schnappschuss';
     draw(); refreshPanels(); updateStatus(); updateDisk();
     log('Zustand geladen – »Starten« setzt genau dort fort.');
@@ -3684,9 +3865,14 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     // Testdatei an der Endung erkennen; Namen wie ADD_l_json.gz zaehlen mit
     if (/\.(json|gz)$/i.test(f.name)) { runTestFiles(e.dataTransfer.files); return; }
     if (/\.adf$/i.test(f.name)) {
-      // mehrere ADFs auf einmal: der Reihe nach in die freien Laufwerke
+      // mehrere ADFs auf einmal: der Reihe nach in die freien Laufwerke, der Rest in die Box
       const adfs = [...e.dataTransfer.files].filter((x) => /\.adf$/i.test(x.name));
-      (async () => { for (const x of adfs) insertADF(freeDrive(), await x.arrayBuffer(), x.name); })();
+      (async () => {
+        for (const x of adfs) {
+          if (allDrivesFull()) boxAdd(x.name, await x.arrayBuffer());
+          else insertADF(freeDrive(), await x.arrayBuffer(), x.name);
+        }
+      })();
       return;
     }
     if (/\.a500$/i.test(f.name)) { f.arrayBuffer().then(loadSnapshot); return; }
@@ -3999,9 +4185,10 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   // Alles zuruecksetzen: Disketten raus, ROM weg, Einstellungen auf Standard,
   // eingebetteter Zustand aus dem Dokument entfernt. Die Datei auf der Platte bleibt unveraendert.
   $('btnFactory').onclick = () => {
-    if (!confirm('Wirklich alles zurücksetzen? ROM, Disketten und Einstellungen werden verworfen.')) return;
+    if (!confirm('Wirklich alles zurücksetzen? ROM, Disketten (auch die Box) und Einstellungen werden verworfen.')) return;
     setRunning(false);
     for (let u = 0; u < 4; u++) { machine.floppy.eject(u); machine.floppy.setPresent(u, u < 2); }
+    diskBox.length = 0; renderBox();
     machine.unloadROM(); romName = null;
     const auto = document.getElementById('autosnap');
     if (auto) auto.remove();
@@ -4017,7 +4204,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     log('Zurückgesetzt: kein ROM, keine Disketten, Standardeinstellungen. Eine geöffnete Datei mit Zustand lädt ihn beim nächsten Öffnen wieder – »Seite mit Zustand sichern« liefert jetzt eine leere Seite.');
   };
   // Fuer Tests und die Browser-Konsole
-  window.amiga = { machine, cpu, loadROMBuffer, insertADF, setRunning, buildPageWithState, get running() { return running; } };
+  window.amiga = { machine, cpu, loadROMBuffer, insertADF, diskBox, boxAdd, boxToDrive, driveToBox, setRunning, buildPageWithState, get running() { return running; } };
   // Ton darf erst nach einer Nutzeraktion starten: erster Klick irgendwo genuegt
   document.addEventListener('click', () => { if (running) { startAudio(); if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume(); } });
 })();
