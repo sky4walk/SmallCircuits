@@ -187,6 +187,11 @@
     </div>
     <div class="controls">
       <label><input type="checkbox" id="joyKeys" checked> Ziffernblock = Joystick, Feuer: 0 oder Enter</label>
+      <label>Gamepad
+        <select id="gamepad">
+          <option value="">keines</option>
+        </select>
+      </label>
       <label>Joystick-Port
         <select id="joyPort">
           <option value="2">Port 2 (Maus in Port 1)</option>
@@ -277,7 +282,7 @@
     <li>Die restlichen 0,4 % sind Adressfehler auf ungeraden Adressen, vor allem <code>LINK A7</code>. In der Praxis ist das die Guru Meditation, kein laufender Code.</li>
     <li>Mit eingeschaltetem Zyklenvergleich 96,9 %. Ohne Adressfehler-Fälle sind es 99,3 %; die Division rechnet mit dem datenabhängigen Timing des 68000, und <code>ADDQ.l</code> auf ein Adressregister braucht die hardwaregemessenen 6 statt der 8 Zyklen aus dem Handbuch. Bei einem Adressfehler wird der Zyklenstand vor dem Fehler aus den abgeschlossenen Zugriffen zusammengerechnet – exakt wird das erst mit der buszyklusgenauen Abrechnung aus Etappe 5.</li>
     <li>Speicherkarte mit OVL-Umschaltung, zwei CIA-8520 mit Timern und TOD, Interruptlogik, Copper, Blitter (Kopiermodus mit Mintermen, Masken, Verschiebung, Füllen) und Denise für Lores und Hires bis sechs Ebenen.</li>
-    <li>Sprites, Tastatur und Maus sind dabei: acht Sprites mit Steuerworten und Farben 17–31, die Tastatur über die serielle Leitung von CIA-A mit der üblichen Invertierung und Rotation, die Maus über die Zähler in JOY0DAT und die Knöpfe an CIA-A PRA und POTGOR. Tastatureingaben gehen an den Emulator, sobald er läuft.</li>
+    <li>Sprites, Tastatur und Maus sind dabei: acht Sprites mit Steuerworten und Farben 17–31, die Tastatur über die serielle Leitung von CIA-A mit der üblichen Invertierung und Rotation, die Maus über die Zähler in JOY0DAT und die Knöpfe an CIA-A PRA und POTGOR. Tastatureingaben gehen an den Emulator, sobald er läuft. Ein angeschlossenes Gamepad lässt sich in der Liste auswählen und steuert den Joystick parallel zum Ziffernblock.</li>
     <li>Noch nicht dabei: HAM, Dual-Playfield, Diskettenlaufwerk über MFM, Audio sowie die zyklusgenaue DMA-Verteilung. Der Blitter arbeitet sofort statt über die Zeit verteilt.</li>
     <li>Mit Kickstart 1.3 läuft exec 34.2 vollständig hoch: exec, expansion, graphics, layers, intuition, mathffp und romboot sind offen, dazu keyboard, gameport, timer, audio, input, console und trackdisk. ExecBase landet bei $676, dem richtigen Wert für einen unerweiterten A500. Das Startbild fehlt noch: Intuition öffnet keinen Bildschirm, die View bleibt ohne ViewPort, und <code>LoadView</code> liest die Copperliste über einen Nullzeiger – der Copper läuft dann über ExecBase und beschreibt unter anderem INTENA.</li>
   </ul>
@@ -3204,6 +3209,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   machine.stopAtFrame = true;
   function frame(now) {
     if (running) {
+      pollPad();
       if (!lastTick) lastTick = now;
       const dt = Math.min(now - lastTick, 100);          // nach Pausen nicht nachholen
       lastTick = now;
@@ -3295,15 +3301,67 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     Numpad7: ['up', 'left'], Numpad9: ['up', 'right'], Numpad1: ['down', 'left'], Numpad3: ['down', 'right'],
     Numpad0: ['fire'], NumpadEnter: ['fire'], Numpad5: [],
   };
+  // Tastatur und Gamepad haben je einen eigenen Zustand; der Joystick des Amiga
+  // ist die Vereinigung beider, damit sich die Quellen nicht gegenseitig loslassen.
+  const keyJoy = { up: false, down: false, left: false, right: false, fire: false };
+  const padJoy = { up: false, down: false, left: false, right: false, fire: false };
+  function clearJoy(j) { for (const k in j) j[k] = false; }
+  function syncJoy() { for (const k in machine.joy) machine.joy[k] = keyJoy[k] || padJoy[k]; }
   function joyKey(e, down) {
     if (!$('joyKeys').checked) return false;
     const dirs = JOYKEYS[e.code];
     if (!dirs) return false;
-    if (e.code === 'Numpad5') { for (const k of ['up', 'down', 'left', 'right']) machine.joy[k] = false; }
-    for (const k of dirs) machine.joy[k] = down;
+    if (e.code === 'Numpad5') { for (const k of ['up', 'down', 'left', 'right']) keyJoy[k] = false; }
+    for (const k of dirs) keyJoy[k] = down;
+    syncJoy();
     e.preventDefault();
     return true;
   }
+
+  // --- Gamepad ------------------------------------------------------------------
+  // Auswahl per Liste; abgefragt wird einmal pro Bild. Steuerkreuz oder linker
+  // Stick (Totzone 0,5) geben die Richtung, die vier Aktionsknoepfe und die
+  // Schultertasten feuern. Nichts davon wird gespeichert – die Kennung eines
+  // Gamepads ist von Sitzung zu Sitzung nicht stabil.
+  let padIndex = -1;
+  function refreshPads() {
+    const sel = $('gamepad');
+    const pads = navigator.getGamepads ? Array.from(navigator.getGamepads()) : [];
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">keines</option>';
+    for (const p of pads) {
+      if (!p) continue;
+      const o = document.createElement('option');
+      o.value = String(p.index);
+      o.textContent = (p.id || 'Gamepad').replace(/\s*\(.*$/, '').slice(0, 40) + ` (#${p.index})`;
+      sel.appendChild(o);
+    }
+    sel.value = Array.from(sel.options).some(o => o.value === cur) ? cur : '';
+    if (sel.value === '') { padIndex = -1; clearJoy(padJoy); syncJoy(); }
+  }
+  function pollPad() {
+    if (padIndex < 0 || !navigator.getGamepads) return;
+    const p = navigator.getGamepads()[padIndex];
+    if (!p || !p.connected) { if (padJoy.up || padJoy.down || padJoy.left || padJoy.right || padJoy.fire) { clearJoy(padJoy); syncJoy(); } return; }
+    const b = (i) => !!(p.buttons[i] && p.buttons[i].pressed);
+    const ax = p.axes[0] || 0, ay = p.axes[1] || 0;
+    const n = {
+      up: b(12) || ay < -0.5, down: b(13) || ay > 0.5,
+      left: b(14) || ax < -0.5, right: b(15) || ax > 0.5,
+      fire: b(0) || b(1) || b(2) || b(3) || b(4) || b(5),
+    };
+    let changed = false;
+    for (const k in n) if (padJoy[k] !== n[k]) { padJoy[k] = n[k]; changed = true; }
+    if (changed) syncJoy();
+  }
+  $('gamepad').onchange = () => {
+    padIndex = $('gamepad').value === '' ? -1 : parseInt($('gamepad').value, 10);
+    clearJoy(padJoy); syncJoy();
+    if (padIndex >= 0) log(`Gamepad #${padIndex} steuert den Joystick in Port ${machine.joyPort}.`);
+  };
+  window.addEventListener('gamepadconnected', (e) => { log(`Gamepad erkannt: ${e.gamepad.id}`); refreshPads(); });
+  window.addEventListener('gamepaddisconnected', () => refreshPads());
+  refreshPads();
   // Umschaltung: 'chars' = Zeichen auf USA-Belegung umsetzen, 'pos' = Tastenposition
   // durchreichen (fuer Amiga-Keymaps wie SetMap d).
   let shiftHeld = { phys: false, synth: false };
@@ -3366,7 +3424,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   });
   window.addEventListener('blur', () => {         // Fensterwechsel: alle Tasten loslassen
     if (shiftHeld.synth) { sendKey(0x60, false); shiftHeld.synth = false; }
-    machine.joy = { up: false, down: false, left: false, right: false, fire: false };
+    clearJoy(keyJoy); clearJoy(padJoy); syncJoy();
     amigaDown.clear();
   });
 
@@ -4195,6 +4253,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     $('chipSize').value = '512'; $('slowRam').checked = false; $('speed').value = '1'; speed = 1;
     $('turbo').checked = false; machine.floppy.turbo = false;
     $('wprot').checked = false; $('joyKeys').checked = true; $('joyPort').value = '2'; machine.joyPort = 2;
+    $('gamepad').value = ''; padIndex = -1; clearJoy(padJoy); clearJoy(keyJoy); syncJoy();
     $('blitTiming').checked = true; machine.blitTiming = true;
     $('dmaContention').checked = true; machine.dmaContention = true;
     $('sound').checked = true; machine.paula.muted = false; $('volume').value = '70';
