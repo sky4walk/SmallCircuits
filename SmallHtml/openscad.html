@@ -281,6 +281,7 @@ main {
     <button id="btn-font">Schrift laden</button>
     <button id="btn-data">Daten laden</button>
     <button id="btn-save">.scad speichern</button>
+    <button id="btn-html" title="Ganze Seite samt Quelltext, Schriften und Daten als neue HTML-Datei speichern (Strg+Umschalt+S)">Als HTML speichern</button>
     <select id="examples"><option value="">Beispiel laden …</option></select>
     <select id="kernel" title="Geometriekern">
       <option value="bsp">Kern: BSP</option>
@@ -334,6 +335,18 @@ main {
 
 <script>
 "use strict";
+// ------------------------------------------------------------
+//  Vorlage für "Als HTML speichern": die Seite, wie sie aus der
+//  Datei kam — festgehalten, bevor initUI() irgendetwas ändert.
+//  Ein eingebettetes Modell steht erst hinter diesem Skript und
+//  ist deshalb hier noch nicht Teil des DOM.
+// ------------------------------------------------------------
+const PAGE_TEMPLATE = (() => {
+  const root = document.documentElement.cloneNode(true);
+  const old = root.querySelector('#scad-embed');
+  if (old) old.remove();
+  return '<!DOCTYPE html>\n' + root.outerHTML;
+})();
 // ============================================================
 //  Lexer
 // ============================================================
@@ -8316,6 +8329,13 @@ let pendingLog = [];
 let currentKernelId = 'bsp';
 let fileName = 'modell.scad';
 
+// Schriften und Datendateien, die geladen wurden — sie wandern
+// beim Speichern als HTML mit in die neue Datei.
+const loadedAssets = new Map();   // 'font:name' / 'data:name' -> { kind, name, file }
+function rememberAsset(kind, file) {
+  loadedAssets.set(kind + ':' + file.name, { kind, name: file.name, file });
+}
+
 function initUI() {
   const editor = $('editor');
   const gutter = $('gutter');
@@ -8389,13 +8409,17 @@ function initUI() {
       e.preventDefault();
       render(false);
     }
-    if (e.key === 's' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveScad(); }
+    if ((e.key === 's' || e.key === 'S') && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (e.shiftKey) saveHTML(); else saveScad();
+    }
   });
 
   $('btn-render').addEventListener('click', () => render(false));
   $('btn-stl').addEventListener('click', saveSTL);
   $('btn-dxf').addEventListener('click', saveDXF);
   $('btn-save').addEventListener('click', saveScad);
+  $('btn-html').addEventListener('click', saveHTML);
   $('btn-open').addEventListener('click', () => $('file-input').click());
   $('btn-font').addEventListener('click', () => $('font-input').click());
   $('btn-data').addEventListener('click', () => $('data-input').click());
@@ -8407,7 +8431,7 @@ function initUI() {
     let pending = files.length;
     if (!pending) return;
     const done = () => { if (--pending === 0) render(false); };
-    for (const f of files) loadDataFile(f, done);
+    for (const f of files) { rememberAsset('data', f); loadDataFile(f, done); }
   });
 
   $('font-input').addEventListener('change', (e) => {
@@ -8421,6 +8445,7 @@ function initUI() {
         const name = f.name.replace(/\.(ttf|ttc)$/i, '');
         try {
           registerFont(name, new TrueTypeFont(rd.result, name));
+          rememberAsset('font', f);
           pendingLog.push({
             text: `Schrift "${name}" geladen. Im Quelltext: text("…", font = "${name}")`,
             cls: 'ok'
@@ -8466,7 +8491,9 @@ function initUI() {
   // Trennlinie zwischen Editor und Ansicht
   initSplitter();
 
-  render(true);
+  const embedded = readEmbedded();
+  if (embedded) restoreEmbedded(embedded);
+  else render(true);
 }
 
 // ------------------------------------------------------------
@@ -8828,6 +8855,132 @@ function saveDXF() {
 
 function saveScad() {
   download(new Blob([$('editor').value], { type: 'text/plain' }), fileName);
+}
+
+// ------------------------------------------------------------
+//  Als HTML speichern: die ganze Seite plus aktuellem Quelltext,
+//  geladenen Schriften/Daten und gewähltem Kern als neue Datei.
+//  Beim Öffnen startet sie direkt mit diesem Modell.
+// ------------------------------------------------------------
+function bytesToBase64(buf) {
+  const u8 = new Uint8Array(buf);
+  let bin = '';
+  for (let i = 0; i < u8.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+
+async function saveHTML() {
+  const btn = $('btn-html');
+  btn.disabled = true;
+  try {
+    const assets = [];
+    for (const a of loadedAssets.values()) {
+      assets.push({ kind: a.kind, name: a.name, type: a.file.type || '',
+                    data: bytesToBase64(await a.file.arrayBuffer()) });
+    }
+    const payload = {
+      version: 1,
+      fileName,
+      kernel: $('kernel').value,
+      source: $('editor').value,
+      assets
+    };
+    // "<" maskieren, damit weder ein schließendes Skript-Tag noch ein HTML-Kommentar im Quelltext
+    // den Skriptblock vorzeitig beenden können.
+    const json = JSON.stringify(payload)
+      .replace(/</g, '\\u003c')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+    const block = '<script type="application/json" id="scad-embed">' + json + '</' + 'script>\n';
+
+    const base = fileName.replace(/\.scad$/i, '');
+    const title = 'OpenSCAD JS – ' + base.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    let html = PAGE_TEMPLATE.replace(/<title>[\s\S]*?<\/title>/i, () => '<title>' + title + '</title>');
+    const at = html.lastIndexOf('</body>');
+    html = at >= 0 ? html.slice(0, at) + block + html.slice(at) : html + block;
+
+    const outName = 'scad_' + base.replace(/^scad_/i, '') + '.html';
+    download(new Blob([html], { type: 'text/html' }), outName);
+    const kb = Math.round(html.length / 1024).toLocaleString('de-DE');
+    logLine(`HTML geschrieben: ${outName} (${kb} KB)`
+      + (assets.length ? `, mit ${assets.length} eingebetteten Datei${assets.length > 1 ? 'en' : ''}` : '')
+      + '. Beim Öffnen startet die Seite direkt mit diesem Modell.', 'ok');
+  } catch (err) {
+    logLine('HTML ließ sich nicht speichern: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function readEmbedded() {
+  const el = document.getElementById('scad-embed');
+  if (!el) return null;
+  try {
+    const d = JSON.parse(el.textContent);
+    return d && typeof d.source === 'string' ? d : null;
+  } catch (err) {
+    pendingLog.push({ text: 'Eingebettetes Modell ist beschädigt: ' + err.message, cls: 'error' });
+    return null;
+  }
+}
+
+function restoreEmbedded(d) {
+  $('editor').value = d.source;
+  if (d.fileName) fileName = d.fileName;
+  updateGutter();
+
+  const finish = () => {
+    if (d.kernel === 'manifold') {
+      const sel = $('kernel');
+      sel.value = 'manifold';
+      sel.dispatchEvent(new Event('change'));   // switchKernel rendert selbst
+      // Ansicht nach dem Laden des Kerns einpassen
+      const wait = setInterval(() => {
+        if (!sel.disabled) { clearInterval(wait); vp.fit(); vp.requestDraw(); }
+      }, 100);
+    } else {
+      render(true);
+    }
+  };
+
+  const assets = Array.isArray(d.assets) ? d.assets : [];
+  const dataFiles = [];
+  for (const a of assets) {
+    let file;
+    try {
+      file = new File([base64ToBytes(a.data)], a.name, { type: a.type || '' });
+    } catch (err) {
+      pendingLog.push({ text: `${a.name}: eingebettete Datei ist beschädigt.`, cls: 'error' });
+      continue;
+    }
+    rememberAsset(a.kind, file);
+    if (a.kind === 'font') {
+      const name = a.name.replace(/\.(ttf|ttc)$/i, '');
+      try {
+        registerFont(name, new TrueTypeFont(base64ToBytes(a.data).buffer, name));
+      } catch (err) {
+        pendingLog.push({ text: `${a.name}: ${err.message}`, cls: 'error' });
+      }
+    } else {
+      dataFiles.push(file);
+    }
+  }
+  if (assets.length) {
+    pendingLog.push({ text: `${assets.length} eingebettete Datei${assets.length > 1 ? 'en' : ''} geladen.`, cls: 'ok' });
+  }
+
+  let pending = dataFiles.length;
+  if (!pending) { finish(); return; }
+  for (const f of dataFiles) loadDataFile(f, () => { if (--pending === 0) finish(); });
 }
 
 document.addEventListener('DOMContentLoaded', initUI);

@@ -64,6 +64,7 @@
   <button id="bNew">Neu</button>
   <button id="bLoad">Laden</button>
   <button id="bSave">Speichern</button>
+  <button id="bHtml" title="Ganze Seite samt Schaltung und eigenen Symbolen als neue HTML-Datei speichern (Strg+Umschalt+S)">Als HTML speichern</button>
   <button id="bSvg">SVG exportieren</button>
   <button id="bLib" title="Eigene Symbolbibliothek (JSON) hinzuladen">Bibliothek laden</button>
   <button id="bLibSave" title="Alle eigenen Symbole als JSON sichern">Bibliothek speichern</button>
@@ -136,6 +137,18 @@
 
 <script>
 'use strict';
+/* ============================================================
+   Vorlage für "Als HTML speichern": die Seite, wie sie aus der
+   Datei kam — festgehalten, bevor das Skript etwas verändert.
+   Eine eingebettete Schaltung steht erst hinter diesem Skript
+   und ist hier noch nicht Teil des DOM.
+   ============================================================ */
+const PAGE_TEMPLATE = (() => {
+  const root = document.documentElement.cloneNode(true);
+  const old = root.querySelector('#schaltplan-embed');
+  if(old) old.remove();
+  return '<!DOCTYPE html>\n' + root.outerHTML;
+})();
 /* ============================================================
    Symbolbibliothek. Koordinaten lokal, Raster 10.
    Formen: ['l',x1,y1,x2,y2] ['r',x,y,w,h,fill?] ['c',cx,cy,r,fill?]
@@ -556,6 +569,7 @@ document.addEventListener('keydown', e => {
   const inField = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
   if(inField){ if(e.key === 'Escape') e.target.blur(); return; }
   if(document.getElementById('dlg').open || document.getElementById('sheetDlg').open) return;
+  if((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S')){ e.preventDefault(); saveHTML(); return; }
   if((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); return; }
   if((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')){ e.preventDefault(); redo(); return; }
   if((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')){ e.preventDefault(); marqueeSelect([-1e9,-1e9],[1e9,1e9],false); return; }
@@ -741,6 +755,43 @@ function docName(){ const t = (S.sheet.title||'').trim().toLowerCase().replace(/
 document.getElementById('bNew').onclick = () => { if(S.components.length || S.wires.length){ if(!confirm('Aktuelle Schaltung verwerfen? Nicht gespeicherte Änderungen gehen verloren.')) return; } S = newDoc(); selection = []; hist.length = 0; redoStack.length = 0; updateUndo(); view = {x:80,y:80,z:1}; setTool('select'); applyView(); render(); showProps(); };
 document.getElementById('bSave').onclick = () => download(docName() + '.json', docJSON(), 'application/json');
 document.getElementById('bSvg').onclick = exportSVG;
+document.getElementById('bHtml').onclick = saveHTML;
+
+/* ============================================================ Als HTML speichern
+   Die ganze Seite plus Schaltung, Blattdaten, Ansicht und allen
+   eigenen Symbolen als neue Datei. Beim Öffnen ist die Schaltung
+   sofort da. */
+function saveHTML(){
+  try {
+    const doc = JSON.parse(docJSON());
+    // alle eigenen Symbole mitnehmen, nicht nur die verwendeten
+    const lib = {}; for(const t in LIB) if(!BUILTIN[t]) lib[t] = LIB[t];
+    doc.library = lib;
+    // "<" maskieren, damit weder ein schließendes Skript-Tag noch ein
+    // HTML-Kommentar in Texten den Datenblock vorzeitig beenden kann.
+    const json = JSON.stringify(doc)
+      .replace(/</g, '\\u003c')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+    const block = '<script type="application/json" id="schaltplan-embed">' + json + '</' + 'script>\n';
+    const title = 'Schaltplan-Editor – ' + ((S.sheet.title || '').trim() || docName());
+    let html = PAGE_TEMPLATE.replace(/<title>[\s\S]*?<\/title>/i, () => '<title>' + esc(title) + '</title>');
+    const at = html.lastIndexOf('</body>');
+    html = at >= 0 ? html.slice(0, at) + block + html.slice(at) : html + block;
+    const outName = 'schaltplan_' + docName() + '.html';
+    download(outName, html, 'text/html');
+    document.getElementById('hint').textContent = outName + ' gespeichert — beim Öffnen ist die Schaltung gleich geladen.';
+  } catch(err){ alert('HTML ließ sich nicht speichern: ' + err.message); }
+}
+function loadEmbedded(){
+  const elEmb = document.getElementById('schaltplan-embed'); if(!elEmb) return;
+  try {
+    const obj = JSON.parse(elEmb.textContent);
+    for(const t in (obj.library||{})){ const d = obj.library[t]; if(!BUILTIN[t] && d && !d.group) d.group = 'Eigene'; }
+    loadDoc(obj);
+    document.getElementById('hint').textContent = 'Eingebettete Schaltung geladen.';
+  } catch(err){ alert('Die eingebettete Schaltung ist beschädigt: ' + err.message); }
+}
 document.getElementById('bLoad').onclick = () => document.getElementById('fileLoad').click();
 document.getElementById('bLib').onclick = () => document.getElementById('fileLib').click();
 document.getElementById('fileLoad').onchange = async e => {
@@ -773,6 +824,8 @@ window.addEventListener('resize', applyView);
 window.addEventListener('beforeunload', e => { if(S.components.length || S.wires.length){ e.preventDefault(); e.returnValue = ''; } });
 
 buildPalette(); setTool('select'); applyView(); render(); showProps(); updateUndo();
+// Der Datenblock steht hinter diesem Skript — erst nach dem Parsen lesen.
+if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadEmbedded); else loadEmbedded();
 
 </script>
 </body>
