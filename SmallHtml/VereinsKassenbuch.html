@@ -117,8 +117,22 @@ select.katwahl.offen{border-color:var(--warn);background:var(--warn-bg)}
 .uebertrag .formular td{border-bottom:1px solid var(--tinte-2)}
 .zeileneingabe{width:56px;font-family:var(--font-num);font-size:13px;text-align:center;border:1px solid var(--linie);border-radius:var(--radius);padding:3px;background:#FFFDF7}
 
+tr.fremd td{opacity:.5}
+tr.inbearbeitung td{background:#F3E6C6}
+.filterzeile{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin:18px 0 6px;padding-top:12px;border-top:1px solid var(--linie)}
+.filterzeile .feld input,.filterzeile .feld select{min-height:32px;padding:5px 8px;font-size:13.5px}
+.bearbeitungsband{background:#F7EFDC;border-left:3px solid var(--messing);padding:8px 12px;margin-bottom:10px;font-size:13.5px;border-radius:var(--radius)}
+.zaehlraster{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 14px;margin:8px 0 14px}
+.zaehlraster label{display:flex;align-items:center;gap:8px;font-family:var(--font-num);font-size:13.5px}
+.zaehlraster label span{width:62px;text-align:right}
+.zaehlraster input{width:64px;font-family:var(--font-num);text-align:right;border:1px solid var(--linie);border-radius:var(--radius);padding:4px 6px;background:#FFFDF7}
+.feld.check{flex-direction:row;align-items:center;gap:8px;min-height:36px}
+.feld.check label{text-transform:none;letter-spacing:0;font-size:14px;color:var(--tinte);font-weight:400}
+
 .statusleiste{position:sticky;bottom:0;z-index:5;background:var(--sud-chrome);color:#9EB3A6;border-top:1px solid #000;font-size:13px}
 .statusleiste .innen{max-width:1240px;margin:0 auto;padding:9px 22px;display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.statusleiste button.tat.leise{color:#C7D6CD;border-color:#3A5E4E}
+.statusleiste button.tat.leise:hover{background:rgba(255,255,255,.07);color:var(--papier)}
 .punkt{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok);margin-right:6px}
 .punkt.offen{background:var(--messing-hell)}
 
@@ -172,6 +186,7 @@ select.katwahl.offen{border-color:var(--warn);background:var(--warn-bg)}
     <button role="tab" data-tab="bank"      aria-selected="false">Kontoauszug einlesen</button>
     <button role="tab" data-tab="auswert"   aria-selected="false">Auswertung</button>
     <button role="tab" data-tab="uebertrag" aria-selected="false">Übertragungsblatt</button>
+    <button role="tab" data-tab="werkzeug"  aria-selected="false">Werkzeuge</button>
     <button role="tab" data-tab="stamm"     aria-selected="false">Einstellungen</button>
     <button role="tab" data-tab="hilfe"     aria-selected="false">Anleitung</button>
   </nav>
@@ -182,15 +197,23 @@ select.katwahl.offen{border-color:var(--warn);background:var(--warn-bg)}
 <div class="statusleiste"><div class="innen">
   <div><span class="punkt" id="statusPunkt"></span><span id="statusText">Bereit</span></div>
   <div>
-    <button class="tat messing" id="btnSpeichern">CSV speichern</button>
+    <button class="tat messing" id="btnSpeichern" title="Speichert diese Seite samt allen Daten (Strg+S)">Speichern</button>
+    <button class="tat leise" id="btnCsvExport">CSV exportieren</button>
     <button class="tat leise" id="btnLaden">CSV laden</button>
     <input type="file" id="dateiWahl" accept=".csv,text/csv" hidden>
     <input type="file" id="camtWahl" accept=".zip,.xml,application/zip,text/xml" multiple hidden>
   </div>
 </div></div>
 
+<!-- Gespeicherter Stand. Wird beim Speichern von der Seite selbst neu geschrieben. -->
+<script id="kassenbuchDaten" type="application/json"></script>
+
 <script>
 "use strict";
+
+// Unberührte Kopie des Dokuments, bevor irgendetwas gezeichnet wird.
+// Daraus entsteht beim Speichern die neue HTML-Datei.
+const VORLAGE = document.documentElement.cloneNode(true);
 
 /* ============================================================
    Kategorien
@@ -236,16 +259,25 @@ const STANDARD_REGELN = [
   {muster:"KONTOFUEHRUNG",     kategorie:"A_GELD"}
 ];
 
+const STANDARD_STAMM = () => ({verein:"Brauverein SC e.V.", betrieb:"Brauerei", steuernummer:"", finanzamt:"",
+  jahr:new Date().getFullYear(), hebesatz:450, verlustvortrag:0, kassenanfang:0, kontoanfang:0,
+  umsatzVorjahr:0, gemeinnuetzig:false});
+
 const zustand = {
-  stamm:{verein:"Brauverein SC e.V.", betrieb:"Brauerei", steuernummer:"", finanzamt:"",
-         jahr:new Date().getFullYear(), hebesatz:450, verlustvortrag:0, kassenanfang:0, umsatzVorjahr:0},
+  stamm:STANDARD_STAMM(),
   kategorien:STANDARD_KATEGORIEN.map(k=>({...k})),
   regeln:STANDARD_REGELN.map(r=>({...r})),
   buchungen:[],
   puffer:[],
   pufferInfo:null,
+  protokoll:[],          // Änderungen und Löschungen an erfassten Buchungen
+  kassenstuerze:[],      // festgehaltene Bargeldzählungen
+  bankAbgleich:null,     // {datum, saldo, quelle} — Kontostand laut Auszug
   tab:"kasse",
-  schmutzig:false
+  filter:{text:"",kat:"",monat:""},
+  letztesDatum:"",
+  // nur zur Laufzeit, wird nicht gespeichert:
+  bearbeiten:null, formVorlage:null, schmutzig:false
 };
 
 /* ============================================================
@@ -265,15 +297,26 @@ function zahl(s){
   if(!s) return 0;
   let t=String(s).trim().replace(/[€\s]/g,"");
   if(t.includes(",")) t=t.replace(/\./g,"").replace(",",".");
+  else if(/^-?\d{1,3}(\.\d{3})+$/.test(t)) t=t.replace(/\./g,"");   // „1.250“ = 1250
   const n=parseFloat(t); return isNaN(n)?0:n;
 }
 const csvZahl = n => String((n||0).toFixed(2)).replace(".",",");
 const kat = key => zustand.kategorien.find(k=>k.key===key)||null;
+const imJahr = b => String(b.datum||"").slice(0,4)===String(zustand.stamm.jahr);
+const neueId = () => "b"+Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+const heute = () => { const d=new Date(); return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0"); };
+const zeitstempel = () => new Date().toLocaleString("de-DE",{dateStyle:"short",timeStyle:"short"});
 
 function markiereSchmutzig(){
   zustand.schmutzig=true;
   g("statusPunkt").className="punkt offen";
-  g("statusText").textContent="Nicht gesichert — vor dem Schließen CSV speichern";
+  g("statusText").textContent="Nicht gesichert — Strg+S speichert die Seite mit allen Daten";
+  notfallMerken();
+}
+// Nur den Text der Statusleiste ändern, ohne den Gesichert-Zustand anzufassen
+function statusMeldung(t){
+  if(zustand.schmutzig) g("statusText").textContent=t+" — noch nicht gesichert";
+  else g("statusText").textContent=t;
 }
 function markiereSauber(t){
   zustand.schmutzig=false;
@@ -289,14 +332,18 @@ window.addEventListener("beforeunload",e=>{ if(zustand.schmutzig){e.preventDefau
 const sortiert = () => [...zustand.buchungen].sort((a,b)=>
   (a.datum||"").localeCompare(b.datum||"") || String(a.beleg||"").localeCompare(String(b.beleg||"")));
 
-function rechne(){
+// bis: optionales Stichtagsdatum (JJJJ-MM-TT) — dann nur Buchungen bis einschließlich diesem Tag
+function rechne(bis){
+  const st=zustand.stamm;
   const r={einnahmenEUER:0,ausgabenEUER:0,proKategorie:{},umsatz:0,
-           kasseEnde:zustand.stamm.kassenanfang,kasseNegativAb:null,
-           bankSaldo:0,transit:0,ausserhalb:{ein:0,aus:0},ohneKategorie:0};
+           kasseEnde:st.kassenanfang,kasseNegativAb:null,
+           bankSaldo:0,transit:0,ausserhalb:{ein:0,aus:0},ohneKategorie:0,fremdesJahr:0};
   zustand.kategorien.forEach(k=>{r.proKategorie[k.key]=0;});
-  let kasse=zustand.stamm.kassenanfang;
+  let kasse=st.kassenanfang;
 
   sortiert().forEach(b=>{
+    if(!imJahr(b)){ r.fremdesJahr++; return; }            // Zuflussprinzip: nur das eingestellte Jahr
+    if(bis && (b.datum||"")>bis) return;
     const k=kat(b.kategorie), betrag=Math.abs(b.betrag||0);
     if(!k){ r.ohneKategorie++; return; }
     r.proKategorie[k.key]+=betrag;
@@ -322,25 +369,39 @@ function rechne(){
     }else r.bankSaldo+=vz*betrag;
   });
 
-  r.kasseEnde=kasse;
-  r.gewinn=r.einnahmenEUER-r.ausgabenEUER;
+  // Rundungsreste aus Gleitkomma-Additionen entfernen
+  const c=x=>Math.round(x*100)/100;
+  r.einnahmenEUER=c(r.einnahmenEUER); r.ausgabenEUER=c(r.ausgabenEUER); r.umsatz=c(r.umsatz);
+  r.kasseEnde=c(kasse);
+  r.bankSaldo=c(r.bankSaldo);
+  r.kontoEnde=c(st.kontoanfang+r.bankSaldo);
+  r.gewinn=c(r.einnahmenEUER-r.ausgabenEUER);
 
-  const vv=Math.max(0,zustand.stamm.verlustvortrag);
+  const vv=Math.max(0,st.verlustvortrag);
   r.verlustAbzug=Math.max(0,Math.min(vv,r.gewinn));
   r.einkommen=r.gewinn-r.verlustAbzug;
-  r.freibetragKSt=Math.max(0,Math.min(5000,r.einkommen));
-  r.zvE=Math.max(0,r.einkommen-r.freibetragKSt);
+  r.freibetragKSt=Math.max(0,Math.min(5000,Math.floor(r.einkommen)));
+  r.zvE=Math.max(0,Math.floor(r.einkommen)-r.freibetragKSt);
   r.kst=Math.floor(r.zvE*0.15);
-  r.soli=Math.round(r.kst*0.055*100)/100;
-  r.verlustRest=Math.max(0,vv-r.verlustAbzug);
+  r.soli=Math.floor(r.kst*0.055*100)/100;                 // § 4 SolZG: Cent-Bruchteile fallen weg
+  // Ein Verlust des laufenden Jahres erhöht den Vortrag
+  r.verlustRest=c(Math.max(0,vv-r.verlustAbzug)+Math.max(0,-r.gewinn));
 
   r.gewerbeertrag=r.gewinn>0?Math.floor(r.gewinn/100)*100:0;
   r.freibetragGewSt=Math.min(5000,r.gewerbeertrag);
   r.gewerbeertragNachFB=Math.max(0,r.gewerbeertrag-r.freibetragGewSt);
   r.messbetrag=Math.floor(r.gewerbeertragNachFB*0.035);
-  r.gewst=Math.floor(r.messbetrag*zustand.stamm.hebesatz/100);
+  r.gewst=Math.floor(r.messbetrag*st.hebesatz/100);
   r.messbetragOhneFB=Math.floor(r.gewerbeertrag*0.035);
-  r.gewstOhneFB=Math.floor(r.messbetragOhneFB*zustand.stamm.hebesatz/100);
+  r.gewstOhneFB=Math.floor(r.messbetragOhneFB*st.hebesatz/100);
+
+  // § 64 Abs. 3 AO: gemeinnützige Körperschaft, Einnahmen der wirtschaftlichen
+  // Geschäftsbetriebe einschließlich Umsatzsteuer höchstens 45.000 € → keine KSt/GewSt
+  r.unterBesteuerungsgrenze = !!st.gemeinnuetzig && r.einnahmenEUER<=45000;
+  if(r.unterBesteuerungsgrenze){
+    r.kstRechnerisch=r.kst; r.soliRechnerisch=r.soli; r.gewstRechnerisch=r.gewst;
+    r.kst=0; r.soli=0; r.gewst=0;
+  }
   return r;
 }
 
@@ -424,6 +485,7 @@ function camtLesen(text, quelle){
   if(doc.getElementsByTagName("parsererror").length) throw new Error("XML in "+quelle+" ist fehlerhaft.");
   const alle=(el,tag)=>Array.from(el.getElementsByTagNameNS("*",tag));
   const erst=(el,tag)=>alle(el,tag)[0]||null;
+  const kind=(el,tag)=>Array.from(el.children).find(c=>c.localName===tag)||null;
   const art=doc.documentElement.namespaceURI||"";
   const typ=/camt\.05(\d)/.exec(art);
 
@@ -433,7 +495,7 @@ function camtLesen(text, quelle){
     const stsCd=sts?((erst(sts,"Cd")||sts).textContent||"").trim():"BOOK";
     if(stsCd && stsCd!=="BOOK") continue;               // Vormerkposten überspringen
 
-    const amtEl=erst(ntry,"Amt"), cdEl=erst(ntry,"CdtDbtInd");
+    const amtEl=kind(ntry,"Amt")||erst(ntry,"Amt"), cdEl=kind(ntry,"CdtDbtInd")||erst(ntry,"CdtDbtInd");
     if(!amtEl||!cdEl) continue;
     const betrag=Math.abs(parseFloat(amtEl.textContent));
     const richtung=cdEl.textContent.trim();
@@ -452,14 +514,28 @@ function camtLesen(text, quelle){
       if(p){ const nm=erst(p,"Nm"); if(nm) gegen=(nm.textContent||"").trim(); }
     }
     const zweck=alle(basis,"Ustrd").map(u=>(u.textContent||"").trim()).filter(Boolean).join(" ").replace(/\s+/g," ");
+    const rv=kind(ntry,"RvslInd");
+    const storno=!!rv && /^(true|1)$/i.test((rv.textContent||"").trim());
 
     buchungen.push({
-      datum, betrag, richtung, gegen, zweck,
+      datum, betrag, richtung, gegen, zweck, storno,
       bankref: ref || [datum,betrag.toFixed(2),richtung,zweck.slice(0,60)].join("|"),
       teile: txs.length, quelle, camt: typ?("camt.05"+typ[1]):"camt"
     });
   }
-  return buchungen;
+
+  // Salden des Auszugs (Stmt/Rpt → Bal) für den Bankabgleich
+  const salden=[];
+  for(const bal of alle(doc,"Bal")){
+    const tpEl=erst(bal,"Tp"); const cd=tpEl?((erst(tpEl,"Cd")||tpEl).textContent||"").trim():"";
+    const amt=kind(bal,"Amt"), ind=kind(bal,"CdtDbtInd"), dtEl=kind(bal,"Dt");
+    if(!amt||!dtEl) continue;
+    const dt=((erst(dtEl,"Dt")||erst(dtEl,"DtTm")||dtEl).textContent||"").trim().slice(0,10);
+    let wert=Math.abs(parseFloat(amt.textContent)); if(isNaN(wert)) continue;
+    if(ind && ind.textContent.trim()==="DBIT") wert=-wert;
+    salden.push({typ:cd, datum:dt, saldo:wert, quelle});
+  }
+  return {buchungen, salden};
 }
 
 function regelTreffer(b){
@@ -494,13 +570,14 @@ function aehnlicheBuchung(b){
 }
 
 async function camtEinlesen(dateien){
-  const roh=[]; const namen=[];
+  const roh=[]; const namen=[]; const salden=[];
+  const nimm=(text,name)=>{ const e=camtLesen(text,name); roh.push(...e.buchungen); salden.push(...e.salden); namen.push(name); };
   for(const d of dateien){
     if(/\.zip$/i.test(d.name)){
       const inhalt=await zipEntpacken(d);
-      inhalt.forEach(x=>{ roh.push(...camtLesen(x.text,x.name)); namen.push(x.name); });
+      inhalt.forEach(x=>nimm(x.text,x.name));
     }else{
-      roh.push(...camtLesen(await d.text(), d.name)); namen.push(d.name);
+      nimm(await d.text(), d.name);
     }
   }
   const bekannt=new Set(zustand.buchungen.map(b=>b.bankref).filter(Boolean));
@@ -509,9 +586,13 @@ async function camtEinlesen(dateien){
   for(const b of roh){
     const dub = bekannt.has(b.bankref) || gesehen.has(b.bankref);
     gesehen.add(b.bankref);
-    puffer.push({...b, kategorie:regelTreffer(b), dublette:dub,
-                 verdacht: dub ? null : aehnlicheBuchung(b), uebernehmen:!dub});
+    const fremd = !imJahr(b);
+    puffer.push({...b, kategorie:regelTreffer(b), dublette:dub, fremdesJahr:fremd,
+                 verdacht: dub ? null : aehnlicheBuchung(b), uebernehmen:!dub && !fremd});
   }
+  // Schlusssaldo: der jüngste gebuchte Endsaldo (CLBD), sonst ein Zwischensaldo (ITBD)
+  const schluss=salden.filter(x=>x.typ==="CLBD"||x.typ==="ITBD")
+    .sort((a,b)=>a.datum.localeCompare(b.datum)||(a.typ==="CLBD"?1:-1)).pop()||null;
   puffer.sort((a,b)=>(a.datum||"").localeCompare(b.datum||""));
   zustand.puffer=puffer;
   const format=[...new Set(roh.map(b=>b.camt))].join(", ")||"—";
@@ -521,7 +602,10 @@ async function camtEinlesen(dateien){
     verdacht:puffer.filter(p=>p.verdacht).length,
     format,
     von:puffer.length?puffer[0].datum:"", bis:puffer.length?puffer[puffer.length-1].datum:"",
-    sammel:roh.filter(b=>b.teile>1).length
+    sammel:roh.filter(b=>b.teile>1).length,
+    storno:puffer.filter(p=>p.storno).length,
+    fremd:puffer.filter(p=>p.fremdesJahr).length,
+    saldo:schluss
   };
 }
 
@@ -544,69 +628,116 @@ function naechsteBelegNr(){
   return "B-"+String(n+1).padStart(3,"0");
 }
 
+function passtFilter(b){
+  const f=zustand.filter;
+  if(f.kat && b.kategorie!==f.kat) return false;
+  if(f.monat && String(b.datum||"").slice(5,7)!==f.monat) return false;
+  if(f.text){
+    const heu=[b.datum,b.beleg,b.text,(kat(b.kategorie)||{}).text,eur.format(b.betrag||0)].join(" ").toLowerCase();
+    if(!f.text.toLowerCase().split(/\s+/).filter(Boolean).every(w=>heu.includes(w))) return false;
+  }
+  return true;
+}
+
 function ansichtKasse(){
-  const r=rechne(), liste=sortiert();
-  let kasse=zustand.stamm.kassenanfang;
+  const r=rechne(), liste=sortiert(), st=zustand.stamm, f=zustand.filter;
+  let kasse=st.kassenanfang, sumEin=0, sumAus=0, gezeigt=0;
+  const filterAktiv=!!(f.text||f.kat||f.monat);
 
   const zeilen=liste.map(b=>{
     const k=kat(b.kategorie), betrag=Math.abs(b.betrag||0);
-    const ein=k&&k.art==="einnahme";
+    const ein=!!k&&k.art==="einnahme";
+    const fremd=!imJahr(b);
     let weg = b.zahlweg==="bar" ? "Bar" : "Bank";
-    if(k&&k.transit){ kasse -= (ein?1:-1)*betrag; weg="Kasse ⇄ Bank"; }
-    else if(b.zahlweg==="bar") kasse += (ein?1:-1)*betrag;
-    const negativ=kasse<-0.005;
-    const zeigtKasse = b.zahlweg==="bar" || (k&&k.transit);
-    return `<tr class="${negativ?"negativ":""}">
+    if(!fremd && k){                                     // gleiche Logik wie rechne()
+      if(k.transit){ kasse -= (ein?1:-1)*betrag; weg="Kasse ⇄ Bank"; }
+      else if(b.zahlweg==="bar") kasse += (ein?1:-1)*betrag;
+    } else if(k&&k.transit) weg="Kasse ⇄ Bank";
+    if(!passtFilter(b)) return "";
+    gezeigt++;
+    if(!fremd && k){ if(ein) sumEin+=betrag; else sumAus+=betrag; }
+    const negativ=!fremd && kasse<-0.005;
+    const zeigtKasse = !fremd && k && (b.zahlweg==="bar" || k.transit);
+    const hinweis = fremd ? ' <span class="mini" style="color:var(--warn)">anderes Jahr — zählt nicht</span>'
+                  : !k    ? ' <span class="mini" style="color:var(--warn)">Kategorie fehlt</span>' : "";
+    const cls=[negativ?"negativ":"", fremd?"fremd":"", zustand.bearbeiten===b.id?"inbearbeitung":""].join(" ").trim();
+    return `<tr class="${cls}">
       <td class="mono">${esc(b.datum)}</td>
       <td class="mono">${esc(b.beleg)}</td>
-      <td>${esc(kuerze(b.text,70))}${k?"":' <span class="mini" style="color:var(--warn)">Kategorie fehlt</span>'}${b.bankref?' <span class="mini" title="aus dem Kontoauszug übernommen">⌁</span>':""}</td>
+      <td>${esc(kuerze(b.text,70))}${hinweis}${b.bankref?' <span class="mini" title="aus dem Kontoauszug übernommen">⌁</span>':""}</td>
       <td class="mini">${k?esc(kuerze(k.text,42)):"—"}</td>
       <td class="mini">${weg}</td>
       <td class="num">${ein?fmt(betrag):""}</td>
-      <td class="num">${!ein?fmt(betrag):""}</td>
+      <td class="num">${k&&!ein?fmt(betrag):!k?`<span class="mini">${fmt(betrag)}</span>`:""}</td>
       <td class="num">${zeigtKasse?fmt(kasse):"<span class='mini'>—</span>"}</td>
-      <td class="nichtdrucken"><button class="zeilentat" data-loeschen="${b.id}" title="Buchung löschen" aria-label="Buchung löschen">✕</button></td>
+      <td class="nichtdrucken" style="white-space:nowrap"><button class="zeilentat" data-bearbeiten="${b.id}" title="Buchung ändern" aria-label="Buchung ändern">✎</button><button class="zeilentat" data-loeschen="${b.id}" title="Buchung löschen" aria-label="Buchung löschen">✕</button></td>
     </tr>`;
   }).join("");
 
+  // Formularwerte: Bearbeitung, Vorlage aus einem Werkzeug oder neue Buchung
+  const bearb = zustand.bearbeiten ? zustand.buchungen.find(x=>x.id===zustand.bearbeiten) : null;
+  if(zustand.bearbeiten && !bearb) zustand.bearbeiten=null;
+  const vorlage = bearb || zustand.formVorlage || null;
+  zustand.formVorlage=null;
+  const vorDatum = vorlage&&vorlage.datum ? vorlage.datum
+    : (zustand.letztesDatum && zustand.letztesDatum.startsWith(String(st.jahr))) ? zustand.letztesDatum
+    : heute().startsWith(String(st.jahr)) ? heute() : st.jahr+"-01-01";
+  const vorKat = vorlage&&vorlage.kategorie || "E_KU";
+  const vorWeg = vorlage&&vorlage.zahlweg || "bar";
+
+  const monate=["01","02","03","04","05","06","07","08","09","10","11","12"];
+  const mname=m=>new Date(2000,parseInt(m,10)-1,1).toLocaleString("de-DE",{month:"long"});
+
   return `
-    <h2>Kassenbuch ${zustand.stamm.jahr}</h2>
+    <h2>Kassenbuch ${st.jahr}</h2>
     <p class="hinweis">Bargeld erfasst du hier von Hand, Kontobewegungen holst du dir unter „Kontoauszug einlesen“. Die Kategorie entscheidet, wo der Betrag später in der EÜR landet.</p>
 
     <div class="nichtdrucken">
+      ${bearb?`<div class="bearbeitungsband"><strong>Du änderst Beleg ${esc(bearb.beleg||"—")}.</strong> Die bisherige Fassung wird im Änderungsprotokoll unter „Werkzeuge“ festgehalten.${bearb.bankref?" Diese Buchung stammt aus dem Kontoauszug — Betrag und Datum sollten zum Auszug passen.":""}</div>`:""}
       <div class="formzeile">
-        <div class="feld w-datum"><label for="fDatum">Datum</label><input type="date" id="fDatum" value="${zustand.stamm.jahr}-01-01"></div>
-        <div class="feld w-beleg"><label for="fBeleg">Beleg-Nr.</label><input type="text" id="fBeleg" value="${naechsteBelegNr()}"></div>
-        <div class="feld w-text"><label for="fText">Was war das?</label><input type="text" id="fText" placeholder="z. B. Bierverkauf Sommerfest"></div>
+        <div class="feld w-datum"><label for="fDatum">Datum</label><input type="date" id="fDatum" value="${esc(vorDatum)}"></div>
+        <div class="feld w-beleg"><label for="fBeleg">Beleg-Nr.</label><input type="text" id="fBeleg" value="${esc(vorlage&&vorlage.beleg!=null&&bearb?vorlage.beleg:naechsteBelegNr())}"></div>
+        <div class="feld w-text"><label for="fText">Was war das?</label><input type="text" id="fText" placeholder="z. B. Bierverkauf Sommerfest" value="${esc(vorlage?vorlage.text:"")}"></div>
       </div>
       <div class="formzeile">
-        <div class="feld w-kat"><label for="fKat">Kategorie</label><select id="fKat">${katOptionen("E_KU")}</select></div>
-        <div class="feld w-betrag"><label for="fBetrag">Betrag</label><input type="text" inputmode="decimal" class="num" id="fBetrag" placeholder="0,00"></div>
-        <div class="feld w-weg"><label for="fWeg">Bezahlt</label><select id="fWeg"><option value="bar">Bar</option><option value="bank">Bank</option></select></div>
-        <button class="tat messing" id="btnBuchen">Buchen</button>
+        <div class="feld w-kat"><label for="fKat">Kategorie</label><select id="fKat">${katOptionen(vorKat)}</select></div>
+        <div class="feld w-betrag"><label for="fBetrag">Betrag</label><input type="text" inputmode="decimal" class="num" id="fBetrag" placeholder="0,00" value="${vorlage&&vorlage.betrag?csvZahl(vorlage.betrag):""}"></div>
+        <div class="feld w-weg"><label for="fWeg">Bezahlt</label><select id="fWeg"><option value="bar"${vorWeg==="bar"?" selected":""}>Bar</option><option value="bank"${vorWeg==="bank"?" selected":""}>Bank</option></select></div>
+        <button class="tat messing" id="btnBuchen">${bearb?"Änderung speichern":"Buchen"}</button>
+        ${bearb?`<button class="tat leise" id="btnAbbrechen">Abbrechen</button>`:""}
       </div>
     </div>
 
     ${r.kasseNegativAb?`<div class="merker"><strong>Der Barbestand wird am ${esc(r.kasseNegativAb)} negativ.</strong>
-      Eine Kasse kann nie weniger als null Euro enthalten. Prüfe den Anfangsbestand, fehlende Bareinnahmen oder eine Einzahlung, die noch nicht als Geldtransit erfasst ist.</div>`:""}
+      Eine Kasse kann nie weniger als null Euro enthalten. Prüfe den Anfangsbestand, fehlende Bareinnahmen oder eine Einzahlung, die noch nicht als Geldtransit erfasst ist. Liegen Einnahme und Einzahlung am selben Tag, entscheidet die Beleg-Nummer über die Reihenfolge.</div>`:""}
     ${r.ohneKategorie?`<div class="merker"><strong>${r.ohneKategorie} Buchungen ohne gültige Kategorie.</strong>
-      Sie stehen in der Liste, fließen aber in keine Auswertung ein.</div>`:""}
+      Sie stehen in der Liste, fließen aber in keine Auswertung ein. Mit ✎ kannst du eine Kategorie nachtragen.</div>`:""}
+    ${r.fremdesJahr?`<div class="merker ruhig"><strong>${r.fremdesJahr} Buchungen liegen nicht im Wirtschaftsjahr ${st.jahr}.</strong>
+      Sie werden angezeigt, zählen aber weder in Kasse noch Auswertung — maßgeblich ist der Tag des Geldflusses. Ausnahme sind regelmäßig wiederkehrende Zahlungen innerhalb von zehn Tagen um den Jahreswechsel (§ 11 EStG); solche Fälle bitte mit dem richtigen Jahr als Datum erfassen und den Grund im Text vermerken.</div>`:""}
+
+    <div class="filterzeile nichtdrucken">
+      <div class="feld" style="flex:1 1 220px"><label for="filterText">Suchen</label><input type="search" id="filterText" value="${esc(f.text)}" placeholder="Text, Beleg, Betrag …"></div>
+      <div class="feld" style="flex:0 1 260px"><label for="filterKat">Kategorie</label><select id="filterKat"><option value="">alle</option>${katOptionen(f.kat)}</select></div>
+      <div class="feld" style="width:150px"><label for="filterMonat">Monat</label><select id="filterMonat"><option value="">alle</option>${monate.map(m=>`<option value="${m}"${f.monat===m?" selected":""}>${mname(m)}</option>`).join("")}</select></div>
+      ${filterAktiv?`<button class="tat leise" id="btnFilterWeg">Filter aufheben</button>`:""}
+    </div>
 
     <div class="tabellenrahmen"><table>
       <thead><tr><th>Datum</th><th>Beleg</th><th>Vorgang</th><th>Kategorie</th><th>Weg</th>
         <th class="num">Einnahme</th><th class="num">Ausgabe</th><th class="num">Kassenbestand</th><th class="nichtdrucken"></th></tr></thead>
       <tbody>
-        <tr><td class="mono">${zustand.stamm.jahr}-01-01</td><td class="mono">—</td>
+        ${filterAktiv?"":`<tr><td class="mono">${st.jahr}-01-01</td><td class="mono">—</td>
           <td><em>Kassenbestand am Jahresanfang</em></td><td class="mini">—</td><td class="mini">Bar</td>
-          <td class="num"></td><td class="num"></td><td class="num">${fmt(zustand.stamm.kassenanfang)}</td><td class="nichtdrucken"></td></tr>
+          <td class="num"></td><td class="num"></td><td class="num">${fmt(st.kassenanfang)}</td><td class="nichtdrucken"></td></tr>`}
         ${zeilen||`<tr><td colspan="9" style="padding:22px 8px;color:var(--tinte-2)">
-          Noch keine Buchungen. Lies einen Kontoauszug ein oder lade unter „Einstellungen“ ein Beispieljahr.</td></tr>`}
-        <tr class="summe"><td colspan="5">Summe · ${liste.length} Buchungen</td>
-          <td class="num">${fmt(r.einnahmenEUER+r.ausserhalb.ein)}</td>
-          <td class="num">${fmt(r.ausgabenEUER+r.ausserhalb.aus)}</td>
-          <td class="num">${fmt(r.kasseEnde)}</td><td class="nichtdrucken"></td></tr>
+          ${filterAktiv?"Keine Buchung passt zum Filter.":"Noch keine Buchungen. Lies einen Kontoauszug ein oder lade unter „Einstellungen“ ein Beispieljahr."}</td></tr>`}
+        <tr class="summe"><td colspan="5">${filterAktiv?`Summe der ${gezeigt} angezeigten Buchungen`:`Summe · ${liste.length} Buchungen`}</td>
+          <td class="num">${fmt(sumEin)}</td>
+          <td class="num">${fmt(sumAus)}</td>
+          <td class="num">${filterAktiv?"":fmt(r.kasseEnde)}</td><td class="nichtdrucken"></td></tr>
       </tbody>
-    </table></div>`;
+    </table></div>
+    ${r.transit&&!filterAktiv?`<p class="mini">Die Spaltensummen enthalten ${fmt(r.transit)} Geldtransit zwischen Kasse und Konto — das ist weder Einnahme noch Ausgabe im Sinne der EÜR.</p>`:""}`;
 }
 
 /* ============================================================
@@ -646,7 +777,7 @@ function ansichtBank(){
         .map(k=>`<option value="${k.key}"${k.key===x.kategorie?" selected":""}>${esc(kuerze(k.text,46))}</option>`).join("")}
     </select>
     ${x.kategorie?`<button class="zeilentat nichtdrucken" data-regel="${i}" title="Regel für ähnliche Buchungen merken">＋Regel</button>`:""}</td>
-    <td class="mini">${x.dublette?"schon gebucht"
+    <td class="mini">${x.storno?'<span class="warnzeichen" title="Die Bank hat eine frühere Buchung zurückgebucht">↺ Storno</span><br>':""}${x.fremdesJahr?`<span style="color:var(--warn)">Jahr ${esc(String(x.datum).slice(0,4))} — gehört nicht in ${zustand.stamm.jahr}</span><br>`:""}${x.dublette?"schon gebucht"
       :x.verdacht?`<span class="warnzeichen" title="Ähnliche Buchung: ${esc(x.verdacht)}">⚠ ähnliche vorhanden</span><br><span class="mini">${esc(kuerze(x.verdacht,52))}</span>`
       :""}</td>
   </tr>`).join("");
@@ -667,6 +798,15 @@ function ansichtBank(){
 
     ${info.verdacht?`<div class="merker"><strong>${info.verdacht} Buchungen sehen aus wie etwas, das schon im Kassenbuch steht.</strong>
       Gleicher Betrag, gleiche Richtung, Datum höchstens drei Tage daneben — aber eine andere Bankreferenz. Das trifft meist handgetippte Kontovorgänge. Sie bleiben ausgewählt, weil es auch echte Wiederholungen gibt, etwa gleich hohe Beiträge oder eine monatliche Miete. Schau die gelb hinterlegten Zeilen einmal an und nimm das Häkchen raus, wo es dieselbe Zahlung ist.</div>`:""}
+
+    ${info.fremd?`<div class="merker ruhig"><strong>${info.fremd} Buchungen liegen außerhalb des Wirtschaftsjahres ${zustand.stamm.jahr}.</strong>
+      Sie sind abgewählt. Buchungen aus dem Vorjahr gehören in dessen Kassenbuch. Liegen sie schon im Folgejahr, kannst du sie übernehmen — sie zählen in ${zustand.stamm.jahr} nicht und werden beim Jahreswechsel ins neue Jahr mitgenommen.</div>`:""}
+
+    ${info.storno?`<div class="merker"><strong>${info.storno} Rückbuchungen (Storno) im Auszug.</strong>
+      Eine Rückbuchung hebt eine frühere Buchung auf. Am saubersten ist, beide Zeilen nicht zu übernehmen — oder, wenn die ursprüngliche Buchung schon im Kassenbuch steht, den Storno abzuwählen und die ursprüngliche dort zu löschen. Der Kontostand stimmt so oder so, weil sich beide Bewegungen aufheben. Übernimmst du den Storno doch, gib ihm keine Kategorie, die auf den Umsatz zählt.</div>`:""}
+
+    ${info.saldo?`<div class="merker ruhig"><strong>Kontostand laut Auszug am ${esc(info.saldo.datum)}: ${fmt(info.saldo.saldo)}</strong>
+      Nach der Übernahme vergleicht „Werkzeuge → Bankabgleich“ diesen Wert mit dem Kontostand, der sich aus dem Kassenbuch ergibt.</div>`:""}
 
     ${info.sammel?`<div class="merker ruhig"><strong>${info.sammel} Sammelbuchungen enthalten mehrere Einzelposten.</strong>
       Übernommen wird die Buchung als Ganzes. Für die Aufteilung, etwa bei einem Lastschrifteinzug der Mitgliedsbeiträge, brauchst du eine eigene Aufstellung als Beleg.</div>`:""}
@@ -708,7 +848,14 @@ function ansichtAuswertung(){
       <div class="kachel"><div class="titel">Betriebsausgaben</div><div class="wert">${fmt(r.ausgabenEUER)}</div><div class="fuss">Anlage EÜR, Zeile 75</div></div>
       <div class="kachel ${r.gewinn>=0?"gruen":"rot"}"><div class="titel">Gewinn</div><div class="wert">${fmt(r.gewinn)}</div><div class="fuss">Zeile 23 abzüglich Zeile 75</div></div>
       <div class="kachel"><div class="titel">Kassenbestand am Jahresende</div><div class="wert">${fmt(r.kasseEnde)}</div><div class="fuss">muss dem Bargeld im Kasten entsprechen</div></div>
+      <div class="kachel"><div class="titel">Kontostand rechnerisch</div><div class="wert">${fmt(r.kontoEnde)}</div><div class="fuss">Stand 1.1. plus alle Bankbuchungen</div></div>
     </div>
+
+    ${zustand.stamm.gemeinnuetzig?(r.unterBesteuerungsgrenze
+      ?`<div class="merker gut"><strong>Besteuerungsgrenze eingehalten: ${fmt(r.einnahmenEUER)} von 45.000 €.</strong>
+        Bei einer gemeinnützigen Körperschaft fallen auf die wirtschaftlichen Geschäftsbetriebe keine Körperschaft- und Gewerbesteuer an, solange deren Einnahmen einschließlich Umsatzsteuer 45.000 € im Jahr nicht übersteigen (§ 64 Abs. 3 AO). Unten stehen die Werte deshalb auf null; die rechnerischen Beträge sind zur Kontrolle vermerkt. Zweckbetriebe und Vermögensverwaltung zählen nicht mit — die Seite kennt diese Bereiche nicht getrennt, bei Bedarf eigene Kategorien ohne EÜR-Haken anlegen.</div>`
+      :`<div class="merker"><strong>Besteuerungsgrenze überschritten: ${fmt(r.einnahmenEUER)} über 45.000 €.</strong>
+        Die wirtschaftlichen Geschäftsbetriebe sind in diesem Jahr körperschaft- und gewerbesteuerpflichtig (§ 64 Abs. 3 AO).</div>`):""}
 
     <h3>Einnahmen-Überschuss-Rechnung</h3>
     <div class="tabellenrahmen"><table>
@@ -736,6 +883,7 @@ function ansichtAuswertung(){
       <tr><td>Körperschaftsteuer 15 %</td><td class="num">${fmtGanz(r.kst)}</td></tr>
       <tr><td>Solidaritätszuschlag 5,5 %</td><td class="num">${fmt(r.soli)}</td></tr>
       <tr class="summe"><td>Belastung Körperschaftsteuer</td><td class="num">${fmt(r.kst+r.soli)}</td></tr>
+      ${r.unterBesteuerungsgrenze?`<tr><td class="mini">rechnerisch ohne Besteuerungsgrenze</td><td class="num mini">${fmt(r.kstRechnerisch+r.soliRechnerisch)}</td></tr>`:""}
     </tbody></table></div>
     ${r.verlustRest>0?`<p class="mini">Verbleibender Verlustvortrag zum Jahresende: ${fmt(r.verlustRest)}</p>`:""}
 
@@ -746,8 +894,9 @@ function ansichtAuswertung(){
       <tr><td>verbleibender Gewerbeertrag</td><td class="num">${fmtGanz(r.gewerbeertragNachFB)}</td></tr>
       <tr><td>Steuermessbetrag, 3,5 %</td><td class="num">${fmtGanz(r.messbetrag)}</td></tr>
       <tr class="summe"><td>Gewerbesteuer bei Hebesatz ${eurGanz.format(zustand.stamm.hebesatz)} %</td><td class="num">${fmtGanz(r.gewst)}</td></tr>
+      ${r.unterBesteuerungsgrenze?`<tr><td class="mini">rechnerisch ohne Besteuerungsgrenze</td><td class="num mini">${fmtGanz(r.gewstRechnerisch)}</td></tr>`:""}
     </tbody></table></div>
-    ${r.gewstOhneFB>r.gewst?`<div class="merker ruhig"><strong>Kontrollrechnung ohne Freibetrag: ${fmtGanz(r.gewstOhneFB)}</strong>
+    ${!r.unterBesteuerungsgrenze&&r.gewstOhneFB>r.gewst?`<div class="merker ruhig"><strong>Kontrollrechnung ohne Freibetrag: ${fmtGanz(r.gewstOhneFB)}</strong>
       Weist dein Bescheid diesen höheren Betrag aus, wurde der Freibetrag für Vereine nicht angesetzt. Der eingetragene Verein fällt unter § 2 Abs. 3 GewStG und hat darauf Anspruch.</div>`:""}
 
     <h3>Kleinunternehmergrenze</h3>
@@ -758,7 +907,40 @@ function ansichtAuswertung(){
       <div class="kachel"><div class="titel">Noch Luft bis 25.000 €</div><div class="wert">${fmtGanz(Math.max(0,25000-r.umsatz))}</div>
         <div class="fuss">danach Regelbesteuerung im Folgejahr</div></div>
     </div>
-    <p class="hinweis">Gezählt werden nur steuerbare Umsätze. Echte Mitgliedsbeiträge, Geldtransit und Erlöse aus dem Verkauf von Anlagevermögen bleiben außen vor. Maßgeblich ist der Geldeingang, nicht das Rechnungsdatum.</p>`;
+    <p class="hinweis">Gezählt werden nur steuerbare Umsätze. Echte Mitgliedsbeiträge, Geldtransit und Erlöse aus dem Verkauf von Anlagevermögen bleiben außen vor. Maßgeblich ist der Geldeingang, nicht das Rechnungsdatum.</p>
+
+    <h3>Monatsübersicht</h3>
+    ${monatsTabelle()}`;
+}
+
+function monatsTabelle(){
+  const st=zustand.stamm, m=[];
+  for(let i=0;i<12;i++) m.push({ein:0,aus:0,neben:0,kasse:0,konto:0});
+  let kasse=st.kassenanfang, konto=st.kontoanfang;
+  const liste=sortiert().filter(imJahr);
+  let idx=0;
+  for(let i=0;i<12;i++){
+    const mm=String(i+1).padStart(2,"0");
+    while(idx<liste.length && String(liste[idx].datum).slice(5,7)===mm){
+      const b=liste[idx++], k=kat(b.kategorie), betrag=Math.abs(b.betrag||0);
+      if(!k) continue;
+      const vz=k.art==="einnahme"?1:-1;
+      if(k.transit){ konto+=vz*betrag; kasse-=vz*betrag; continue; }
+      if(k.euer){ if(vz>0) m[i].ein+=betrag; else m[i].aus+=betrag; } else m[i].neben+=vz*betrag;
+      if(b.zahlweg==="bar") kasse+=vz*betrag; else konto+=vz*betrag;
+    }
+    m[i].kasse=kasse; m[i].konto=konto;
+  }
+  const name=i=>new Date(2000,i,1).toLocaleString("de-DE",{month:"long"});
+  const zeilen=m.map((x,i)=>`<tr${x.kasse<-0.005?' class="negativ"':""}><td>${name(i)}</td>
+    <td class="num">${x.ein?fmt(x.ein):"—"}</td><td class="num">${x.aus?fmt(x.aus):"—"}</td>
+    <td class="num">${fmt(x.ein-x.aus)}</td><td class="num">${x.neben?fmt(x.neben):"—"}</td>
+    <td class="num">${fmt(x.kasse)}</td><td class="num">${fmt(x.konto)}</td></tr>`).join("");
+  return `<div class="tabellenrahmen"><table>
+    <thead><tr><th>Monat</th><th class="num">Betriebseinn.</th><th class="num">Betriebsausg.</th><th class="num">Ergebnis</th>
+      <th class="num">außerhalb EÜR</th><th class="num">Kasse Monatsende</th><th class="num">Konto Monatsende</th></tr></thead>
+    <tbody>${zeilen}</tbody></table></div>
+    <p class="mini">„Außerhalb EÜR“ zeigt Beiträge, ideelle Einnahmen und Ausgaben sowie nicht abziehbare Steuern als Saldo. Der Kontostand stimmt nur, wenn unter „Einstellungen“ der Kontostand am 1.1. eingetragen ist.</p>`;
 }
 
 /* ============================================================
@@ -821,6 +1003,7 @@ function ansichtStamm(){
     <td style="text-align:center">${k.transit?"<span class='mini'>—</span>":`<input type="checkbox" data-kfeld="euer" data-ki="${i}" ${k.euer?"checked":""} aria-label="zählt in die EÜR">`}</td>
     <td style="text-align:center">${k.art==="einnahme"&&!k.transit?`<input type="checkbox" data-kfeld="umsatz" data-ki="${i}" ${k.umsatz?"checked":""} aria-label="zählt in den Umsatz">`:"<span class='mini'>—</span>"}</td>
     <td><input class="zeileneingabe" data-kfeld="zeile" data-ki="${i}" value="${esc(k.zeile)}" placeholder="—" aria-label="EÜR-Zeile"></td>
+    <td class="nichtdrucken">${STANDARD_KATEGORIEN.some(x=>x.key===k.key)?"":`<button class="zeilentat" data-katweg="${i}" title="Kategorie löschen" aria-label="Kategorie löschen">✕</button>`}</td>
   </tr>`).join("");
 
   const regelZeilen=zustand.regeln.map((r,i)=>`<tr>
@@ -846,15 +1029,23 @@ function ansichtStamm(){
       <div class="feld" style="width:140px"><label for="sHebe">Hebesatz in %</label><input type="number" class="num" id="sHebe" value="${s.hebesatz}"></div>
       <div class="feld" style="width:170px"><label for="sVv">Verlustvortrag</label><input type="text" inputmode="decimal" class="num" id="sVv" value="${csvZahl(s.verlustvortrag)}"></div>
       <div class="feld" style="width:190px"><label for="sKasse">Kassenbestand am 1.1.</label><input type="text" inputmode="decimal" class="num" id="sKasse" value="${csvZahl(s.kassenanfang)}"></div>
+      <div class="feld" style="width:190px"><label for="sKonto">Kontostand am 1.1.</label><input type="text" inputmode="decimal" class="num" id="sKonto" value="${csvZahl(s.kontoanfang)}"></div>
       <div class="feld" style="width:190px"><label for="sUvj">Umsatz im Vorjahr</label><input type="text" inputmode="decimal" class="num" id="sUvj" value="${csvZahl(s.umsatzVorjahr)}"></div>
     </div>
-    <div class="knopfreihe"><button class="tat messing" id="btnStammSpeichern">Angaben übernehmen</button></div>
+    <div class="formzeile">
+      <div class="feld check"><input type="checkbox" id="sGem" ${s.gemeinnuetzig?"checked":""}><label for="sGem">Der Verein ist als gemeinnützig anerkannt — Besteuerungsgrenze von 45.000 € nach § 64 Abs. 3 AO anwenden</label></div>
+    </div>
+    <p class="mini">Änderungen gelten, sobald du ein Feld verlässt.</p>
 
     <h3>Kategorien</h3>
     <p class="hinweis">„EÜR“ bedeutet, dass die Kategorie in die Gewinnermittlung eingeht, „Umsatz“, dass sie auf die Kleinunternehmergrenze angerechnet wird. Die beiden Transit-Kategorien buchen zwischen Kasse und Konto um und berühren weder das eine noch das andere.</p>
     <div class="tabellenrahmen"><table>
-      <thead><tr><th>Bezeichnung</th><th>Art</th><th style="text-align:center">EÜR</th><th style="text-align:center">Umsatz</th><th>Zeile</th></tr></thead>
+      <thead><tr><th>Bezeichnung</th><th>Art</th><th style="text-align:center">EÜR</th><th style="text-align:center">Umsatz</th><th>Zeile</th><th class="nichtdrucken"></th></tr></thead>
       <tbody>${katZeilen}</tbody></table></div>
+    <div class="knopfreihe nichtdrucken">
+      <button class="tat leise" id="btnKatEin">Einnahmenkategorie hinzufügen</button>
+      <button class="tat leise" id="btnKatAus">Ausgabenkategorie hinzufügen</button>
+    </div>
 
     <h3>Zuordnungsregeln für den Kontoimport</h3>
     <p class="hinweis">Enthält der Verwendungszweck oder der Name der Gegenpartei den Suchtext, schlägt der Import diese Kategorie vor. Groß- und Kleinschreibung spielt keine Rolle. Die erste passende Regel gewinnt, und die Richtung muss stimmen — eine Einnahmenkategorie wird nie einer Lastschrift zugeordnet.</p>
@@ -864,13 +1055,130 @@ function ansichtStamm(){
     <div class="knopfreihe"><button class="tat leise" id="btnRegelNeu">Regel hinzufügen</button></div>
 
     <h3>Daten</h3>
-    <p class="hinweis">Diese Seite speichert nichts von selbst. Alles liegt nur im geöffneten Tab — sichere am Ende jeder Sitzung die CSV-Datei. Sie enthält Stammdaten, Kategorien, Regeln und alle Buchungen samt Bankreferenz.</p>
+    <p class="hinweis"><strong>Speichern</strong> (oder Strg+S) schreibt diese Seite zusammen mit allen Buchungen, Einstellungen, Regeln, einem angefangenen Kontoimport und den Werkzeugdaten in eine einzige HTML-Datei. Beim nächsten Öffnen ist alles wieder da. ${window.showSaveFilePicker
+      ?"Beim ersten Speichern fragt der Browser nach dem Ort — wähle diese Datei, danach überschreibt Strg+S sie direkt."
+      :"Dein Browser legt die Datei als Download ab. Damit du die alte Datei direkt überschreiben kannst, stelle in den Einstellungen „Immer fragen, wo Dateien gespeichert werden“ ein; in Firefox unter Allgemein → Dateien und Anwendungen."}</p>
+    <p class="hinweis">Zusätzlich hält der Browser nach jeder Änderung eine Notfallkopie. Hast du vergessen zu speichern, bietet die Seite beim nächsten Öffnen an, diesen Stand wiederherzustellen.</p>
     <div class="knopfreihe">
-      <button class="tat messing" id="btnSpeichern2">CSV speichern</button>
+      <button class="tat messing" id="btnSpeichern2">Speichern</button>
+      <button class="tat leise" id="btnLeerKopie">Leere Vorlage speichern</button>
+    </div>
+    <p class="hinweis" style="margin-top:14px">Die CSV-Datei bleibt als Austauschformat, etwa für die Kanzlei, eine Tabellenkalkulation oder als zusätzliche Sicherung.</p>
+    <div class="knopfreihe">
+      <button class="tat leise" id="btnCsvExport2">CSV exportieren</button>
       <button class="tat leise" id="btnLaden2">CSV laden</button>
       <button class="tat leise" id="btnBeispiel">Beispieljahr laden</button>
       <button class="tat leise" id="btnLeeren">Alles verwerfen</button>
     </div>`;
+}
+
+/* ============================================================
+   Ansicht: Werkzeuge
+   ============================================================ */
+
+const STUECKELUNG=[50000,20000,10000,5000,2000,1000,500,200,100,50,20,10,5,2,1];   // in Cent
+const stueckName=c=> c>=100 ? eurGanz.format(c/100)+" €" : c+" ct";
+
+function zaehlSumme(anzahl){
+  return STUECKELUNG.reduce((s,c)=>s+c*(parseInt(anzahl[c],10)||0),0)/100;
+}
+
+function ansichtWerkzeuge(){
+  const st=zustand.stamm;
+  if(!zustand.zaehlung) zustand.zaehlung={stichtag:"",anzahl:{}};
+  const z=zustand.zaehlung;
+  const stichtag = z.stichtag || (heute().startsWith(String(st.jahr))?heute():st.jahr+"-12-31");
+  const soll=rechne(stichtag).kasseEnde, ist=zaehlSumme(z.anzahl), diff=Math.round((ist-soll)*100)/100;
+
+  const raster=STUECKELUNG.map(c=>`<label><span>${stueckName(c)}</span><input type="number" min="0" step="1" data-stueck="${c}" value="${z.anzahl[c]||""}" aria-label="Anzahl ${stueckName(c)}"></label>`).join("");
+
+  const fruehere=zustand.kassenstuerze.map((k,i)=>`<tr>
+    <td class="mono">${esc(k.stichtag)}</td><td class="mini">${esc(k.zeit)}</td>
+    <td class="num">${fmt(k.soll)}</td><td class="num">${fmt(k.ist)}</td>
+    <td class="num" style="color:${Math.abs(k.differenz)<0.005?"var(--ok)":"var(--warn)"}">${fmt(k.differenz)}</td>
+    <td class="mini">${esc(k.notiz||"")}</td>
+    <td class="nichtdrucken"><button class="zeilentat" data-sturzweg="${i}" title="Zählung entfernen">✕</button></td></tr>`).join("");
+
+  // Bankabgleich
+  const ab=zustand.bankAbgleich;
+  let abgleich="";
+  if(ab && ab.datum){
+    const rab=rechne(ab.datum);
+    const rechn=rab.kontoEnde, d=Math.round((rechn-ab.saldo)*100)/100;
+    const imJ=String(ab.datum).startsWith(String(st.jahr));
+    abgleich=`<div class="kacheln">
+      <div class="kachel"><div class="titel">Laut Auszug</div><div class="wert">${fmt(ab.saldo)}</div><div class="fuss">am ${esc(ab.datum)}${ab.quelle?", "+esc(kuerze(ab.quelle,28)):""}</div></div>
+      <div class="kachel"><div class="titel">Laut Kassenbuch</div><div class="wert">${fmt(rechn)}</div><div class="fuss">Stand 1.1. plus Bankbuchungen bis zum Tag</div></div>
+      <div class="kachel ${Math.abs(d)<0.005?"gruen":"rot"}"><div class="titel">Differenz</div><div class="wert">${fmt(d)}</div><div class="fuss">${Math.abs(d)<0.005?"stimmt überein":"Kassenbuch minus Auszug"}</div></div>
+    </div>
+    ${!imJ?`<div class="merker ruhig"><strong>Der Saldo stammt nicht aus ${st.jahr}.</strong> Ein Vergleich ist nur innerhalb des eingestellten Wirtschaftsjahres sinnvoll.</div>`
+    :Math.abs(d)>=0.005?`<div class="merker"><strong>Kassenbuch und Konto weichen um ${fmt(Math.abs(d))} ab.</strong>
+      Häufige Ursachen: der Kontostand am 1.1. fehlt oder ist falsch, eine Kontobuchung wurde nicht übernommen oder doppelt erfasst, eine Barbuchung ist versehentlich als „Bank“ markiert, oder ein Vormerkposten ist inzwischen gebucht. Suche im Kassenbuch nach dem Differenzbetrag.</div>`:""}`;
+  }
+
+  const prot=zustand.protokoll.slice().reverse().map(p=>`<tr>
+    <td class="mini" style="white-space:nowrap">${esc(p.zeit)}</td><td>${esc(p.aktion)}</td>
+    <td class="mini">${esc(p.vorher||"")}</td><td class="mini">${esc(p.nachher||"")}</td></tr>`).join("");
+
+  const r=rechne();
+  return `
+    <h2>Werkzeuge</h2>
+
+    <h3>Kassensturz</h3>
+    <p class="hinweis">Bargeld nach Stückelung zählen und mit dem Kassenbestand laut Kassenbuch vergleichen. Das festgehaltene Zählprotokoll ist der Nachweis für die Kassenprüfer — drucke es aus oder speichere die Seite.</p>
+    <div class="formzeile">
+      <div class="feld w-datum"><label for="zStichtag">Stichtag</label><input type="date" id="zStichtag" value="${esc(stichtag)}"></div>
+    </div>
+    <div class="zaehlraster">${raster}</div>
+    <div class="kacheln">
+      <div class="kachel"><div class="titel">Gezählt</div><div class="wert" id="zIst">${fmt(ist)}</div><div class="fuss">Summe der Stückelung</div></div>
+      <div class="kachel"><div class="titel">Soll laut Kassenbuch</div><div class="wert">${fmt(soll)}</div><div class="fuss">Stand am Ende des ${esc(stichtag)}</div></div>
+      <div class="kachel ${Math.abs(diff)<0.005?"gruen":"rot"}" id="zDiffKachel"><div class="titel">Differenz</div><div class="wert" id="zDiff">${fmt(diff)}</div><div class="fuss">gezählt minus Soll</div></div>
+    </div>
+    <div class="knopfreihe nichtdrucken">
+      <button class="tat messing" id="btnZaehlungMerken">Zählung festhalten</button>
+      <button class="tat leise" id="btnZaehlungBuchen"${Math.abs(diff)<0.005?" disabled":""}>Differenz als Buchung vorbereiten</button>
+      <button class="tat leise" id="btnZaehlungLeeren">Zählfelder leeren</button>
+    </div>
+    <p class="mini">Eine Kassendifferenz muss gebucht werden, damit Kassenbuch und Bargeld wieder übereinstimmen. Die Schaltfläche füllt das Buchungsformular vor; die Kategorie entscheidest du dort. Ungeklärte Differenzen sollten selten sein — häufen sie sich, zweifelt das Finanzamt an der Kassenführung.</p>
+    ${fruehere?`<div class="tabellenrahmen"><table>
+      <thead><tr><th>Stichtag</th><th>Gezählt am</th><th class="num">Soll</th><th class="num">Ist</th><th class="num">Differenz</th><th>Notiz</th><th class="nichtdrucken"></th></tr></thead>
+      <tbody>${fruehere}</tbody></table></div>`:""}
+
+    <h3>Bankabgleich</h3>
+    <p class="hinweis">Vergleicht den Kontostand laut Kontoauszug mit dem, was sich aus dem Kassenbuch ergibt. Beim Einlesen eines CAMT-Auszugs wird der Schlusssaldo automatisch übernommen; du kannst ihn auch von Hand eintragen.</p>
+    <div class="formzeile nichtdrucken">
+      <div class="feld w-datum"><label for="abDatum">Datum</label><input type="date" id="abDatum" value="${esc(ab&&ab.datum||"")}"></div>
+      <div class="feld w-betrag" style="width:150px"><label for="abSaldo">Kontostand</label><input type="text" inputmode="decimal" class="num" id="abSaldo" value="${ab?csvZahl(ab.saldo):""}" placeholder="0,00"></div>
+      <button class="tat leise" id="btnAbgleich">Vergleichen</button>
+    </div>
+    ${abgleich || `<p class="mini">Noch kein Kontostand hinterlegt.</p>`}
+    ${Math.abs(st.kontoanfang)<0.005&&zustand.buchungen.some(b=>b.zahlweg==="bank")?`<p class="mini" style="color:var(--warn)">Unter „Einstellungen“ ist kein Kontostand am 1.1. eingetragen — ohne ihn kann der Abgleich nicht stimmen.</p>`:""}
+
+    <h3>Jahreswechsel</h3>
+    <p class="hinweis">Schließt ${st.jahr} ab und beginnt ${st.jahr+1}. Zuerst wird eine Archivkopie mit allen Daten von ${st.jahr} heruntergeladen. Danach übernimmt die Seite die Endstände als Anfangswerte, behält Kategorien und Regeln und leert das Kassenbuch. Buchungen, die schon in ${st.jahr+1} liegen, bleiben erhalten.</p>
+    <div class="tabellenrahmen"><table><tbody>
+      <tr><td>Kassenbestand am 1.1.${st.jahr+1}</td><td class="num">${fmt(r.kasseEnde)}</td></tr>
+      <tr><td>Kontostand am 1.1.${st.jahr+1}</td><td class="num">${fmt(r.kontoEnde)}</td></tr>
+      <tr><td>Umsatz im Vorjahr</td><td class="num">${fmt(r.umsatz)}</td></tr>
+      <tr><td>Verlustvortrag</td><td class="num">${fmt(r.verlustRest)}</td></tr>
+    </tbody></table></div>
+    <div class="knopfreihe nichtdrucken"><button class="tat" id="btnJahreswechsel">Archivkopie speichern und ${st.jahr+1} beginnen</button></div>
+
+    <h3>Änderungsprotokoll</h3>
+    <p class="hinweis">Jede Änderung und Löschung einer erfassten Buchung wird hier mit Zeitpunkt und bisheriger Fassung festgehalten. Ein Kassenbuch muss nachvollziehbar bleiben; das Protokoll wird mit der Seite gespeichert und lässt sich nicht löschen.</p>
+    ${prot?`<div class="tabellenrahmen"><table>
+      <thead><tr><th>Zeitpunkt</th><th>Vorgang</th><th>Vorher</th><th>Nachher</th></tr></thead>
+      <tbody>${prot}</tbody></table></div>`:`<p class="mini">Bisher wurde nichts geändert oder gelöscht.</p>`}`;
+}
+
+function buchungKurz(b){
+  if(!b) return "";
+  const k=kat(b.kategorie);
+  return `${b.datum} · ${b.beleg||"—"} · ${b.text} · ${k?k.text:b.kategorie} · ${fmt(b.betrag)} · ${b.zahlweg==="bar"?"Bar":"Bank"}`;
+}
+function protokolliere(aktion, vorher, nachher){
+  zustand.protokoll.push({zeit:zeitstempel(), aktion, vorher:buchungKurz(vorher), nachher:buchungKurz(nachher)});
 }
 
 /* ============================================================
@@ -882,18 +1190,18 @@ function ansichtHilfe(){
     <h2>So arbeitest du damit</h2>
 
     <h3>Einmal am Anfang</h3>
-    <p class="hinweis">Unter „Einstellungen“ Verein, Jahr, Hebesatz der Gemeinde, Kassenbestand am 1. Januar und den Umsatz des Vorjahres eintragen. Den Verlustvortrag findest du im letzten Körperschaftsteuerbescheid. Danach einmal auf „CSV speichern“ — diese Datei ist ab jetzt dein Kassenbuch.</p>
+    <p class="hinweis">Unter „Einstellungen“ Verein, Jahr, Hebesatz der Gemeinde, Kassenbestand am 1. Januar und den Umsatz des Vorjahres eintragen. Den Kontostand am 1.1. liefert der Jahresabschluss der Bank, den Verlustvortrag der letzte Körperschaftsteuerbescheid. Danach auf „Speichern“ — die gespeicherte HTML-Datei ist ab jetzt dein Kassenbuch, mit allen Daten darin.</p>
 
     <h3>Monatlich</h3>
-    <p class="hinweis">CSV laden. Im Sparkassen-Banking den Umsatzexport als <strong>CAMT V8</strong> herunterladen und die ZIP-Datei unter „Kontoauszug einlesen“ ablegen. Jede Zeile bekommt einen Kategorievorschlag; wo noch „offen“ steht, entscheidest du. Mit „＋Regel“ merkt sich die Seite die Zuordnung für ähnliche Buchungen.</p>
-    <p class="hinweis">Bareinnahmen aus dem Ausschank erfasst du im Kassenbuch von Hand — die stehen in keinem Kontoauszug. Danach CSV wieder speichern.</p>
+    <p class="hinweis">Die gespeicherte Seite öffnen — alles ist wieder da. Im Sparkassen-Banking den Umsatzexport als <strong>CAMT V8</strong> herunterladen und die ZIP-Datei unter „Kontoauszug einlesen“ ablegen. Jede Zeile bekommt einen Kategorievorschlag; wo noch „offen“ steht, entscheidest du. Mit „＋Regel“ merkt sich die Seite die Zuordnung für ähnliche Buchungen.</p>
+    <p class="hinweis">Bareinnahmen aus dem Ausschank erfasst du im Kassenbuch von Hand — die stehen in keinem Kontoauszug. Danach speichern (Strg+S). Unter „Werkzeuge“ prüft der Bankabgleich, ob der Kontostand passt.</p>
 
     <h3>Der wichtigste Punkt: Geldtransit</h3>
     <p class="hinweis">Wenn du Bargeld aus der Kasse auf das Konto einzahlst, ist das <strong>kein Umsatz</strong>. Der Umsatz ist beim Verkauf entstanden und steht schon im Kassenbuch. Zählst du die Einzahlung nochmal als Einnahme, verdoppelst du deine Erlöse — und reißt womöglich eine Grenze, die gar nicht gerissen ist.</p>
     <p class="hinweis">Dafür gibt es die zwei Transit-Kategorien. Sie verschieben Geld zwischen Kasse und Konto, ohne Gewinn oder Umsatz zu berühren. Der Import erkennt Einzahlungen und Abhebungen meist automatisch.</p>
 
     <h3>Am Jahresende</h3>
-    <p class="hinweis">Bargeld zählen und mit dem Kassenbestand vergleichen. Dann auf „Übertragungsblatt“ und drucken. Die Werte tippst du in Mein ELSTER ab oder gibst den Ausdruck der Kanzlei.</p>
+    <p class="hinweis">Bargeld unter „Werkzeuge → Kassensturz“ zählen und die Zählung festhalten. Dann auf „Übertragungsblatt“ und drucken. Anschließend „Werkzeuge → Jahreswechsel“: Die Seite speichert eine Archivkopie des alten Jahres und trägt die Endstände als Anfangswerte des neuen ein. Die Werte tippst du in Mein ELSTER ab oder gibst den Ausdruck der Kanzlei.</p>
 
     <h3>Welchen Export die Sparkasse liefert</h3>
     <p class="hinweis">Der Umsatzexport erzeugt <strong>camt.052</strong>, einen Kontobericht. Der offizielle <strong>Kontoauszug</strong> ist camt.053 und liegt im elektronischen Postfach. Zum Buchen taugt beides und die Seite versteht beides — für die Belegablage solltest du aber den echten Kontoauszug archivieren, denn nur er ist der Nachweis. Die zehnjährige Aufbewahrungspflicht liegt bei dir, nicht bei der Bank.</p>
@@ -902,8 +1210,11 @@ function ansichtHilfe(){
     <p class="hinweis"><strong>Echte Mitgliedsbeiträge</strong> — satzungsgemäß, von allen gleich, ohne Gegenleistung — bleiben nach § 8 Abs. 5 KStG außer Ansatz und zählen nicht auf die Kleinunternehmergrenze. Bekommt ein Mitglied für seinen Beitrag etwas Konkretes, ist es eine normale Betriebseinnahme.</p>
     <p class="hinweis"><strong>Gewerbe- und Körperschaftsteuer</strong> sind keine abziehbaren Betriebsausgaben. Sie stehen im Kassenbuch, mindern aber den Gewinn nicht.</p>
 
+    <h3>Buchungen korrigieren</h3>
+    <p class="hinweis">Mit ✎ neben einer Buchung lässt sie sich ändern, mit ✕ löschen. Beides landet mit der bisherigen Fassung im Änderungsprotokoll unter „Werkzeuge“ — ein Kassenbuch darf korrigiert werden, aber nicht spurlos.</p>
+
     <h3>Was diese Seite nicht kann</h3>
-    <p class="hinweis">Sie übermittelt nichts an ELSTER — das geht nur mit der ERiC-Bibliothek der Finanzverwaltung. Sie ersetzt auch keine Beratung: die Zuordnung eines Belegs bleibt eine fachliche Entscheidung. Die Berechnungen folgen den Grundfällen und kennen keine Sonderregelungen wie Hinzurechnungen nach § 8 GewStG oder Abschreibungsverläufe.</p>`;
+    <p class="hinweis">Sie übermittelt nichts an ELSTER — das geht nur mit der ERiC-Bibliothek der Finanzverwaltung. Sie ersetzt auch keine Beratung: die Zuordnung eines Belegs bleibt eine fachliche Entscheidung. Die Berechnungen folgen den Grundfällen und kennen keine Sonderregelungen wie Hinzurechnungen nach § 8 GewStG, gewerbesteuerliche Verlustvorträge, Abschreibungsverläufe oder eine Umsatzsteuer-Voranmeldung bei Regelbesteuerung.</p>`;
 }
 
 /* ============================================================
@@ -917,26 +1228,53 @@ function zeichne(){
     zustand.tab==="bank"      ? ansichtBank()      :
     zustand.tab==="auswert"   ? ansichtAuswertung():
     zustand.tab==="uebertrag" ? ansichtUebertrag() :
-    zustand.tab==="stamm"     ? ansichtStamm()     : ansichtHilfe();
+    zustand.tab==="stamm"     ? ansichtStamm()     :
+    zustand.tab==="werkzeug"  ? ansichtWerkzeuge() : ansichtHilfe();
   zeichneGlas();
   verdrahte();
 }
 
+function zeigeTab(t){
+  zustand.tab=t;
+  document.querySelectorAll(".reiter button").forEach(x=>x.setAttribute("aria-selected", x.dataset.tab===t?"true":"false"));
+}
+
 function verdrahte(){
+  // Kassenbuch: Formular
   const bb=g("btnBuchen");
   if(bb){
     bb.onclick=buchen;
     g("fBetrag").addEventListener("keydown",e=>{if(e.key==="Enter")buchen();});
     g("fText").addEventListener("keydown",e=>{if(e.key==="Enter")g("fBetrag").focus();});
+    const ba=g("btnAbbrechen"); if(ba) ba.onclick=()=>{ zustand.bearbeiten=null; zeichne(); };
   }
+  // Kassenbuch: Filter
+  const ft=g("filterText");
+  if(ft){
+    ft.oninput=()=>{
+      zustand.filter.text=ft.value; const pos=ft.selectionStart;
+      zeichne(); const n=g("filterText"); n.focus(); try{n.setSelectionRange(pos,pos);}catch(e){}
+    };
+    g("filterKat").onchange=e=>{ zustand.filter.kat=e.target.value; zeichne(); };
+    g("filterMonat").onchange=e=>{ zustand.filter.monat=e.target.value; zeichne(); };
+    const fw=g("btnFilterWeg"); if(fw) fw.onclick=()=>{ zustand.filter={text:"",kat:"",monat:""}; zeichne(); };
+  }
+  document.querySelectorAll("[data-bearbeiten]").forEach(b=>b.onclick=()=>{
+    zustand.bearbeiten=b.getAttribute("data-bearbeiten"); zeichne();
+    window.scrollTo({top:0,behavior:"smooth"}); const t=g("fText"); if(t) t.focus();
+  });
   document.querySelectorAll("[data-loeschen]").forEach(b=>b.onclick=()=>{
     const id=b.getAttribute("data-loeschen");
     const buch=zustand.buchungen.find(x=>x.id===id); if(!buch) return;
-    if(confirm(`Buchung „${buch.text}“ über ${fmt(buch.betrag)} löschen?`)){
+    if(confirm(`Buchung „${buch.text}“ über ${fmt(buch.betrag)} löschen?\n\nDie Löschung wird im Änderungsprotokoll festgehalten.`)){
+      protokolliere("gelöscht", buch, null);
       zustand.buchungen=zustand.buchungen.filter(x=>x.id!==id);
+      if(zustand.bearbeiten===id) zustand.bearbeiten=null;
       markiereSchmutzig(); zeichne();
     }
   });
+
+  // Übertragungsblatt und Kategorien
   document.querySelectorAll("[data-zeile]").forEach(i=>i.onchange=()=>{
     const k=kat(i.getAttribute("data-zeile")); if(k){k.zeile=i.value.trim(); markiereSchmutzig();}
   });
@@ -946,6 +1284,23 @@ function verdrahte(){
     k[f]= el.type==="checkbox" ? el.checked : el.value.trim();
     markiereSchmutzig(); if(f!=="text"&&f!=="zeile") zeichne();
   });
+  document.querySelectorAll("[data-katweg]").forEach(b=>b.onclick=()=>{
+    const k=zustand.kategorien[parseInt(b.getAttribute("data-katweg"),10)]; if(!k) return;
+    const n=zustand.buchungen.filter(x=>x.kategorie===k.key).length;
+    if(n){ alert(`„${k.text}“ wird von ${n} Buchungen verwendet und kann nicht gelöscht werden.`); return; }
+    if(!confirm(`Kategorie „${k.text}“ löschen?`)) return;
+    zustand.kategorien=zustand.kategorien.filter(x=>x!==k);
+    zustand.regeln=zustand.regeln.filter(r=>r.kategorie!==k.key);
+    markiereSchmutzig(); zeichne();
+  });
+  const katNeu=art=>{
+    const t=prompt(art==="einnahme"?"Bezeichnung der neuen Einnahmenkategorie:":"Bezeichnung der neuen Ausgabenkategorie:");
+    if(!t||!t.trim()) return;
+    zustand.kategorien.push({key:(art==="einnahme"?"E_":"A_")+Date.now().toString(36).toUpperCase(),
+      art, euer:true, umsatz:art==="einnahme", transit:false, zeile:"", text:t.trim()});
+    markiereSchmutzig(); zeichne();
+  };
+  if(g("btnKatEin")){ g("btnKatEin").onclick=()=>katNeu("einnahme"); g("btnKatAus").onclick=()=>katNeu("ausgabe"); }
   document.querySelectorAll("[data-ri]").forEach(el=>el.onchange=()=>{
     const i=parseInt(el.getAttribute("data-ri"),10), f=el.getAttribute("data-rfeld");
     if(zustand.regeln[i]){ zustand.regeln[i][f]=el.value.trim(); markiereSchmutzig(); }
@@ -964,10 +1319,10 @@ function verdrahte(){
     ab.addEventListener("drop",e=>{ if(e.dataTransfer.files.length) importStarten(Array.from(e.dataTransfer.files)); });
   }
   document.querySelectorAll("[data-uebernehmen]").forEach(c=>c.onchange=()=>{
-    zustand.puffer[parseInt(c.getAttribute("data-uebernehmen"),10)].uebernehmen=c.checked; zeichne();
+    zustand.puffer[parseInt(c.getAttribute("data-uebernehmen"),10)].uebernehmen=c.checked; markiereSchmutzig(); zeichne();
   });
   document.querySelectorAll("[data-kategorie]").forEach(s=>s.onchange=()=>{
-    zustand.puffer[parseInt(s.getAttribute("data-kategorie"),10)].kategorie=s.value; zeichne();
+    zustand.puffer[parseInt(s.getAttribute("data-kategorie"),10)].kategorie=s.value; markiereSchmutzig(); zeichne();
   });
   document.querySelectorAll("[data-regel]").forEach(b=>b.onclick=()=>{
     const p=zustand.puffer[parseInt(b.getAttribute("data-regel"),10)];
@@ -982,66 +1337,136 @@ function verdrahte(){
   const bu=g("btnUebernehmen");
   if(bu){
     bu.onclick=uebernehmen;
-    g("btnAlleAn").onclick=()=>{zustand.puffer.forEach(p=>{if(!p.dublette)p.uebernehmen=true;});zeichne();};
-    g("btnKeine").onclick=()=>{zustand.puffer.forEach(p=>p.uebernehmen=false);zeichne();};
-    g("btnVerwerfen").onclick=()=>{ if(confirm("Den eingelesenen Kontoauszug verwerfen?")){zustand.puffer=[];zeichne();} };
+    g("btnAlleAn").onclick=()=>{zustand.puffer.forEach(p=>{if(!p.dublette&&!p.fremdesJahr)p.uebernehmen=true;});markiereSchmutzig();zeichne();};
+    g("btnKeine").onclick=()=>{zustand.puffer.forEach(p=>p.uebernehmen=false);markiereSchmutzig();zeichne();};
+    g("btnVerwerfen").onclick=()=>{ if(confirm("Den eingelesenen Kontoauszug verwerfen?")){zustand.puffer=[];markiereSchmutzig();zeichne();} };
   }
 
-  const bs=g("btnStammSpeichern");
-  if(bs){
-    bs.onclick=()=>{
-      const s=zustand.stamm;
-      s.verein=g("sVerein").value.trim()||"Verein";
-      s.betrieb=g("sBetrieb").value.trim();
-      s.steuernummer=g("sStnr").value.trim();
-      s.finanzamt=g("sFa").value.trim();
-      s.jahr=parseInt(g("sJahr").value,10)||new Date().getFullYear();
-      s.hebesatz=zahl(g("sHebe").value);
-      s.verlustvortrag=zahl(g("sVv").value);
-      s.kassenanfang=zahl(g("sKasse").value);
-      s.umsatzVorjahr=zahl(g("sUvj").value);
-      markiereSchmutzig(); zeichne();
-    };
+  // Einstellungen
+  const stammFelder=["sVerein","sBetrieb","sStnr","sFa","sJahr","sHebe","sVv","sKasse","sKonto","sUvj","sGem"];
+  if(g("sVerein")){
+    stammFelder.forEach(id=>g(id).onchange=()=>stammUebernehmen(id==="sJahr"||id==="sGem"));
     g("btnRegelNeu").onclick=()=>{ zustand.regeln.push({muster:"",kategorie:"A_UEBRIG"}); markiereSchmutzig(); zeichne(); };
-    g("btnSpeichern2").onclick=csvSpeichern;
+    g("btnSpeichern2").onclick=speichern;
+    g("btnLeerKopie").onclick=leereVorlageSpeichern;
+    g("btnCsvExport2").onclick=csvSpeichern;
     g("btnLaden2").onclick=()=>g("dateiWahl").click();
     g("btnBeispiel").onclick=beispielLaden;
     g("btnLeeren").onclick=()=>{
-      if(confirm("Alle Buchungen und Einstellungen verwerfen? Ungesicherte Daten gehen verloren.")){
-        zustand.buchungen=[]; zustand.puffer=[];
+      if(confirm("Alle Buchungen, Einstellungen, Regeln und Werkzeugdaten verwerfen? Ungesicherte Daten gehen verloren.")){
+        zustand.stamm=STANDARD_STAMM();
+        zustand.buchungen=[]; zustand.puffer=[]; zustand.pufferInfo=null;
         zustand.kategorien=STANDARD_KATEGORIEN.map(k=>({...k}));
         zustand.regeln=STANDARD_REGELN.map(r=>({...r}));
-        markiereSauber("Leer"); zeichne();
+        zustand.protokoll=[]; zustand.kassenstuerze=[]; zustand.bankAbgleich=null; zustand.zaehlung=null;
+        zustand.bearbeiten=null; zustand.filter={text:"",kat:"",monat:""};
+        markiereSchmutzig(); zeichne();
       }
     };
   }
+
+  // Werkzeuge: Kassensturz
+  if(g("zStichtag")){
+    const z=zustand.zaehlung;
+    g("zStichtag").onchange=e=>{ z.stichtag=e.target.value; markiereSchmutzig(); zeichne(); };
+    document.querySelectorAll("[data-stueck]").forEach(i=>i.oninput=()=>{
+      const v=parseInt(i.value,10); z.anzahl[i.getAttribute("data-stueck")]= v>0 ? v : 0;
+      // nur die Zahlen aktualisieren, damit das Eingabefeld den Fokus behält
+      const soll=rechne(g("zStichtag").value).kasseEnde, ist=zaehlSumme(z.anzahl), d=Math.round((ist-soll)*100)/100;
+      g("zIst").textContent=fmt(ist); g("zDiff").textContent=fmt(d);
+      g("zDiffKachel").className="kachel "+(Math.abs(d)<0.005?"gruen":"rot");
+      g("btnZaehlungBuchen").disabled=Math.abs(d)<0.005;
+      markiereSchmutzig();
+    });
+    g("btnZaehlungLeeren").onclick=()=>{ z.anzahl={}; zeichne(); };
+    g("btnZaehlungMerken").onclick=()=>{
+      const tag=g("zStichtag").value; if(!tag){ alert("Bitte einen Stichtag eintragen."); return; }
+      const soll=rechne(tag).kasseEnde, ist=zaehlSumme(z.anzahl);
+      const notiz=prompt("Notiz zur Zählung (z. B. wer gezählt hat):","")||"";
+      zustand.kassenstuerze.push({stichtag:tag, zeit:zeitstempel(), soll, ist, differenz:Math.round((ist-soll)*100)/100,
+        anzahl:{...z.anzahl}, notiz});
+      markiereSchmutzig(); zeichne();
+    };
+    g("btnZaehlungBuchen").onclick=()=>{
+      const tag=g("zStichtag").value, soll=rechne(tag).kasseEnde, ist=zaehlSumme(z.anzahl);
+      const d=Math.round((ist-soll)*100)/100; if(Math.abs(d)<0.005) return;
+      zustand.formVorlage={datum:tag, text:(d<0?"Kassenfehlbetrag":"Kassenüberschuss")+" laut Kassensturz vom "+tag,
+        kategorie:d<0?"A_UEBRIG":"E_SONST", betrag:Math.abs(d), zahlweg:"bar"};
+      zustand.bearbeiten=null; zeigeTab("kasse"); zeichne(); window.scrollTo({top:0,behavior:"smooth"});
+    };
+    document.querySelectorAll("[data-sturzweg]").forEach(b=>b.onclick=()=>{
+      if(!confirm("Diese Zählung aus der Liste entfernen?")) return;
+      zustand.kassenstuerze.splice(parseInt(b.getAttribute("data-sturzweg"),10),1); markiereSchmutzig(); zeichne();
+    });
+    g("btnAbgleich").onclick=()=>{
+      const d=g("abDatum").value, v=g("abSaldo").value.trim();
+      if(!d||!v){ alert("Bitte Datum und Kontostand eintragen."); return; }
+      zustand.bankAbgleich={datum:d, saldo:zahl(v), quelle:"von Hand"}; markiereSchmutzig(); zeichne();
+    };
+    g("btnJahreswechsel").onclick=jahreswechsel;
+  }
+}
+
+function stammUebernehmen(neuZeichnen){
+  const s=zustand.stamm;
+  s.verein=g("sVerein").value.trim()||"Verein";
+  s.betrieb=g("sBetrieb").value.trim();
+  s.steuernummer=g("sStnr").value.trim();
+  s.finanzamt=g("sFa").value.trim();
+  s.jahr=parseInt(g("sJahr").value,10)||new Date().getFullYear();
+  s.hebesatz=zahl(g("sHebe").value);
+  s.verlustvortrag=zahl(g("sVv").value);
+  s.kassenanfang=zahl(g("sKasse").value);
+  s.kontoanfang=zahl(g("sKonto").value);
+  s.umsatzVorjahr=zahl(g("sUvj").value);
+  s.gemeinnuetzig=g("sGem").checked;
+  markiereSchmutzig();
+  if(neuZeichnen) zeichne(); else zeichneGlas();
 }
 
 function buchen(){
-  const datum=g("fDatum").value, text=g("fText").value.trim(), betrag=zahl(g("fBetrag").value);
+  const datum=g("fDatum").value, text=g("fText").value.trim(), betrag=Math.round(zahl(g("fBetrag").value)*100)/100;
   if(!datum){alert("Bitte ein Datum eintragen.");g("fDatum").focus();return;}
   if(!text){alert("Bitte kurz beschreiben, worum es geht.");g("fText").focus();return;}
   if(betrag<=0){alert("Der Betrag muss größer als null sein. Ob Einnahme oder Ausgabe, entscheidet die Kategorie.");g("fBetrag").focus();return;}
-  zustand.buchungen.push({id:"b"+Date.now()+Math.random().toString(36).slice(2,6),
-    datum, beleg:g("fBeleg").value.trim(), text, kategorie:g("fKat").value, betrag, zahlweg:g("fWeg").value, bankref:""});
+  if(!datum.startsWith(String(zustand.stamm.jahr)) &&
+     !confirm(`Das Datum ${datum} liegt nicht im Wirtschaftsjahr ${zustand.stamm.jahr}. Die Buchung wird gespeichert, zählt aber nicht. Trotzdem buchen?`)) return;
+  const beleg=g("fBeleg").value.trim();
+  const felder={datum, beleg, text, kategorie:g("fKat").value, betrag, zahlweg:g("fWeg").value};
+
+  if(zustand.bearbeiten){
+    const b=zustand.buchungen.find(x=>x.id===zustand.bearbeiten);
+    if(b){
+      const vorher={...b};
+      Object.assign(b,felder);
+      if(buchungKurz(vorher)!==buchungKurz(b)) protokolliere("geändert", vorher, b);
+    }
+    zustand.bearbeiten=null;
+    markiereSchmutzig(); zeichne();
+    return;
+  }
+  if(beleg && zustand.buchungen.some(x=>x.beleg===beleg) &&
+     !confirm(`Die Beleg-Nummer ${beleg} ist schon vergeben. Trotzdem buchen?`)) return;
+  zustand.buchungen.push({id:neueId(), ...felder, bankref:""});
+  zustand.letztesDatum=datum;
   markiereSchmutzig();
-  const mk=g("fKat").value, mw=g("fWeg").value, md=datum;
+  const mk=g("fKat").value, mw=g("fWeg").value;
   zeichne();
-  g("fKat").value=mk; g("fWeg").value=mw; g("fDatum").value=md; g("fText").focus();
+  g("fKat").value=mk; g("fWeg").value=mw; g("fText").focus();
 }
 
 async function importStarten(dateien){
   try{
-    markiereSauber("Lese Kontoauszug …");
+    statusMeldung("Lese Kontoauszug …");
     await camtEinlesen(dateien);
-    if(!zustand.puffer.length){ alert("In diesen Dateien wurden keine gebuchten Umsätze gefunden."); markiereSauber(); return; }
-    zustand.tab="bank";
-    document.querySelectorAll(".reiter button").forEach(t=>t.setAttribute("aria-selected", t.dataset.tab==="bank"?"true":"false"));
+    if(!zustand.puffer.length){ alert("In diesen Dateien wurden keine gebuchten Umsätze gefunden."); statusMeldung(zustand.schmutzig?"Nicht gesichert":"Bereit"); return; }
+    zeigeTab("bank");
+    markiereSchmutzig();
     zeichne();
-    if(zustand.schmutzig) markiereSchmutzig(); else markiereSauber("Kontoauszug gelesen — noch nichts übernommen");
+    statusMeldung("Kontoauszug gelesen, noch nichts übernommen");
   }catch(err){
     alert("Der Kontoauszug ließ sich nicht lesen.\n\n"+err.message);
-    markiereSauber();
+    statusMeldung(zustand.schmutzig?"Nicht gesichert":"Bereit");
   }
 }
 
@@ -1053,18 +1478,21 @@ function uebernehmen(){
     n++;
     const bez=[p.gegen,p.zweck].filter(Boolean).join(" — ");
     zustand.buchungen.push({
-      id:"b"+Date.now()+Math.random().toString(36).slice(2,6),
+      id:neueId(),
       datum:p.datum, beleg:"B-"+String(n).padStart(3,"0"),
-      text:kuerze(bez||"Kontobuchung",160), kategorie:p.kategorie,
+      text:kuerze((p.storno?"Storno: ":"")+(bez||"Kontobuchung"),160), kategorie:p.kategorie,
       betrag:p.betrag, zahlweg:"bank", bankref:p.bankref
     });
   });
+  const saldo=zustand.pufferInfo&&zustand.pufferInfo.saldo;
+  if(saldo && (!zustand.bankAbgleich || (zustand.bankAbgleich.datum||"")<=saldo.datum))
+    zustand.bankAbgleich={datum:saldo.datum, saldo:saldo.saldo, quelle:saldo.quelle};
   const anzahl=nehmen.length;
   zustand.puffer=[];
-  zustand.tab="kasse";
-  document.querySelectorAll(".reiter button").forEach(t=>t.setAttribute("aria-selected", t.dataset.tab==="kasse"?"true":"false"));
+  zeigeTab("kasse");
   markiereSchmutzig(); zeichne();
-  alert(anzahl+" Buchungen übernommen. Denk daran, die Bareinnahmen aus dem Ausschank noch von Hand zu erfassen.");
+  alert(anzahl+" Buchungen übernommen. Denk daran, die Bareinnahmen aus dem Ausschank noch von Hand zu erfassen."
+    +(saldo?"\n\nDer Kontostand laut Auszug ist für den Bankabgleich unter „Werkzeuge“ hinterlegt.":""));
 }
 
 /* ============================================================
@@ -1085,6 +1513,8 @@ function csvSpeichern(){
   z.push("#VERLUSTVORTRAG;"+csvZahl(s.verlustvortrag));
   z.push("#KASSENANFANG;"+csvZahl(s.kassenanfang));
   z.push("#UMSATZVORJAHR;"+csvZahl(s.umsatzVorjahr));
+  z.push("#KONTOANFANG;"+csvZahl(s.kontoanfang));
+  z.push("#GEMEINNUETZIG;"+(s.gemeinnuetzig?"1":"0"));
   zustand.kategorien.forEach(k=>z.push(["#KATEGORIE",k.key,csvFeld(k.text),k.art,k.euer?"1":"0",k.umsatz?"1":"0",csvFeld(k.zeile),k.transit?"1":"0"].join(";")));
   zustand.regeln.forEach(r=>z.push(["#REGEL",csvFeld(r.muster),r.kategorie].join(";")));
   z.push("#BUCHUNGEN");
@@ -1097,17 +1527,26 @@ function csvSpeichern(){
   a.download="Kassenbuch_"+s.jahr+"_"+s.verein.replace(/[^\wÄÖÜäöüß]+/g,"_").replace(/^_|_$/g,"")+".csv";
   document.body.appendChild(a); a.click();
   setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},800);
-  markiereSauber("Gesichert als "+a.download);
+  statusMeldung("CSV exportiert als "+a.download);
 }
 
-function zerlegeZeile(z){
-  const f=[]; let akt="", anf=false;
-  for(let i=0;i<z.length;i++){
-    const c=z[i];
-    if(anf){ if(c==='"'){ if(z[i+1]==='"'){akt+='"';i++;} else anf=false; } else akt+=c; }
-    else { if(c==='"') anf=true; else if(c===";"){f.push(akt);akt="";} else akt+=c; }
+// Zerlegt den ganzen Text; Felder in Anführungszeichen dürfen Zeilenumbrüche enthalten
+function csvZeilen(text){
+  const zeilen=[]; let f=[], akt="", anf=false;
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(anf){
+      if(c==='"'){ if(text[i+1]==='"'){akt+='"';i++;} else anf=false; }
+      else akt+=c;
+    }else if(c==='"') anf=true;
+    else if(c===";"){ f.push(akt); akt=""; }
+    else if(c==="\r"||c==="\n"){
+      if(c==="\r"&&text[i+1]==="\n") i++;
+      f.push(akt); zeilen.push(f); f=[]; akt="";
+    }else akt+=c;
   }
-  f.push(akt); return f;
+  if(akt!==""||f.length){ f.push(akt); zeilen.push(f); }
+  return zeilen;
 }
 
 function csvLesen(text){
@@ -1115,9 +1554,9 @@ function csvLesen(text){
   const stamm={...zustand.stamm}, katNeu=[], regNeu=[], buchNeu=[];
   let inTabelle=false;
 
-  text.split(/\r\n|\n|\r/).forEach(roh=>{
-    if(!roh.trim()) return;
-    const f=zerlegeZeile(roh), kopf=f[0];
+  csvZeilen(text).forEach(f=>{
+    if(!f.join("").trim()) return;
+    const kopf=f[0];
     if(kopf==="#BUCHUNGEN"){ inTabelle=true; return; }
     if(kopf.startsWith("#")){
       const w=f[1]||"";
@@ -1131,6 +1570,8 @@ function csvLesen(text){
         case "#VERLUSTVORTRAG": stamm.verlustvortrag=zahl(w); break;
         case "#KASSENANFANG": stamm.kassenanfang=zahl(w); break;
         case "#UMSATZVORJAHR": stamm.umsatzVorjahr=zahl(w); break;
+        case "#KONTOANFANG": stamm.kontoanfang=zahl(w); break;
+        case "#GEMEINNUETZIG": stamm.gemeinnuetzig=w==="1"; break;
         case "#KATEGORIE":
           katNeu.push({key:f[1],text:f[2],art:f[3]==="einnahme"?"einnahme":"ausgabe",
                        euer:f[4]==="1",umsatz:f[5]==="1",zeile:f[6]||"",transit:f[7]==="1"});
@@ -1142,7 +1583,7 @@ function csvLesen(text){
     if(!inTabelle) return;
     if(/^datum$/i.test(kopf)) return;
     if(f.length<5) return;
-    buchNeu.push({id:"b"+Date.now()+Math.random().toString(36).slice(2,6),
+    buchNeu.push({id:neueId(),
       datum:f[0].trim(), beleg:f[1], text:f[2], kategorie:f[3],
       betrag:Math.abs(zahl(f[4])),
       zahlweg:(f[5]||"").trim().toLowerCase()==="bar"?"bar":"bank",
@@ -1153,17 +1594,19 @@ function csvLesen(text){
   if(katNeu.length) zustand.kategorien=katNeu;
   if(regNeu.length) zustand.regeln=regNeu;
   zustand.buchungen=buchNeu;
-  zustand.puffer=[];
+  zustand.puffer=[]; zustand.pufferInfo=null; zustand.bearbeiten=null;
+  zustand.protokoll.push({zeit:zeitstempel(), aktion:`CSV geladen, ${buchNeu.length} Buchungen ersetzen den bisherigen Stand`, vorher:"", nachher:""});
 
   const unbekannt=buchNeu.filter(b=>!kat(b.kategorie)).length;
-  markiereSauber(`Geladen: ${buchNeu.length} Buchungen`+(unbekannt?` — ${unbekannt} ohne passende Kategorie`:""));
+  markiereSchmutzig();
+  statusMeldung(`Aus CSV geladen: ${buchNeu.length} Buchungen`+(unbekannt?` — ${unbekannt} ohne passende Kategorie`:""));
   zeichne();
   if(unbekannt) alert(unbekannt+" Buchungen verweisen auf Kategorien, die in dieser Datei nicht definiert sind. Sie sind im Kassenbuch markiert und fließen in keine Auswertung ein.");
 }
 
 g("dateiWahl").addEventListener("change",e=>{
   const d=e.target.files&&e.target.files[0]; if(!d) return;
-  if(zustand.schmutzig&&!confirm("Die aktuellen Daten sind nicht gesichert und werden überschrieben. Trotzdem laden?")){e.target.value="";return;}
+  if((zustand.schmutzig||zustand.buchungen.length)&&!confirm("Die CSV ersetzt alle Buchungen und Einstellungen dieser Seite. Trotzdem laden?")){e.target.value="";return;}
   const l=new FileReader();
   l.onload=()=>{ try{ csvLesen(String(l.result)); }catch(err){ alert("Die Datei ließ sich nicht lesen. Erwartet wird eine CSV, die diese Seite selbst gespeichert hat."); } };
   l.onerror=()=>alert("Die Datei konnte nicht geöffnet werden.");
@@ -1214,10 +1657,154 @@ function beispielLaden(){
   zustand.stamm.kassenanfang=300;
   zustand.stamm.umsatzVorjahr=17348.79;
   zustand.stamm.verlustvortrag=0;
+  zustand.stamm.kontoanfang=3200;
+  zustand.puffer=[]; zustand.pufferInfo=null; zustand.bearbeiten=null; zustand.bankAbgleich=null;
   markiereSchmutzig();
-  zustand.tab="auswert";
-  document.querySelectorAll(".reiter button").forEach(t=>t.setAttribute("aria-selected",t.dataset.tab==="auswert"?"true":"false"));
+  zeigeTab("auswert");
   zeichne();
+}
+
+/* ============================================================
+   Speichern als HTML-Datei mit eingebetteten Daten
+   ============================================================ */
+
+const DATENFORMAT="sudhaus-kladde";
+const DATENVERSION=3;
+const GESPEICHERT=["stamm","kategorien","regeln","buchungen","puffer","pufferInfo",
+                   "protokoll","kassenstuerze","bankAbgleich","tab","filter","letztesDatum","zaehlung"];
+let dateiHandle=null;          // File System Access API (Chrome/Edge), falls vorhanden
+let geladenAm=0;               // Zeitstempel des eingebetteten Stands
+
+function zustandFuerDatei(){
+  const d={format:DATENFORMAT, version:DATENVERSION, gespeichertAm:Date.now()};
+  GESPEICHERT.forEach(k=>{ d[k]=zustand[k]; });
+  return d;
+}
+
+function zustandUebernehmen(d){
+  if(!d || d.format!==DATENFORMAT) throw new Error("Unbekanntes Datenformat.");
+  zustand.stamm={...STANDARD_STAMM(), ...(d.stamm||{})};
+  zustand.kategorien=Array.isArray(d.kategorien)&&d.kategorien.length ? d.kategorien : STANDARD_KATEGORIEN.map(k=>({...k}));
+  zustand.regeln=Array.isArray(d.regeln) ? d.regeln : STANDARD_REGELN.map(r=>({...r}));
+  zustand.buchungen=(Array.isArray(d.buchungen)?d.buchungen:[]).map(b=>({...b, id:b.id||neueId()}));
+  zustand.puffer=Array.isArray(d.puffer)?d.puffer:[];
+  zustand.pufferInfo=d.pufferInfo||null;
+  zustand.protokoll=Array.isArray(d.protokoll)?d.protokoll:[];
+  zustand.kassenstuerze=Array.isArray(d.kassenstuerze)?d.kassenstuerze:[];
+  zustand.bankAbgleich=d.bankAbgleich||null;
+  zustand.filter={text:"",kat:"",monat:"", ...(d.filter||{})};
+  zustand.letztesDatum=d.letztesDatum||"";
+  zustand.zaehlung=d.zaehlung||null;
+  zustand.bearbeiten=null; zustand.formVorlage=null;
+  const tabs=[...document.querySelectorAll(".reiter button")].map(t=>t.dataset.tab);
+  zeigeTab(tabs.includes(d.tab)?d.tab:"kasse");
+}
+
+// JSON so verpacken, dass es gefahrlos in einem <script>-Element stehen kann
+const jsonSicher = o => JSON.stringify(o).replace(/</g,"\\u003c").replace(/\u2028/g,"\\u2028").replace(/\u2029/g,"\\u2029");
+
+function seitenHtml(daten){
+  const kopie=VORLAGE.cloneNode(true);
+  const block=kopie.querySelector("#kassenbuchDaten");
+  block.textContent = daten ? "\n"+jsonSicher(daten)+"\n" : "";
+  return "<!DOCTYPE html>\n"+kopie.outerHTML+"\n";
+}
+
+function dateiname(zusatz){
+  let n="";
+  try{ n=decodeURIComponent(location.pathname.split("/").pop()||""); }catch(e){}
+  if(!/\.html?$/i.test(n)) n="Kassenbuch_"+zustand.stamm.verein.replace(/[^\wÄÖÜäöüß]+/g,"_").replace(/^_|_$/g,"")+".html";
+  return zusatz ? n.replace(/(\.html?)$/i, "_"+zusatz+"$1") : n;
+}
+
+function herunterladen(inhalt, name){
+  const blob=new Blob([inhalt],{type:"text/html;charset=utf-8"});
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob); a.download=name;
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1500);
+}
+
+async function speichern(){
+  const daten=zustandFuerDatei();
+  const html=seitenHtml(daten);
+  try{
+    if(window.showSaveFilePicker){
+      if(!dateiHandle){
+        dateiHandle=await window.showSaveFilePicker({suggestedName:dateiname(),
+          types:[{description:"HTML-Seite",accept:{"text/html":[".html",".htm"]}}]});
+      }
+      const w=await dateiHandle.createWritable(); await w.write(html); await w.close();
+      markiereSauber("Gespeichert in "+dateiHandle.name+" um "+new Date().toLocaleTimeString("de-DE",{hour:"2-digit",minute:"2-digit"}));
+      notfallAufraeumen();
+    }else{
+      herunterladen(html, dateiname());
+      markiereSauber("Gespeichert als "+dateiname()+" — überschreibe damit die alte Datei");
+      // Notfallkopie bleibt: Öffnest du versehentlich die alte Datei, bietet sie den neuen Stand an
+    }
+    geladenAm=daten.gespeichertAm;
+  }catch(err){
+    if(err && err.name==="AbortError") return;           // Dialog abgebrochen
+    dateiHandle=null;
+    alert("Speichern hat nicht geklappt: "+(err&&err.message||err)+"\n\nDie Seite lädt die Datei stattdessen herunter.");
+    herunterladen(html, dateiname());
+    markiereSauber("Als Download gespeichert");
+  }
+}
+
+function leereVorlageSpeichern(){
+  herunterladen(seitenHtml(null), "Sudhaus-Kladde_leer.html");
+  statusMeldung("Leere Vorlage heruntergeladen");
+}
+
+/* Notfallkopie im Browser — nur als Sicherheitsnetz, falls das Speichern vergessen wurde */
+const NOTFALL_SCHLUESSEL="sudhaus-kladde:"+location.pathname;
+let notfallTimer=null;
+function notfallMerken(){
+  clearTimeout(notfallTimer);
+  notfallTimer=setTimeout(()=>{
+    try{ localStorage.setItem(NOTFALL_SCHLUESSEL, JSON.stringify({zeit:Date.now(), daten:zustandFuerDatei()})); }catch(e){}
+  },600);
+}
+function notfallAufraeumen(){
+  clearTimeout(notfallTimer);
+  try{ localStorage.removeItem(NOTFALL_SCHLUESSEL); }catch(e){}
+}
+function notfallPruefen(){
+  let n=null;
+  try{ n=JSON.parse(localStorage.getItem(NOTFALL_SCHLUESSEL)||"null"); }catch(e){ return false; }
+  if(!n || !n.daten || !(n.zeit>geladenAm+1000)) return false;
+  const wann=new Date(n.zeit).toLocaleString("de-DE",{dateStyle:"medium",timeStyle:"short"});
+  const anzahl=(n.daten.buchungen||[]).length;
+  if(confirm(`Es gibt einen ungesicherten Stand vom ${wann} mit ${anzahl} Buchungen, der neuer ist als diese Datei.\n\nWiederherstellen? (Abbrechen verwirft ihn.)`)){
+    try{ zustandUebernehmen(n.daten); markiereSchmutzig(); statusMeldung("Ungesicherten Stand vom "+wann+" wiederhergestellt"); return true; }
+    catch(e){ alert("Der gemerkte Stand ließ sich nicht lesen."); }
+  }
+  notfallAufraeumen();
+  return false;
+}
+
+function jahreswechsel(){
+  const alt=zustand.stamm.jahr, neu=alt+1;
+  if(zustand.puffer.length && !confirm("Es liegt noch ein nicht übernommener Kontoimport vor. Er wird ins neue Jahr mitgenommen. Weiter?")) return;
+  if(!confirm(`Jahreswechsel ${alt} → ${neu}\n\n1. Eine Archivkopie „${dateiname(String(alt))}“ mit allen Daten von ${alt} wird heruntergeladen.\n2. Endstände werden zu Anfangswerten von ${neu}.\n3. Die Buchungen von ${alt} und älter werden aus dieser Seite entfernt.\n\nFortfahren?`)) return;
+
+  const archiv=zustandFuerDatei();
+  herunterladen(seitenHtml(archiv), dateiname(String(alt)));
+
+  const r=rechne(), st=zustand.stamm;
+  st.kassenanfang=r.kasseEnde; st.kontoanfang=r.kontoEnde;
+  st.umsatzVorjahr=r.umsatz; st.verlustvortrag=r.verlustRest; st.jahr=neu;
+  const bleiben=zustand.buchungen.filter(b=>String(b.datum||"").slice(0,4)>String(alt));
+  zustand.buchungen=bleiben;
+  zustand.protokoll=[{zeit:zeitstempel(), aktion:`Jahreswechsel ${alt} → ${neu}. Archiv: ${dateiname(String(alt))}. ${bleiben.length} Buchungen aus ${neu} übernommen.`, vorher:"", nachher:""}];
+  zustand.kassenstuerze=[]; zustand.zaehlung=null; zustand.filter={text:"",kat:"",monat:""};
+  if(zustand.bankAbgleich && String(zustand.bankAbgleich.datum).slice(0,4)<=String(alt)) zustand.bankAbgleich=null;
+  zustand.puffer.forEach(p=>{ p.fremdesJahr=!imJahr(p); if(p.fremdesJahr) p.uebernehmen=false; });
+  dateiHandle=null;                                       // das neue Jahr nicht versehentlich über das Archiv schreiben
+  zeigeTab("kasse");
+  markiereSchmutzig(); zeichne();
+  alert(`${neu} ist eingerichtet. Speichere die Seite jetzt (Strg+S) unter ihrem gewohnten Namen — die Archivkopie von ${alt} liegt in deinen Downloads.`);
 }
 
 /* ============================================================
@@ -1225,16 +1812,34 @@ function beispielLaden(){
    ============================================================ */
 
 document.querySelectorAll(".reiter button").forEach(t=>t.onclick=()=>{
-  document.querySelectorAll(".reiter button").forEach(x=>x.setAttribute("aria-selected","false"));
-  t.setAttribute("aria-selected","true");
-  zustand.tab=t.dataset.tab; zeichne();
+  zeigeTab(t.dataset.tab); zeichne();
   window.scrollTo({top:0,behavior:"smooth"});
 });
-g("btnSpeichern").onclick=csvSpeichern;
+g("btnSpeichern").onclick=speichern;
+g("btnCsvExport").onclick=csvSpeichern;
 g("btnLaden").onclick=()=>g("dateiWahl").click();
+window.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey) && !e.altKey && e.key.toLowerCase()==="s"){ e.preventDefault(); speichern(); }
+});
 
-markiereSauber("Bereit — noch nichts erfasst");
-zeichne();
+(function starten(){
+  let meldung="Bereit — noch nichts erfasst";
+  const roh=(g("kassenbuchDaten").textContent||"").trim();
+  if(roh){
+    try{
+      const d=JSON.parse(roh);
+      zustandUebernehmen(d);
+      geladenAm=d.gespeichertAm||0;
+      const wann=geladenAm?new Date(geladenAm).toLocaleString("de-DE",{dateStyle:"medium",timeStyle:"short"}):"";
+      meldung=`Stand vom ${wann} geöffnet — ${zustand.buchungen.length} Buchungen`;
+    }catch(err){
+      alert("Die in dieser Seite gespeicherten Daten ließen sich nicht lesen ("+err.message+"). Die Seite startet leer; die Datei selbst bleibt unverändert, solange du nicht speicherst.");
+    }
+  }
+  markiereSauber(meldung);
+  zeichne();
+  if(notfallPruefen()) zeichne();
+})();
 </script>
 </body>
 </html>
