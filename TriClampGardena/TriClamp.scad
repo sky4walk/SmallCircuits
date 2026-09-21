@@ -3,7 +3,7 @@
 //  Maße aus dem Original-Mesh (TriClamp.scad) herausgemessen.
 //  Achsen wie im Original: Rohrachse ‖ z, Scharnierachse ‖ z.
 // =====================================================================
-//$fn = 96;
+$fn = 96;
 
 // ---- Bügel (beide Hälften gleich) -----------------------------------
 R_in   = 30.5;      // Innenradius Bügel (Ø61)
@@ -36,6 +36,14 @@ SHAFT_D = 9.8; SHAFT_L = 12.5;                // glatter Bund
 THR_MAJ = 8.9; THR_MIN = 6.2; THR_P = 1.8; THR_L = 31.4;
 NUT_TOL = 0.3;
 
+// F5-Vorschau: bei Treiberproblemen (Bügel unsichtbar) auf true setzen –
+// die Hälften werden dann per CGAL vorberechnet (einmalig ~10-20 s).
+PREVIEW_RENDER = true;
+// F5-Vorschau: Gewinde nur als glatter Zylinder zeichnen (schnell); F6 rechnet
+// immer das echte Gewinde.
+FAST_THREAD = true;
+module preview_fix() if (PREVIEW_RENDER && $preview) render(convexity = 10) children(); else children();
+
 // =====================================================================
 //  Hilfsmodule
 // =====================================================================
@@ -51,9 +59,9 @@ module groove_profile()
 
 // Ringsektor des Bügels von Winkel a0 bis a1 (um C)
 module band_sector(a0, a1)
-    translate(C) rotate([0, 0, a0]) rotate_extrude(angle = a1 - a0) band_profile();
+    translate(C) rotate([0, 0, a0]) rotate_extrude(angle = a1 - a0, convexity = 10) band_profile();
 module groove_sector(a0, a1)
-    translate(C) rotate([0, 0, a0]) rotate_extrude(angle = a1 - a0) groove_profile();
+    translate(C) rotate([0, 0, a0]) rotate_extrude(angle = a1 - a0, convexity = 10) groove_profile();
 
 // dünne "Stirnfläche" des Bügels bei Winkel a (für hull mit dem Auge)
 module band_end_face(a)
@@ -66,7 +74,8 @@ module eye(z0, z1) translate([E[0], E[1], z0]) difference() {
 
 // Einfaches Spitzgewinde: verdrehte "Nocken"-Kontur (r(θ) dreieckig)
 module thread(d_maj, d_min, pitch, len)
-    linear_extrude(height = len, twist = -360 * len / pitch,
+    if ($preview && FAST_THREAD) cylinder(d = d_maj, h = len);
+    else linear_extrude(height = len, twist = -360 * len / pitch,
                    slices = ceil(len / pitch * 24), convexity = 10)
         polygon([for (a = [0 : 5 : 359])
             let(t = 1 - abs(a / 180 - 1))               // 0 → 1 → 0
@@ -79,20 +88,22 @@ module thread(d_maj, d_min, pitch, len)
 module half_body(lug_y) {
     a_lug = asin((lug_y[1] - C[1]) / R_out);   // Außenkante trifft Laschenoberkante
     a_eye = 180 - asin((E[1] + R_eye - C[1]) / R_out); // Außenkante trifft Augenoberseite
-    intersection() {
+    // Kein intersection(): das mag der OpenCSG-Vorschaumodus (Goldfeather)
+    // auf manchen Grafiktreibern nicht – difference() ist robuster.
+    difference() {
         union() {
             band_sector(a_lug, 180);
             hull() { eye(0, H); band_end_face(a_eye); }
             // Lasche (Rohblock, Details je Hälfte)
             translate([LUG_X0, lug_y[0], 0])
-                linear_extrude(H) rrect([LUG_X1 - LUG_X0, lug_y[1] - lug_y[0]], LUG_R);
+                linear_extrude(H, convexity = 4) rrect([LUG_X1 - LUG_X0, lug_y[1] - lug_y[0]], LUG_R);
         }
-        translate([-50, 12, -1]) cube([200, 100, H + 2]); // Steg nur oberhalb y = 12
+        translate([-50, -100, -1]) cube([200, 112, H + 2]); // Steg nur oberhalb y = 12
     }
 }
 
 // ---- obere Hälfte: Auge mit 2 Zungen, Lasche mit Einschwenkschlitz ----
-module TriClampUp() {
+module TriClampUp() preview_fix() {
     difference() {
         union() { half_body(UP_LUG_Y); eye(0, H); }
         groove_sector(-5, 185);
@@ -107,7 +118,7 @@ module TriClampUp() {
 }
 
 // ---- untere Hälfte: eine Mittelzunge, Lasche mit U-Lager für T-Kopf ----
-module TriClampDown() translate([0, 50, 0]) mirror([0, 1, 0]) difference() {
+module TriClampDown() preview_fix() translate([0, 50, 0]) mirror([0, 1, 0]) difference() {
     union() { half_body(DN_LUG_Y); eye(FORK + TOL, H - FORK - TOL); }
     groove_sector(-5, 185);
     // oben und unten frei für die Zungen der Oberhälfte
@@ -117,15 +128,15 @@ module TriClampDown() translate([0, 50, 0]) mirror([0, 1, 0]) difference() {
     translate([DN_SLOT_X[0], 0, SLOT_Z[0]])
         cube([DN_SLOT_X[1] - DN_SLOT_X[0], 60, SLOT_Z[1] - SLOT_Z[0]]);
     // U-Schlitz für den Querstift, nach innen offen
-    translate([U_C[0], U_C[1], -1]) linear_extrude(H + 2) union() {
+    translate([U_C[0], U_C[1], -1]) linear_extrude(H + 2, convexity = 4) union() {
         circle(r = U_R);
         translate([-U_R, 0]) square([2 * U_R, 10]);
     }
 }
 
 // ---- Scharnierstift mit Kopf und Rast-Kuppe (Achse z, Kopf bei z<0) ----
-module TriClampHinge() {
-    translate([0, 0, -2.24]) rotate_extrude() rrect([7.5, 2.24], F); // Kopf Ø15
+module TriClampHinge() preview_fix() {
+    translate([0, 0, -2.24]) rotate_extrude(convexity = 4) rrect([7.5, 2.24], F); // Kopf Ø15
     cylinder(d = 9.4, h = 21.5);                                     // Schaft
     translate([0, 0, 21.5]) intersection() {                         // Rastkuppe Ø10.4
         scale([1, 1, 0.4]) sphere(r = 5.2);
@@ -134,7 +145,7 @@ module TriClampHinge() {
 }
 
 // ---- T-Kopf-Schraube: Querstift ‖ z, Schaft ‖ +y ----------------------
-module TriClampScrew() {
+module TriClampScrew() preview_fix() {
     translate([0, 0, -PIN_L / 2]) cylinder(d = PIN_D, h = PIN_L);
     rotate([-90, 0, 0]) {
         cylinder(d = SHAFT_D, h = PIN_D / 2 + SHAFT_L);
@@ -146,11 +157,11 @@ module TriClampScrew() {
 }
 
 // ---- Flügelmutter: Achse ‖ +y, Fuß bei y = 0 ---------------------------
-module TriClampWingnut() rotate([-90, 0, 0]) difference() {
+module TriClampWingnut() preview_fix() rotate([-90, 0, 0]) difference() {
     union() {
         difference() { cylinder(d = 17.8, h = 8.35); translate([0,0,-1]) cylinder(d = 15.8, h = 9.35 + 1); } // Schürze
         translate([0, 0, 8.35]) cylinder(d = 26, h = 2);                          // Bund
-        rotate([90, 0, 0]) linear_extrude(height = 12.2, center = true)           // Flügel
+        rotate([90, 0, 0]) linear_extrude(height = 12.2, center = true, convexity = 6)           // Flügel
             wing_outline();
     }
     translate([0, 0, 8]) thread(THR_MAJ + NUT_TOL, THR_MIN + NUT_TOL, THR_P, 22.5); // Innengewinde
