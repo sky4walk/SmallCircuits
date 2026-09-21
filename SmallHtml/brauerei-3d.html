@@ -104,6 +104,9 @@ table.tb td:last-child{border-right:0}
 .legend{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:13px;color:var(--ink2);margin:0}
 .legend i{display:inline-block;width:22px;height:4px;vertical-align:middle;margin-right:6px}
 .hint{font-size:12.5px;color:var(--ink2);margin:6px 0 0}
+.btn{font:600 16px 'Barlow Condensed',sans-serif;color:var(--paper);background:var(--ink);border:1.5px solid var(--ink);padding:5px 14px;cursor:pointer}
+.btn:hover{background:transparent;color:var(--ink)}
+.btn:disabled{opacity:.5;cursor:progress}
 .foot{font-size:13px}
 .foot a{color:var(--ink);font-weight:600;text-underline-offset:2px}
 
@@ -225,6 +228,19 @@ table.tb td:last-child{border-right:0}
         </div>
         <p class="legend" style="margin-top:8px"><span><i style="background:var(--wort)"></i>Heißwasser und Würze</span><span><i style="background:var(--glycol)"></i>Glykol-Kühlkreis</span></p>
         <p class="hint">Ziehen dreht, rechte Maustaste oder Umschalt+Ziehen verschiebt, Mausrad zoomt. Auf dem Handy mit zwei Fingern verschieben und zoomen.</p>
+      </div>
+      <div class="row" id="stlRow">
+        <span class="lab">STL-Export <small>(für 3D-Druck oder CAD)</small></span>
+        <div class="two" style="grid-template-columns:1fr auto">
+          <select id="stlScale" aria-label="Maßstab">
+            <option value="1000">1:1 in Millimetern, für CAD</option>
+            <option value="20" selected>1:50, für den 3D-Druck</option>
+            <option value="10">1:100, kleines Druckmodell</option>
+          </select>
+          <button id="stlBtn" class="btn">STL speichern</button>
+        </div>
+        <div class="toggles" style="margin-top:6px"><label><input type="checkbox" id="stlWalls">Wände mit exportieren</label></div>
+        <p class="hint" id="stlInfo">Exportiert, was gerade sichtbar ist: Geräte, Bodenplatte und je nach Schalter Leitungen und Figur.</p>
       </div>
       <div class="row foot">Mehr übers Brauen im Blog <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></div>
     </div>
@@ -1359,6 +1375,114 @@ function toggleCollapse(){
   b.textContent=c?'Ausklappen':'Einklappen'; b.setAttribute('aria-expanded',String(!c));
 }
 $('#collapse').addEventListener('click',toggleCollapse);
+
+/* ---------- STL-Export ---------- */
+let dlNs=null;
+if(window.claude&&typeof window.claude.use==='function'){
+  window.claude.use('downloads').then(ns=>{dlNs=ns;}).catch(()=>{});
+}
+function collectTriangles(includeWalls){
+  world.updateMatrixWorld(true);
+  const out=[]; // flache Liste x,y,z je Ecke (three-Koordinaten, Meter)
+  const va=new THREE.Vector3(),vb=new THREE.Vector3(),vc=new THREE.Vector3();
+  function addGeo(geo,mw){
+    const pos=geo.attributes.position, idx=geo.index;
+    const n=idx?idx.count:pos.count;
+    for(let i=0;i<n;i+=3){
+      const a=idx?idx.getX(i):i,b=idx?idx.getX(i+1):i+1,c=idx?idx.getX(i+2):i+2;
+      va.fromBufferAttribute(pos,a).applyMatrix4(mw);
+      vb.fromBufferAttribute(pos,b).applyMatrix4(mw);
+      vc.fromBufferAttribute(pos,c).applyMatrix4(mw);
+      out.push(va.x,va.y,va.z,vb.x,vb.y,vb.z,vc.x,vc.y,vc.z);
+    }
+  }
+  function walk(o){
+    if(o===layers.ground||o===layers.lights)return;
+    const isWall=walls.includes(o);
+    if(isWall){ if(!includeWalls)return; }
+    else if(!o.visible)return;
+    if(o.isMesh){
+      const t=o.geometry.type;
+      if(t!=='PlaneGeometry'&&t!=='PlaneBufferGeometry'&&o.material!==MAT.ghost&&o.material!==MAT.led)addGeo(o.geometry,o.matrixWorld);
+    }
+    o.children.forEach(walk);
+  }
+  walk(world);
+  // Bodenplatte 10 cm stark statt der dünnen Bodenfläche
+  const t=includeWalls?.18:0;
+  const slab=new THREE.BoxGeometry(L.W+2*t,.1,L.D+2*t);
+  addGeo(slab,new THREE.Matrix4().makeTranslation(0,-.05,0)); slab.dispose();
+  return out;
+}
+function buildSTL(tri,scale){
+  const n=tri.length/9;
+  const buf=new ArrayBuffer(84+n*50), dv=new DataView(buf);
+  const head='Brauerei-Aufstellung, zwieselbrau.wordpress.com';
+  for(let i=0;i<80;i++)dv.setUint8(i,i<head.length?head.charCodeAt(i)&127:32);
+  dv.setUint32(80,n,true);
+  let o=84;
+  const p=[0,0,0,0,0,0,0,0,0];
+  for(let k=0;k<n;k++){
+    const j=k*9;
+    // three (y oben) -> STL (z oben): (x, -z, y)
+    for(let v=0;v<3;v++){p[v*3]=tri[j+v*3]*scale;p[v*3+1]=-tri[j+v*3+2]*scale;p[v*3+2]=tri[j+v*3+1]*scale;}
+    const ux=p[3]-p[0],uy=p[4]-p[1],uz=p[5]-p[2],wx=p[6]-p[0],wy=p[7]-p[1],wz=p[8]-p[2];
+    let nx=uy*wz-uz*wy,ny=uz*wx-ux*wz,nz=ux*wy-uy*wx; const l=Math.hypot(nx,ny,nz)||1;
+    dv.setFloat32(o,nx/l,true);dv.setFloat32(o+4,ny/l,true);dv.setFloat32(o+8,nz/l,true);o+=12;
+    for(let q=0;q<9;q++){dv.setFloat32(o,p[q],true);o+=4;}
+    dv.setUint16(o,0,true);o+=2;
+  }
+  return new Uint8Array(buf);
+}
+const CRC=(()=>{const t=new Uint32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?0xEDB88320^(c>>>1):c>>>1;t[n]=c>>>0;}return t;})();
+function crc32(d){let c=0xFFFFFFFF;for(let i=0;i<d.length;i++)c=CRC[(c^d[i])&255]^(c>>>8);return (c^0xFFFFFFFF)>>>0;}
+function zipStore(name,data){ // ZIP ohne Kompression, eine Datei
+  const nb=new TextEncoder().encode(name), crc=crc32(data), sz=data.length;
+  const lh=new DataView(new ArrayBuffer(30));
+  lh.setUint32(0,0x04034b50,true);lh.setUint16(4,20,true);lh.setUint16(6,0x0800,true);lh.setUint16(8,0,true);
+  lh.setUint16(10,0,true);lh.setUint16(12,0x21,true);lh.setUint32(14,crc,true);lh.setUint32(18,sz,true);lh.setUint32(22,sz,true);
+  lh.setUint16(26,nb.length,true);lh.setUint16(28,0,true);
+  const ch=new DataView(new ArrayBuffer(46));
+  ch.setUint32(0,0x02014b50,true);ch.setUint16(4,20,true);ch.setUint16(6,20,true);ch.setUint16(8,0x0800,true);ch.setUint16(10,0,true);
+  ch.setUint16(12,0,true);ch.setUint16(14,0x21,true);ch.setUint32(16,crc,true);ch.setUint32(20,sz,true);ch.setUint32(24,sz,true);
+  ch.setUint16(28,nb.length,true);ch.setUint32(42,0,true);
+  const cdOff=30+nb.length+sz, cdSize=46+nb.length;
+  const end=new DataView(new ArrayBuffer(22));
+  end.setUint32(0,0x06054b50,true);end.setUint16(8,1,true);end.setUint16(10,1,true);end.setUint32(12,cdSize,true);end.setUint32(16,cdOff,true);
+  return new Blob([lh.buffer,nb,data,ch.buffer,nb,end.buffer]);
+}
+$('#stlBtn').addEventListener('click',async()=>{
+  const btn=$('#stlBtn'), info=$('#stlInfo');
+  btn.disabled=true; info.textContent='STL wird erzeugt …';
+  await new Promise(r=>setTimeout(r,30));
+  try{
+    const scale=Number($('#stlScale').value);
+    const tri=collectTriangles($('#stlWalls').checked);
+    const stl=buildSTL(tri,scale);
+    const tag=state.room+'m2_'+state.batch+'L_'+state.tanks+'x'+(state.batch*state.mult)+'L';
+    const sc={1000:'1zu1_mm',20:'1zu50',10:'1zu100'}[scale];
+    const base='brauerei_'+tag+'_'+sc;
+    const mb=nf1.format(stl.length/1048576);
+    const dims=nf0.format(L.W*scale)+' × '+nf0.format(L.D*scale)+' mm';
+    if(dlNs){
+      try{
+        await dlNs.save({filename:base+'.zip',data:zipStore(base+'.stl',stl)});
+        info.textContent='Gespeichert als ZIP mit '+base+'.stl ('+nf0.format(tri.length/9)+' Dreiecke, '+mb+' MB, Grundfläche '+dims+').';
+      }catch(err){
+        const c=err&&err.code;
+        info.textContent=c==='declined'?'Speichern abgebrochen.':c==='rate_limited'?'Es ist schon ein Speicherdialog offen. Kurz warten und erneut versuchen.':'Speichern ist in dieser Ansicht nicht möglich. Die heruntergeladene HTML-Datei kann die STL direkt speichern.';
+      }
+    } else {
+      const url=URL.createObjectURL(new Blob([stl],{type:'model/stl'}));
+      const a=document.createElement('a'); a.href=url; a.download=base+'.stl';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url),4000);
+      info.textContent=base+'.stl gespeichert ('+nf0.format(tri.length/9)+' Dreiecke, '+mb+' MB, Grundfläche '+dims+').';
+    }
+    if(scale<1000)info.textContent+=' Rohre und Geländer sind in diesem Maßstab dünner als 1 mm; für den Druck am besten „Leitungen“ ausschalten.';
+  }catch(e){ info.textContent='Export fehlgeschlagen: '+e.message; }
+  btn.disabled=false;
+});
 
 /* ---------- Größe ---------- */
 function resize(){
