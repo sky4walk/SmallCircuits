@@ -205,6 +205,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-transistor" aria-controls="panel-transistor" data-tab="transistor" aria-selected="false">Transistor</button>
     <button role="tab" id="tab-logik" aria-controls="panel-logik" data-tab="logik" aria-selected="false">Logik</button>
     <button role="tab" id="tab-schwingkreis" aria-controls="panel-schwingkreis" data-tab="schwingkreis" aria-selected="false">Schwingkreis</button>
+    <button role="tab" id="tab-verstaerker" aria-controls="panel-verstaerker" data-tab="verstaerker" aria-selected="false">Verstärker</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -985,10 +986,72 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: Verstaerker ============================ -->
+<section class="panel" id="panel-verstaerker" data-tab="verstaerker" role="tabpanel" aria-labelledby="tab-verstaerker" hidden>
+  <h2>Emitterschaltung: Arbeitspunkt und Aussteuerung</h2>
+  <p class="lead">Derselbe Transistor wie in Teil 10, nur mit dem Arbeitspunkt in der Mitte der Arbeitsgeraden statt in der S&auml;ttigung. Die erste Ansicht legt ihn fest, die zweite schickt einen Sinus durch und misst, was hinten herauskommt.</p>
+
+  <div class="split">
+    <div>
+      <div class="seg" role="group" aria-label="Ansicht">
+        <button type="button" class="ghost on" id="vs-mode-ap">Arbeitspunkt</button>
+        <button type="button" class="ghost" id="vs-mode-aus">Aussteuern</button>
+      </div>
+
+      <div class="field">
+        <label for="vs-Ub">Betriebsspannung in Volt</label>
+        <input id="vs-Ub" type="text" inputmode="decimal" autocomplete="off" value="12">
+      </div>
+      <div class="field">
+        <label for="vs-R1">R1 &ndash; Teiler nach oben</label>
+        <input id="vs-R1" type="text" inputmode="decimal" autocomplete="off" value="47k">
+      </div>
+      <div class="field">
+        <label for="vs-R2">R2 &ndash; Teiler nach Masse</label>
+        <input id="vs-R2" type="text" inputmode="decimal" autocomplete="off" value="10k">
+      </div>
+      <div class="field">
+        <label for="vs-Rc">Kollektorwiderstand R_C</label>
+        <input id="vs-Rc" type="text" inputmode="decimal" autocomplete="off" value="1k8">
+      </div>
+      <div class="field">
+        <label for="vs-Re">Emitterwiderstand R_E</label>
+        <input id="vs-Re" type="text" inputmode="decimal" autocomplete="off" value="470">
+      </div>
+      <div class="field">
+        <label for="vs-ce">Emitterkondensator C_E</label>
+        <select id="vs-ce">
+          <option value="nein" selected>ohne &ndash; Gegenkopplung wirkt</option>
+          <option value="ja">mit &ndash; volle Verst&auml;rkung</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="vs-beta">Stromverst&auml;rkung &beta;</label>
+        <input id="vs-beta" type="text" inputmode="decimal" autocomplete="off" value="200">
+      </div>
+      <div class="field" id="vs-ampfeld" hidden>
+        <label for="vs-amp">Eingangsamplitude in Volt</label>
+        <input id="vs-amp" type="text" inputmode="decimal" autocomplete="off" value="300m">
+        <div class="note">Scheitelwert. Mit C_E gen&uuml;gen wenige Millivolt.</div>
+      </div>
+      <div class="field" id="vs-speedfeld" hidden>
+        <label for="vs-speed">Zeitraffer</label>
+        <select id="vs-speed">
+          <option value="0.3">schnell</option>
+          <option value="1" selected>normal &ndash; 1 s je Periode</option>
+          <option value="3">langsam</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="lcd" id="vs-lcd" aria-live="off"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Verstärker, Modulation, Netzwerkanalyse mit Matrix.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Dezibel und Pegel, Modulation, Antennen und Leitungen.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -3817,6 +3880,249 @@ document.getElementById("sk-anstoss").addEventListener("click", function(){ SimS
 });
 document.getElementById("sk-art").addEventListener("change", function(){ if(skMode === "freq") skResonanz(); });
 
+/* ============================================================================
+   Reiter: Verstaerker (Emitterschaltung)
+   ----------------------------------------------------------------------------
+   Gleichstrom: Basisspannungsteiler, Emitterwiderstand, Arbeitspunkt.
+   Wechselstrom: v = -R_C / (r_e + R_E,ac) mit r_e = 26 mV / I_C.
+   In der Simulation wird ein Sinus durchgeschickt und die Verstaerkung aus
+   dem Verlauf GEMESSEN; das Begrenzen faellt dabei von selbst an.
+   ========================================================================== */
+
+function vsWerte(){
+  var g = function(id){ return parseValue(document.getElementById(id).value); };
+  var Ub = g("vs-Ub"), R1 = g("vs-R1"), R2 = g("vs-R2"), Rc = g("vs-Rc"), Re = g("vs-Re");
+  var beta = g("vs-beta"), amp = g("vs-amp");
+  if([Ub, R1, R2, Rc, Re, beta, amp].some(function(x){ return x === null || isNaN(x); })) return null;
+  if(Ub <= 0 || R1 <= 0 || R2 <= 0 || Rc <= 0 || Re <= 0 || beta <= 0) return null;
+  var ce = document.getElementById("vs-ce").value === "ja";
+
+  var Ub_basis = Ub * R2 / (R1 + R2);          /* unbelasteter Teiler */
+  var Ue = Ub_basis - 0.7;
+  if(Ue <= 0) return {fehler:"Die Basisspannung liegt unter 0,7 V \u2013 der Transistor sperrt."};
+  var Ie = Ue / Re, Ic = Ie * beta / (beta + 1);
+  var Uce = Ub - Ic * Rc - Ie * Re;
+  var re = 0.026 / Ic;                          /* Steilheitswiderstand */
+  var Reac = ce ? 0 : Re;
+  var v = -Rc / (re + Reac);
+  var rin_b = beta * (re + Reac);
+  var rin = 1 / (1 / R1 + 1 / R2 + 1 / rin_b);
+  return {Ub:Ub, R1:R1, R2:R2, Rc:Rc, Re:Re, beta:beta, ce:ce, amp:amp,
+          Ubas:Ub_basis, Ue:Ue, Ie:Ie, Ic:Ic, Uce:Uce, re:re, v:v, rin:rin, rout:Rc,
+          hub:Math.min(Uce - 0.2, Ub - Ic * Rc - Ie * Re + (Ub - Uce) - (Ub - Uce)) || 0,
+          f:1000, basis:1 / 1000};
+}
+
+var VS_SVG =
+  '<svg viewBox="0 0 300 180" role="img" aria-label="Emitterschaltung">' +
+    '<text id="s-ublabel" x="120" y="12" font-size="9" fill="currentColor" opacity="0.8">U_b</text>' +
+    '<line x1="70" y1="16" x2="220" y2="16" stroke="currentColor" stroke-width="2"/>' +
+    /* R1 und Rc nach oben */
+    '<line x1="70" y1="16" x2="70" y2="30" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="58" y="30" width="24" height="26" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<text id="s-r1" x="30" y="47" font-size="8" fill="currentColor">R1</text>' +
+    '<line x1="70" y1="56" x2="70" y2="86" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="220" y1="16" x2="220" y2="30" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="208" y="30" width="24" height="26" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<text id="s-rc" x="238" y="47" font-size="8" fill="currentColor">R_C</text>' +
+    '<line x1="220" y1="56" x2="220" y2="80" stroke="currentColor" stroke-width="2"/>' +
+    /* Transistor */
+    '<line x1="150" y1="76" x2="150" y2="120" stroke="currentColor" stroke-width="2.6"/>' +
+    '<line x1="150" y1="86" x2="220" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="150" y1="110" x2="220" y2="122" stroke="currentColor" stroke-width="2"/>' +
+    '<polygon points="212,114 218,124 206,122" fill="currentColor"/>' +
+    '<line x1="70" y1="98" x2="150" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    /* Ausgang */
+    '<line x1="220" y1="98" x2="252" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="252" y1="92" x2="252" y2="104" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="258" y1="92" x2="258" y2="104" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="258" y1="98" x2="284" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="264" y="90" font-size="8" fill="currentColor">aus</text>' +
+    /* Eingang */
+    '<line x1="8" y1="98" x2="34" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="34" y1="92" x2="34" y2="104" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="40" y1="92" x2="40" y2="104" stroke="currentColor" stroke-width="2.2"/>' +
+    '<line x1="40" y1="98" x2="70" y2="98" stroke="currentColor" stroke-width="2"/>' +
+    '<text x="8" y="90" font-size="8" fill="currentColor">ein</text>' +
+    /* R2 */
+    '<line x1="70" y1="98" x2="70" y2="116" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="58" y="116" width="24" height="26" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<text id="s-r2" x="30" y="133" font-size="8" fill="currentColor">R2</text>' +
+    '<line x1="70" y1="142" x2="70" y2="164" stroke="currentColor" stroke-width="2"/>' +
+    /* Re und Ce */
+    '<line x1="220" y1="122" x2="220" y2="130" stroke="currentColor" stroke-width="2"/>' +
+    '<rect x="208" y="130" width="24" height="24" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/>' +
+    '<text id="s-re" x="238" y="146" font-size="8" fill="currentColor">R_E</text>' +
+    '<line x1="220" y1="154" x2="220" y2="164" stroke="currentColor" stroke-width="2"/>' +
+    '<g id="s-cegrp">' +
+      '<line x1="220" y1="130" x2="272" y2="130" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="266" y1="136" x2="278" y2="136" stroke="currentColor" stroke-width="2.2"/>' +
+      '<line x1="266" y1="144" x2="278" y2="144" stroke="currentColor" stroke-width="2.2"/>' +
+      '<line x1="272" y1="130" x2="272" y2="136" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="272" y1="144" x2="272" y2="164" stroke="currentColor" stroke-width="2"/>' +
+      '<line x1="220" y1="164" x2="272" y2="164" stroke="currentColor" stroke-width="2"/>' +
+      '<text x="280" y="142" font-size="8" fill="currentColor">C_E</text>' +
+    "</g>" +
+    '<line x1="70" y1="164" x2="220" y2="164" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="145" y1="164" x2="145" y2="172" stroke="currentColor" stroke-width="2"/>' +
+    '<line x1="137" y1="172" x2="153" y2="172" stroke="currentColor" stroke-width="2"/>' +
+  "</svg>";
+
+/* ------------------------------------------------ Ansicht 1: Arbeitspunkt */
+
+function vsStatisch(){
+  var lcd = document.getElementById("vs-lcd");
+  var w = vsWerte();
+  if(!w){ lcd.innerHTML = '<p class="empty">Alle Werte eintragen.</p>'; return; }
+  if(w.fehler){ lcd.innerHTML = '<p class="empty">' + w.fehler + "</p>"; return; }
+
+  var obenfrei = w.Ub - w.Ue - w.Uce;      /* Luft nach oben bis zur Sperrgrenze */
+  var untenfrei = w.Uce - 0.2;             /* Luft nach unten bis zur Saettigung */
+  var hub = Math.min(obenfrei, untenfrei);
+
+  var html = VS_SVG + '<canvas class="sim-plot" style="height:150px"></canvas>';
+  html += '<div class="readout"><span class="what">Arbeitspunkt</span><span><span class="val">' +
+          fmt(w.Uce, "V") + " / " + fmt(w.Ic, "A") + '</span><span class="tag">U_CE und Kollektorstrom</span></span></div>';
+  html += '<div class="readout"><span class="what">Verst\u00e4rkung</span><span><span class="val">' +
+          Math.abs(w.v).toFixed(1).replace(".", ",") + '\u00d7</span><span class="tag">' +
+          (w.ce ? "mit C_E: v = R_C / r_e" : "ohne C_E: v = R_C / R_E") + ", invertierend</span></span></div>";
+  html += '<div class="readout"><span class="what">m\u00f6glicher Ausgangshub</span><span><span class="val">' +
+          fmt(2 * hub, "V") + '</span><span class="tag">Spitze-Spitze, symmetrisch</span></span></div>';
+  html += '<div class="readout given"><span class="what">Ein- und Ausgangswiderstand</span><span><span class="val">' +
+          fmt(w.rin, "\u03a9") + " / " + fmt(w.rout, "\u03a9") + '</span><span class="tag">was Quelle und Last sehen</span></span></div>';
+
+  html += '<div class="hint"><table class="eserie"><tr><th>Gr\u00f6\u00dfe</th><th class="num">Wert</th></tr>' +
+    "<tr><td>Basisspannung aus dem Teiler</td><td class=\"num\">" + fmt(w.Ubas, "V") + "</td></tr>" +
+    "<tr><td>Emitterspannung</td><td class=\"num\">" + fmt(w.Ue, "V") + "</td></tr>" +
+    "<tr><td>Emitterstrom</td><td class=\"num\">" + fmt(w.Ie, "A") + "</td></tr>" +
+    "<tr><td>Steilheitswiderstand r_e</td><td class=\"num\">" + fmt(w.re, "\u03a9") + "</td></tr>" +
+    "<tr><td>Querstrom im Teiler</td><td class=\"num\">" + fmt(w.Ub / (w.R1 + w.R2), "A") + "</td></tr>" +
+    "<tr><td>Verlustleistung im Transistor</td><td class=\"num\">" + fmt(w.Uce * w.Ic, "W") + "</td></tr></table>";
+  var warn = [];
+  if(untenfrei < obenfrei * 0.5) warn.push("Der Arbeitspunkt liegt zu tief \u2013 die negative Halbwelle wird zuerst begrenzt. R_C verkleinern oder R2 vergr\u00f6\u00dfern.");
+  if(obenfrei < untenfrei * 0.5) warn.push("Der Arbeitspunkt liegt zu hoch \u2013 die positive Halbwelle wird zuerst begrenzt.");
+  if(w.Ub / (w.R1 + w.R2) < 10 * (w.Ie / w.beta)) warn.push("Der Querstrom im Teiler ist kleiner als das Zehnfache des Basisstroms \u2013 der Arbeitspunkt wird von \u03b2 abh\u00e4ngig.");
+  if(warn.length) html += '<p style="margin:10px 0 0">' + warn.join(" ") + "</p>";
+  html += "</div>";
+  html += '<p class="work">Arbeitsgerade: I_C = (U_b \u2212 U_CE) / (R_C + R_E)\nMitte w\u00e4re bei U_CE = ' +
+          fmt((w.Ub - w.Ue + 0.2) / 2, "V") + ", jetzt " + fmt(w.Uce, "V") + "</p>";
+  lcd.innerHTML = html;
+  document.getElementById("s-cegrp").setAttribute("opacity", w.ce ? 1 : 0.18);
+
+  /* Arbeitsgerade mit Arbeitspunkt und nutzbarem Bereich */
+  var Rges = w.Rc + w.Re, Imax = w.Ub / Rges;
+  Sim.plot(lcd.querySelector("canvas"), {
+    xmax:w.Ub, ymax:Imax * 1.05, yTop:fmt(Imax, "A"),
+    band:{x0:w.Uce - hub, x1:w.Uce + hub},
+    kurven:[{p:[[0, Imax], [w.Ub, 0]], alpha:0.8}],
+    punkte:[{x:w.Uce, y:w.Ic, text:"Arbeitspunkt"}]
+  });
+}
+
+/* ------------------------------------------------- Ansicht 2: Aussteuerung */
+
+var SimVerst = {
+  lcd:"vs-lcd",
+  fehltext:"Alle Werte eintragen.",
+  t:0, buf:[], vmess:null, begrenzt:false,
+
+  svg:VS_SVG,
+  zusatz:
+    '<canvas class="sim-plot" style="height:160px"></canvas>' +
+    '<div class="readout"><span class="what">gemessene Verst\u00e4rkung</span><span>' +
+      '<span class="val" id="s-vm">\u2013</span><span class="tag" id="s-vf"></span></span></div>' +
+    '<div class="readout"><span class="what">Ausgangsspannung</span><span>' +
+      '<span class="val" id="s-uss">\u2013</span><span class="tag" id="s-clip">Spitze zu Spitze</span></span></div>' +
+    '<p class="work" id="s-note"></p>',
+
+  bau:function(){ SimVerst.cv = document.getElementById("vs-lcd").querySelector("canvas"); },
+  tempo:function(){ return parseFloat(document.getElementById("vs-speed").value); },
+  werte:function(){ var w = vsWerte(); return (w && !w.fehler) ? w : null; },
+  leeren:function(){ SimVerst.t = 0; SimVerst.buf = []; SimVerst.vmess = null; },
+
+  schritt:function(w, dt){
+    var s = SimVerst, h = Math.min(dt, 1 / (w.f * 100)), n = Math.min(Math.ceil(dt / h), 3000), k;
+    h = dt / n;
+    for(k = 0; k < n; k++){
+      var uin = w.amp * Math.sin(2 * Math.PI * w.f * s.t);
+      var uout = w.Uce + w.v * uin;
+      var ober = w.Ub - w.Ue, unter = 0.2;
+      var geklemmt = false;
+      if(uout > ober){ uout = ober; geklemmt = true; }
+      if(uout < unter){ uout = unter; geklemmt = true; }
+      s.buf.push([s.t, uin, uout, geklemmt ? 1 : 0]);
+      s.t += h;
+    }
+    var fenster = 2 / w.f;
+    while(s.buf.length > 3000 || (s.buf.length > 2 && s.buf[0][0] < s.t - fenster)) s.buf.shift();
+    /* Verstaerkung aus dem Verlauf messen */
+    var t1 = s.t, omin = null, omax = null, imin = null, imax = null, clip = false, i;
+    for(i = 0; i < s.buf.length; i++){
+      if(s.buf[i][0] < t1 - 1 / w.f) continue;
+      var a = s.buf[i][1], b = s.buf[i][2];
+      if(imin === null || a < imin) imin = a;
+      if(imax === null || a > imax) imax = a;
+      if(omin === null || b < omin) omin = b;
+      if(omax === null || b > omax) omax = b;
+      if(s.buf[i][3]) clip = true;
+    }
+    if(imax !== null && imax - imin > 0){
+      s.vmess = (omax - omin) / (imax - imin);
+      s.uss = omax - omin;
+    }
+    s.begrenzt = clip;
+  },
+
+  zeichne:function(w){
+    var s = SimVerst, e = s.el;
+    document.getElementById("s-cegrp").setAttribute("opacity", w.ce ? 1 : 0.18);
+    e.vm.textContent = s.vmess ? s.vmess.toFixed(1).replace(".", ",") + "\u00d7" : "\u2013";
+    e.vf.textContent = "rechnerisch " + Math.abs(w.v).toFixed(1).replace(".", ",") + "\u00d7";
+    e.uss.textContent = s.uss ? fmt(s.uss, "V") : "\u2013";
+    e.clip.textContent = s.begrenzt ? "begrenzt \u2013 der Verst\u00e4rker \u00fcbersteuert" : "unverzerrt";
+    e.note.textContent =
+      "Eingang " + fmt(2 * w.amp, "V") + " Spitze-Spitze bei " + fmt(w.f, "Hz") +
+      "\ndurchgezogen: Ausgang \u2013 gestrichelt: Eingang, stark vergr\u00f6\u00dfert" +
+      "\nArbeitspunkt " + fmt(w.Uce, "V") + ", Grenzen 0,2 V und " + fmt(w.Ub - w.Ue, "V");
+
+    var fenster = 2 / w.f, t1 = s.buf.length ? s.buf[s.buf.length - 1][0] : 0;
+    var t0 = Math.max(0, t1 - fenster);
+    Sim.plot(s.cv, {
+      xmax:fenster, ymax:w.Ub, yTop:fmt(w.Ub, "V"),
+      hlinien:[{y:w.Uce, text:"AP"}],
+      kurven:[
+        {p:s.buf.map(function(p){ return [p[0] - t0, w.Uce + p[1] * Math.abs(w.v)]; }), dash:true, alpha:0.4},
+        {p:s.buf.map(function(p){ return [p[0] - t0, p[2]]; })}
+      ]
+    });
+  }
+};
+
+/* --- Umschaltung ---------------------------------------------------------- */
+
+var vsMode = "ap";
+
+function setVsMode(m){
+  vsMode = m;
+  document.getElementById("vs-ampfeld").hidden = m !== "aus";
+  document.getElementById("vs-speedfeld").hidden = m !== "aus";
+  document.getElementById("vs-mode-ap").classList.toggle("on", m === "ap");
+  document.getElementById("vs-mode-aus").classList.toggle("on", m === "aus");
+  if(m === "aus"){ SimVerst.leeren(); Sim.start(SimVerst); }
+  else { Sim.stop(); vsStatisch(); }
+}
+
+document.getElementById("vs-mode-ap").addEventListener("click", function(){ setVsMode("ap"); });
+document.getElementById("vs-mode-aus").addEventListener("click", function(){ setVsMode("aus"); });
+["vs-Ub", "vs-R1", "vs-R2", "vs-Rc", "vs-Re", "vs-beta", "vs-amp"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", function(){
+    if(vsMode === "ap") vsStatisch(); else SimVerst.leeren();
+  });
+});
+document.getElementById("vs-ce").addEventListener("change", function(){
+  if(vsMode === "ap") vsStatisch(); else SimVerst.leeren();
+});
+
 /* --- Anbindung ------------------------------------------------------------ */
 
 function simStart(){ Sim.start(SimRC); }
@@ -3833,6 +4139,7 @@ Sim.tabWechsel = function(name){
   if(name === "flanke") Sim.start(SimFlanke);
   else if(name === "spule") Sim.start(SimSpule);
   else if(name === "gleichrichter") Sim.start(SimGleich);
+  else if(name === "verstaerker"){ if(vsMode === "aus"){ SimVerst.leeren(); Sim.start(SimVerst); } else { Sim.stop(); vsStatisch(); } }
   else if(name === "schwingkreis"){ if(skMode === "zeit"){ Sim.start(SimSchwing); SimSchwing.anstossen(); } else { Sim.stop(); skResonanz(); } }
   else if(name === "logik"){ if(lgMode === "inverter") Sim.start(SimLogik); else { Sim.stop(); lgLeistung(); } }
   else if(name === "transistor"){ if(trMode === "kennlinie") Sim.start(SimTrans); else { Sim.stop(); trStatisch(); } }
