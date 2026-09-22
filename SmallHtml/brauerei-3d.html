@@ -64,6 +64,8 @@ legend{padding:0;font-size:13px;font-weight:600;margin-bottom:5px}
 .seg label+label{border-left:1.5px solid var(--ink)}
 .seg input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
 .seg span{display:block;padding:5px 2px 4px;font:600 16px/1.1 'Barlow Condensed',sans-serif}
+#segRoom span{font-size:15px}
+#segRoom span small{font-size:10.5px}
 .seg span small{display:block;font:400 11.5px/1.2 'Barlow',sans-serif;color:var(--ink2)}
 .seg input:checked+span{background:var(--ink);color:var(--paper)}
 .seg input:checked+span small{color:var(--paper);opacity:.8}
@@ -193,6 +195,8 @@ table.tb td:last-child{border-right:0}
             <label><input type="radio" name="room" value="50"><span>50 m²<small>8,4 × 6,0 m</small></span></label>
             <label><input type="radio" name="room" value="60"><span>60 m²<small>10 × 6 m</small></span></label>
             <label><input type="radio" name="room" value="75" checked><span>75 m²<small>10 × 7,5 m</small></span></label>
+            <label><input type="radio" name="room" value="80"><span>80 m²<small>10 × 8 m</small></span></label>
+            <label><input type="radio" name="room" value="100"><span>100 m²<small>12,5 × 8 m</small></span></label>
           </div>
         </fieldset>
       </div>
@@ -255,7 +259,24 @@ table.tb td:last-child{border-right:0}
           <label><input type="checkbox" id="oHoses" checked>Schlauchhalter</label>
           <label><input type="checkbox" id="oBottler" checked>Flaschenabfüllung</label>
           <label><input type="checkbox" id="oCold">Kühlraum</label>
+          <label><input type="checkbox" id="oTreber" checked>Treberwagen</label>
+          <label><input type="checkbox" id="oCo2" checked>CO₂-Flaschen</label>
+          <label><input type="checkbox" id="oKegwash">KEG-Waschstation</label>
+          <label><input type="checkbox" id="oChem" checked>Chemikalienschrank</label>
+          <label><input type="checkbox" id="oWater">Wasseraufbereitung</label>
+          <label><input type="checkbox" id="oFridge">Hopfen-/Hefekühlschrank</label>
+          <label><input type="checkbox" id="oLab">Laborecke</label>
+          <label><input type="checkbox" id="oScale">Waage</label>
+          <label><input type="checkbox" id="oJack">Hubwagen</label>
+          <label><input type="checkbox" id="oExt" checked>Feuerlöscher</label>
+          <label><input type="checkbox" id="oWindows" checked>Fenster</label>
         </div>
+        <select id="energy" aria-label="Energieversorgung des Sudhauses" style="margin-top:6px">
+          <option value="none" selected>Sudhaus-Beheizung: nicht dargestellt</option>
+          <option value="elektro">Elektrisch, Heizstäbe (Schaltschrank)</option>
+          <option value="gas">Gas, Heizkessel außen mit Abgasrohr</option>
+          <option value="dampf">Dampf, Dampferzeuger außen</option>
+        </select>
         <select id="coldSize" aria-label="Größe des Kühlraums" style="margin-top:6px" disabled>
           <option value="1">Kühlraum klein, 2,0 × 2,0 m</option>
           <option value="2" selected>Kühlraum mittel, 3,0 × 2,5 m</option>
@@ -322,11 +343,11 @@ const camera=new THREE.PerspectiveCamera(40,1,0.1,200);
 const reduceMotion=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* ---------- Zustand ---------- */
-const ROOMS={50:{w:8.4,d:6.0},60:{w:10,d:6},75:{w:10,d:7.5}};
+const ROOMS={50:{w:8.4,d:6.0},60:{w:10,d:6},75:{w:10,d:7.5},80:{w:10,d:8},100:{w:12.5,d:8}};
 const H=4.5;
 const ROOM_MIN=5, ROOM_MAX=20;
 const COLD={1:{w:2.0,d:2.0,t:'klein'},2:{w:3.0,d:2.5,t:'mittel'},3:{w:4.0,d:3.0,t:'groß'}};
-const state={batch:1000,W:10,D:7.5,tanks:6,mult:1,weeks:6,sink:true,hoses:true,bottler:true,cold:false,coldSize:2,labels:true,pipes:true,grid:false,person:true,spin:false,walls:true};
+const state={batch:1000,W:10,D:7.5,tanks:6,mult:1,weeks:6,sink:true,hoses:true,bottler:true,cold:false,coldSize:2,treber:true,co2:true,energy:'none',kegwash:false,chem:true,water:false,fridge:false,lab:false,scale:false,jack:false,extinguisher:true,windows:true,labels:true,pipes:true,grid:false,person:true,spin:false,walls:true};
 
 /* ---------- Hilfen ---------- */
 const P=(x,y,z)=>new THREE.Vector3(x,y,z);
@@ -423,6 +444,7 @@ const MAT={
   hose:std({color:0xd9a441,roughness:.55}),
   auger:std({color:0x8e979c,metalness:.6,roughness:.45}),
   wood:std({color:0xb3875a,roughness:.9}),
+  treber:std({color:0x8b6a3e,roughness:1}),
   panel:std({color:0xe9eeee,roughness:.45,metalness:.05}),
   panelIn:std({color:0xdfe7ea,roughness:.4,metalness:.05}),
   bottle:std({color:0x5b3413,roughness:.12,metalness:0,transparent:true,opacity:.88}),
@@ -598,12 +620,16 @@ function computeLayout(){
   const leftStart=(colEnd>D/2-1.3)?px1+.75:-W/2+.3;
   const malt={x:leftStart+.4,z:frontZ-.6};
   const mill={x:leftStart+.8+.3+.35,z:frontZ-.5};
-  const leftEnd=leftStart+.8+.3+.7;
+  let leftEnd=leftStart+.8+.3+.7;
+  let kegwash=null, lab=null;
+  if(state.kegwash){kegwash={x:leftEnd+.1+.45,z:D/2-.36,w:.9,d:.72}; leftEnd+=1.0;}
+  if(state.lab){lab={x:leftEnd+.1+.6,z:D/2-.31,w:1.2,d:.62}; leftEnd+=1.3;}
   const kegs=cold?{x:W/2-.12-.42,z:D/2-.12-.62,inCold:true}:{x:W/2-.3-.4,z:frontZ-.6};
   let rx=cold?cold.x0-.1:W/2-.3-.8;   // linke Kante von Kühlraum bzw. Fasspalette
   let bottler=null, sink=null;
   if(state.bottler){bottler={x:rx-.2-.5,z:D/2-.3,w:1.0,d:.5}; rx-=.2+1.0;}
   if(state.sink){sink={x:rx-.2-.6,z:D/2-.33,w:1.2,d:.6}; rx-=.2+1.2;}
+  let fridge=null; if(state.fridge){fridge={x:rx-.1-.35,z:D/2-.34,w:.7,d:.68}; rx-=.1+.7;}
   const rightEnd=rx-.25;
   const gl=leftEnd+.15, gr=rightEnd-.15;
   const doorW=Math.max(1.1,Math.min(3.0,gr-gl));
@@ -619,9 +645,21 @@ function computeLayout(){
   const phe={x:px1+.3,z:bkZ+.05};
   const pump={x:px1+.3,z:bkZ-.75};
   const cab={x:(px1+tx0)/2+.15,z:-D/2};
+  // Zubehör an Rückwand, neben dem Sudhaus und außen
+  const treber=state.treber?{x:px0+.5,z:hltZ+.25}:null;
+  const chem=state.chem?{x:px0+.3,z:-D/2+.28,w:.6,d:.5}:null;
+  const co2=state.co2?{x:px0+1.0,z:-D/2+.22,w:.7,d:.36}:null;
+  const water=state.water?{x:colX,z:-D/2-.18-.7,outside:true}:null;
+  const energy=state.energy!=='none'?{type:state.energy,x:state.energy==='elektro'?cab.x+.95:W/2+.18+.45,z:state.energy==='elektro'?-D/2:-D/2+2.4}:null;
+  const scale=state.scale?{x:malt.x,z:malt.z-.6-.34}:null;
+  const jackAlong=(gr-gl)>=1.9;
+  const jack=state.jack?{x:doorX,z:jackAlong?D/2-.42:D/2-1.0,along:jackAlong}:null;
+  const extinguishers=state.extinguisher?[{x:gr+.18,z:D/2,y:1.05,rot:Math.PI,where:'neben dem Rolltor'},{x:cab.x+.55,z:-D/2,y:1.05,rot:0,where:'neben der Steuerung'}]:null;
+  const nWin=state.windows?Math.max(1,Math.round(W/3.2)):0;
+  const windows=[]; for(let i=0;i<nWin;i++)windows.push({c:-W/2+(i+.5)*W/nWin,w:1.4,y0:2.7,y1:3.6});
   const chiller={x:W/2+.15+.55,z:-D/2+1.1};
   return {W,D,V,bs,colX,colR,hltZ,mltZ,bkZ,colEnd,platH,px0,px1,pz0,pz1,tx0,tx1,tz0,tz1,T,ts,cols,rows,cap,tanks,
-          malt,mill,kegs,bottler,sink,cold,frontTight,gl,hoseSpots,doorW,doorX,aisleX,cip,phe,pump,cab,chiller,frontZ};
+          malt,mill,kegs,bottler,sink,cold,frontTight,gl,kegwash,lab,fridge,treber,chem,co2,water,energy,scale,jack,extinguishers,windows,hoseSpots,doorW,doorX,aisleX,cip,phe,pump,cab,chiller,frontZ};
 }
 
 /* ---------- Welt ---------- */
@@ -677,23 +715,44 @@ function buildRoom(L){
       mm.castShadow=false;
     });
   }
-  function wall(name,orient,off,n,opening){
+  function wall(name,orient,off,n,openings){
     const grp=new THREE.Group(); grp.userData={n,c:orient==='x'?P(0,H/2,off):P(off,H/2,0)};
     const half=(orient==='x'?W:D)/2+t;
-    if(!opening)wallPart(grp,orient,-half,half,0,H,off);
-    else{
-      const o0=opening.c-opening.w/2,o1=opening.c+opening.w/2;
-      wallPart(grp,orient,-half,o0,0,H,off);
-      wallPart(grp,orient,o1,half,0,H,off);
-      wallPart(grp,orient,o0,o1,opening.h,H,off);
-    }
+    const ops=(openings||[]).slice().sort((a,b)=>a.c-b.c);
+    let a=-half;
+    ops.forEach(o=>{
+      const o0=o.c-o.w/2,o1=o.c+o.w/2;
+      if(o0>a+.001)wallPart(grp,orient,a,o0,0,H,off);
+      if(o.y0>0)wallPart(grp,orient,o0,o1,0,o.y0,off);
+      if(o.y1<H)wallPart(grp,orient,o0,o1,o.y1,H,off);
+      a=o1;
+    });
+    if(half>a+.001)wallPart(grp,orient,a,half,0,H,off);
     g.add(grp); walls.push(grp); return grp;
   }
-  wall('back','x',-D/2-t/2,P(0,0,1));
+  const bw=wall('back','x',-D/2-t/2,P(0,0,1),L.windows);
+  if(L.windows.length){
+    const wg=new THREE.Group();
+    L.windows.forEach(o=>{
+      const wh=o.y1-o.y0, yc=(o.y0+o.y1)/2;
+      box(o.w+.1,.06,t+.06,MAT.white,wg,o.c,o.y0-.03,-D/2-t/2);          // Fensterbank
+      box(o.w,wh,.04,MAT.white,wg,o.c,yc,-D/2-t/2).visible=false;
+      [[-1,0],[1,0]].forEach(([sx])=>box(.06,wh,.08,MAT.white,wg,o.c+sx*(o.w/2-.03),yc,-D/2-t/2));
+      box(o.w,.06,.08,MAT.white,wg,o.c,o.y1-.03,-D/2-t/2); box(o.w,.06,.08,MAT.white,wg,o.c,o.y0+.03,-D/2-t/2);
+      box(.05,wh-.1,.07,MAT.white,wg,o.c,yc,-D/2-t/2);                    // Mittelsprosse
+      const gl=mesh(new THREE.PlaneGeometry(o.w-.12,wh-.12),MAT.glass,wg,o.c,yc,-D/2-t/2+.01); gl.castShadow=false;
+      const gl2=mesh(new THREE.PlaneGeometry(o.w-.12,wh-.12),MAT.glass,wg,o.c,yc,-D/2-t/2-.01); gl2.rotation.y=Math.PI; gl2.castShadow=false;
+    });
+    bw.add(wg);
+    const wc=addComp(new THREE.Group(),{key:'windows',wall:true,name:'Fenster in der Rückwand',label:'Fenster',
+      text:'Oberlichter über der Tankreihe: Tageslicht ohne direkte Sonne auf die Tanks, Lüftungsflügel zum Abführen von Wärme und Gärungs-CO₂.',
+      facts:[['Anzahl',String(L.windows.length)],['Größe je','1,4 × 0,9 m'],['Brüstung','2,7 m']],anchor:P(L.windows[0].c,L.windows[0].y1+.25,-D/2)});
+    wc.add(wg.clone()); wc.visible=false;
+  }
   wall('left','z',-W/2-t/2,P(1,0,0));
   wall('right','z',W/2+t/2,P(-1,0,0));
   const doorH=3.2;
-  const fw=wall('front','x',D/2+t/2,P(0,0,-1),{c:L.doorX,w:L.doorW,h:doorH});
+  const fw=wall('front','x',D/2+t/2,P(0,0,-1),[{c:L.doorX,w:L.doorW,y0:0,y1:doorH}]);
 
   // Rolltor (halb geöffnet)
   const doorG=new THREE.Group();
@@ -1083,6 +1142,221 @@ function buildColdRoom(L){
     anchor:P(cx,hC+.35,cz)});
 }
 
+/* Treberwagen neben dem Maischbottich */
+function buildTreber(L){
+  const T=L.treber, g=new THREE.Group(), w=.7, d=.9, h=.75;
+  box(w,h,d,MAT.brushed,g,0,.22+h/2,0);
+  box(w-.06,.02,d-.06,MAT.treber,g,0,.22+h-.06,0);
+  const heap=mesh(new THREE.SphereGeometry(.3,18,10,0,Math.PI*2,0,Math.PI/2),MAT.treber,g,0,.22+h-.07,0); heap.scale.set(1,.45,1.3);
+  [[-.28,-.36],[.28,-.36],[-.28,.36],[.28,.36]].forEach(([x,z])=>{const c=cyl(.06,.06,.04,MAT.black,g,x,.06,z,14);c.rotation.z=Math.PI/2;box(.03,.14,.03,MAT.frame,g,x,.15,z);});
+  box(w-.1,.04,d-.1,MAT.frame,g,0,.2,0);
+  pipe([P(-.3,.95,-d/2-.02),P(-.3,1.1,-d/2-.2),P(.3,1.1,-d/2-.2),P(.3,.95,-d/2-.02)],.015,MAT.brushed,g);
+  g.position.set(T.x,0,T.z);
+  const kg=L.V*.21*1.1;
+  addComp(g,{key:'treber',name:'Treberwagen',label:'Treber',
+    text:'Fahrbarer Edelstahlwagen unter dem Treberauswurf des Läuterbottichs. Nasser Treber wird noch am Sudtag abgefahren, meist an einen Landwirt als Futter.',
+    facts:[['Fassungsvermögen','≈ 400 L'],['Treber je Sud','≈ '+nf0.format(kg)+' kg nass'],['Maße','0,7 × 0,9 m']],anchor:P(T.x,1.5,T.z)});
+}
+
+/* CO2-Flaschen im Wandkäfig (lokal: Wand bei z=0, Raum in +z) */
+function buildCO2(L){
+  const C=L.co2, g=new THREE.Group(), n=3;
+  [[-.33,.02],[.33,.02],[-.33,.34],[.33,.34]].forEach(([x,z])=>box(.03,1.75,.03,MAT.frame,g,x,.875,z));
+  [.4,1.3].forEach(y=>{box(.7,.03,.03,MAT.frame,g,0,y,.34);box(.03,.03,.34,MAT.frame,g,-.33,y,.18);box(.03,.03,.34,MAT.frame,g,.33,y,.18);});
+  box(.7,.03,.34,MAT.frame,g,0,.03,.18);
+  for(let k=0;k<n;k++){
+    const x=-.22+k*.22;
+    cyl(.1,.1,1.45,MAT.dark,g,x,.05+.725,.18,18);
+    mesh(new THREE.SphereGeometry(.1,18,10,0,Math.PI*2,0,Math.PI/2),MAT.dark,g,x,1.5,.18);
+    cyl(.035,.035,.14,MAT.brushed,g,x,1.62,.18,12);
+    box(.1,.05,.03,MAT.brushed,g,x+.05,1.66,.18);
+    box(.06,.06,.06,MAT.glycol,g,x,1.71,.18);
+  }
+  box(.12,.1,.1,MAT.brushed,g,.42,1.62,.12);                    // Druckminderer
+  const m1=cyl(.045,.045,.02,MAT.white,g,.42,1.7,.14,16); m1.rotation.x=Math.PI/2;
+  pipe([P(.42,1.57,.12),P(.42,1.1,.02),P(.6,1.1,.02),P(.6,1.9,.02)],.008,MAT.brushed,g);
+  box(.22,.16,.01,MAT.yellow,g,0,2.0,.005);                     // Warnschild
+  g.position.set(C.x,0,-L.D/2);
+  addComp(g,{key:'co2',kind:'cold',name:'CO₂-Flaschen',label:'CO₂',
+    text:'Drei 10-kg-Flaschen im Wandkäfig mit Kette und Druckminderer. Versorgen Fassvorspannung, Abfüllstation und die Nachkarbonisierung. Der Raum braucht dafür einen CO₂-Warner nahe dem Boden.',
+    facts:[['Flaschen','3 × 10 kg'],['Vordruck','ca. 3 bar am Minderer'],['Käfig','0,7 × 0,35 m']],anchor:P(C.x,2.4,-L.D/2+.2)});
+}
+
+/* Beheizung des Sudhauses */
+function buildEnergy(L){
+  const E=L.energy, g=new THREE.Group(), out=E.type!=='elektro';
+  if(E.type==='elektro'){
+    box(.6,1.0,.3,MAT.cabinet,g,0,1.5,.15);
+    box(.004,.96,.005,MAT.dark,g,0,1.5,.303);
+    [.7,1.1,1.5,1.9].forEach(y=>box(.16,.03,.005,MAT.dark,g,-.15,y,.303));
+    cyl(.02,.02,.02,MAT.red,g,.18,1.85,.31,12).rotation.x=Math.PI/2;
+    [.5,.95,1.4].forEach(y=>{const c=cyl(.018,.018,.02,MAT.led,g,.18,y+.4,.31,12);c.rotation.x=Math.PI/2;});
+    box(.12,H-2.0,.08,MAT.frame,g,.2,2.0+(H-2.0)/2,.05);
+    g.position.set(E.x,0,E.z);
+    addComp(g,{key:'energy',kind:'hot',name:'Heizungs-Schaltschrank (elektrisch)',label:'Heizstäbe',
+      text:'Leistungsteil für die Heizstäbe in Heißwassertank und Würzepfanne. Bei 1000 L braucht das Kochen rund 60 kW; dafür ist ein eigener Drehstromanschluss mit großem Querschnitt nötig.',
+      facts:[['Heizleistung','≈ '+nf0.format(Math.max(18,L.V*.06))+' kW'],['Anschluss','400 V, '+nf0.format(Math.max(32,L.V*.1))+' A'],['Maße','0,6 × 1,0 × 0,3 m']],anchor:P(E.x,2.3,E.z+.2)});
+    return;
+  }
+  const dampf=E.type==='dampf';
+  const bw=dampf?.9:.6, bd=dampf?1.4:.5, bh=dampf?1.6:1.2;
+  box(bw,bh,bd,MAT.white,g,E.x,bh/2+.05,E.z);
+  box(bw+.04,.05,bd+.04,MAT.frame,g,E.x,.025,E.z);
+  if(dampf){cyl(.32,.32,1.2,MAT.jacket,g,E.x,bh+.05+.3,E.z,28).rotation.x=Math.PI/2; box(.3,.2,.01,MAT.dark,g,E.x+bw/2+.005,1.0,E.z);}
+  else box(.28,.36,.01,MAT.dark,g,E.x+bw/2+.005,.9,E.z);
+  // Abgasrohr über Dach
+  const ch=dampf?.12:.08, top=H+1.2, cx=E.x+bw*.25, cz=E.z-bd*.25;
+  cyl(ch,ch,top-bh-.05,MAT.jacket,g,cx,(top+bh+.05)/2,cz,20);
+  cyl(ch*1.6,ch*1.6,.08,MAT.dark,g,cx,top+.02,cz,20); cyl(.02,.02,.2,MAT.dark,g,cx,top-.08,cz,8);
+  // Versorgungsleitung durch die Wand zum Sudhaus
+  const y=H-.75, xin=L.W/2-.14, xv=L.colX+L.colR+.06;
+  const mt=dampf?MAT.jacket:MAT.yellow, r=dampf?.035:.02;
+  pipe([P(E.x-bw/2+.1,bh*.6,E.z),P(E.x-bw/2+.1,y,E.z),P(xin,y,E.z),P(xv,y,E.z),P(xv,y,L.bkZ),P(xv,2.2,L.bkZ)],r,mt,g);
+  if(dampf)pipe([P(xv+.1,2.2,L.hltZ),P(xv+.1,y-.12,L.hltZ),P(xv+.1,y-.12,E.z-.12),P(xin,y-.12,E.z-.12),P(E.x-bw/2+.1,y-.12,E.z-.12),P(E.x-bw/2+.1,bh*.4,E.z-.12)],.022,MAT.brushed,g);
+  const kw=Math.max(30,L.V*.09);
+  addComp(g,{key:'energy',kind:'hot',outside:true,name:dampf?'Dampferzeuger (außen)':'Gas-Heizkessel (außen)',label:dampf?'Dampferzeuger':'Heizkessel',
+    text:dampf?'Kompakter Dampferzeuger im Anbau, versorgt die Heizmäntel von Würzepfanne und Heißwassertank mit Niederdruckdampf. Rücklauf des Kondensats zum Speisewasserbehälter. Braucht Abgasführung und Wasseraufbereitung.':'Gasbrennwertkessel im Anbau, speist über Glykol- oder Heißwasserkreis die Heizmäntel von Würzepfanne und Heißwassertank. Abgas über Dach, Gasanschluss mit Absperrung außen.',
+    facts:[['Leistung','≈ '+nf0.format(kw)+' kW'],['Energieträger',dampf?'Erdgas oder Öl':'Erdgas'],['Aufstellung','außen an der rechten Wand'],['Maße',nf1.format(bw)+' × '+nf1.format(bd)+' × '+nf1.format(bh)+' m']],anchor:P(E.x,bh+.9,E.z)});
+}
+
+/* KEG-Waschstation (lokal: Wand bei z=0, Raum in +z) */
+function buildKegWash(L){
+  const K=L.kegwash, g=new THREE.Group(), w=K.w, d=K.d, h=.8;
+  [[-w/2+.05,.06],[w/2-.05,.06],[-w/2+.05,d-.06],[w/2-.05,d-.06]].forEach(([x,z])=>cyl(.022,.022,h,MAT.brushed,g,x,h/2,z,12));
+  box(w,.04,d,MAT.steel,g,0,h,d/2);
+  box(w-.1,.14,d-.1,MAT.dark,g,0,h-.09,d/2);             // Auffangwanne
+  box(.5,.2,.16,MAT.cabinet,g,-.15,h+.12,.1);             // Steuerkasten
+  [-.08,.06].forEach(x=>{const c=cyl(.02,.02,.02,MAT.led,g,x,h+.14,.19,12);c.rotation.x=Math.PI/2;});
+  // KEG kopfüber auf dem Spülkopf
+  const kx=.12, kz=d/2+.05;
+  cyl(.03,.03,.08,MAT.brushed,g,kx,h+.06,kz,12);
+  cyl(.198,.198,.6,MAT.steel,g,kx,h+.1+.3,kz,24);
+  ring(g,.19,h+.11,.012,MAT.brushed).position.set(kx,h+.11,kz); ring(g,.19,h+.69,.012,MAT.brushed).position.set(kx,h+.69,kz);
+  ring(g,.2,h+.3,.01,MAT.brushed).position.set(kx,h+.3,kz); ring(g,.2,h+.5,.01,MAT.brushed).position.set(kx,h+.5,kz);
+  // Leitungen: Lauge, Wasser, Dampf/Heißwasser
+  [[-.3,MAT.hose],[-.36,MAT.glycolR],[-.42,MAT.brushed]].forEach(([x,mt])=>pipe([P(x,h-.05,.03),P(x,h+.55,.03),P(x,h+.55,.0)],.012,mt,g));
+  hose([P(w/2-.05,h-.1,d/2),P(w/2+.25,.5,d/2+.2),P(w/2+.3,.05,d/2+.6),P(w/2+.1,.03,d/2+1.2)],.014,MAT.hose,g);
+  g.position.set(K.x,0,L.D/2); g.rotation.y=Math.PI;
+  addComp(g,{key:'kegwash',name:'KEG-Waschstation',label:'KEG-Wäsche',
+    text:'Halbautomatische Einkopf-Station: Das Fass wird kopfüber aufgesetzt, dann laufen Vorspülen, Lauge, Klarspülen und Dampf- oder Heißwasserdesinfektion nacheinander. Lauge kommt vom CIP-Wagen.',
+    facts:[['Leistung','ca. 15–20 KEG/h'],['Anschlüsse','Wasser, Lauge, Druckluft/CO₂'],['Maße','0,9 × 0,7 m']],anchor:P(K.x,1.85,K.z)});
+}
+
+/* Chemikalienschrank (lokal: Wand bei z=0, Raum in +z) */
+function buildChem(L){
+  const C=L.chem, g=new THREE.Group(), w=C.w, d=C.d, h=1.2;
+  box(w,h,d,MAT.yellow,g,0,.06+h/2,d/2);
+  box(w+.06,.06,d+.06,MAT.dark,g,0,.03,d/2);                     // Auffangwanne
+  box(.004,h-.1,.01,MAT.dark,g,0,.06+h/2,d+.003);
+  [-.08,.08].forEach(x=>box(.02,.14,.02,MAT.dark,g,x,.7,d+.015));
+  [.4,.8].forEach(y=>box(w-.06,.01,.005,MAT.dark,g,0,y,d+.003));   // Türfugen als Andeutung
+  box(.16,.16,.006,MAT.white,g,-.15,1.05,d+.004); box(.11,.11,.007,MAT.dark,g,-.15,1.05,d+.006).rotation.z=Math.PI/4;
+  box(.16,.16,.006,MAT.white,g,.15,1.05,d+.004); box(.1,.1,.007,MAT.red,g,.15,1.05,d+.006);
+  // Kanister obendrauf
+  box(.22,.3,.2,MAT.white,g,-.14,h+.06+.15,d/2); box(.22,.3,.2,MAT.glycol,g,.14,h+.06+.15,d/2);
+  g.position.set(C.x,0,-L.D/2);
+  addComp(g,{key:'chem',name:'Chemikalienschrank',label:'Chemikalien',
+    text:'Abschließbarer Schrank mit Auffangwanne für Lauge, Säure und Desinfektionsmittel der CIP-Reinigung. Lauge und Säure getrennt lagern, Augenspülflasche und Schutzausrüstung direkt daneben.',
+    facts:[['Inhalt','Lauge, Säure, Desinfektion'],['Auffangwanne','ja, säurefest'],['Maße','0,6 × 0,5 × 1,2 m']],anchor:P(C.x,2.0,-L.D/2+.3)});
+}
+
+/* Wasseraufbereitung außen hinter der Rückwand */
+function buildWater(L){
+  const Wt=L.water, g=new THREE.Group(), z=Wt.z, x=Wt.x;
+  box(2.0,.05,1.2,MAT.concrete,g,x,.025,z);
+  [[-.8,MAT.glycol,'E'],[-.45,MAT.dark,'A']].forEach(([dx,mt])=>{cyl(.17,.17,1.3,mt,g,x+dx,.05+.65,z-.2,24);mesh(new THREE.SphereGeometry(.17,24,12,0,Math.PI*2,0,Math.PI/2),mt,g,x+dx,1.35,z-.2);box(.14,.16,.14,MAT.dark,g,x+dx,1.45,z-.2);});
+  box(.5,.6,.5,MAT.white,g,x-.6,.35,z+.32);                     // Salzbehälter
+  const st=shell(.4,1.1,{type:'flat'},{type:'dome',h:.12},MAT.steel); st.mesh.position.set(x+.45,.05,z); g.add(st.mesh);
+  legs(g,3,.32,.0,.03); ring(g,.4,.9,.008).position.set(x+.45,.9,z);
+  box(.3,.25,.2,MAT.motor,g,x-.05,.18,z+.4);                      // Druckerhöhung
+  pipe([P(x-.8,1.5,z-.2),P(x-.45,1.5,z-.2),P(x+.45,1.5,z-.2),P(x+.45,1.2,z-.2)],.018,MAT.brushed,g);
+  pipe([P(x+.45,.6,z+.4),P(x-.05,.6,z+.4),P(x-.05,.3,z+.4)],.018,MAT.brushed,g);
+  pipe([P(x+.1,.35,z+.4),P(x+.1,.35,-L.D/2-.1),P(x+.1,.35,-L.D/2+.2),P(x+.1,H-.9,-L.D/2+.2),P(x+.1,H-.9,L.hltZ),P(x+.1,H-1.3,L.hltZ)],.018,MAT.brushed,g);
+  addComp(g,{key:'water',outside:true,name:'Wasseraufbereitung (außen)',label:'Wasseraufbereitung',
+    text:'Enthärter mit Salzbehälter, Aktivkohlefilter gegen Chlor und ein Vorratstank mit Druckerhöhung. Steht im Nebenraum hinter der Rückwand; die Leitung führt unter der Decke zum Heißwassertank.',
+    facts:[['Enthärter','Ionentauscher, Regenerierung mit Salz'],['Filter','Aktivkohle'],['Vorrat','≈ 500 L'],['Aufstellung','Nebenraum hinter der Rückwand']],anchor:P(x,2.0,z)});
+}
+
+/* Hopfen- und Hefekühlschrank (lokal: Wand bei z=0, Raum in +z) */
+function buildFridge(L){
+  const F=L.fridge, g=new THREE.Group(), w=F.w, d=F.d, h=1.85;
+  box(w,h,d,MAT.white,g,0,.05+h/2,d/2);
+  box(w+.02,.05,d,MAT.dark,g,0,.025,d/2);
+  box(.004,h-.2,.01,MAT.dark,g,-.02,.05+h/2,d+.004);              // Türspalt
+  box(.03,.5,.03,MAT.brushed,g,.28,1.2,d+.03);                     // Griff
+  box(.18,.08,.01,MAT.dark,g,0,h-.1,d+.006); box(.05,.03,.011,MAT.led,g,0,h-.1,d+.008);  // Temperaturanzeige
+  box(.5,.4,.01,MAT.glass,g,-.02,1.3,d+.003);                      // Sichtfenster
+  g.position.set(F.x,0,L.D/2); g.rotation.y=Math.PI;
+  addComp(g,{key:'fridge',kind:'cold',name:'Hopfen- und Hefekühlschrank',label:'Hopfen/Hefe',
+    text:'Gewerbekühlschrank für Hopfenpellets, Flüssighefe und Erntehefe. Hopfen gehört bei 0 bis 4 °C luftdicht gelagert, sonst verliert er schnell Alphasäure.',
+    facts:[['Inhalt','≈ 600 L'],['Temperatur','0 bis 4 °C'],['Maße','0,7 × 0,7 × 1,85 m']],anchor:P(F.x,2.25,F.z)});
+}
+
+/* Laborecke (lokal: Wand bei z=0, Raum in +z) */
+function buildLab(L){
+  const B=L.lab, g=new THREE.Group(), w=B.w, d=B.d, h=.9;
+  [[-w/2+.04,.04],[w/2-.04,.04],[-w/2+.04,d-.04],[w/2-.04,d-.04]].forEach(([x,z])=>box(.04,h,.04,MAT.frame,g,x,h/2,z));
+  box(w,.04,d,MAT.white,g,0,h,d/2);
+  box(w-.08,.02,d-.08,MAT.frame,g,0,.25,d/2);
+  // Mikroskop
+  box(.16,.02,.2,MAT.dark,g,-.35,h+.03,d/2); box(.04,.28,.04,MAT.dark,g,-.35,h+.18,d/2-.07);
+  cyl(.03,.03,.16,MAT.dark,g,-.35,h+.3,d/2+.02,12).rotation.x=-.45; box(.1,.01,.1,MAT.white,g,-.35,h+.14,d/2+.02);
+  // Refraktometer, pH-Meter, Kolben
+  cyl(.014,.014,.16,MAT.brushed,g,0,h+.03,d/2,10).rotation.z=Math.PI/2;
+  box(.08,.12,.04,MAT.white,g,.2,h+.08,d/2-.1); cyl(.01,.01,.14,MAT.dark,g,.3,h+.09,d/2-.1,8);
+  cyl(.05,.04,.08,MAT.glass,g,.42,h+.06,d/2+.08,14); cyl(.012,.012,.06,MAT.glass,g,.42,h+.13,d/2+.08,10);
+  // Regalbrett und Ordner
+  box(w-.2,.03,.25,MAT.white,g,0,1.55,.13);
+  [-.4,-.31,-.22].forEach((x,i)=>box(.07,.3,.22,[MAT.glycol,MAT.red,MAT.dark][i],g,x,1.72,.13));
+  box(.3,.22,.01,MAT.white,g,.3,1.9,.005);
+  // Hocker
+  cyl(.16,.16,.03,MAT.dark,g,.1,.62,d+.3,16); cyl(.02,.02,.6,MAT.frame,g,.1,.31,d+.3,10); cyl(.18,.18,.02,MAT.frame,g,.1,.01,d+.3,16);
+  g.position.set(B.x,0,L.D/2); g.rotation.y=Math.PI;
+  addComp(g,{key:'lab',name:'Laborecke',label:'Labor',
+    text:'Kleiner Labortisch für Stammwürze und Restextrakt mit Refraktometer und Spindel, pH-Messung, Hefezellzählung unter dem Mikroskop und die Sudbuch-Ordner.',
+    facts:[['Ausstattung','Mikroskop, Refraktometer, pH-Meter'],['Tisch','1,2 × 0,6 m']],anchor:P(B.x,2.2,B.z)});
+}
+
+/* Bodenwaage hinter der Malzpalette */
+function buildScale(L){
+  const S=L.scale, g=new THREE.Group();
+  box(.55,.06,.55,MAT.dark,g,0,.03,0); box(.5,.01,.5,MAT.plates,g,0,.065,0);
+  box(.04,.95,.04,MAT.frame,g,-.2,.5,-.25); box(.2,.12,.05,MAT.cabinet,g,-.2,1.0,-.24); box(.14,.05,.006,MAT.dark,g,-.2,1.02,-.21);
+  g.position.set(S.x,0,S.z);
+  addComp(g,{key:'scale',name:'Bodenwaage',label:'Waage',
+    text:'Plattformwaage neben der Malzpalette zum Einwiegen der Schüttung und für Hopfen und Zusatzstoffe in kleinerem Maßstab.',
+    facts:[['Wägebereich','bis 150 kg'],['Teilung','50 g'],['Plattform','0,5 × 0,5 m']],anchor:P(S.x,1.35,S.z)});
+}
+
+/* Hubwagen am Rolltor */
+function buildJack(L){
+  const J=L.jack, g=new THREE.Group();
+  [-.19,.19].forEach(x=>{box(.16,.07,1.15,MAT.red,g,x,.085,.2);const w=cyl(.04,.04,.06,MAT.black,g,x,.04,.72,12);w.rotation.z=Math.PI/2;});
+  box(.5,.3,.14,MAT.red,g,0,.2,-.42);
+  const rw=cyl(.09,.09,.08,MAT.black,g,0,.09,-.42,16); rw.rotation.z=Math.PI/2;
+  const hd=box(.04,1.15,.04,MAT.frame,g,0,.9,-.75); hd.rotation.x=-.5;
+  box(.3,.04,.04,MAT.frame,g,0,1.35,-1.0);
+  g.position.set(J.x,0,J.z); g.rotation.y=J.along?Math.PI/2:0;
+  addComp(g,{key:'jack',name:'Handhubwagen',label:'Hubwagen',
+    text:'Für Malzpaletten und Fasspaletten. Steht am Tor, wo angeliefert und abgeholt wird. Der Boden braucht dafür eine ebene Fläche ohne Schwellen.',
+    facts:[['Tragkraft','2.000 kg'],['Gabellänge','1,15 m'],['Bedarf','Tor mindestens 1,2 m breit']],anchor:P(J.x,1.1,J.z)});
+}
+
+/* Feuerlöscher an der Wand (lokal: Wand bei z=0, Raum in +z) */
+function buildExtinguisher(L,sp,i){
+  const g=new THREE.Group();
+  box(.16,.08,.02,MAT.frame,g,0,0,.01); box(.06,.06,.1,MAT.frame,g,0,0,.06);
+  cyl(.075,.075,.5,MAT.red,g,0,-.15,.16,18);
+  mesh(new THREE.SphereGeometry(.075,18,10,0,Math.PI*2,0,Math.PI/2),MAT.red,g,0,.1,.16);
+  cyl(.025,.025,.08,MAT.black,g,0,.2,.16,12); box(.03,.02,.14,MAT.black,g,0,.26,.2);
+  hose([P(.05,.22,.16),P(.1,.05,.2),P(.08,-.2,.2),P(.06,-.35,.15)],.012,MAT.black,g);
+  box(.18,.18,.008,MAT.red,g,0,.55,.004); box(.1,.1,.009,MAT.white,g,0,.55,.005);   // Hinweisschild
+  g.position.set(sp.x,sp.y,sp.z); g.rotation.y=sp.rot;
+  addComp(g,{key:'ext'+i,wall:true,name:'Feuerlöscher',label:i===0?'Feuerlöscher':null,
+    text:'6-kg-Schaumlöscher an der Wand '+sp.where+'. Für Brauräume reichen zwei Löscher meist aus, an der Beheizung des Sudhauses zusätzlich ein CO₂-Löscher.',
+    facts:[['Typ','Schaum, 6 kg'],['Montagehöhe','Griff auf ca. 1,2 m']],anchor:P(sp.x+Math.sin(sp.rot)*.25,sp.y+.85,sp.z+Math.cos(sp.rot)*.25)});
+}
+
 /* Waschtisch / Spüle (lokal: Wand bei z=0, Raum in +z) */
 function buildSink(L){
   const S=L.sink, g=new THREE.Group(), w=S.w, d=S.d, h=.9;
@@ -1305,6 +1579,17 @@ function build(){
   L.tanks.forEach(t=>{tankTops[t.n]=buildUnitank(L,t);});
   buildMalt(L); buildMill(L); buildKegs(L); buildCIP(L); buildChiller(L); buildCabinet(L);
   if(L.cold)buildColdRoom(L); else coldPanels=[];
+  if(L.treber)buildTreber(L);
+  if(L.co2)buildCO2(L);
+  if(L.chem)buildChem(L);
+  if(L.energy)buildEnergy(L);
+  if(L.kegwash)buildKegWash(L);
+  if(L.water)buildWater(L);
+  if(L.fridge)buildFridge(L);
+  if(L.lab)buildLab(L);
+  if(L.scale)buildScale(L);
+  if(L.jack)buildJack(L);
+  if(L.extinguishers)L.extinguishers.forEach((sp,i)=>buildExtinguisher(L,sp,i));
   if(L.sink)buildSink(L);
   if(L.bottler)buildBottler(L);
   if(state.hoses)L.hoseSpots.forEach((sp,i)=>buildHoseReel(L,sp,i));
@@ -1332,7 +1617,7 @@ function updateStats(L,v){
     if(c.tank&&c.key&&!L.tanks.find(t=>'tank'+t.n===c.key).fits)return;
     const b=new THREE.Box3().setFromObject(c.group);
     if(!isFinite(b.min.x))return;
-    if(c.key==='chiller'||c.wall||c.inCold)return; // steht außen bzw. hängt an der Wand
+    if(c.key==='chiller'||c.wall||c.inCold||c.outside)return; // steht außen bzw. hängt an der Wand
     foot+=(b.max.x-b.min.x)*(b.max.z-b.min.z);
   });
   const fits=L.tanks.filter(t=>t.fits).length, over=L.tanks.length-fits;
@@ -1361,7 +1646,7 @@ function updateStats(L,v){
     st.innerHTML='<b>Kühlraum passt nicht.</b> Der '+L.cold.size+'e Kühlraum ('+nf1.format(L.cold.w)+' × '+nf1.format(L.cold.d)+' m) ragt in Sudhaus, Gang oder den Bereich von Malz und Mühle. Kleineren Kühlraum wählen oder den Raum vergrößern.';
   } else if(L.frontTight){
     st.className='warn';
-    st.innerHTML='<b>Vorderwand zu voll.</b> Neben Malz, Mühle, Fässern'+(L.sink?', Spüle':'')+(L.bottler?', Abfüllung':'')+(L.cold?', Kühlraum':'')+' bleibt kein Platz mehr für das 1,1 m breite Rolltor. Raum breiter machen oder Zubehör abwählen.';
+    st.innerHTML='<b>Vorderwand zu voll.</b> Neben Malz, Mühle, Fässern'+(L.sink?', Spüle':'')+(L.bottler?', Abfüllung':'')+(L.cold?', Kühlraum':'')+(L.kegwash?', KEG-Wäsche':'')+(L.lab?', Labor':'')+(L.fridge?', Kühlschrank':'')+' bleibt kein Platz mehr für das 1,1 m breite Rolltor. Raum breiter machen oder Zubehör abwählen.';
   } else if(needH>H){
     st.className='warn';
     st.innerHTML='<b>Raum zu niedrig.</b> Mit Bedienraum über den Tanks werden '+nf1.format(needH)+' m gebraucht.';
@@ -1602,10 +1887,11 @@ function rebuild(){
   build();
   if(keepView&&keepView.dataset.view!=='tour')setView(keepView.dataset.view);
 }
-[['oSink','sink'],['oHoses','hoses'],['oBottler','bottler'],['oCold','cold']].forEach(([id,k])=>{
+[['oSink','sink'],['oHoses','hoses'],['oBottler','bottler'],['oCold','cold'],['oTreber','treber'],['oCo2','co2'],['oKegwash','kegwash'],['oChem','chem'],['oWater','water'],['oFridge','fridge'],['oLab','lab'],['oScale','scale'],['oJack','jack'],['oExt','extinguisher'],['oWindows','windows']].forEach(([id,k])=>{
   const el=$('#'+id); el.addEventListener('change',()=>{state[k]=el.checked;if(k==='cold')$('#coldSize').disabled=!el.checked;rebuild();});
 });
 $('#coldSize').addEventListener('change',e=>{state.coldSize=Number(e.target.value);rebuild();});
+$('#energy').addEventListener('change',e=>{state.energy=e.target.value;rebuild();});
 [['oLabels','labels'],['oPipes','pipes'],['oGrid','grid'],['oPerson','person'],['oSpin','spin'],['oWalls','walls']].forEach(([id,k])=>{
   const el=$('#'+id); el.addEventListener('change',()=>{state[k]=el.checked;applyToggles();});
 });
