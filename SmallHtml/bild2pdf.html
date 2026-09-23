@@ -34,6 +34,15 @@ body{
     radial-gradient(120% 60% at 50% -10%, rgba(242,160,61,.07), transparent 60%);
 }
 
+/* ---------- Fußzeile ---------- */
+footer{
+  padding:18px 24px 28px;
+  border-top:1px solid var(--line);
+  color:var(--muted);
+  font-size:13px;
+}
+footer a{color:var(--safelight)}
+
 /* ---------- Kopf ---------- */
 header{
   padding:28px 24px 20px;
@@ -540,6 +549,11 @@ button.ghost{background:transparent}
 </section>
 </main>
 
+<footer>
+  Teil der SmallHtml-Sammlung —
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
+
 <script>
 "use strict";
 
@@ -652,6 +666,7 @@ function card(it, i, c){
       <span class="name" title="${esc(it.name)}">${esc(it.name)}</span>
       ${it.iw}×${it.ih} px · ${kb(it.file.size)}
       ${it.rot ? ` · <span class="tag">${it.rot}°</span>` : ""}
+      ${it.note ? ` · <span class="tag">${esc(it.note)}</span>` : ""}
       <br><span class="tag">${L.pw.toFixed(0)}×${L.ph.toFixed(0)} pt</span>
     </div>
     <div class="tools">
@@ -714,19 +729,46 @@ async function addFiles(list){
   const files = [...list].filter(f => /^image\//.test(f.type));
   if (!files.length){ say("Keine Bilddateien dabei. Erwartet werden JPG, PNG, WebP oder GIF.", "err"); return; }
   for (const f of files){
-    const url = URL.createObjectURL(f);
+    let file = f, url = URL.createObjectURL(f), dim = null, note = null;
     try{
-      const dim = await dims(url);
-      items.push({ id:nextId++, file:f, name:f.name, url, iw:dim.w, ih:dim.h, rot:0 });
+      dim = await dims(url);
     }catch{
+      const conv = await cmykToFile(f);            // vier Kanäle: selbst umsetzen
+      if (conv){
+        URL.revokeObjectURL(url);
+        file = conv.file; url = conv.url; dim = conv.dim; note = "CMYK";
+      }
+    }
+    if (!dim){
       URL.revokeObjectURL(url);
       say(`${f.name} lässt sich nicht als Bild lesen und wurde übersprungen.`, "err");
+      continue;
     }
+    items.push({ id:nextId++, file, name:f.name, url, iw:dim.w, ih:dim.h, rot:0, note });
   }
   render();
   if ($("#status").className !== "status err")
     say(items.length + " Bilder bereit.", "ok");
 }
+/* CMYK-JPEG in eine Datei umsetzen, die der Browser anzeigen kann */
+async function cmykToFile(f){
+  try{
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    if (CMYKJPEG.comps(bytes) !== 4) return null;
+    const img = CMYKJPEG.decode(bytes);
+    const cv  = document.createElement("canvas");
+    cv.width  = img.width; cv.height = img.height;
+    const ctx = cv.getContext("2d");
+    const id  = ctx.createImageData(img.width, img.height);
+    id.data.set(img.data);
+    ctx.putImageData(id, 0, 0);
+    const blob = await new Promise(r => cv.toBlob(r, "image/png"));
+    if (!blob) return null;
+    const file = new File([blob], f.name.replace(/\.jpe?g$/i, "") + ".png", { type:"image/png" });
+    return { file, url: URL.createObjectURL(file), dim: { w: img.width, h: img.height } };
+  }catch(e){ return null; }
+}
+
 function dims(url){
   return new Promise((res, rej) => {
     const im = new Image();
@@ -1034,6 +1076,322 @@ if (typeof CompressionStream === "undefined"){
 render();
 
 /* =====================================================================
+   CMYK-JPEG (baseline, 4 Komponenten) — eigener Dekoder
+
+   Druckvorstufen-PDFs (Zeitungen, Anzeigen) betten JPEGs mit vier
+   Farbkanaelen ein, meist YCCK mit Adobe-Marker. Kein Browser dekodiert
+   die nativ: createImageBitmap scheitert oder liefert Unsinn. Dieser
+   Dekoder deckt genau den Fall ab.
+
+   Kann:       baseline sequentiell (SOF0/SOF1), 8 bit, 1/3/4 Kanaele,
+               beliebiges Subsampling, Restart-Marker.
+   Kann nicht: progressiv (SOF2), 12 bit, arithmetische Kodierung.
+               Diese Faelle werfen eine klare Meldung statt stiller Fehler.
+   ===================================================================== */
+const CMYKJPEG = (() => {
+"use strict";
+
+const ZIGZAG = new Int32Array([
+   0,  1,  8, 16,  9,  2,  3, 10,  17, 24, 32, 25, 18, 11,  4,  5,
+  12, 19, 26, 33, 40, 48, 41, 34,  27, 20, 13,  6,  7, 14, 21, 28,
+  35, 42, 49, 56, 57, 50, 43, 36,  29, 22, 15, 23, 30, 37, 44, 51,
+  58, 59, 52, 45, 38, 31, 39, 46,  53, 60, 61, 54, 47, 55, 62, 63
+]);
+
+/* COS[u*8+x] = 0,5 · C(u) · cos((2x+1)uπ/16); zweimal angewandt ergibt die 2D-IDCT */
+const COS = new Float32Array(64);
+for (let u = 0; u < 8; u++){
+  const cu = u === 0 ? Math.SQRT1_2 : 1;
+  for (let x = 0; x < 8; x++) COS[u*8+x] = 0.5 * cu * Math.cos((2*x+1)*u*Math.PI/16);
+}
+
+const u16 = (d, p) => (d[p] << 8) | d[p+1];
+
+/* ---------------------------------------------------------------------
+   CMYK zu RGB. Naives 255·(1−c)·(1−k) ignoriert die Wechselwirkung der
+   Druckfarben und faellt deutlich zu bunt aus. Die Polynomnaeherung
+   (c,m,y,k je 0…1) bildet ein uebliches Druckprofil nach und liegt nahe
+   an dem, was Poppler ausgibt.
+   ------------------------------------------------------------------ */
+const cmykR = (c,m,y,k) => 255 +
+  c*(-4.387332384609988*c + 54.48615194189176*m + 18.82290502165302*y + 212.25662451639585*k - 285.2331026137004) +
+  m*(1.7149763477362134*m - 5.6096736904047315*y - 17.873870861415444*k - 5.497006427196366) +
+  y*(-2.5217340131683033*y - 21.248923337353073*k + 17.5119270841813) +
+  k*(-21.86122147463605*k - 189.48180835922747);
+const cmykG = (c,m,y,k) => 255 +
+  c*(8.841041422036149*c + 60.118027045597366*m + 6.871425592049007*y + 31.159100130055922*k - 79.2970844816548) +
+  m*(-15.310361306967817*m + 17.575251261109482*y + 131.35250912493976*k - 190.9453302588951) +
+  y*(4.444339102852739*y + 9.8632861493405*k - 24.86741582555878) +
+  k*(-20.737325471181034*k - 187.80453709719578);
+const cmykB = (c,m,y,k) => 255 +
+  c*(0.8842522430003296*c + 8.078677503112928*m + 30.89978309703729*y - 0.23883238689178934*k - 14.183576799673286) +
+  m*(10.49593273432072*m + 63.02378494754052*y + 50.606957656360734*k - 112.23884253719248) +
+  y*(0.03296041114873217*y + 115.60384449646641*k - 193.58209356861505) +
+  k*(-22.33816807309886*k - 180.12613974708367);
+
+/* ---------- Huffman, kanonische Codes nach JPEG-Spec F.15/F.16 ---------- */
+function huffTable(counts, values){
+  const mincode = new Int32Array(17), maxcode = new Int32Array(17), valptr = new Int32Array(17);
+  let code = 0, k = 0;
+  for (let l = 1; l <= 16; l++){
+    if (!counts[l-1]){ maxcode[l] = -1; code <<= 1; continue; }
+    valptr[l] = k; mincode[l] = code;
+    code += counts[l-1]; k += counts[l-1];
+    maxcode[l] = code - 1; code <<= 1;
+  }
+  return { mincode, maxcode, valptr, vals: values };
+}
+
+/* ---------- Bitleser: Byte-Stuffing und Marker ---------- */
+class Bits {
+  constructor(d, p){ this.d = d; this.p = p; this.buf = 0; this.cnt = 0; this.eof = false; this.marker = 0; }
+  bit(){
+    if (!this.cnt){
+      if (this.p >= this.d.length){ this.eof = true; return 0; }
+      const b = this.d[this.p++];
+      if (b === 0xFF){
+        const b2 = this.d[this.p];
+        if (b2 === 0x00) this.p++;                       // gestopftes Byte
+        else { this.marker = b2; this.eof = true; return 0; }
+      }
+      this.buf = b; this.cnt = 8;
+    }
+    return (this.buf >> --this.cnt) & 1;
+  }
+  bits(n){ let v = 0; while (n-- > 0) v = (v << 1) | this.bit(); return v; }
+  sym(t){
+    let code = this.bit(), l = 1;
+    while (l <= 16 && code > t.maxcode[l]){ code = (code << 1) | this.bit(); l++; }
+    return l > 16 ? 0 : t.vals[t.valptr[l] + code - t.mincode[l]];
+  }
+  restart(){                                              // auf RSTn aufsetzen
+    this.cnt = 0; this.eof = false; this.marker = 0;
+    while (this.p < this.d.length - 1){
+      if (this.d[this.p] === 0xFF){
+        const m = this.d[this.p+1];
+        if (m >= 0xD0 && m <= 0xD7){ this.p += 2; return true; }
+        if (m !== 0x00) return false;
+      }
+      this.p++;
+    }
+    return false;
+  }
+}
+const extend = (v, n) => v < (1 << (n-1)) ? v - (1 << n) + 1 : v;
+
+/* ---------- 2D-IDCT, separabel ---------- */
+const TMP = new Float32Array(64);
+function idct(coef, out, stride, off){
+  for (let y = 0; y < 8; y++){
+    const r = y*8;
+    for (let x = 0; x < 8; x++){
+      let s = 0;
+      for (let u = 0; u < 8; u++){ const c = coef[r+u]; if (c) s += c * COS[u*8+x]; }
+      TMP[r+x] = s;
+    }
+  }
+  for (let x = 0; x < 8; x++){
+    for (let y = 0; y < 8; y++){
+      let s = 0;
+      for (let u = 0; u < 8; u++){ const t = TMP[u*8+x]; if (t) s += t * COS[u*8+y]; }
+      const i = (s + 128.5) | 0;
+      out[off + y*stride + x] = i < 0 ? 0 : i > 255 ? 255 : i;
+    }
+  }
+}
+
+/* ---------- Marker lesen ---------- */
+function parse(data){
+  if (data[0] !== 0xFF || data[1] !== 0xD8) throw new Error("Kein JPEG");
+  let p = 2, frame = null, adobe = null, scan = null, ri = 0;
+  const qt = [], hDC = [], hAC = [];
+
+  while (p < data.length - 1){
+    if (data[p] !== 0xFF){ p++; continue; }
+    const m = data[p+1]; p += 2;
+    if (m === 0xFF){ p--; continue; }
+    if (m === 0xD8 || m === 0xD9 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
+    const len = u16(data, p);
+    if (len < 2) break;
+    let s = p + 2; const end = p + len;
+
+    if (m === 0xDB){                                       // Quantisierung
+      while (s < end){
+        const pq = data[s] >> 4, tq = data[s] & 15; s++;
+        const tab = new Int32Array(64);
+        for (let i = 0; i < 64; i++) tab[ZIGZAG[i]] = pq ? u16(data, s + i*2) : data[s+i];
+        s += pq ? 128 : 64;
+        qt[tq] = tab;
+      }
+    } else if (m === 0xC4){                                // Huffman
+      while (s < end){
+        const tc = data[s] >> 4, th = data[s] & 15; s++;
+        const counts = data.subarray(s, s+16); s += 16;
+        let n = 0; for (let i = 0; i < 16; i++) n += counts[i];
+        const vals = data.subarray(s, s+n); s += n;
+        (tc ? hAC : hDC)[th] = huffTable(counts, vals);
+      }
+    } else if (m === 0xDD){                                // Restart-Abstand
+      ri = u16(data, s);
+    } else if (m === 0xEE){                                // Adobe
+      if (data[s] === 0x41 && data[s+1] === 0x64 && data[s+2] === 0x6F)
+        adobe = { transform: data[end-1] };
+    } else if (m >= 0xC0 && m <= 0xCF && m !== 0xC4 && m !== 0xC8 && m !== 0xCC){
+      const nc = data[s+5], comps = [];
+      let maxH = 1, maxV = 1;
+      for (let c = 0; c < nc; c++){
+        const o = s + 6 + c*3, ch = data[o+1] >> 4, cv = data[o+1] & 15;
+        if (ch > maxH) maxH = ch;
+        if (cv > maxV) maxV = cv;
+        comps.push({ id: data[o], h: ch, v: cv, tq: data[o+2] });
+      }
+      frame = { marker: m, precision: data[s], height: u16(data, s+1), width: u16(data, s+3),
+                comps, maxH, maxV,
+                progressive: (m === 0xC2 || m === 0xC6 || m === 0xCA),
+                baseline:    (m === 0xC0 || m === 0xC1) };
+    } else if (m === 0xDA){                                // Beginn der Bilddaten
+      const ns = data[s], sc = [];
+      for (let k = 0; k < ns; k++)
+        sc.push({ id: data[s+1+k*2], td: data[s+2+k*2] >> 4, ta: data[s+2+k*2] & 15 });
+      scan = { comps: sc, start: end };
+      break;
+    }
+    p = end;
+  }
+  return { frame, scan, qt, hDC, hAC, ri, adobe };
+}
+
+/* Anzahl der Farbkanaele, ohne das Bild zu dekodieren */
+function comps(bytes){
+  try{ const f = parse(bytes).frame; return f ? f.comps.length : 0; }
+  catch(e){ return 0; }
+}
+
+/* Kurzbefund: was fuer ein JPEG ist das und wer soll es dekodieren */
+function sniff(bytes){
+  let s;
+  try{ s = parse(bytes); }catch(e){ return null; }
+  if (!s.frame) return null;
+  const f = s.frame;
+  return {
+    width: f.width, height: f.height, components: f.comps.length,
+    precision: f.precision, progressive: f.progressive, baseline: f.baseline,
+    adobe: !!s.adobe, transform: s.adobe ? s.adobe.transform : null,
+    needsOwnDecoder: f.comps.length === 4,
+    decodable: f.baseline && f.precision === 8
+  };
+}
+
+/* ---------- Dekodieren nach RGBA ---------- */
+function decode(bytes, opt){
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const inv = !!(opt && opt.invert);
+  const s = parse(data), f = s.frame;
+  if (!f) throw new Error("JPEG ohne Bildkopf");
+  if (f.progressive) throw new Error("progressives JPEG");
+  if (!f.baseline)   throw new Error("JPEG-Variante 0x" + f.marker.toString(16));
+  if (f.precision !== 8) throw new Error(f.precision + " bit je Kanal");
+  if (!s.scan) throw new Error("JPEG ohne Bilddaten");
+
+  const comps = f.comps, nc = comps.length;
+  const mcusX = Math.ceil(f.width  / (f.maxH * 8));
+  const mcusY = Math.ceil(f.height / (f.maxV * 8));
+
+  for (let i = 0; i < nc; i++){
+    const c = comps[i];
+    c.stride = mcusX * c.h * 8;
+    c.plane  = new Uint8ClampedArray(c.stride * mcusY * c.v * 8);
+    c.pred   = 0;
+    const sc = s.scan.comps.find(x => x.id === c.id) || s.scan.comps[i];
+    c.dc = s.hDC[sc.td]; c.ac = s.hAC[sc.ta]; c.q = s.qt[c.tq];
+    if (!c.dc || !c.ac || !c.q) throw new Error("Tabelle fehlt (Kanal " + c.id + ")");
+  }
+
+  const br = new Bits(data, s.scan.start);
+  const coef = new Int32Array(64);
+  const total = mcusX * mcusY;
+  let left = s.ri || 0;
+
+  for (let mcu = 0; mcu < total; mcu++){
+    const my = (mcu / mcusX) | 0, mx = mcu % mcusX;
+    for (let ci = 0; ci < nc; ci++){
+      const c = comps[ci];
+      for (let by = 0; by < c.v; by++) for (let bx = 0; bx < c.h; bx++){
+        coef.fill(0);
+        const t = br.sym(c.dc);
+        c.pred += t ? extend(br.bits(t), t) : 0;
+        coef[0] = c.pred * c.q[0];
+        let k = 1;
+        while (k < 64){
+          const rs = br.sym(c.ac), r = rs >> 4, sz = rs & 15;
+          if (!sz){ if (r !== 15) break; k += 16; continue; }
+          k += r;
+          if (k > 63) break;
+          const z = ZIGZAG[k];
+          coef[z] = extend(br.bits(sz), sz) * c.q[z];
+          k++;
+        }
+        idct(coef, c.plane, c.stride,
+             ((my*c.v + by)*8) * c.stride + (mx*c.h + bx)*8);
+      }
+    }
+    if (s.ri && --left === 0 && mcu + 1 < total){
+      if (!br.restart()) break;
+      for (let i = 0; i < nc; i++) comps[i].pred = 0;
+      left = s.ri;
+    }
+    if (br.eof && br.marker && !(br.marker >= 0xD0 && br.marker <= 0xD7)) break;
+  }
+
+  /* ---------- Farben ---------- */
+  const W = f.width, H = f.height;
+  const out = new Uint8ClampedArray(W*H*4);
+  const tr = s.adobe ? s.adobe.transform : (nc === 3 ? 1 : 0);
+  const pick = (c, x, y) =>
+    c.plane[(((y*c.v / f.maxV) | 0) * c.stride) + ((x*c.h / f.maxH) | 0)];
+  const clamp01 = v => v < 0 ? 0 : v > 1 ? 1 : v;
+
+  for (let y = 0, o = 0; y < H; y++) for (let x = 0; x < W; x++){
+    let R, G, B;
+    if (nc === 1){
+      R = G = B = pick(comps[0], x, y);
+    } else if (nc === 3){
+      const Y = pick(comps[0], x, y);
+      if (tr === 0){ R = Y; G = pick(comps[1], x, y); B = pick(comps[2], x, y); }
+      else {
+        const Cb = pick(comps[1], x, y) - 128, Cr = pick(comps[2], x, y) - 128;
+        R = Y + 1.402*Cr;
+        G = Y - 0.344136*Cb - 0.714136*Cr;
+        B = Y + 1.772*Cb;
+      }
+    } else {
+      /* Vier Kanaele. Bei transform=2 (YCCK) liefert die YCbCr-Umkehr
+         bereits (255−C, 255−M, 255−Y); der vierte Kanal ist K direkt. */
+      const a = pick(comps[0], x, y), b = pick(comps[1], x, y),
+            d2 = pick(comps[2], x, y), kk = pick(comps[3], x, y);
+      let ri, gi, bi;
+      if (tr === 2){
+        const Cb = b - 128, Cr = d2 - 128;
+        ri = a + 1.402*Cr;
+        gi = a - 0.344136*Cb - 0.714136*Cr;
+        bi = a + 1.772*Cb;
+      } else { ri = a; gi = b; bi = d2; }
+      let cc = clamp01((255 - ri)/255), mm = clamp01((255 - gi)/255),
+          yy = clamp01((255 - bi)/255), kv = kk/255;
+      if (inv){ cc = 1-cc; mm = 1-mm; yy = 1-yy; kv = 1-kv; }   // /Decode [1 0 …]
+      R = cmykR(cc, mm, yy, kv);
+      G = cmykG(cc, mm, yy, kv);
+      B = cmykB(cc, mm, yy, kv);
+    }
+    out[o++] = R; out[o++] = G; out[o++] = B; out[o++] = 255;
+  }
+  return { width: W, height: H, data: out };
+}
+
+return { decode, sniff, comps };
+})();
+
+/* =====================================================================
    CCITT-Fax (ITU T.4 / T.6) — für gescannte Schwarzweißseiten
    ===================================================================== */
 const CCITT = (() => {
@@ -1264,6 +1622,582 @@ return { decode };
    PDF-Leser — eigenständig, ohne Bibliothek
    Liest die Objektstruktur, entpackt Bilddaten und zeichnet Seiten.
    ===================================================================== */
+/* =====================================================================
+   Glyphenumrisse — CFF (Type 2) und TrueType (glyf)
+
+   Liefert zu einer eingebetteten Schrift die Umrisse einzelner Glyphen
+   als flache Befehlsliste. Kodierung der Liste:
+     0 x y                    Anfang eines Zuges
+     1 x y                    Gerade
+     2 x1 y1 x2 y2 x y        Kubische Kurve
+     3                        Zug schliessen
+     4 cx cy x y              Quadratische Kurve (TrueType)
+   Alle Werte in Schrifteinheiten; die Umrechnung ins Textsystem
+   uebernimmt die Schriftmatrix des Aufrufers.
+   ===================================================================== */
+const GLYF = (() => {
+"use strict";
+
+/* ---------- CFF: INDEX und DICT ---------- */
+function readIndex(d, p){
+  if (p + 2 > d.length) return { items: [], end: p + 2 };
+  const count = (d[p] << 8) | d[p+1];
+  if (!count) return { items: [], end: p + 2 };
+  const offSize = d[p+2];
+  let q = p + 3;
+  const offs = new Array(count + 1);
+  for (let i = 0; i <= count; i++){
+    let v = 0;
+    for (let k = 0; k < offSize; k++) v = (v * 256) + d[q++];
+    offs[i] = v;
+  }
+  const base = q - 1;
+  const items = new Array(count);
+  for (let i = 0; i < count; i++) items[i] = d.subarray(base + offs[i], base + offs[i+1]);
+  return { items, end: base + offs[count] };
+}
+
+function parseDict(d){
+  const out = Object.create(null);
+  let ops = [];
+  for (let i = 0; i < d.length; ){
+    const b = d[i];
+    if (b <= 21){
+      let op = b; i++;
+      if (b === 12){ op = 1200 + d[i]; i++; }
+      out[op] = ops; ops = [];
+    } else if (b === 28){ ops.push((((d[i+1] << 8) | d[i+2]) << 16) >> 16); i += 3; }
+    else if (b === 29){ ops.push((d[i+1] << 24) | (d[i+2] << 16) | (d[i+3] << 8) | d[i+4]); i += 5; }
+    else if (b === 30){                                   // Gleitkomma als Halbbytes
+      let s = ""; i++;
+      loop: while (i < d.length){
+        const by = d[i++];
+        for (const nib of [by >> 4, by & 15]){
+          if (nib <= 9) s += nib;
+          else if (nib === 10) s += ".";
+          else if (nib === 11) s += "E";
+          else if (nib === 12) s += "E-";
+          else if (nib === 14) s += "-";
+          else if (nib === 15) break loop;
+        }
+      }
+      ops.push(parseFloat(s) || 0);
+    }
+    else if (b >= 32 && b <= 246){ ops.push(b - 139); i++; }
+    else if (b >= 247 && b <= 250){ ops.push((b - 247) * 256 + d[i+1] + 108); i += 2; }
+    else if (b >= 251 && b <= 254){ ops.push(-(b - 251) * 256 - d[i+1] - 108); i += 2; }
+    else i++;
+  }
+  return out;
+}
+
+const STD_STRINGS = (".notdef space exclam quotedbl numbersign dollar percent ampersand quoteright parenleft parenright asterisk plus comma hyphen period slash zero one two three four five six seven eight nine colon semicolon less equal greater question at A B C D E F G H I J K L M N O P Q R S T U V W X Y Z bracketleft backslash bracketright asciicircum underscore quoteleft a b c d e f g h i j k l m n o p q r s t u v w x y z braceleft bar braceright asciitilde exclamdown cent sterling fraction yen florin section currency quotesingle quotedblleft guillemotleft guilsinglleft guilsinglright fi fl endash dagger daggerdbl periodcentered paragraph bullet quotesinglbase quotedblbase quotedblright guillemotright ellipsis perthousand questiondown grave acute circumflex tilde macron breve dotaccent dieresis ring cedilla hungarumlaut ogonek caron emdash AE ordfeminine Lslash Oslash OE ordmasculine ae dotlessi lslash oslash oe germandbls onesuperior logicalnot mu trademark Eth onehalf plusminus Thorn onequarter divide brokenbar degree thorn threequarters twosuperior registered minus eth multiply threesuperior copyright Aacute Acircumflex Adieresis Agrave Aring Atilde Ccedilla Eacute Ecircumflex Edieresis Egrave Iacute Icircumflex Idieresis Igrave Ntilde Oacute Ocircumflex Odieresis Ograve Otilde Scaron Uacute Ucircumflex Udieresis Ugrave Yacute Ydieresis Zcaron aacute acircumflex adieresis agrave aring atilde ccedilla eacute ecircumflex edieresis egrave iacute icircumflex idieresis igrave ntilde oacute ocircumflex odieresis ograve otilde scaron uacute ucircumflex udieresis ugrave yacute ydieresis zcaron").split(" ");
+
+/* ---------- CFF lesen ---------- */
+function parseCFF(data){
+  const hdrSize = data[2];
+  let p = hdrSize;
+  p = readIndex(data, p).end;                            // Name INDEX
+  const topIdx = readIndex(data, p); p = topIdx.end;
+  const strIdx = readIndex(data, p); p = strIdx.end;
+  const gsubrs = readIndex(data, p).items;
+  if (!topIdx.items.length) throw new Error("CFF ohne Top-DICT");
+  const top = parseDict(topIdx.items[0]);
+  if (!top[17]) throw new Error("CFF ohne CharStrings");
+
+  const charStrings = readIndex(data, top[17][0]).items;
+  const nGlyphs = charStrings.length;
+  const isCID = !!top[1230];
+  const fontMatrix = top[1207] && top[1207].length === 6 ? top[1207] : [0.001, 0, 0, 0.001, 0, 0];
+
+  const readPrivate = pv => {
+    if (!pv || pv.length < 2) return { subrs: [], nominalWidthX: 0, defaultWidthX: 0 };
+    const [sz, off] = pv;
+    const pd = parseDict(data.subarray(off, off + sz));
+    return {
+      subrs: pd[19] ? readIndex(data, off + pd[19][0]).items : [],
+      nominalWidthX: pd[21] ? pd[21][0] : 0,
+      defaultWidthX: pd[20] ? pd[20][0] : 0
+    };
+  };
+
+  let fdArray = null, fdSelect = null, priv = null;
+  if (isCID && top[1236]){
+    fdArray = readIndex(data, top[1236][0]).items.map(f => readPrivate(parseDict(f)[18]));
+    fdSelect = new Uint8Array(nGlyphs);
+    if (top[1237]){
+      const off = top[1237][0], fmt = data[off];
+      if (fmt === 0){ for (let i = 0; i < nGlyphs; i++) fdSelect[i] = data[off+1+i]; }
+      else if (fmt === 3){
+        const nR = (data[off+1] << 8) | data[off+2];
+        let q = off + 3, first = (data[q] << 8) | data[q+1]; q += 2;
+        for (let i = 0; i < nR; i++){
+          const fd = data[q++], next = (data[q] << 8) | data[q+1]; q += 2;
+          for (let g = first; g < next && g < nGlyphs; g++) fdSelect[g] = fd;
+          first = next;
+        }
+      }
+    }
+  } else {
+    priv = readPrivate(top[18]);
+  }
+
+  /* charset: Glyph -> SID (einfach) bzw. Glyph -> CID (CID-Schrift) */
+  const charset = new Uint16Array(nGlyphs);
+  const csOff = top[15] ? top[15][0] : 0;
+  if (csOff > 2){
+    const fmt = data[csOff];
+    let q = csOff + 1, gid = 1;
+    if (fmt === 0){
+      while (gid < nGlyphs){ charset[gid++] = (data[q] << 8) | data[q+1]; q += 2; }
+    } else if (fmt === 1 || fmt === 2){
+      while (gid < nGlyphs && q < data.length){
+        const first = (data[q] << 8) | data[q+1]; q += 2;
+        let nLeft;
+        if (fmt === 1) nLeft = data[q++];
+        else { nLeft = (data[q] << 8) | data[q+1]; q += 2; }
+        for (let k = 0; k <= nLeft && gid < nGlyphs; k++) charset[gid++] = first + k;
+      }
+    }
+  } else {
+    for (let g = 0; g < nGlyphs; g++) charset[g] = g;    // ISOAdobe: SID == GID
+  }
+
+  const font = {
+    kind: "cff", data, charStrings, gsubrs, priv, fdArray, fdSelect,
+    isCID, fontMatrix, nGlyphs, charset, strIdx: strIdx.items,
+    cache: new Map()
+  };
+
+  /* CID -> GID */
+  if (isCID){
+    const m = new Map();
+    for (let g = 0; g < nGlyphs; g++) m.set(charset[g], g);
+    font.cidToGid = cid => m.has(cid) ? m.get(cid) : (cid < nGlyphs ? cid : 0);
+  } else {
+    /* Glyphenname -> GID, fuer Differences und Standardkodierung */
+    const byName = new Map();
+    const sidName = sid => sid < STD_STRINGS.length ? STD_STRINGS[sid]
+      : (strIdx.items[sid - 391] ? String.fromCharCode(...strIdx.items[sid - 391]) : "");
+    for (let g = 0; g < nGlyphs; g++){
+      const n = sidName(charset[g]);
+      if (n && !byName.has(n)) byName.set(n, g);
+    }
+    font.byName = byName;
+    /* eingebaute Kodierung: Code -> GID */
+    const encOff = top[16] ? top[16][0] : 0;
+    const enc = new Int16Array(256).fill(-1);
+    if (encOff > 1){
+      const fmt = data[encOff] & 0x7F;
+      if (fmt === 0){
+        const n = data[encOff+1];
+        for (let i = 1; i <= n && i < nGlyphs; i++) enc[data[encOff+1+i]] = i;
+      } else if (fmt === 1){
+        const nR = data[encOff+1];
+        let gid = 1, q = encOff + 2;
+        for (let i = 0; i < nR; i++){
+          const first = data[q++], nLeft = data[q++];
+          for (let k = 0; k <= nLeft && gid < nGlyphs; k++) enc[first + k] = gid++;
+        }
+      }
+    }
+    font.builtinEnc = encOff > 1 ? enc : null;
+  }
+  return font;
+}
+
+/* ---------- Type-2-Charstrings ausfuehren ---------- */
+const bias = n => n < 1240 ? 107 : n < 33900 ? 1131 : 32768;
+
+function cffPath(font, gid){
+  const hit = font.cache.get(gid);
+  if (hit) return hit;
+  const path = [];
+  const cs = font.charStrings[gid];
+  if (!cs){ font.cache.set(gid, path); return path; }
+
+  const pv = font.fdArray ? (font.fdArray[font.fdSelect[gid]] || font.fdArray[0]) : font.priv;
+  const subrs = pv ? pv.subrs : [];
+  const gb = bias(font.gsubrs.length), lb = bias(subrs.length);
+
+  let x = 0, y = 0, nStems = 0, haveWidth = false, open = false;
+  const st = [];
+  const trans = [];
+
+  const moveTo = (a, b) => { if (open) path.push(3); path.push(0, a, b); open = true; };
+  const lineTo = (a, b) => path.push(1, a, b);
+  const curveTo = (a,b,c,d,e,f) => path.push(2, a,b,c,d,e,f);
+
+  const stems = () => { if (st.length % 2) haveWidth = true; nStems += st.length >> 1; st.length = 0; };
+
+  function exec(code, depth){
+    if (depth > 10) return;
+    for (let i = 0; i < code.length; ){
+      let v = code[i++];
+      if (v >= 32 || v === 28){
+        if (v === 28){ st.push((((code[i] << 8) | code[i+1]) << 16) >> 16); i += 2; }
+        else if (v < 247) st.push(v - 139);
+        else if (v < 251){ st.push((v - 247) * 256 + code[i++] + 108); }
+        else if (v < 255){ st.push(-(v - 251) * 256 - code[i++] - 108); }
+        else { st.push(((code[i] << 24) | (code[i+1] << 16) | (code[i+2] << 8) | code[i+3]) / 65536); i += 4; }
+        continue;
+      }
+      switch (v){
+        case 1: case 3: case 18: case 23: stems(); break;
+        case 19: case 20: stems(); i += (nStems + 7) >> 3; break;
+        case 21:                                            // rmoveto
+          if (st.length > 2 && !haveWidth){ st.shift(); haveWidth = true; }
+          x += st[0] || 0; y += st[1] || 0; moveTo(x, y); st.length = 0; haveWidth = true; break;
+        case 22:                                            // hmoveto
+          if (st.length > 1 && !haveWidth){ st.shift(); haveWidth = true; }
+          x += st[0] || 0; moveTo(x, y); st.length = 0; haveWidth = true; break;
+        case 4:                                             // vmoveto
+          if (st.length > 1 && !haveWidth){ st.shift(); haveWidth = true; }
+          y += st[0] || 0; moveTo(x, y); st.length = 0; haveWidth = true; break;
+        case 5:                                             // rlineto
+          for (let k = 0; k + 1 < st.length; k += 2){ x += st[k]; y += st[k+1]; lineTo(x, y); }
+          st.length = 0; break;
+        case 6: case 7: {                                   // hlineto / vlineto
+          let horiz = v === 6;
+          for (let k = 0; k < st.length; k++){
+            if (horiz) x += st[k]; else y += st[k];
+            lineTo(x, y); horiz = !horiz;
+          }
+          st.length = 0; break;
+        }
+        case 8:                                             // rrcurveto
+          for (let k = 0; k + 5 < st.length; k += 6){
+            const c1x = x + st[k], c1y = y + st[k+1];
+            const c2x = c1x + st[k+2], c2y = c1y + st[k+3];
+            x = c2x + st[k+4]; y = c2y + st[k+5];
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          }
+          st.length = 0; break;
+        case 24: {                                          // rcurveline
+          let k = 0;
+          for (; k + 5 < st.length - 2; k += 6){
+            const c1x = x + st[k], c1y = y + st[k+1];
+            const c2x = c1x + st[k+2], c2y = c1y + st[k+3];
+            x = c2x + st[k+4]; y = c2y + st[k+5];
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          }
+          x += st[k] || 0; y += st[k+1] || 0; lineTo(x, y);
+          st.length = 0; break;
+        }
+        case 25: {                                          // rlinecurve
+          let k = 0;
+          for (; k + 1 < st.length - 6; k += 2){ x += st[k]; y += st[k+1]; lineTo(x, y); }
+          const c1x = x + (st[k]||0), c1y = y + (st[k+1]||0);
+          const c2x = c1x + (st[k+2]||0), c2y = c1y + (st[k+3]||0);
+          x = c2x + (st[k+4]||0); y = c2y + (st[k+5]||0);
+          curveTo(c1x, c1y, c2x, c2y, x, y);
+          st.length = 0; break;
+        }
+        case 26: case 27: {                                 // vvcurveto / hhcurveto
+          let k = 0, d1 = 0;
+          if (st.length % 4){ d1 = st[0]; k = 1; }
+          for (; k + 3 < st.length; k += 4){
+            let c1x, c1y;
+            if (v === 26){ c1x = x + d1; c1y = y + st[k]; }
+            else          { c1x = x + st[k]; c1y = y + d1; }
+            const c2x = c1x + st[k+1], c2y = c1y + st[k+2];
+            if (v === 26){ x = c2x; y = c2y + st[k+3]; }
+            else          { x = c2x + st[k+3]; y = c2y; }
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+            d1 = 0;
+          }
+          st.length = 0; break;
+        }
+        case 30: case 31: {                                 // vhcurveto / hvcurveto
+          let horiz = v === 31, k = 0;
+          while (k + 3 < st.length){
+            const last = (st.length - k === 5);
+            let c1x, c1y, c2x, c2y;
+            if (horiz){
+              c1x = x + st[k]; c1y = y;
+              c2x = c1x + st[k+1]; c2y = c1y + st[k+2];
+              y = c2y + st[k+3];
+              x = c2x + (last ? st[k+4] : 0);
+            } else {
+              c1x = x; c1y = y + st[k];
+              c2x = c1x + st[k+1]; c2y = c1y + st[k+2];
+              x = c2x + st[k+3];
+              y = c2y + (last ? st[k+4] : 0);
+            }
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+            k += last ? 5 : 4;
+            horiz = !horiz;
+          }
+          st.length = 0; break;
+        }
+        case 10: {                                          // callsubr
+          const idx = (st.pop() | 0) + lb;
+          const s = subrs[idx];
+          if (s) exec(s, depth + 1);
+          break;
+        }
+        case 29: {                                          // callgsubr
+          const idx = (st.pop() | 0) + gb;
+          const s = font.gsubrs[idx];
+          if (s) exec(s, depth + 1);
+          break;
+        }
+        case 11: return;                                    // return
+        case 14:                                            // endchar
+          if (st.length && !haveWidth) haveWidth = true;
+          if (open) path.push(3);
+          open = false;
+          return;
+        case 12: {
+          const v2 = code[i++];
+          if (v2 === 35){                                   // flex
+            let cx = x, cy = y;
+            const a = st;
+            let c1x = cx + a[0], c1y = cy + a[1], c2x = c1x + a[2], c2y = c1y + a[3];
+            let jx = c2x + a[4], jy = c2y + a[5];
+            curveTo(c1x, c1y, c2x, c2y, jx, jy);
+            c1x = jx + a[6]; c1y = jy + a[7]; c2x = c1x + a[8]; c2y = c1y + a[9];
+            x = c2x + a[10]; y = c2y + a[11];
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          } else if (v2 === 34){                            // hflex
+            const a = st, y0 = y;
+            let c1x = x + a[0], c1y = y, c2x = c1x + a[1], c2y = y + a[2];
+            let jx = c2x + a[3], jy = c2y;
+            curveTo(c1x, c1y, c2x, c2y, jx, jy);
+            c1x = jx + a[4]; c1y = c2y; c2x = c1x + a[5]; c2y = y0;
+            x = c2x + a[6]; y = y0;
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          } else if (v2 === 36){                            // hflex1
+            const a = st, y0 = y;
+            let c1x = x + a[0], c1y = y + a[1], c2x = c1x + a[2], c2y = c1y + a[3];
+            let jx = c2x + a[4], jy = c2y;
+            curveTo(c1x, c1y, c2x, c2y, jx, jy);
+            c1x = jx + a[5]; c1y = c2y; c2x = c1x + a[6]; c2y = c1y + a[7];
+            x = c2x + a[8]; y = y0;
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          } else if (v2 === 37){                            // flex1
+            const a = st, x0 = x, y0 = y;
+            let dx = 0, dy = 0;
+            for (let k = 0; k < 10; k += 2){ dx += a[k]; dy += a[k+1]; }
+            let c1x = x + a[0], c1y = y + a[1], c2x = c1x + a[2], c2y = c1y + a[3];
+            let jx = c2x + a[4], jy = c2y + a[5];
+            curveTo(c1x, c1y, c2x, c2y, jx, jy);
+            c1x = jx + a[6]; c1y = jy + a[7]; c2x = c1x + a[8]; c2y = c1y + a[9];
+            if (Math.abs(dx) > Math.abs(dy)){ x = c2x + a[10]; y = y0; }
+            else                            { x = x0; y = c2y + a[10]; }
+            curveTo(c1x, c1y, c2x, c2y, x, y);
+          }
+          st.length = 0; break;
+        }
+        default: st.length = 0; break;
+      }
+    }
+  }
+
+  try{ exec(cs, 0); }catch(e){ /* unvollstaendige Glyphe ist besser als keine Seite */ }
+  if (open) path.push(3);
+  font.cache.set(gid, path);
+  return path;
+}
+
+/* ---------- TrueType ---------- */
+function parseTTF(data){
+  const u16 = p => (data[p] << 8) | data[p+1];
+  const i16 = p => (u16(p) << 16) >> 16;
+  const u32 = p => ((data[p] << 24) | (data[p+1] << 16) | (data[p+2] << 8) | data[p+3]) >>> 0;
+
+  let off = 0;
+  if (u32(0) === 0x74746366) off = u32(12);               // ttcf: erste Schrift
+  const numTables = u16(off + 4);
+  const tab = Object.create(null);
+  for (let i = 0; i < numTables; i++){
+    const p = off + 12 + i*16;
+    const tag = String.fromCharCode(data[p], data[p+1], data[p+2], data[p+3]);
+    tab[tag] = { off: u32(p+8), len: u32(p+12) };
+  }
+  if (tab["CFF "]){                                        // OpenType mit CFF-Kern
+    const f = parseCFF(data.subarray(tab["CFF "].off, tab["CFF "].off + tab["CFF "].len));
+    f.ttTables = tab; f.ttData = data;
+    return f;
+  }
+  if (!tab.glyf || !tab.loca || !tab.head) throw new Error("TrueType ohne glyf");
+
+  const unitsPerEm = u16(tab.head.off + 18) || 1000;
+  const longLoca = i16(tab.head.off + 50) === 1;
+  const numGlyphs = tab.maxp ? u16(tab.maxp.off + 4) : 0;
+  const loca = g => longLoca ? u32(tab.loca.off + g*4) : u16(tab.loca.off + g*2) * 2;
+
+  const font = {
+    kind: "tt", data, tab, unitsPerEm, numGlyphs,
+    fontMatrix: [1/unitsPerEm, 0, 0, 1/unitsPerEm, 0, 0],
+    cache: new Map(), u16, i16, u32, loca
+  };
+
+  /* cmap fuer einfache Schriften: Unicode/MacRoman -> GID */
+  font.cmap = null;
+  if (tab.cmap){
+    const c = tab.cmap.off, n = u16(c + 2);
+    let best = 0, bestScore = -1;
+    for (let i = 0; i < n; i++){
+      const pid = u16(c + 4 + i*8), eid = u16(c + 6 + i*8), sub = u32(c + 8 + i*8);
+      const score = (pid === 3 && eid === 1) ? 3 : (pid === 3 && eid === 0) ? 2 : (pid === 1) ? 1 : 0;
+      if (score > bestScore){ bestScore = score; best = c + sub; font.cmapPid = pid; }
+    }
+    if (bestScore >= 0){
+      const fmt = u16(best), map = new Map();
+      if (fmt === 4){
+        const segX2 = u16(best + 6), seg = segX2 >> 1;
+        const endP = best + 14, startP = endP + segX2 + 2;
+        const deltaP = startP + segX2, rangeP = deltaP + segX2;
+        for (let s = 0; s < seg; s++){
+          const end = u16(endP + s*2), start = u16(startP + s*2);
+          const delta = i16(deltaP + s*2), ro = u16(rangeP + s*2);
+          if (start === 0xFFFF) continue;
+          for (let ch = start; ch <= end && ch !== 0x10000; ch++){
+            let g;
+            if (ro === 0) g = (ch + delta) & 0xFFFF;
+            else {
+              const gp = rangeP + s*2 + ro + (ch - start)*2;
+              g = u16(gp); if (g) g = (g + delta) & 0xFFFF;
+            }
+            if (g) map.set(ch, g);
+          }
+        }
+      } else if (fmt === 0){
+        for (let ch = 0; ch < 256; ch++){ const g = data[best + 6 + ch]; if (g) map.set(ch, g); }
+      } else if (fmt === 6){
+        const first = u16(best + 6), cnt = u16(best + 8);
+        for (let k = 0; k < cnt; k++){ const g = u16(best + 10 + k*2); if (g) map.set(first + k, g); }
+      }
+      font.cmap = map;
+    }
+  }
+  return font;
+}
+
+function ttPath(font, gid, depth){
+  const hit = font.cache.get(gid);
+  if (hit) return hit;
+  const path = [];
+  const { u16, i16, loca, tab, data } = font;
+  const start = loca(gid), end = loca(gid + 1);
+  if (end <= start){ font.cache.set(gid, path); return path; }
+  let p = tab.glyf.off + start;
+  const nc = i16(p);
+  p += 10;
+
+  if (nc < 0){                                             // zusammengesetzte Glyphe
+    if ((depth || 0) > 4){ font.cache.set(gid, path); return path; }
+    for(;;){
+      const flags = u16(p), idx = u16(p + 2); p += 4;
+      let dx, dy;
+      if (flags & 1){ dx = i16(p); dy = i16(p+2); p += 4; }
+      else { dx = (data[p] << 24) >> 24; dy = (data[p+1] << 24) >> 24; p += 2; }
+      let a = 1, b = 0, c = 0, d = 1;
+      const f2d = q => i16(q) / 16384;
+      if (flags & 8){ a = d = f2d(p); p += 2; }
+      else if (flags & 0x40){ a = f2d(p); d = f2d(p+2); p += 4; }
+      else if (flags & 0x80){ a = f2d(p); b = f2d(p+2); c = f2d(p+4); d = f2d(p+6); p += 8; }
+      if (!(flags & 2)){ dx = 0; dy = 0; }                 // Punktzuordnung: nicht unterstuetzt
+      const sub = ttPath(font, idx, (depth || 0) + 1);
+      for (let i = 0; i < sub.length; ){
+        const op = sub[i++];
+        const tx = (X, Y) => [a*X + c*Y + dx, b*X + d*Y + dy];
+        if (op === 0 || op === 1){ const [X,Y] = tx(sub[i], sub[i+1]); path.push(op, X, Y); i += 2; }
+        else if (op === 4){
+          const [x1,y1] = tx(sub[i], sub[i+1]); const [x2,y2] = tx(sub[i+2], sub[i+3]);
+          path.push(4, x1, y1, x2, y2); i += 4;
+        }
+        else if (op === 3) path.push(3);
+      }
+      if (!(flags & 0x20)) break;
+    }
+    font.cache.set(gid, path);
+    return path;
+  }
+
+  const ends = [];
+  for (let i = 0; i < nc; i++){ ends.push(u16(p)); p += 2; }
+  const nPts = nc ? ends[nc-1] + 1 : 0;
+  p += 2 + u16(p);                                         // Anweisungen ueberspringen
+
+  const flags = new Uint8Array(nPts);
+  for (let i = 0; i < nPts; ){
+    const f = data[p++];
+    flags[i++] = f;
+    if (f & 8){ let r = data[p++]; while (r-- > 0 && i < nPts) flags[i++] = f; }
+  }
+  const xs = new Int16Array(nPts), ys = new Int16Array(nPts);
+  let v = 0;
+  for (let i = 0; i < nPts; i++){
+    const f = flags[i];
+    if (f & 2){ const d0 = data[p++]; v += (f & 16) ? d0 : -d0; }
+    else if (!(f & 16)){ v += i16(p); p += 2; }
+    xs[i] = v;
+  }
+  v = 0;
+  for (let i = 0; i < nPts; i++){
+    const f = flags[i];
+    if (f & 4){ const d0 = data[p++]; v += (f & 32) ? d0 : -d0; }
+    else if (!(f & 32)){ v += i16(p); p += 2; }
+    ys[i] = v;
+  }
+
+  let s = 0;
+  for (let c = 0; c < nc; c++){
+    const e = ends[c];
+    if (e < s){ s = e + 1; continue; }
+    const n = e - s + 1;
+    const on = i => (flags[s + ((i % n) + n) % n] & 1) !== 0;
+    const px = i => xs[s + ((i % n) + n) % n], py = i => ys[s + ((i % n) + n) % n];
+
+    let i0 = 0;
+    while (i0 < n && !on(i0)) i0++;
+    let sx, sy;
+    if (i0 === n){ i0 = 0; sx = (px(0) + px(1)) / 2; sy = (py(0) + py(1)) / 2; }
+    else { sx = px(i0); sy = py(i0); }
+    path.push(0, sx, sy);
+
+    let k = i0 + 1;
+    let cx = null, cy = null;
+    for (let step = 0; step < n; step++, k++){
+      const X = px(k), Y = py(k);
+      if (on(k)){
+        if (cx === null) path.push(1, X, Y);
+        else { path.push(4, cx, cy, X, Y); cx = null; }
+      } else {
+        if (cx !== null){ const mx = (cx + X) / 2, my = (cy + Y) / 2; path.push(4, cx, cy, mx, my); }
+        cx = X; cy = Y;
+      }
+    }
+    if (cx !== null) path.push(4, cx, cy, sx, sy);
+    path.push(3);
+    s = e + 1;
+  }
+  font.cache.set(gid, path);
+  return path;
+}
+
+/* ---------- Einstieg ---------- */
+function load(bytes, hint){
+  const d = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (!d.length) throw new Error("leere Schriftdatei");
+  const isSfnt = (d[0] === 0 && d[1] === 1 && d[2] === 0 && d[3] === 0) ||
+                 (d[0] === 0x74 && d[1] === 0x72 && d[2] === 0x75) ||   // true
+                 (d[0] === 0x4F && d[1] === 0x54 && d[2] === 0x54 && d[3] === 0x4F) || // OTTO
+                 (d[0] === 0x74 && d[1] === 0x74 && d[2] === 0x63 && d[3] === 0x66);   // ttcf
+  if (isSfnt) return parseTTF(d);
+  if (d[0] === 1 && d[1] === 0) return parseCFF(d);        // blanke CFF
+  if (hint === "tt") return parseTTF(d);
+  return parseCFF(d);
+}
+
+const path = (font, gid) => font.kind === "cff" ? cffPath(font, gid) : ttPath(font, gid, 0);
+
+const stdString = i => STD_STRINGS[i] || null;
+return { load, path, parseCFF, parseTTF, stdString };
+})();
+
 const PDF = (() => {
 "use strict";
 
@@ -2009,6 +2943,20 @@ function jpegComps(b){
   return 0;
 }
 
+/* Eigener Dekoder auf eine Zeichenfläche; /Decode [1 0 …] kehrt die Kanäle um */
+function cmykCanvas(data, decode, doc){
+  try{
+    const inv = Array.isArray(decode) && +doc.res(decode[0]) === 1;
+    const img = CMYKJPEG.decode(data, { invert: inv });
+    const cv  = mkCanvas(img.width, img.height);
+    const ctx = cv.getContext("2d");
+    const id  = ctx.createImageData(img.width, img.height);
+    id.data.set(img.data);
+    ctx.putImageData(id, 0, 0);
+    return cv;
+  }catch(e){ return null; }
+}
+
 /* ---------- Bild-XObject zu Zeichenfläche ---------- */
 async function decodeImage(doc, stm, res, fill, cache){
   const key = stm._key;
@@ -2028,18 +2976,26 @@ async function decodeImageInner(doc, stm, res, fill){
   const decode = doc.res(d.Decode ?? d.D);
   const { data, stop, parms } = await doc.rawData(stm);
 
-  /* a) JPEG — vom Browser dekodieren lassen */
+  /* a) JPEG — Browser zuerst, vier Kanaele selbst */
   if (stop === "DCTDecode" || stop === "DCT"){
-    let bmp;
-    try{ bmp = await createImageBitmap(new Blob([data], { type: "image/jpeg" })); }
-    catch(e){
-      return { err: jpegComps(data) === 4 ? "CMYK-JPEG: dieser Browser kann es nicht lesen"
-                                          : "JPEG nicht lesbar" };
+    let cv = null;
+    if (jpegComps(data) === 4){
+      // CMYK/YCCK: kein Browser kann das, also gar nicht erst versuchen
+      cv = cmykCanvas(data, decode, doc);
+      if (!cv) return { err: "CMYK-JPEG nicht lesbar" };
+    } else {
+      let bmp = null;
+      try{ bmp = await createImageBitmap(new Blob([data], { type: "image/jpeg" })); }
+      catch(e){ bmp = null; }
+      if (bmp){
+        cv = mkCanvas(bmp.width, bmp.height);
+        cv.getContext("2d").drawImage(bmp, 0, 0);
+        bmp.close?.();
+      } else {
+        cv = cmykCanvas(data, decode, doc);        // zweiter Anlauf mit eigenem Dekoder
+        if (!cv) return { err: "JPEG nicht lesbar" };
+      }
     }
-    const cv = mkCanvas(bmp.width, bmp.height);
-    const ctx = cv.getContext("2d");
-    ctx.drawImage(bmp, 0, 0);
-    bmp.close?.();
     await applyAlpha(doc, d, cv, res);
     return { canvas: cv, w: cv.width, h: cv.height, native: true };
   }
@@ -2138,80 +3094,494 @@ async function applyAlpha(doc, d, cv, res){
 }
 
 /* ---------- Inhaltsstrom ausführen ---------- */
+/* ---------- Schriften aus dem PDF aufbauen ---------- */
+const nm = v => v instanceof Name ? v.n : null;
+
+/* /W-Feld einer CID-Schrift: [ c [w …]  cErst cLetzt w  … ] */
+function parseW(doc, W, into){
+  if (!Array.isArray(W)) return;
+  for (let i = 0; i < W.length; ){
+    const a = +doc.res(W[i++]) || 0;
+    const nx = doc.res(W[i]);
+    if (Array.isArray(nx)){
+      i++;
+      nx.forEach((w, k) => into.set(a + k, +doc.res(w) || 0));
+    } else {
+      const b = +doc.res(W[i++]) || 0, w = +doc.res(W[i++]) || 0;
+      if (b - a < 65536) for (let c = a; c <= b; c++) into.set(c, w);
+    }
+  }
+}
+
+/* ToUnicode nur fuer den Notnagel ohne eingebettete Schrift */
+function parseToUnicode(txt){
+  const map = new Map();
+  const hex = s => parseInt(s, 16);
+  const str = s => {
+    let out = "";
+    for (let i = 0; i + 3 < s.length; i += 4) out += String.fromCharCode(hex(s.substr(i, 4)));
+    return out;
+  };
+  let m;
+  const reChar = /beginbfchar([\s\S]*?)endbfchar/g;
+  while ((m = reChar.exec(txt))){
+    const re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+    let p;
+    while ((p = re.exec(m[1]))) map.set(hex(p[1]), str(p[2]));
+  }
+  const reRange = /beginbfrange([\s\S]*?)endbfrange/g;
+  while ((m = reRange.exec(txt))){
+    const re = /<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g;
+    let p;
+    while ((p = re.exec(m[1]))){
+      const a = hex(p[1]), b = hex(p[2]), c = hex(p[3]);
+      if (b - a < 65536) for (let k = 0; a + k <= b; k++) map.set(a + k, String.fromCharCode(c + k));
+    }
+  }
+  return map;
+}
+
+/* Standardkodierung, soweit sie sich aus den CFF-Standardnamen ergibt */
+function stdName(code, winAnsi){
+  if (code >= 32 && code <= 126){
+    if (winAnsi && code === 39) return "quotesingle";
+    if (winAnsi && code === 96) return "grave";
+    return GLYF.stdString(code - 31);
+  }
+  return null;
+}
+
+async function buildFont(doc, fd){
+  const sub = nm(doc.res(fd.Subtype));
+  const f = {
+    two: false, widths: new Map(), dw: 0, face: null, cid2gid: null,
+    diff: null, winAnsi: false, toUni: null, family: "sans-serif", style: "", note: null
+  };
+
+  /* Nur für den Notnagel ohne Umrisse: Lage aus Name und Kennbits ableiten */
+  const styleOf = desc => {
+    const bf = nm(doc.res(fd.BaseFont)) || "";
+    const fl = +doc.res(desc && desc.Flags) || 0;
+    const sw = +doc.res(desc && desc.StemV) || 0;
+    let s = "";
+    if (/Italic|Oblique/i.test(bf) || (fl & 64)) s += "italic ";
+    if (/Bold|Black|Heavy|Semibold/i.test(bf) || (fl & 0x40000) || sw >= 120) s += "bold ";
+    return s;
+  };
+
+  const takeFace = async desc => {
+    if (!desc) return;
+    const ff = doc.res(desc.FontFile3) || doc.res(desc.FontFile2) || doc.res(desc.FontFile);
+    if (!ff) return;
+    const hint = doc.res(desc.FontFile2) ? "tt" : null;
+    try{
+      const bytes = await doc.data(ff);
+      if (bytes && bytes.length) f.face = GLYF.load(bytes, hint);
+    }catch(e){ f.note = "Schrift nicht lesbar: " + (nm(doc.res(fd.BaseFont)) || "?"); }
+  };
+
+  const flags = d => +doc.res(d && d.Flags) || 0;
+
+  if (sub === "Type0"){
+    f.two = true;                                        // Identity-H und die üblichen CMaps
+    const df = doc.res(doc.res(fd.DescendantFonts)?.[0]);
+    if (!df) return null;
+    f.dw = +doc.res(df.DW) || 1000;
+    parseW(doc, doc.res(df.W), f.widths);
+    const desc = doc.res(df.FontDescriptor);
+    await takeFace(desc);
+    if (flags(desc) & 1) f.family = "monospace";
+    else if (flags(desc) & 2) f.family = "serif";
+    f.style = styleOf(desc);
+    const c2g = doc.res(df.CIDToGIDMap);
+    if (c2g instanceof Stm){
+      try{
+        const m = await doc.data(c2g);
+        f.cid2gid = cid => (cid*2 + 1 < m.length) ? ((m[cid*2] << 8) | m[cid*2+1]) : 0;
+      }catch(e){ /* dann Identität */ }
+    }
+  } else if (sub === "Type3"){
+    return null;                                          // Glyphen als Inhaltsströme: nicht umgesetzt
+  } else {
+    const fc = +doc.res(fd.FirstChar) || 0;
+    const W = doc.res(fd.Widths);
+    if (Array.isArray(W)) W.forEach((w, i) => f.widths.set(fc + i, +doc.res(w) || 0));
+    const desc = doc.res(fd.FontDescriptor);
+    f.dw = +doc.res(desc && desc.MissingWidth) || 0;
+    await takeFace(desc);
+    if (flags(desc) & 1) f.family = "monospace";
+    else if (flags(desc) & 2) f.family = "serif";
+    f.style = styleOf(desc);
+    const enc = doc.res(fd.Encoding);
+    const encName = nm(enc) || nm(doc.res(enc && enc.BaseEncoding));
+    f.winAnsi = encName === "WinAnsiEncoding";
+    const dif = doc.res(enc && enc.Differences);
+    if (Array.isArray(dif)){
+      f.diff = new Map();
+      let code = 0;
+      for (const it0 of dif){
+        const it = doc.res(it0);
+        if (typeof it === "number") code = it;
+        else if (it instanceof Name) f.diff.set(code++, it.n);
+      }
+    }
+    if (!f.widths.size && !f.face){
+      const bf = nm(doc.res(fd.BaseFont)) || "";
+      if (/Courier|Mono/i.test(bf)) f.family = "monospace";
+      else if (/Times|Serif|Roman|Georgia/i.test(bf)) f.family = "serif";
+    }
+  }
+
+  if (!f.face){
+    const tu = doc.res(fd.ToUnicode);
+    if (tu instanceof Stm){
+      try{ f.toUni = parseToUnicode(lat(await doc.data(tu), 0, 1e7)); }catch(e){ /* egal */ }
+    }
+  }
+
+  /* Code -> Glyphennummer */
+  f.gidOf = code => {
+    const face = f.face;
+    if (!face) return -1;
+    if (f.two){
+      if (f.cid2gid) return f.cid2gid(code);
+      if (face.kind === "cff" && face.isCID) return face.cidToGid(code);
+      return code;                                       // CFF ohne ROS: CID ist die Glyphennummer
+    }
+    const name = (f.diff && f.diff.get(code)) || stdName(code, f.winAnsi);
+    if (face.kind === "cff"){
+      if (name && face.byName && face.byName.has(name)) return face.byName.get(name);
+      if (face.builtinEnc && face.builtinEnc[code] >= 0) return face.builtinEnc[code];
+      return code;
+    }
+    if (face.cmap){
+      if (face.cmap.has(code)) return face.cmap.get(code);
+      if (face.cmap.has(0xF000 + code)) return face.cmap.get(0xF000 + code);
+    }
+    return code;
+  };
+
+  /* null = unbekannt; dann misst der Aufrufer mit der Ersatzschrift nach */
+  f.widthOf = code => {
+    const w = f.widths.get(code);
+    if (w !== undefined) return w;
+    if (f.dw) return f.dw;
+    return null;
+  };
+  f.textOf = code => f.toUni ? (f.toUni.get(code) || "") :
+                     (f.two ? "" : String.fromCharCode(code));
+  return f;
+}
+
+/* ---------- Pfad auf die Zeichenfläche bringen ---------- */
+function emitPath(ctx, path){
+  ctx.beginPath();
+  for (let i = 0; i < path.length; ){
+    const op = path[i++];
+    if (op === 0){ ctx.moveTo(path[i], path[i+1]); i += 2; }
+    else if (op === 1){ ctx.lineTo(path[i], path[i+1]); i += 2; }
+    else if (op === 2){ ctx.bezierCurveTo(path[i], path[i+1], path[i+2], path[i+3], path[i+4], path[i+5]); i += 6; }
+    else if (op === 4){ ctx.quadraticCurveTo(path[i], path[i+1], path[i+2], path[i+3]); i += 4; }
+    else if (op === 3) ctx.closePath();
+  }
+}
+
+const css = c => "rgb(" + (c[0]|0) + "," + (c[1]|0) + "," + (c[2]|0) + ")";
+
+/* ---------- Inhaltsstrom abspielen ---------- */
 async function run(doc, content, res, ctx, base, opt, state){
   const p = new P(content, 0, doc);
   const stack = [];
   let ctm = base.slice();
-  let fill = state.fill.slice();
+  let gs = {
+    fill: state.fill.slice(), stroke: [0,0,0], lw: 1, alpha: 1, salpha: 1,
+    font: null, fsize: 0, Tc: 0, Tw: 0, Th: 1, Tl: 0, Ts: 0, Tmode: 0
+  };
   const ops = [];
   let guard = 0;
 
+  if (!state.fonts) state.fonts = new Map();
+
+  /* Pfad im Geräteraum sammeln — cm ist innerhalb eines Pfades nicht erlaubt */
+  let path = [], px = 0, py = 0, sx = 0, sy = 0, clipWait = null;
+  const dev = (x, y) => [ctm[0]*x + ctm[2]*y + ctm[4], ctm[1]*x + ctm[3]*y + ctm[5]];
+  const mv = (x, y) => { const d = dev(x, y); path.push(0, d[0], d[1]); px = sx = x; py = sy = y; };
+  const ln = (x, y) => { const d = dev(x, y); path.push(1, d[0], d[1]); px = x; py = y; };
+  const cv = (a,b,c,d2,e,f2) => {
+    const A = dev(a,b), B = dev(c,d2), C = dev(e,f2);
+    path.push(2, A[0],A[1], B[0],B[1], C[0],C[1]); px = e; py = f2;
+  };
+  const scaleOf = () => Math.sqrt(Math.abs(ctm[0]*ctm[3] - ctm[1]*ctm[2])) || 1;
+
+  function paint(fill, stroke, rule){
+    if (ctx && path.length){
+      emitPath(ctx, path);
+      if (fill){
+        ctx.fillStyle = css(gs.fill);
+        ctx.globalAlpha = gs.alpha;
+        ctx.fill(rule === "eo" ? "evenodd" : "nonzero");
+      }
+      if (stroke){
+        ctx.strokeStyle = css(gs.stroke);
+        ctx.globalAlpha = gs.salpha;
+        ctx.lineWidth = Math.max(gs.lw * scaleOf(), 0.7);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+      if (clipWait){ ctx.clip(clipWait === "eo" ? "evenodd" : "nonzero"); }
+    }
+    clipWait = null;
+    path = [];
+  }
+
+  /* ---------- Text ---------- */
+  let Tm = null, Tlm = null;
+
+  async function pickFont(name){
+    const fonts = doc.res(doc.dget(res, "Font"));
+    const raw = fonts ? fonts[name] : null;
+    if (raw === undefined || raw === null) return null;
+    const key = raw instanceof Ref ? "R" + raw.num : "N:" + name;
+    if (state.fonts.has(key)) return state.fonts.get(key);
+    let built = null;
+    try{ built = await buildFont(doc, doc.res(raw)); }catch(e){ built = null; }
+    if (built && built.note) state.notes.add(built.note);
+    state.fonts.set(key, built);
+    return built;
+  }
+
+  function showText(bytes){
+    const f = gs.font;
+    if (!f || !bytes || !bytes.length) return;
+    const step = f.two ? 2 : 1;
+    const draw = ctx && gs.Tmode !== 3 && gs.Tmode !== 7 && gs.fsize !== 0;
+
+    for (let i = 0; i + step - 1 < bytes.length; i += step){
+      const code = step === 2 ? ((bytes[i] << 8) | bytes[i+1]) : bytes[i];
+      let wRaw = f.widthOf(code);
+      if (wRaw === null){                                 // Standardschrift ohne /Widths
+        if (ctx && !f.face){
+          ctx.font = f.style + "100px " + f.family;
+          wRaw = ctx.measureText(f.textOf(code) || " ").width * 10;
+        } else wRaw = f.two ? 1000 : 500;
+      }
+      const w0 = wRaw / 1000;
+
+      if (draw){
+        const trm = mul(mul([gs.fsize*gs.Th, 0, 0, gs.fsize, 0, gs.Ts], Tm), ctm);
+        const gid = f.gidOf(code);
+        if (gid >= 0 && f.face){
+          const gp = GLYF.path(f.face, gid);
+          if (gp.length){
+            const m = mul(f.face.fontMatrix, trm);
+            ctx.beginPath();
+            for (let k = 0; k < gp.length; ){
+              const op = gp[k++];
+              if (op === 3){ ctx.closePath(); continue; }
+              const n = op === 2 ? 6 : op === 4 ? 4 : 2;
+              const pt = [];
+              for (let q = 0; q < n; q += 2){
+                const X = gp[k+q], Y = gp[k+q+1];
+                pt.push(m[0]*X + m[2]*Y + m[4], m[1]*X + m[3]*Y + m[5]);
+              }
+              k += n;
+              if (op === 0) ctx.moveTo(pt[0], pt[1]);
+              else if (op === 1) ctx.lineTo(pt[0], pt[1]);
+              else if (op === 4) ctx.quadraticCurveTo(pt[0], pt[1], pt[2], pt[3]);
+              else ctx.bezierCurveTo(pt[0], pt[1], pt[2], pt[3], pt[4], pt[5]);
+            }
+            ctx.globalAlpha = gs.alpha;
+            if (gs.Tmode === 1 || gs.Tmode === 5){
+              ctx.strokeStyle = css(gs.stroke);
+              ctx.lineWidth = Math.max(gs.lw * scaleOf(), 0.5);
+              ctx.stroke();
+            } else {
+              ctx.fillStyle = css(gs.fill);
+              ctx.fill("nonzero");
+              if (gs.Tmode === 2 || gs.Tmode === 6){
+                ctx.strokeStyle = css(gs.stroke);
+                ctx.lineWidth = Math.max(gs.lw * scaleOf(), 0.5);
+                ctx.stroke();
+              }
+            }
+            ctx.globalAlpha = 1;
+          }
+        } else {
+          const t = f.textOf(code);                       // ohne Umrisse: Systemschrift
+          if (t){
+            const m = mul(mul([gs.fsize*gs.Th/100, 0, 0, gs.fsize/100, 0, gs.Ts], Tm), ctm);
+            ctx.save();
+            ctx.setTransform(m[0], m[1], -m[2], -m[3], m[4], m[5]);
+            ctx.font = f.style + "100px " + f.family;
+            ctx.fillStyle = css(gs.fill);
+            ctx.globalAlpha = gs.alpha;
+            ctx.fillText(t, 0, 0);
+            ctx.restore();
+            ctx.globalAlpha = 1;
+            state.notes.add("Schrift ohne Umrisse ersetzt");
+          }
+        }
+      }
+
+      const isSp = step === 1 && code === 32;
+      const tx = (w0 * gs.fsize + gs.Tc + (isSp ? gs.Tw : 0)) * gs.Th;
+      Tm = mul([1, 0, 0, 1, tx, 0], Tm);
+    }
+  }
+
   const drawImage = async (img) => {
     const m = ctm;
-    const sx = Math.max(1e-6, Math.hypot(m[0], m[1]));
-    const sy = Math.max(1e-6, Math.hypot(m[2], m[3]));
+    const sX = Math.max(1e-6, Math.hypot(m[0], m[1]));
+    const sY = Math.max(1e-6, Math.hypot(m[2], m[3]));
 
-    if (!ctx){                                        // nur vermessen — Maße aus dem Wörterbuch
+    if (!ctx){
       const iw = +doc.res(img.dict.Width  ?? img.dict.W) || 0;
       const ih = +doc.res(img.dict.Height ?? img.dict.H) || 0;
       if (iw && ih){
         state.images++;
-        state.scaleWish = Math.max(state.scaleWish, Math.min(iw / sx, ih / sy));
+        state.scaleWish = Math.max(state.scaleWish, Math.min(iw / sX, ih / sY));
       }
       return;
     }
 
-    const r = await decodeImage(doc, img, res, fill, opt.cache);
+    const r = await decodeImage(doc, img, res, gs.fill, opt.cache);
     if (!r) return;
     if (r.err){ state.notes.add(r.err); return; }
     state.images++;
     ctx.save();
     ctx.setTransform(m[0], m[1], m[2], m[3], m[4], m[5]);
     ctx.transform(1/r.w, 0, 0, -1/r.h, 0, 1);
+    ctx.globalAlpha = gs.alpha;
     ctx.drawImage(r.canvas, 0, 0, r.w, r.h);
     ctx.restore();
+    ctx.globalAlpha = 1;
   };
 
   for(;;){
     if (guard++ > 4e6) break;
     const v = p.obj();
     if (v === undefined) break;
-    if (!(v instanceof Kw)){ ops.push(v); if (ops.length > 40) ops.shift(); continue; }
+    if (!(v instanceof Kw)){ ops.push(v); if (ops.length > 80) ops.shift(); continue; }
     const op = v.v;
+    const n1 = () => +ops[ops.length-1] || 0;
 
-    if (op === "q"){ stack.push({ ctm: ctm.slice(), fill: fill.slice() }); if (ctx) ctx.save(); }
+    /* --- Zustand --- */
+    if (op === "q"){ stack.push({ ctm: ctm.slice(), gs: { ...gs, fill: gs.fill.slice(), stroke: gs.stroke.slice() } }); if (ctx) ctx.save(); }
     else if (op === "Q"){
       const s = stack.pop();
-      if (s){ ctm = s.ctm; fill = s.fill; }
+      if (s){ ctm = s.ctm; gs = s.gs; }
       if (ctx) ctx.restore();
     }
     else if (op === "cm" && ops.length >= 6){
       const a = ops.slice(-6).map(Number);
       if (a.every(isFinite)) ctm = mul(a, ctm);
     }
-    else if (op === "g"  && ops.length >= 1){ const t = Math.round((+ops[ops.length-1]||0)*255); fill = [t,t,t]; }
-    else if (op === "rg" && ops.length >= 3){ fill = ops.slice(-3).map(x => Math.round((+x||0)*255)); }
-    else if (op === "k"  && ops.length >= 4){
-      const [c,m2,y2,k2] = ops.slice(-4).map(x => +x||0);
-      fill = [255*(1-Math.min(1,c+k2)), 255*(1-Math.min(1,m2+k2)), 255*(1-Math.min(1,y2+k2))].map(Math.round);
-    }
-    else if ((op === "sc" || op === "scn") && ops.length){
-      const nums = ops.filter(x => typeof x === "number");
-      if (nums.length === 1){ const t = Math.round(nums[0]*255); fill = [t,t,t]; }
-      else if (nums.length === 3) fill = nums.map(x => Math.round(x*255));
-      else if (nums.length === 4){
-        const [c,m2,y2,k2] = nums;
-        fill = [255*(1-Math.min(1,c+k2)), 255*(1-Math.min(1,m2+k2)), 255*(1-Math.min(1,y2+k2))].map(Math.round);
+    else if (op === "w") gs.lw = n1();
+    else if (op === "gs" && ops.length){
+      const g = doc.res(doc.dget(res, "ExtGState"));
+      const e = g ? doc.res(g[nm(ops[ops.length-1])]) : null;
+      if (e){
+        const ca = doc.res(e.ca), CA = doc.res(e.CA), LW = doc.res(e.LW);
+        if (typeof ca === "number") gs.alpha = ca;
+        if (typeof CA === "number") gs.salpha = CA;
+        if (typeof LW === "number") gs.lw = LW;
       }
     }
+
+    /* --- Farben --- */
+    else if (op === "g"  && ops.length >= 1){ const t = Math.round(n1()*255); gs.fill = [t,t,t]; }
+    else if (op === "G"  && ops.length >= 1){ const t = Math.round(n1()*255); gs.stroke = [t,t,t]; }
+    else if (op === "rg" && ops.length >= 3) gs.fill   = ops.slice(-3).map(x => Math.round((+x||0)*255));
+    else if (op === "RG" && ops.length >= 3) gs.stroke = ops.slice(-3).map(x => Math.round((+x||0)*255));
+    else if (op === "k"  && ops.length >= 4) gs.fill   = cmyk(ops.slice(-4));
+    else if (op === "K"  && ops.length >= 4) gs.stroke = cmyk(ops.slice(-4));
+    else if (op === "sc" || op === "scn" || op === "SC" || op === "SCN"){
+      const nums = ops.filter(x => typeof x === "number");
+      let c = null;
+      if (nums.length === 1){ const t = Math.round(nums[0]*255); c = [t,t,t]; }
+      else if (nums.length === 3) c = nums.map(x => Math.round(x*255));
+      else if (nums.length === 4) c = cmyk(nums);
+      if (c){ if (op === "sc" || op === "scn") gs.fill = c; else gs.stroke = c; }
+    }
+
+    /* --- Pfade --- */
+    else if (op === "m" && ops.length >= 2){ const a = ops.slice(-2).map(Number); mv(a[0], a[1]); }
+    else if (op === "l" && ops.length >= 2){ const a = ops.slice(-2).map(Number); ln(a[0], a[1]); }
+    else if (op === "c" && ops.length >= 6){ const a = ops.slice(-6).map(Number); cv(a[0],a[1],a[2],a[3],a[4],a[5]); }
+    else if (op === "v" && ops.length >= 4){ const a = ops.slice(-4).map(Number); cv(px,py,a[0],a[1],a[2],a[3]); }
+    else if (op === "y" && ops.length >= 4){ const a = ops.slice(-4).map(Number); cv(a[0],a[1],a[2],a[3],a[2],a[3]); }
+    else if (op === "h"){ if (path.length){ path.push(3); px = sx; py = sy; } }
+    else if (op === "re" && ops.length >= 4){
+      const [x,y,w,h] = ops.slice(-4).map(Number);
+      mv(x, y); ln(x+w, y); ln(x+w, y+h); ln(x, y+h); path.push(3); px = sx = x; py = sy = y;
+    }
+    else if (op === "W")  clipWait = "nz";
+    else if (op === "W*") clipWait = "eo";
+    else if (op === "n")  paint(false, false);
+    else if (op === "f" || op === "F") paint(true, false, "nz");
+    else if (op === "f*") paint(true, false, "eo");
+    else if (op === "S")  paint(false, true);
+    else if (op === "s"){ if (path.length) path.push(3); paint(false, true); }
+    else if (op === "B")  paint(true, true, "nz");
+    else if (op === "B*") paint(true, true, "eo");
+    else if (op === "b"){ if (path.length) path.push(3); paint(true, true, "nz"); }
+    else if (op === "b*"){ if (path.length) path.push(3); paint(true, true, "eo"); }
+
+    /* --- Text --- */
+    else if (op === "BT"){ Tm = [1,0,0,1,0,0]; Tlm = Tm.slice(); }
+    else if (op === "ET"){ Tm = Tlm = null; }
+    else if (op === "Tf" && ops.length >= 2){
+      gs.fsize = +ops[ops.length-1] || 0;
+      const fname = nm(ops[ops.length-2]);
+      gs.font = ctx ? await pickFont(fname) : null;
+    }
+    else if (op === "Tc") gs.Tc = n1();
+    else if (op === "Tw") gs.Tw = n1();
+    else if (op === "Tz") gs.Th = (n1() || 100) / 100;
+    else if (op === "TL") gs.Tl = n1();
+    else if (op === "Ts") gs.Ts = n1();
+    else if (op === "Tr") gs.Tmode = n1() | 0;
+    else if (op === "Td" && ops.length >= 2 && Tlm){
+      const a = ops.slice(-2).map(Number);
+      Tlm = mul([1,0,0,1,a[0],a[1]], Tlm); Tm = Tlm.slice();
+    }
+    else if (op === "TD" && ops.length >= 2 && Tlm){
+      const a = ops.slice(-2).map(Number);
+      gs.Tl = -a[1];
+      Tlm = mul([1,0,0,1,a[0],a[1]], Tlm); Tm = Tlm.slice();
+    }
+    else if (op === "Tm" && ops.length >= 6 && Tlm){
+      const a = ops.slice(-6).map(Number);
+      if (a.every(isFinite)){ Tlm = a; Tm = a.slice(); }
+    }
+    else if (op === "T*" && Tlm){ Tlm = mul([1,0,0,1,0,-gs.Tl], Tlm); Tm = Tlm.slice(); }
+    else if (op === "Tj" && ops.length && Tm){ showText(ops[ops.length-1]); }
+    else if (op === "'" && ops.length && Tlm){
+      Tlm = mul([1,0,0,1,0,-gs.Tl], Tlm); Tm = Tlm.slice();
+      showText(ops[ops.length-1]);
+    }
+    else if (op === "\"" && ops.length >= 3 && Tlm){
+      gs.Tw = +ops[ops.length-3] || 0;
+      gs.Tc = +ops[ops.length-2] || 0;
+      Tlm = mul([1,0,0,1,0,-gs.Tl], Tlm); Tm = Tlm.slice();
+      showText(ops[ops.length-1]);
+    }
+    else if (op === "TJ" && ops.length && Tm){
+      const arr = ops[ops.length-1];
+      if (Array.isArray(arr)) for (const el of arr){
+        if (typeof el === "number") Tm = mul([1,0,0,1, -el/1000 * gs.fsize * gs.Th, 0], Tm);
+        else if (el && el.length !== undefined) showText(el);
+      }
+    }
+
+    /* --- XObjects --- */
     else if (op === "Do" && ops.length){
-      const nm = ops[ops.length-1];
-      if (nm instanceof Name){
+      const nmv = ops[ops.length-1];
+      if (nmv instanceof Name){
         const xo = doc.res(doc.dget(res, "XObject"));
-        const o  = xo ? doc.res(xo[nm.n]) : null;
+        const o  = xo ? doc.res(xo[nmv.n]) : null;
         if (o instanceof Stm){
-          const st = doc.res(o.dict.Subtype);
-          const sn = st instanceof Name ? st.n : "";
+          const sn = nm(doc.res(o.dict.Subtype)) || "";
           if (sn === "Image") await drawImage(o);
           else if (sn === "Form" && opt.depth < 12){
             const key = o._key;
@@ -2237,11 +3607,11 @@ async function run(doc, content, res, ctx, base, opt, state){
                              Math.abs(q[2]-q[0]), Math.abs(q[3]-q[1]));
                     ctx.clip();
                   }
+                  ctx.setTransform(1, 0, 0, 1, 0, 0);     // ab hier wieder Geräteraum
                 }
                 const keepFill = state.fill;
-                state.fill = fill;
-                await run(doc, fdata, fres, ctx,
-                          m2, { ...opt, depth: opt.depth + 1 }, state);
+                state.fill = gs.fill;
+                await run(doc, fdata, fres, ctx, m2, { ...opt, depth: opt.depth + 1 }, state);
                 state.fill = keepFill;
                 if (ctx) ctx.restore();
               }
@@ -2252,7 +3622,6 @@ async function run(doc, content, res, ctx, base, opt, state){
       }
     }
     else if (op === "BI"){
-      // Reihenbild: Wörterbuch bis ID, dann Daten bis EI
       const d = Object.create(null);
       for(;;){
         const k = p.obj();
@@ -2260,7 +3629,7 @@ async function run(doc, content, res, ctx, base, opt, state){
         if (k instanceof Kw && k.v === "ID") break;
         if (k instanceof Name){ const val = p.obj(); if (val !== undefined) d[k.n] = val; }
       }
-      p.p++;                                          // ein Trennzeichen
+      p.p++;
       const start = p.p;
       let end = start;
       for(;;){
@@ -2275,9 +3644,15 @@ async function run(doc, content, res, ctx, base, opt, state){
       stm._key = "inline:" + start;
       try{ await drawImage(stm); }catch(e){ /* weiter */ }
     }
+
     if (v instanceof Kw) ops.length = 0;
   }
-  state.fill = fill;
+  state.fill = gs.fill;
+}
+
+function cmyk(a){
+  const [c,m,y,k] = a.map(x => +x || 0);
+  return [255*(1-Math.min(1,c+k)), 255*(1-Math.min(1,m+k)), 255*(1-Math.min(1,y+k))].map(Math.round);
 }
 
 /* ---------- Seite zeichnen ---------- */
