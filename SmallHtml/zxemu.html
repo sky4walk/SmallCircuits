@@ -969,7 +969,9 @@ class FDC{
   constructor(){this.drives=[{disk:null,pcn:0,idx:0,seekEnd:0},{disk:null,pcn:0,idx:0,seekEnd:0}];this.turbo=false;this.now=()=>0;this.srt=6;this.reset();}
   reset(){this.phase=0;this.cmd=[];this.res=[];this.ints=[];this.motor=0;this.motorAt=0;this.buf=null;this.bp=0;this.dirIn=true;this.onDone=null;this.led=0;
     this.resAt=0;this.lastAct=-1e9;this.t0=0;this.tc=0;this.due=null;this.over=null;this.overruns=0;}
-  setMotor(v){v&=1;if(v&&!this.motor)this.motorAt=this.now();this.motor=v;}
+  // Die Scheibe läuft nach dem Abschalten noch eine Weile nach: Wird der Motor binnen einer halben Sekunde wieder
+  // eingeschaltet, ist sie noch auf Drehzahl (California Games schaltet ihn im Bootsektor aus und sofort wieder ein)
+  setMotor(v){v&=1;const t=this.now();if(v&&!this.motor){if(!(t-(this.motorAus??-1e12)<500000))this.motorAt=t;}if(!v&&this.motor)this.motorAus=t;this.motor=v;}
   // ---------- Zeitrechnung ----------
   winkel(t){return Math.floor(t/FDC_BYTE)%FDC_TRACK;}
   naechst(pos,t){return t+((pos-this.winkel(t)+FDC_TRACK*2)%FDC_TRACK)*FDC_BYTE;} // nächster Durchgang einer Spurstelle
@@ -2510,8 +2512,11 @@ function laufwerkAnzeigen(i){
   q('name').textContent=d?(d.name||'Diskette')+(d.dirty?' (geändert)':''):'leer';q('wp').checked=!!(d&&d.wp);
   el.dataset.gen=d?String(d.gen||0):'';
   const kat=q('kat');kat.innerHTML='';if(!d)return;
-  const f=d.amsdosFormat(),list=f?d.catalog():null;
-  if(!list){kat.textContent='Kein +3DOS-Verzeichnis (anderes Format oder Kopierschutz).';return;}
+  const f=d.amsdosFormat(),alle=f?d.catalog():null;
+  if(!alle){kat.textContent='Kein +3DOS-Verzeichnis (anderes Format oder Kopierschutz).';return;}
+  // Kopierschutz legt oft Daten in den Verzeichnisbereich: Einträge mit unlesbaren Namen ausblenden
+  const list=alle.filter(x=>/^[\x21-\x7e]*$/.test(x.name+x.ext)&&x.name.length),weg=alle.length-list.length;
+  if(weg){const w=document.createElement('div');w.textContent=weg+' Einträge mit unlesbaren Namen ausgeblendet (Kopierschutz)';kat.appendChild(w);}
   {let ams=0,p3=0;for(const x of list){const b0=x.extents[0]&&x.extents[0].blocks[0];if(!b0)continue;const blk=d.readBlock(b0,f);if(plus3Kopf(blk))p3++;else if(amsdosHeaderOk(blk))ams++;}
    if(ams&&!p3){const w=document.createElement('div');w.textContent='Amstrad-CPC-Diskette (AMSDOS) – läuft nicht auf dem Spectrum:';kat.appendChild(w);}}
   if(!list.length){kat.textContent='Diskette ist leer.';}
