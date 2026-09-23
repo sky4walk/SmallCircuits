@@ -206,6 +206,7 @@ footer a{color:var(--signal)}
     <button role="tab" id="tab-logik" aria-controls="panel-logik" data-tab="logik" aria-selected="false">Logik</button>
     <button role="tab" id="tab-schwingkreis" aria-controls="panel-schwingkreis" data-tab="schwingkreis" aria-selected="false">Schwingkreis</button>
     <button role="tab" id="tab-verstaerker" aria-controls="panel-verstaerker" data-tab="verstaerker" aria-selected="false">Verstärker</button>
+    <button role="tab" id="tab-dezibel" aria-controls="panel-dezibel" data-tab="dezibel" aria-selected="false">Dezibel</button>
     <!-- NEUEN REITER HINZUFÜGEN: hier einen <button role="tab" data-tab="xyz" aria-controls="panel-xyz"> ergänzen
          und unten ein <section class="panel" id="panel-xyz" data-tab="xyz"> anlegen. Mehr braucht es nicht. -->
   </nav>
@@ -1048,10 +1049,71 @@ footer a{color:var(--signal)}
   </div>
 </section>
 
+<!-- ============================ Reiter: Dezibel ============================ -->
+<section class="panel" id="panel-dezibel" data-tab="dezibel" role="tabpanel" aria-labelledby="tab-dezibel" hidden>
+  <h2>Dezibel und Pegel</h2>
+  <p class="lead">Verh&auml;ltnisse als Dezibel, Absolutpegel in dBm und dB&micro;V &ndash; und eine Pegelkette, in der sich Gewinne und D&auml;mpfungen einfach aufaddieren.</p>
+
+  <div class="split">
+    <div>
+      <div class="seg" role="group" aria-label="Ansicht">
+        <button type="button" class="ghost on" id="db-mode-um">Umrechnen</button>
+        <button type="button" class="ghost" id="db-mode-kette">Pegelkette</button>
+      </div>
+
+      <div id="db-umfeld">
+        <div class="field">
+          <label for="db-wert">Wert</label>
+          <input id="db-wert" type="text" inputmode="decimal" autocomplete="off" value="20">
+        </div>
+        <div class="field">
+          <label for="db-art">ist ein&hellip;</label>
+          <select id="db-art">
+            <option value="dbL" selected>Dezibel-Wert</option>
+            <option value="pv">Leistungsverh&auml;ltnis</option>
+            <option value="uv">Spannungsverh&auml;ltnis</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="db-p">Absolutpegel</label>
+          <input id="db-p" type="text" inputmode="decimal" autocomplete="off" value="10">
+        </div>
+        <div class="field">
+          <label for="db-peinheit">Einheit des Absolutpegels</label>
+          <select id="db-peinheit">
+            <option value="W">Watt</option>
+            <option value="dBm" selected>dBm</option>
+            <option value="dBuV">dB&micro;V an 50 &Omega;</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="db-kettefeld" hidden>
+        <div class="field">
+          <label for="db-start">Startpegel in dBm</label>
+          <input id="db-start" type="text" inputmode="decimal" autocomplete="off" value="37">
+          <div class="note">37 dBm sind 5 W &ndash; die Leistung eines Handfunkger&auml;ts.</div>
+        </div>
+        <div class="field">
+          <label>Stufen: Name und Gewinn in dB</label>
+          <div id="db-rows"></div>
+          <div class="note">Minuszeichen f&uuml;r D&auml;mpfung, etwa bei Kabel und Steckern.</div>
+        </div>
+        <div class="row">
+          <button type="button" class="ghost" id="db-add">Stufe hinzuf&uuml;gen</button>
+          <button type="button" class="ghost" id="db-beispiel">Beispiel zur&uuml;cksetzen</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="lcd" id="db-lcd" aria-live="polite"></div>
+  </div>
+</section>
+
 </main>
 
 <footer>
-  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Dezibel und Pegel, Modulation, Antennen und Leitungen.</p>
+  <p>Weitere Reiter kommen mit den nächsten Folgen dazu: Oszillator, Modulation, Antennen und Leitungen.</p>
   <p>Die Seite ist eine einzelne HTML-Datei ohne Bibliotheken. Speichern und offline benutzen ist ausdrücklich vorgesehen.</p>
 </footer>
 
@@ -4070,6 +4132,184 @@ document.getElementById("vs-ce").addEventListener("change", function(){
   if(vsMode === "ap") vsStatisch(); else SimVerst.leeren();
 });
 
+/* ============================================================================
+   Reiter: Dezibel
+   Ansicht 1: Umrechnen zwischen Verhaeltnis, dB und Absolutpegeln.
+   Ansicht 2: Pegelkette - Stufen aufaddieren, Verlauf zeichnen.
+   ========================================================================== */
+
+var DB_Z = 50;   /* Bezugsimpedanz fuer dBm <-> dBuV */
+
+function dbVonLeistung(v){ return 10 * Math.log10(v); }
+function dbVonSpannung(v){ return 20 * Math.log10(v); }
+
+function dbUmrechnen(){
+  var lcd = document.getElementById("db-lcd");
+  var wert = parseValue(document.getElementById("db-wert").value);
+  var art = document.getElementById("db-art").value;
+  if(wert === null || isNaN(wert)){
+    lcd.innerHTML = '<p class="empty">Wert eintragen.</p>'; return;
+  }
+  var dbL;
+  if(art === "dbL") dbL = wert;
+  else if(art === "dbU") dbL = wert;                 /* dB ist dB - nur die Rechnung dahin unterscheidet sich */
+  else if(art === "pv"){ if(wert <= 0){ lcd.innerHTML = '<p class="empty">Verh\u00e4ltnisse m\u00fcssen gr\u00f6\u00dfer als null sein.</p>'; return; } dbL = dbVonLeistung(wert); }
+  else { if(wert <= 0){ lcd.innerHTML = '<p class="empty">Verh\u00e4ltnisse m\u00fcssen gr\u00f6\u00dfer als null sein.</p>'; return; } dbL = dbVonSpannung(wert); }
+
+  var pFaktor = Math.pow(10, dbL / 10);
+  var uFaktor = Math.pow(10, dbL / 20);
+
+  var html = '<div class="readout"><span class="what">Dezibel</span><span><span class="val">' +
+             (dbL >= 0 ? "+" : "\u2212") + Math.abs(dbL).toFixed(2).replace(".", ",") +
+             ' dB</span><span class="tag">' + (dbL >= 0 ? "Gewinn" : "D\u00e4mpfung") + "</span></span></div>";
+  html += '<div class="readout"><span class="what">Leistungsverh\u00e4ltnis</span><span><span class="val">' +
+          (pFaktor >= 1000 || pFaktor < 0.01 ? pFaktor.toExponential(2) : pFaktor.toFixed(3)).replace(".", ",") +
+          '\u00d7</span><span class="tag">10 hoch (dB/10)</span></span></div>';
+  html += '<div class="readout"><span class="what">Spannungsverh\u00e4ltnis</span><span><span class="val">' +
+          (uFaktor >= 1000 || uFaktor < 0.01 ? uFaktor.toExponential(2) : uFaktor.toFixed(3)).replace(".", ",") +
+          '\u00d7</span><span class="tag">10 hoch (dB/20)</span></span></div>';
+
+  html += '<div class="hint"><table class="eserie"><tr><th>dB</th><th class="num">Leistung</th>' +
+          '<th class="num">Spannung</th></tr>';
+  [1, 3, 6, 10, 20, 30, 60].forEach(function(d){
+    html += "<tr" + (Math.abs(d - Math.abs(dbL)) < 0.05 ? ' class="exact"' : "") + "><td>" + d +
+            ' dB</td><td class="num">' + Math.pow(10, d / 10).toFixed(d >= 20 ? 0 : 2).replace(".", ",") +
+            '\u00d7</td><td class="num">' + Math.pow(10, d / 20).toFixed(d >= 20 ? 0 : 2).replace(".", ",") + "\u00d7</td></tr>";
+  });
+  html += "</table></div>";
+
+  /* Absolutpegel */
+  var pw = parseValue(document.getElementById("db-p").value);
+  var peinheit = document.getElementById("db-peinheit").value;
+  if(pw !== null && !isNaN(pw) && pw > -1e9){
+    var watt;
+    if(peinheit === "W") watt = pw;
+    else if(peinheit === "dBm") watt = Math.pow(10, pw / 10) / 1000;
+    else watt = Math.pow(Math.pow(10, pw / 20) * 1e-6, 2) / DB_Z;
+    if(watt > 0){
+      var dbm = 10 * Math.log10(watt * 1000);
+      var volt = Math.sqrt(watt * DB_Z);
+      var dbuv = 20 * Math.log10(volt / 1e-6);
+      html += '<div class="readout given"><span class="what">Absolutpegel</span><span><span class="val">' +
+              dbm.toFixed(1).replace(".", ",") + ' dBm</span><span class="tag">' + fmt(watt, "W") + " an " + DB_Z + " \u03a9</span></span></div>";
+      html += '<div class="readout given"><span class="what">als Spannung</span><span><span class="val">' +
+              dbuv.toFixed(1).replace(".", ",") + ' dB\u00b5V</span><span class="tag">' + fmt(volt, "V") + " Effektivwert</span></span></div>";
+      html += '<p class="work">P[dBm] = 10 \u00b7 log(P / 1 mW)\nU[dB\u00b5V] = 20 \u00b7 log(U / 1 \u00b5V)\nAn 50 \u03a9 liegen beide genau 107 dB auseinander.</p>';
+    }
+  }
+  lcd.innerHTML = html;
+}
+
+/* ------------------------------------------------------ Ansicht 2: Kette */
+
+var DB_START = [["Sender", "+37"], ["Kabel 20 m", "-3,5"], ["Stecker", "-0,3"], ["Antenne", "+6"]];
+
+function dbZeilen(){
+  return Array.prototype.map.call(document.querySelectorAll("#db-rows .rp-row"), function(r){
+    var i = r.querySelectorAll("input");
+    return [i[0].value, i[1].value];
+  });
+}
+
+function dbBaueZeilen(werte){
+  var html = "", i;
+  for(i = 0; i < werte.length; i++){
+    html += '<div class="rp-row">' +
+      '<input type="text" autocomplete="off" aria-label="Name" value="' + werte[i][0].replace(/"/g, "") + '" style="flex:2">' +
+      '<input type="text" inputmode="decimal" autocomplete="off" aria-label="dB" value="' + werte[i][1].replace(/"/g, "") + '" style="flex:1">' +
+      '<button type="button" class="ghost rp-del" data-idx="' + i + '" aria-label="Zeile entfernen"' +
+      (werte.length <= 1 ? " disabled" : "") + ">\u00d7</button></div>";
+  }
+  var box = document.getElementById("db-rows");
+  box.innerHTML = html;
+  Array.prototype.forEach.call(box.querySelectorAll("input"), function(inp){
+    inp.addEventListener("input", dbKette);
+  });
+  Array.prototype.forEach.call(box.querySelectorAll(".rp-del"), function(b){
+    b.addEventListener("click", function(){
+      var v = dbZeilen();
+      if(v.length <= 1) return;
+      v.splice(parseInt(b.dataset.idx, 10), 1);
+      dbBaueZeilen(v); dbKette();
+    });
+  });
+}
+
+function dbKette(){
+  var lcd = document.getElementById("db-lcd");
+  var start = parseValue(document.getElementById("db-start").value);
+  if(start === null || isNaN(start)){ lcd.innerHTML = '<p class="empty">Startpegel eintragen.</p>'; return; }
+  var zeilen = dbZeilen(), pegel = start, summe = 0;
+  var punkte = [[0, start]], namen = ["Start"], werte = [start];
+  var html = '<canvas class="sim-plot" style="height:150px"></canvas>';
+  html += '<div class="hint"><table class="eserie"><tr><th>Stufe</th><th class="num">dB</th>' +
+          '<th class="num">Pegel</th><th class="num">Leistung</th></tr>' +
+          '<tr><td>Start</td><td class="num">\u2013</td><td class="num">' + start.toFixed(1).replace(".", ",") +
+          ' dBm</td><td class="num">' + fmt(Math.pow(10, start / 10) / 1000, "W") + "</td></tr>";
+  zeilen.forEach(function(z, i){
+    var d = parseValue(z[1]);
+    if(d === null || isNaN(d)) d = 0;
+    pegel += d; summe += d;
+    punkte.push([i + 1, pegel]); namen.push(z[0] || "Stufe " + (i + 1)); werte.push(pegel);
+    html += "<tr><td>" + (z[0] || "Stufe " + (i + 1)) + '</td><td class="num">' +
+            (d >= 0 ? "+" : "\u2212") + Math.abs(d).toFixed(1).replace(".", ",") + '</td><td class="num">' +
+            pegel.toFixed(1).replace(".", ",") + ' dBm</td><td class="num">' +
+            fmt(Math.pow(10, pegel / 10) / 1000, "W") + "</td></tr>";
+  });
+  html += "</table></div>";
+
+  var pStart = Math.pow(10, start / 10) / 1000, pEnde = Math.pow(10, pegel / 10) / 1000;
+  html = '<div class="readout"><span class="what">Pegel am Ende</span><span><span class="val">' +
+         pegel.toFixed(1).replace(".", ",") + ' dBm</span><span class="tag">' + fmt(pEnde, "W") + "</span></span></div>" +
+         '<div class="readout"><span class="what">Summe der Stufen</span><span><span class="val">' +
+         (summe >= 0 ? "+" : "\u2212") + Math.abs(summe).toFixed(1).replace(".", ",") +
+         ' dB</span><span class="tag">Faktor ' + (pEnde / pStart).toFixed(2).replace(".", ",") + " in der Leistung</span></span></div>" + html;
+  html += '<p class="work">In Dezibel wird addiert statt multipliziert.\nDas ist der ganze Grund, warum es die Einheit gibt.</p>';
+  lcd.innerHTML = html;
+
+  var min = Math.min.apply(null, werte), max = Math.max.apply(null, werte);
+  var spanne = (max - min) || 1;
+  Sim.plot(lcd.querySelector("canvas"), {
+    xmax:punkte.length - 1, ymax:1.05,
+    yTop:max.toFixed(0) + " dBm", yBot:min.toFixed(0) + " dBm",
+    marken:punkte.map(function(p, i){ return {x:i, text:namen[i].substring(0, 8)}; }),
+    kurven:[{p:punkte.map(function(p){ return [p[0], (p[1] - min) / spanne]; })}],
+    punkte:punkte.map(function(p){ return {x:p[0], y:(p[1] - min) / spanne, r:3}; })
+  });
+}
+
+/* --- Umschaltung ---------------------------------------------------------- */
+
+var dbMode = "um";
+
+function setDbMode(m){
+  dbMode = m;
+  document.getElementById("db-umfeld").hidden = m !== "um";
+  document.getElementById("db-kettefeld").hidden = m !== "kette";
+  document.getElementById("db-mode-um").classList.toggle("on", m === "um");
+  document.getElementById("db-mode-kette").classList.toggle("on", m === "kette");
+  Sim.stop();
+  if(m === "um") dbUmrechnen(); else dbKette();
+}
+
+document.getElementById("db-mode-um").addEventListener("click", function(){ setDbMode("um"); });
+document.getElementById("db-mode-kette").addEventListener("click", function(){ setDbMode("kette"); });
+["db-wert", "db-p"].forEach(function(id){
+  document.getElementById(id).addEventListener("input", function(){ if(dbMode === "um") dbUmrechnen(); });
+});
+["db-art", "db-peinheit"].forEach(function(id){
+  document.getElementById(id).addEventListener("change", function(){ if(dbMode === "um") dbUmrechnen(); });
+});
+document.getElementById("db-start").addEventListener("input", function(){ if(dbMode === "kette") dbKette(); });
+document.getElementById("db-add").addEventListener("click", function(){
+  var v = dbZeilen(); v.push(["weitere Stufe", "0"]); dbBaueZeilen(v); dbKette();
+});
+document.getElementById("db-beispiel").addEventListener("click", function(){
+  document.getElementById("db-start").value = "37";
+  dbBaueZeilen(DB_START.slice(1)); dbKette();
+});
+dbBaueZeilen(DB_START.slice(1));
+
 /* --- Anbindung ------------------------------------------------------------ */
 
 function simStart(){ Sim.start(SimRC); }
@@ -4086,6 +4326,7 @@ Sim.tabWechsel = function(name){
   if(name === "flanke") Sim.start(SimFlanke);
   else if(name === "spule") Sim.start(SimSpule);
   else if(name === "gleichrichter") Sim.start(SimGleich);
+  else if(name === "dezibel"){ Sim.stop(); if(dbMode === "um") dbUmrechnen(); else dbKette(); }
   else if(name === "verstaerker"){ if(vsMode === "aus"){ SimVerst.leeren(); Sim.start(SimVerst); } else { Sim.stop(); vsStatisch(); } }
   else if(name === "schwingkreis"){ if(skMode === "zeit"){ Sim.start(SimSchwing); SimSchwing.anstossen(); } else { Sim.stop(); skResonanz(); } }
   else if(name === "logik"){ if(lgMode === "inverter") Sim.start(SimLogik); else { Sim.stop(); lgLeistung(); } }
