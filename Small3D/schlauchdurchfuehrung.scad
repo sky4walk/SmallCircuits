@@ -3,11 +3,16 @@
 // Ende mit dem Haken liegt am Flansch. Dadurch hat der Haken einen langen
 // Hebel zum Einfedern, statt direkt an der starren Flanschwurzel zu sitzen.
 //
-// Druck: Flansch nach unten aufs Bett, keine Stützen nötig. Material: PETG.
-// Die Zungen beginnen kopf_spalt über dem Flansch (bei 0,2-mm-Schichten also
-// 2 Leerschichten). Die erste Zungenschicht hängt leicht durch und haftet
-// ggf. schwach am Flansch: nach dem Druck jede Zunge einmal nach innen
-// drücken oder mit dem Cutter durch den Spalt fahren.
+// Version 3: Opferbrücken. Die seitlichen Schlitze bleiben am freien
+// Zungenende auf bruecke_h Höhe geschlossen. Dadurch druckt die erste
+// Zungenschicht als Brücke von Steg zu Steg statt als freie Insel.
+//
+// Druck: Flansch nach unten aufs Bett, Stützen AUS. Material: PETG.
+// In der Slicer-Vorschau prüfen, dass die erste Zungenschicht als Brücke
+// erkannt wird. Nach dem Druck mit dem Cutter durch jeden Schlitz fahren
+// (2 Schnitte pro Zunge), dann jede Zunge einmal nach innen drücken.
+// Mit bruecke_voll = false bleibt nur ein dünner Außensteg stehen
+// (leichter zu schneiden, Brücke etwas weniger stabil).
 
 $fn = 120;
 
@@ -28,9 +33,14 @@ zungen_b     = 5;     // Zungenbreite in mm, 0 = automatisch (Rest wird Steg)
 arm_wand     = 1.8;   // Wandstärke Rohr / Zungenwurzel
 schlitz_b    = 1.5;   // Schlitzbreite neben den Zungen
 steg_b       = 4.0;   // Stegbreite in mm, nur bei zungen_b = 0 verwendet
-kopf_spalt   = 0.4;   // Spalt zwischen Zungenende und Flansch (≈ 2 Schichten)
+kopf_spalt   = 0.6;   // Spalt zwischen Zungenende und Flansch (≈ 3 Schichten)
 fuss_h       = 3.0;   // geschlossener Ring unterhalb der Zungenwurzel
 max_dehnung  = 2.0;   // Warnschwelle Biegedehnung in % (PETG, quer zur Schicht)
+
+/* [Opferbrücke] */
+bruecke_h    = 0.4;   // Höhe der Opferbrücke in den Schlitzen (2 Schichten), 0 = aus
+bruecke_voll = true;  // true: volle Wandstärke, false: nur bruecke_t von außen
+bruecke_t    = 1.0;   // radiale Stärke der Brücke bei bruecke_voll = false
 
 /* [Test] */
 testring     = false; // true: nur Flanschring + Zungen, ohne Nabe (schneller Probedruck)
@@ -62,6 +72,7 @@ tip   = d_max + haken_rest;                  // Hakenüberstand über Lochrand
 function kz(r) = z0 - keil_s * (r - loch_r); // Keilfläche
 
 z_wurzel = -(kopf_spalt + zungen_l);         // Zungenwurzel
+z_schlitz = bruecke_h > 0 ? -(kopf_spalt + bruecke_h) : 0.02; // Oberkante Schlitze
 rohr_l   = kopf_spalt + zungen_l + fuss_h;
 z_spitze = kz(loch_r + tip);
 
@@ -80,6 +91,10 @@ echo(str("Zungen: ", arm_n, " × ", round(zunge_a * body_r * PI / 180 * 10) / 10
          " mm breit, ", zungen_l, " mm lang; Stege ", round(steg_ist * 10) / 10, " mm"));
 echo(str("Hakenüberstand: ", tip, " mm, Hebel: ", hebel, " mm, Wurzeldehnung: ",
          round(dehnung * 100) / 100, " %"));
+if (bruecke_h > 0)
+    echo(str("Opferbrücken: ", 2 * arm_n, " Schnitte, je ",
+             bruecke_voll ? arm_wand : bruecke_t, " × ", schlitz_b, " × ", bruecke_h,
+             " mm; Brückenspannweite ", round((zunge_a + 2 * schlitz_a) * body_r * PI / 180 * 10) / 10, " mm"));
 if (dehnung > max_dehnung)
     echo(str("WARNUNG: Dehnung über ", max_dehnung,
              " % – zungen_l erhöhen oder arm_wand verringern"));
@@ -88,6 +103,9 @@ assert(zunge_a > 5, "Zungen zu schmal: arm_n, steg_b oder schlitz_b verkleinern"
 assert(steg_ist >= 2, "Stege unter 2 mm: zungen_b verkleinern oder arm_n reduzieren");
 assert(kz(body_r) < -kopf_spalt - 0.3, "Haken kollidiert mit dem Kopfspalt");
 assert(z_spitze - haken_spitze > z_wurzel + 2, "Zunge zu kurz für den Haken");
+assert(bruecke_h >= 0 && z_schlitz > z_wurzel + 2, "bruecke_h zu groß");
+assert(bruecke_voll || (bruecke_t > 0 && bruecke_t < arm_wand),
+       "bruecke_t muss zwischen 0 und arm_wand liegen");
 
 // ---------- Hilfsformen ----------
 // Kreissektor, mittig um die X-Achse, zwischen r1..r2 und z1..z2
@@ -118,7 +136,12 @@ module rohr() {
                 for (s = [-1, 1])
                     rotate([0, 0, s * (zunge_a + schlitz_a) / 2]) {
                         translate([in_r - 1, -schlitz_b / 2, z_wurzel])
-                            cube([arm_wand + 2, schlitz_b, -z_wurzel + 0.02]);
+                            cube([arm_wand + 2, schlitz_b, z_schlitz - z_wurzel]);
+                        // reduzierte Brücke: innen freischneiden, außen bruecke_t stehen lassen
+                        if (bruecke_h > 0 && !bruecke_voll)
+                            translate([in_r - 1, -schlitz_b / 2, z_schlitz - 0.01])
+                                cube([body_r - bruecke_t - (in_r - 1), schlitz_b,
+                                      bruecke_h + 0.02]);
                         translate([in_r - 1, 0, z_wurzel])
                             rotate([0, 90, 0])
                                 cylinder(d = schlitz_b, h = arm_wand + 2, $fn = 24);
