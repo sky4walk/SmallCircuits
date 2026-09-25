@@ -51,12 +51,15 @@ haken_rest   = 0.7;   // Resthakenüberdeckung beim dicksten Blech
 haken_spitze = 1.5;   // senkrechte Dicke der Hakenspitze (vorher fest 0.8)
 
 /* [Schlauch] */
-schlauch_d     = 12.5;
+schlauch_d     = 13.5;
 klemm          = 0.3;   // Bohrung so viel kleiner als Schlauch
-nabe_d         = 20;
-nabe_l         = 18;
-nabe_schlitze  = 4;
+nabe_wand      = 3.9;   // Wandstärke der Spannzange (ohne Nut), bestimmt nabe_d
+nabe_d         = 0;     // Außendurchmesser Nabe, 0 = automatisch aus Schlauch + Wand
+nabe_l         = 0;     // Nabenlänge, 0 = automatisch (≈ 1,4 × Schlauch, min. 18)
+nabe_schlitze  = 0;     // Anzahl Spannzangen-Schlitze, 0 = automatisch
+nabe_segment   = 14;    // Ziel-Segmentbreite (Umfang) für die Automatik
 nabe_schlitz_b = 1.5;
+nabe_kopf      = 4;     // oben massiv bleibender Teil der Nabe
 kb_b           = 4.5;   // Kabelbindernut Breite
 kb_t           = 1.0;   // Kabelbindernut Tiefe
 
@@ -65,6 +68,12 @@ loch_r = loch_d / 2;
 body_r = loch_r - spiel;
 in_r   = body_r - arm_wand;
 bohr_d = schlauch_d - klemm;
+
+// Nabe wächst mit dem Schlauch mit
+nabe_d_ist = nabe_d > 0 ? nabe_d : bohr_d + 2 * nabe_wand;
+nabe_l_ist = nabe_l > 0 ? nabe_l : max(18, round(1.4 * schlauch_d));
+nabe_n     = nabe_schlitze > 0 ? nabe_schlitze
+           : max(3, round(PI * nabe_d_ist / (nabe_segment + nabe_schlitz_b)));
 
 z0    = -blech_min + 0.2;                    // Keilhöhe am Lochrand (Ruhelage)
 d_max = (blech_max + z0) / keil_s;           // Einfederung beim dicksten Blech
@@ -99,6 +108,15 @@ if (dehnung > max_dehnung)
     echo(str("WARNUNG: Dehnung über ", max_dehnung,
              " % – zungen_l erhöhen oder arm_wand verringern"));
 
+echo(str("Nabe: Ø ", nabe_d_ist, " mm, ", nabe_l_ist, " mm lang, ", nabe_n,
+         " Schlitze, Wand an der Nut ", (nabe_d_ist - bohr_d) / 2 - kb_t, " mm"));
+
+assert((nabe_d_ist - bohr_d) / 2 - kb_t >= 1.2,
+       "Nabenwand an der Kabelbindernut zu dünn: nabe_wand oder nabe_d erhöhen");
+assert(nabe_d_ist / 2 + 1 < in_r - tip,
+       "Nabe zu dick: Zungen können nicht mehr nach innen einfedern");
+assert(nabe_kopf + 3 + kb_b < nabe_l_ist,
+       "Nabe zu kurz für Kabelbindernut und massiven Kopf");
 assert(zunge_a > 5, "Zungen zu schmal: arm_n, steg_b oder schlitz_b verkleinern");
 assert(steg_ist >= 2, "Stege unter 2 mm: zungen_b verkleinern oder arm_n reduzieren");
 assert(kz(body_r) < -kopf_spalt - 0.3, "Haken kollidiert mit dem Kopfspalt");
@@ -169,18 +187,18 @@ module haken() {
 }
 
 module nabe() {
-    translate([0, 0, -nabe_l])
+    translate([0, 0, -nabe_l_ist])
     difference() {
-        cylinder(d = nabe_d, h = nabe_l + 0.01);
-        // Spannzangen-Schlitze (oben 4 mm massiv lassen)
-        for (i = [0 : nabe_schlitze - 1])
-            rotate([0, 0, i * 360 / nabe_schlitze])
+        cylinder(d = nabe_d_ist, h = nabe_l_ist + 0.01);
+        // Spannzangen-Schlitze (oben nabe_kopf massiv lassen)
+        for (i = [0 : nabe_n - 1])
+            rotate([0, 0, i * 360 / nabe_n])
                 translate([0, -nabe_schlitz_b / 2, -1])
-                    cube([nabe_d, nabe_schlitz_b, nabe_l - 4 + 1]);
+                    cube([nabe_d_ist, nabe_schlitz_b, nabe_l_ist - nabe_kopf + 1]);
         // Kabelbindernut
         translate([0, 0, 3])
             rotate_extrude()
-                translate([nabe_d / 2 - kb_t, 0]) square([kb_t + 1, kb_b]);
+                translate([nabe_d_ist / 2 - kb_t, 0]) square([kb_t + 1, kb_b]);
     }
 }
 
@@ -196,8 +214,8 @@ difference() {
         if (!testring) nabe();
     }
     // Schlauchbohrung
-    translate([0, 0, -nabe_l - 1])
-        cylinder(d = bohr_d, h = nabe_l + flansch_h + 2);
+    translate([0, 0, -nabe_l_ist - 1])
+        cylinder(d = bohr_d, h = nabe_l_ist + flansch_h + 2);
     // Fase oben am Schlaucheinlauf
     translate([0, 0, flansch_h - 1])
         cylinder(h = 1.01, d1 = bohr_d, d2 = bohr_d + 2);
