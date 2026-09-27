@@ -30,7 +30,7 @@ flansch_h = 2.5;
 arm_n        = 10;    // Anzahl Federzungen [2:1:16]
 zungen_l     = 24;    // Zungenlänge in mm (länger = weicher, geringere Bruchgefahr) [10:1:40]
 zungen_b     = 5;     // Zungenbreite in mm, 0 = automatisch (Rest wird Steg)
-arm_wand     = 1.8;   // Wandstärke Rohr / Zungenwurzel
+arm_wand     = 3;   // Wandstärke Rohr / Zungenwurzel
 schlitz_b    = 1.5;   // Schlitzbreite neben den Zungen
 steg_b       = 4.0;   // Stegbreite in mm, nur bei zungen_b = 0 verwendet
 kopf_spalt   = 0.6;   // Spalt zwischen Zungenende und Flansch (≈ 3 Schichten)
