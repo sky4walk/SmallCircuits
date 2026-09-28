@@ -129,6 +129,12 @@
         </select>
       </label>
       <label><input type="checkbox" id="slowRam"> Slow-RAM $C00000</label>
+      <label title="PAL: 50 Bilder/s, 312 Zeilen. NTSC: 60 Bilder/s, 263 Zeilen – läuft auf 60-Hz-Monitoren ohne Ruckeln. Ein Wechsel setzt die Maschine zurück.">Norm
+        <select id="videoNorm">
+          <option value="pal">PAL 50 Hz</option>
+          <option value="ntsc">NTSC 60 Hz</option>
+        </select>
+      </label>
       <label>Tempo
         <select id="speed">
           <option value="1">1×</option>
@@ -1721,7 +1727,7 @@ if (typeof module !== 'undefined') module.exports = { makeFloppy };
 // ---- Paula ----
 // Paula-Audio: vier Kanaele mit DMA, Periode, Lautstaerke und Interrupts.
 // Die Maschine ruft je Rasterzeile tickLine(); daraus entstehen zwei Stereo-
-// Abtastwerte (31,25 kHz PAL), die im Ringpuffer auf die Ausgabe warten.
+// Abtastwerte (31,25 kHz PAL, 31,54 kHz NTSC), die im Ringpuffer auf die Ausgabe warten.
 function makePaula(io) {
   const P = {};
   const CCK_PER_LINE = 227;
@@ -1872,12 +1878,17 @@ if (typeof module !== 'undefined') module.exports = { makePaula };
 // A500-Maschine: Speicherkarte, CIA-8520 (2x), Agnus/Denise/Paula (Teilmenge)
 // Etappe 1 - genug fuer den Kickstart-Boot bis zum Diskettenbild.
 // ---------------------------------------------------------------------------
-const CPU_HZ = 7093790;
+// Videonorm: PAL 7,09 MHz / 312 Zeilen / 50 Hz, NTSC 7,16 MHz / 263 Zeilen / 60 Hz.
+// Der Zeilentakt (227 Farbtakte) ist in beiden Normen gleich; nur Zeilenzahl und
+// Grundtakt unterscheiden sich. Die Norm laesst sich im Betrieb umschalten.
+const CPU_HZ = 7093790;            // PAL (Vorgabe)
+const CPU_HZ_NTSC = 7159090;
 const CCK_PER_LINE = 227;          // Farbtakte je Rasterzeile
 const CYC_PER_LINE = CCK_PER_LINE * 2;
 const LINES_PAL = 312;
+const LINES_NTSC = 263;
 const FB_W = 960;                  // Framebuffer in Hires-Pixeln: bis DIW-Hstop $1e0 (Overscan)
-const FB_H = LINES_PAL;
+const FB_H = LINES_PAL;            // Puffer fuer die groessere Norm; NTSC nutzt nur die ersten 263 Zeilen
 
 const _makeFloppy = (typeof makeFloppy !== 'undefined') ? makeFloppy : require('./floppy.js').makeFloppy;
 const _makePaula = (typeof makePaula !== 'undefined') ? makePaula : require('./paula.js').makePaula;
@@ -1911,6 +1922,21 @@ function makeMachine() {
   const color = new Uint32Array(32);
   let dmacon = 0, intena = 0, intreq = 0, adkcon = 0;
   let vpos = 0, lineCycles = 0, frame = 0, lof = true;
+  // Videonorm (siehe Konstanten oben). Im NTSC-Betrieb meldet VPOSR die Agnus-
+  // Kennung $10 (8370/8361 NTSC), sonst $00 (8367/8371 PAL) - daran erkennt der
+  // Kickstart beim Start die Norm (Bildschirmhoehe, TOD-Takt).
+  let linesPerFrame = LINES_PAL;
+  M.ntsc = false; M.cpuHz = CPU_HZ; M.linesPerFrame = LINES_PAL; M.cyclesPerFrame = LINES_PAL * CYC_PER_LINE;
+  M.setNTSC = function (on) {
+    M.ntsc = !!on;
+    linesPerFrame = M.ntsc ? LINES_NTSC : LINES_PAL;
+    M.cpuHz = M.ntsc ? CPU_HZ_NTSC : CPU_HZ;
+    M.linesPerFrame = linesPerFrame;
+    M.cyclesPerFrame = linesPerFrame * CYC_PER_LINE;
+    if (M.paula) M.paula.rate = M.cpuHz / CYC_PER_LINE * 2;   // zwei Abtastwerte je Zeile
+    if (vpos >= linesPerFrame) vpos = linesPerFrame - 1;
+    if (M.ntsc) fb.fill(0xff000000, linesPerFrame * FB_W);       // Zeilen unterhalb des NTSC-Bildes bleiben schwarz
+  };
   let bplpt = new Uint32Array(6);
   let copPC = 0, copWait = -1, copWaitH = 0, copWaitVM = 0xff, copWaitHM = 0xfe;
   const sprPt = new Uint32Array(8);
@@ -2326,7 +2352,7 @@ function makeMachine() {
       case 0x088: copPC = ptr(0x080); copWait = -1; return 0xffff;
       case 0x08a: copPC = ptr(0x084); copWait = -1; return 0xffff;
       case R.DMACONR: return dmacon | (bltBusy ? 0x4000 : 0) | (M.bltzero ? 0x2000 : 0);
-      case R.VPOSR: return (lof ? 0x8000 : 0) | ((vpos >> 8) & 7);
+      case R.VPOSR: return (lof ? 0x8000 : 0) | (M.ntsc ? 0x1000 : 0) | ((vpos >> 8) & 7);
       case R.VHPOSR: return ((vpos & 0xff) << 8) | ((lineCycles >> 1) & 0xff);
       case R.INTENAR: return intena;
       case R.INTREQR: return intreq;
@@ -2405,7 +2431,7 @@ function makeMachine() {
   }
   M.customWrite = customWrite;
   M.customReg = (reg) => cst[reg >> 1];
-  M.state = () => ({ vpos, dmacon, intena, intreq, copPC, frame, ovl: M.ovl });
+  M.state = () => ({ vpos, dmacon, intena, intreq, copPC, frame, ovl: M.ovl, ntsc: M.ntsc });
   M._bplpt = bplpt;
 
   // --- Speicherkarte ------------------------------------------------------
@@ -2649,11 +2675,18 @@ function makeMachine() {
     const h1 = diwstrt & 0xff;
     const xstart = h1 * 2 - 2;
     const xstop = ((diwstop & 0xff) | 0x100) * 2 - 2;
+    const px = hires ? 1 : 2;
+    // Wo das erste geholte Wort erscheint, bestimmt DDFSTRT, nicht DIWSTRT: ein bei
+    // Farbtakt h geholtes Wort wird in Lores ab Lores-Position 2h + 17 sichtbar, in
+    // Hires ab 2h + 9 (HRM: DDFSTRT = DIWSTRT_H/2 - 8,5 bzw. - 4,5). Fuer DIWSTRT $81
+    // mit DDFSTRT $38 (Lores) bzw. $3c (Hires) faellt beides zusammen; holt ein
+    // Programm zum Scrollen ein Wort frueher (DDFSTRT $30), liegt es 16 Pixel links.
+    const dataStart = ddfstrt * 4 + (hires ? 16 : 32);
     const bplcon1 = cst[0x102 >> 1];
-    const scroll1 = bplcon1 & 15, scroll2 = (bplcon1 >> 4) & 15;   // ungerade / gerade Ebenen
+    // Scroll-Schrittweite ist auf OCS immer ein Lores-Pixel, in Hires also zwei Pixel
+    const scroll1 = (bplcon1 & 15) * (hires ? 2 : 1), scroll2 = ((bplcon1 >> 4) & 15) * (hires ? 2 : 1);   // ungerade / gerade Ebenen
     const bplcon2 = cst[0x104 >> 1];
     const pf2pri = (bplcon2 & 0x40) !== 0;
-    const px = hires ? 1 : 2;
     // CLXCON: Bits 11-6 aktivieren Ebene 6..1, Bits 5-0 sind die Vergleichswerte
     const clxcon = cst[0x098 >> 1];
     let en1 = 0, en2 = 0, mv1 = 0, mv2 = 0;
@@ -2670,7 +2703,7 @@ function makeMachine() {
       }
     }
     const npix = words * 16;
-    for (let i = 0; i < npix + 16; i++) {
+    for (let i = 0; i < npix + 32; i++) {
       let idx1 = 0, idx2 = 0;
       for (let p = 0; p < nplanes; p++) {
         const bp = i - ((p & 1) ? scroll2 : scroll1);
@@ -2679,7 +2712,8 @@ function makeMachine() {
         if (!bit) continue;
         if (p & 1) idx2 |= 1 << (p >> 1); else idx1 |= 1 << (p >> 1);
       }
-      const x0 = xstart + i * px;
+      const x0 = dataStart + i * px;
+      if (x0 >= xstop) break;
       if (evIdx < colorEventCount) evIdx = applyColorEvents(x0, evIdx);
       const bg = color[0];
       let c, a = 0, b = 0;
@@ -2854,7 +2888,7 @@ function makeMachine() {
     }
 
     vpos++;
-    if (vpos >= LINES_PAL) {
+    if (vpos >= linesPerFrame) {
       vpos = 0; frame++;
       M.laceActive = laceSeen; laceSeen = false;
       // LOF wechselt nur im Zeilensprungbetrieb; sonst ist jedes Bild ein langes.
@@ -2875,7 +2909,7 @@ function makeMachine() {
       version: 1,
       regs: { dmacon, intena, intreq, adkcon, vpos, lineCycles, frame, lof, copPC, copWait, copWaitH, copWaitVM, copWaitHM,
               kbdWait, dskPrev, eclkAcc, ovl: M.ovl, bltzero: !!M.bltzero, slowRAM: !!M.slowRAM, chipSize,
-              bltBusy, bltSlots, bltZeroPending, clxdat },
+              bltBusy, bltSlots, bltZeroPending, clxdat, ntsc: M.ntsc },
       cst: Array.from(cst), color: Array.from(color), bplpt: Array.from(bplpt),
       sprPt: Array.from(sprPt), sprState: Array.from(sprState), sprV1: Array.from(sprV1), sprV2: Array.from(sprV2),
       sprH: Array.from(sprH), sprDat: Array.from(sprDat), sprArmed: Array.from(sprArmed),
@@ -2893,6 +2927,7 @@ function makeMachine() {
     slow.set(blobs.slow.subarray(0, slow.length));
     if (blobs.rom) M.loadROM(blobs.rom);
     M.slowRAM = r.slowRAM; M.ovl = r.ovl; M.bltzero = r.bltzero;
+    M.setNTSC(!!r.ntsc);                       // aeltere Schnappschuesse: PAL
     dmacon = r.dmacon; intena = r.intena; intreq = r.intreq; adkcon = r.adkcon;
     vpos = r.vpos; lineCycles = r.lineCycles; frame = r.frame; lof = r.lof;
     copPC = r.copPC; copWait = r.copWait; copWaitH = r.copWaitH; copWaitVM = r.copWaitVM; copWaitHM = r.copWaitHM;
@@ -3164,17 +3199,29 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   let running = false, romName = null, speed = 1;
   let lastFrames = 0, lastTime = performance.now(), fps = 0, mhz = 0, cyclesRun = 0;
 
-  const CYCLES_PER_FRAME = Math.round(7093790 / 50);
 
   // --- Bildausgabe --------------------------------------------------------
-  const CROP_X = 232, CROP_Y = 24, CROP_W = 720, CROP_H = 280;
-  // Ein Hires-Pixel ist halb so breit wie eine Rasterzeile hoch: jede Zeile
+  const CROP_X = 232, CROP_W = 720;
+  // PAL: 312 Zeilen, Ausschnitt 280 Zeilen ab Zeile 24. NTSC: 263 Zeilen, Ausschnitt
+  // 234 Zeilen ab Zeile 27 - der 200-Zeilen-Bildschirm (ab $2c) sitzt mittig, und die
+  // Zeilen sind wie auf einem NTSC-Monitor um 1,2 hoeher, damit das Bild wieder 4:3 hat.
+  // Dazu bringt CSS das Bild immer auf das PAL-Seitenverhaeltnis 720:560.
+  // Ein Hires-Pixel ist halb so breit wie eine PAL-Rasterzeile hoch: jede Zeile
   // wird doppelt gezeichnet, damit das Bild wie auf dem Monitor 4:3 hat.
+  let CROP_Y = 24, CROP_H = 280;
   const canvas = $('screen');
-  canvas.width = CROP_W; canvas.height = CROP_H * 2;
+  canvas.style.aspectRatio = '720 / 560';
   const ctx = canvas.getContext('2d');
-  const img = ctx.createImageData(CROP_W, CROP_H * 2);
-  const img32 = new Uint32Array(img.data.buffer);
+  let img, img32;
+  function setCrop(ntsc) {
+    const y = ntsc ? 27 : 24, h = ntsc ? 234 : 280;
+    if (img && h === CROP_H && y === CROP_Y) return;
+    CROP_Y = y; CROP_H = h;
+    canvas.width = CROP_W; canvas.height = CROP_H * 2;
+    img = ctx.createImageData(CROP_W, CROP_H * 2);
+    img32 = new Uint32Array(img.data.buffer);
+  }
+  setCrop(false);
 
   // Bildgroesse: "fit" haelt das Bild im Fenster (Breite und Hoehe), "auto" fuellt die
   // Spalte, feste Faktoren beziehen sich auf 720 Hires-Pixel Breite (1x = 720 px).
@@ -3194,18 +3241,23 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   applyScale($('scale').value);
 
   function draw() {
-    const W = machine.FB_W;
+    const W = machine.FB_W, lines = machine.linesPerFrame;
+    setCrop(machine.ntsc);
     if (machine.laceActive) {
       // Zeilensprung: beide Halbbilder liegen bereits verschraenkt vor, keine Zeilenverdopplung
       const lf = machine.laceFB;
       for (let y = 0; y < CROP_H * 2; y++) {
-        const s = (y + CROP_Y * 2) * W + CROP_X;
+        const src = y + CROP_Y * 2;
+        if (src >= lines * 2) { img32.fill(0xff000000, y * CROP_W, (y + 1) * CROP_W); continue; }
+        const s = src * W + CROP_X;
         img32.set(lf.subarray(s, s + CROP_W), y * CROP_W);
       }
     } else {
       const fb = machine.framebuffer;
       for (let y = 0; y < CROP_H; y++) {
-        const s = (y + CROP_Y) * W + CROP_X;
+        const src = y + CROP_Y;
+        if (src >= lines) { img32.fill(0xff000000, (y * 2) * CROP_W, (y * 2 + 2) * CROP_W); continue; }
+        const s = src * W + CROP_X;
         const row = fb.subarray(s, s + CROP_W);
         img32.set(row, (y * 2) * CROP_W);
         img32.set(row, (y * 2 + 1) * CROP_W);
@@ -3226,8 +3278,9 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
       if (!lastTick) lastTick = now;
       const dt = Math.min(now - lastTick, 100);          // nach Pausen nicht nachholen
       lastTick = now;
-      owed += speed === 0 ? CYCLES_PER_FRAME * 6 : dt * (CPU_HZ / 1000) * speed;
-      if (owed > CYCLES_PER_FRAME * 3) owed = CYCLES_PER_FRAME * 3;
+      const perFrame = machine.cyclesPerFrame;
+      owed += speed === 0 ? perFrame * 6 : dt * (machine.cpuHz / 1000) * speed;
+      if (owed > perFrame * 3) owed = perFrame * 3;
       const t0 = performance.now();
       let done = 0, drewFrame = false;
       machine.hitBreak = false;
@@ -3255,7 +3308,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   function updateStatus() {
     const st = machine.state();
     $('status').textContent =
-      `${fps.toFixed(0)} B/s · ${mhz.toFixed(2)} MHz · Zeile ${st.vpos} · Bild ${st.frame}` +
+      `${st.ntsc ? 'NTSC' : 'PAL'} · ${fps.toFixed(0)} B/s · ${mhz.toFixed(2)} MHz · Zeile ${st.vpos} · Bild ${st.frame}` +
       (romName ? ` · ${romName}` : ' · kein ROM');
   }
 
@@ -3448,8 +3501,9 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   let mRestX = 0, mRestY = 0;
   function mouseMove(dx, dy) {
     const r = canvas.getBoundingClientRect();
-    const scale = (CROP_W / r.width) * 0.5;
-    mRestX += dx * scale; mRestY += dy * scale;
+    // waagerecht: ein Zaehlerschritt = zwei Hires-Pixel; senkrecht: eine Rasterzeile
+    // (bei NTSC ist eine Zeile auf dem Bildschirm hoeher als bei PAL)
+    mRestX += dx * (CROP_W / r.width) * 0.5; mRestY += dy * (CROP_H / r.height);
     const ix = Math.trunc(mRestX), iy = Math.trunc(mRestY);
     mRestX -= ix; mRestY -= iy;
     machine.mouseX = (machine.mouseX + ix) & 0xff;
@@ -3768,7 +3822,6 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     if (!AC) { log('Web Audio ist in diesem Browser nicht verfuegbar.'); return; }
     audioCtx = new AC();
     const paula = machine.paula;
-    const ratio = paula.rate / audioCtx.sampleRate;
     audioNode = audioCtx.createScriptProcessor(2048, 0, 2);
     const scratch = new Float32Array(8192);
     audioPrev = new Float32Array(2);
@@ -3776,6 +3829,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     audioNode.onaudioprocess = (e) => {
       const L = e.outputBuffer.getChannelData(0), R = e.outputBuffer.getChannelData(1);
       const n = L.length;
+      const ratio = paula.rate / audioCtx.sampleRate;   // je Aufruf: die Norm kann sich aendern
       const vol = parseInt($('volume').value, 10) / 100;
       let avail = paula.available();
       const maxAhead = Math.round(paula.rate * 0.2);
@@ -3819,7 +3873,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     // Diskettenbox: jede Diskette als eigener Block box0, box1, ...
     st.box = diskBox.map((d, i) => { list.push({ name: 'box' + i, length: d.data.length }); parts.push(d.data); return d.name; });
     st.blobList = list;
-    st.ui = { chipSize: $('chipSize').value, slowRam: $('slowRam').checked, speed: $('speed').value, scale: $('scale').value,
+    st.ui = { chipSize: $('chipSize').value, slowRam: $('slowRam').checked, videoNorm: $('videoNorm').value, speed: $('speed').value, scale: $('scale').value,
               turbo: $('turbo').checked, wprot: $('wprot').checked, joyKeys: $('joyKeys').checked, joyPort: machine.joyPort,
               blitTiming: $('blitTiming').checked, dmaContention: $('dmaContention').checked, keyMode: $('keyMode').value, romName };
     const json = new TextEncoder().encode(JSON.stringify(st));
@@ -3904,6 +3958,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     const ui = st.ui || {};
     if (ui.chipSize) $('chipSize').value = ui.chipSize;
     $('slowRam').checked = !!ui.slowRam;
+    $('videoNorm').value = ui.videoNorm === 'ntsc' ? 'ntsc' : 'pal';
     if (ui.speed !== undefined) { $('speed').value = ui.speed; speed = parseInt(ui.speed, 10); }
     if (ui.scale !== undefined) { $('scale').value = ui.scale; applyScale(ui.scale); }
     $('turbo').checked = !!ui.turbo; $('wprot').checked = !!ui.wprot;
@@ -3954,6 +4009,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   function doReset() {
     machine.setChipSize(parseInt($('chipSize').value, 10));
     machine.slowRAM = $('slowRam').checked;
+    machine.setNTSC($('videoNorm').value === 'ntsc');
     machine.reset();
     if (!machine.hasROM()) { log('Kein ROM geladen – die CPU liest Nullen.'); }
     draw(); refreshPanels(); updateStatus();
@@ -3967,9 +4023,16 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
   $('btnReset').onclick = () => { setRunning(false); doReset(); log('Zurückgesetzt.'); };
   $('btnStep').onclick = () => { setRunning(false); machine.runCycles(1); draw(); refreshPanels(); };
   $('btnStep100').onclick = () => { setRunning(false); for (let i = 0; i < 100; i++) machine.runCycles(1); draw(); refreshPanels(); };
-  $('btnFrame').onclick = () => { setRunning(false); machine.runCycles(CYCLES_PER_FRAME); draw(); refreshPanels(); };
+  $('btnFrame').onclick = () => { setRunning(false); machine.runCycles(machine.cyclesPerFrame); draw(); refreshPanels(); };
   $('chipSize').onchange = doReset;
   $('slowRam').onchange = doReset;
+  // Der Kickstart liest die Agnus-Kennung nur beim Start (Bildschirmhoehe, Uhr):
+  // ein Wechsel der Norm setzt deshalb - wie ein Wechsel der RAM-Groesse - die Maschine zurueck.
+  $('videoNorm').onchange = () => {
+    doReset();
+    log(machine.ntsc ? 'NTSC: 60 Bilder/s, 263 Zeilen, 7,16 MHz – zurückgesetzt.'
+                     : 'PAL: 50 Bilder/s, 312 Zeilen, 7,09 MHz – zurückgesetzt.');
+  };
   $('speed').onchange = () => { speed = parseInt($('speed').value, 10); };
 
   // --- Registeranzeige ----------------------------------------------------
@@ -4263,7 +4326,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
     machine.unloadROM(); romName = null;
     const auto = document.getElementById('autosnap');
     if (auto) auto.remove();
-    $('chipSize').value = '512'; $('slowRam').checked = false; $('speed').value = '1'; speed = 1;
+    $('chipSize').value = '512'; $('slowRam').checked = false; $('videoNorm').value = 'pal'; machine.setNTSC(false); $('speed').value = '1'; speed = 1;
     $('turbo').checked = false; machine.floppy.turbo = false;
     $('wprot').checked = false; $('joyKeys').checked = true; $('joyPort').value = '2'; machine.joyPort = 2;
     $('gamepad').value = ''; padIndex = -1; clearJoy(padJoy); clearJoy(keyJoy); syncJoy();
