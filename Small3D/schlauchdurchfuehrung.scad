@@ -13,6 +13,9 @@
 // (2 Schnitte pro Zunge), dann jede Zunge einmal nach innen drücken.
 // Mit bruecke_voll = false bleibt nur ein dünner Außensteg stehen
 // (leichter zu schneiden, Brücke etwas weniger stabil).
+//
+// Version 4: Schalter verschluss = true macht aus der Durchführung einen
+// Blindstopfen: keine Nabe, keine Bohrung, der Flansch ist oben geschlossen.
 
 $fn = 120;
 
@@ -41,6 +44,9 @@ max_dehnung  = 2.0;   // Warnschwelle Biegedehnung in % (PETG, quer zur Schicht)
 bruecke_h    = 0.4;   // Höhe der Opferbrücke in den Schlitzen (2 Schichten), 0 = aus
 bruecke_voll = true;  // true: volle Wandstärke, false: nur bruecke_t von außen
 bruecke_t    = 1.0;   // radiale Stärke der Brücke bei bruecke_voll = false
+
+/* [Modus] */
+verschluss   = false; // true: Blindstopfen – keine Nabe, keine Schlauchbohrung, oben dicht
 
 /* [Test] */
 testring     = false; // true: nur Flanschring + Zungen, ohne Nabe (schneller Probedruck)
@@ -108,14 +114,19 @@ if (dehnung > max_dehnung)
     echo(str("WARNUNG: Dehnung über ", max_dehnung,
              " % – zungen_l erhöhen oder arm_wand verringern"));
 
-echo(str("Nabe: Ø ", nabe_d_ist, " mm, ", nabe_l_ist, " mm lang, ", nabe_n,
-         " Schlitze, Wand an der Nut ", (nabe_d_ist - bohr_d) / 2 - kb_t, " mm"));
+nabe_aktiv = !verschluss && !testring;
 
-assert((nabe_d_ist - bohr_d) / 2 - kb_t >= 1.2,
+if (verschluss)
+    echo("Modus: Verschluss (Blindstopfen, oben dicht)");
+if (nabe_aktiv)
+    echo(str("Nabe: Ø ", nabe_d_ist, " mm, ", nabe_l_ist, " mm lang, ", nabe_n,
+             " Schlitze, Wand an der Nut ", (nabe_d_ist - bohr_d) / 2 - kb_t, " mm"));
+
+assert(!nabe_aktiv || (nabe_d_ist - bohr_d) / 2 - kb_t >= 1.2,
        "Nabenwand an der Kabelbindernut zu dünn: nabe_wand oder nabe_d erhöhen");
-assert(nabe_d_ist / 2 + 1 < in_r - tip,
+assert(!nabe_aktiv || nabe_d_ist / 2 + 1 < in_r - tip,
        "Nabe zu dick: Zungen können nicht mehr nach innen einfedern");
-assert(nabe_kopf + 3 + kb_b < nabe_l_ist,
+assert(!nabe_aktiv || nabe_kopf + 3 + kb_b < nabe_l_ist,
        "Nabe zu kurz für Kabelbindernut und massiven Kopf");
 assert(zunge_a > 5, "Zungen zu schmal: arm_n, steg_b oder schlitz_b verkleinern");
 assert(steg_ist >= 2, "Stege unter 2 mm: zungen_b verkleinern oder arm_n reduzieren");
@@ -211,12 +222,14 @@ difference() {
             flansch();
         rohr();
         haken();
-        if (!testring) nabe();
+        if (nabe_aktiv) nabe();
     }
-    // Schlauchbohrung
-    translate([0, 0, -nabe_l_ist - 1])
-        cylinder(d = bohr_d, h = nabe_l_ist + flansch_h + 2);
-    // Fase oben am Schlaucheinlauf
-    translate([0, 0, flansch_h - 1])
-        cylinder(h = 1.01, d1 = bohr_d, d2 = bohr_d + 2);
+    if (!verschluss) {
+        // Schlauchbohrung
+        translate([0, 0, -nabe_l_ist - 1])
+            cylinder(d = bohr_d, h = nabe_l_ist + flansch_h + 2);
+        // Fase oben am Schlaucheinlauf
+        translate([0, 0, flansch_h - 1])
+            cylinder(h = 1.01, d1 = bohr_d, d2 = bohr_d + 2);
+    }
 }
