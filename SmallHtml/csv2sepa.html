@@ -320,11 +320,11 @@ function validateDate(dateStr, label) {
     const d = new Date(Date.UTC(+m[1], +m[2]-1, +m[3]));
     if (!isNaN(d.getTime())) return d;
   }
-  // DD.MM.YYYY
-  m = dateStr.match(/^(\d{2})\.(\d{2})\.(\d{4})$/);
-  if (m) {
-    const d = new Date(Date.UTC(+m[3], +m[2]-1, +m[1]));
-    if (!isNaN(d.getTime())) return d;
+  // DD.MM.YYYY, auch D.M.YYYY / D.M.YY (so speichert Excel Datumswerte gern zurück)
+  const p = parseDateLoose(dateStr);
+  if (p) {
+    const d = new Date(Date.UTC(p.y, p.mo-1, p.d));
+    if (!isNaN(d.getTime()) && d.getUTCDate() === p.d) return d;
   }
   throw new ValidationError(`${label}: Datum '${dateStr}' muss im Format YYYY-MM-DD oder DD.MM.YYYY sein`);
 }
@@ -426,12 +426,14 @@ function parseCsvBlockRaw(lines) {
   const records = parseCsvRecords(lines.join("\n"), delim)
     .filter(r => r.some(c => c.trim() !== ""));
   if (records.length === 0) return {header: [], rows: []};
-  const header = records[0].map(normHeader);
+  // Leere Kopfspalten (z.B. von Excel aufgefüllte ";;;") ignorieren
+  const cols = records[0].map((h, idx) => ({h: normHeader(h), idx})).filter(c => c.h !== "");
+  const header = cols.map(c => c.h);
   const rows = [];
   for (let i = 1; i < records.length; i++) {
     const cells = records[i];
     const row = {};
-    header.forEach((h, idx) => { row[h] = (cells[idx] !== undefined ? cells[idx] : "").trim(); });
+    cols.forEach(({h, idx}) => { row[h] = (cells[idx] !== undefined ? cells[idx] : "").trim(); });
     rows.push(row);
   }
   return {header, rows};
@@ -441,17 +443,42 @@ function parseCsvBlock(lines) {
   return parseCsvBlockRaw(lines).rows;
 }
 
+// Abschnittsmarke erkennen – tolerant gegenüber Excel-Resten wie "#creditor;;;;" oder "\"#debitors\","
+function sectionMarker(line) {
+  const s = line.trim().replace(/^"|"$/g, "").replace(/[;,\t\s"]+$/, "").toLowerCase();
+  return (s === "#creditor" || s === "#debitors") ? s.slice(1) : (s.startsWith("#") ? "comment" : null);
+}
+
+// Reparatur für "von Excel verpackte" Dateien: Ein deutsches Excel öffnet eine
+// kommagetrennte Datei mit ';' als Trenner, legt jede Zeile komplett in Spalte A
+// und hängt beim Speichern ';' an. Hier wird das rückgängig gemacht: mit ';'
+// zerlegen (inkl. Excel-Quoting) und die Zellen wieder zur Originalzeile verbinden.
+function unwrapExcelWrapped(text) {
+  const recs = parseCsvRecords(text, ";");
+  const di = recs.findIndex(r => sectionMarker(r.join(";")) === "debitors");
+  if (di < 0) return text;
+  const hdr = recs.slice(di + 1).find(r => r.some(c => c.trim() !== ""));
+  if (!hdr) return text;
+  const filled = hdr.filter(c => c.trim() !== "").length;
+  const commas = (hdr.join("").match(/,/g) || []).length;
+  if (!(commas >= 5 && filled <= 3)) return text;   // normale ;-Datei → unverändert
+  return recs.map(r => {
+    const line = r.join("");
+    return sectionMarker(line) ? line.replace(/[;,\s]+$/, "") : line;
+  }).join("\n");
+}
+
 // Zerlegt den CSV-Text in #creditor- und #debitors-Zeilen (ohne Validierung)
 function splitSections(text) {
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  text = unwrapExcelWrapped(text);
   const rawLines = text.split(/\r\n|\r|\n/);
   let section = null;
   const creditorLines = [], debitorLines = [];
   for (const line of rawLines) {
-    const stripped = line.trim();
-    if (stripped.toLowerCase() === "#creditor") { section = "creditor"; continue; }
-    if (stripped.toLowerCase() === "#debitors") { section = "debitors"; continue; }
-    if (stripped.startsWith("#")) continue;
+    const mk = sectionMarker(line);
+    if (mk === "creditor" || mk === "debitors") { section = mk; continue; }
+    if (mk === "comment") continue;
     if (section === "creditor") creditorLines.push(line);
     else if (section === "debitors") debitorLines.push(line);
   }
@@ -460,22 +487,7 @@ function splitSections(text) {
 
 
 function parseCsv(text) {
-  // strip BOM
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-  const rawLines = text.split(/\r\n|\r|\n/);
-
-  let section = null;
-  const creditorLines = [];
-  const debitorLines = [];
-
-  for (const line of rawLines) {
-    const stripped = line.trim();
-    if (stripped.toLowerCase() === "#creditor") { section = "creditor"; continue; }
-    if (stripped.toLowerCase() === "#debitors") { section = "debitors"; continue; }
-    if (stripped.startsWith("#")) continue;
-    if (section === "creditor") creditorLines.push(line);
-    else if (section === "debitors") debitorLines.push(line);
-  }
+  const {creditorLines, debitorLines} = splitSections(text);
 
   if (creditorLines.length === 0) throw new ValidationError("CSV enthält keinen #creditor Block");
   if (debitorLines.length === 0) throw new ValidationError("CSV enthält keinen #debitors Block");
@@ -991,16 +1003,19 @@ function csvQuote(v) {
   v = v == null ? "" : String(v);
   return /[",\r\n;]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
 }
+// Export mit ';' und CRLF: So öffnet ein deutsches Excel die Datei direkt
+// spaltenweise und speichert sie im selben Format wieder (Import erkennt ';' automatisch).
+const CSV_DELIM = ";";
 function buildMembersCsv() {
   const L = [];
   L.push("#creditor");
-  L.push(mem.creditorHeader.map(csvQuote).join(","));
-  L.push(mem.creditorHeader.map(h => csvQuote(mem.creditor[h])).join(","));
+  L.push(mem.creditorHeader.map(csvQuote).join(CSV_DELIM));
+  L.push(mem.creditorHeader.map(h => csvQuote(mem.creditor[h])).join(CSV_DELIM));
   L.push("");
   L.push("#debitors");
-  L.push(mem.header.map(csvQuote).join(","));
-  for (const m of mem.members) L.push(mem.header.map(h => csvQuote(m[h])).join(","));
-  return L.join("\n") + "\n";
+  L.push(mem.header.map(csvQuote).join(CSV_DELIM));
+  for (const m of mem.members) L.push(mem.header.map(h => csvQuote(m[h])).join(CSV_DELIM));
+  return L.join("\r\n") + "\r\n";
 }
 function downloadText(text, filename, mime) {
   const blob = new Blob(["\uFEFF" + text], {type: mime || "text/csv;charset=utf-8"});
