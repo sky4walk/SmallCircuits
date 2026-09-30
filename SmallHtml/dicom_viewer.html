@@ -365,7 +365,8 @@
     <div class="drop-label">
       <strong>DICOM-Datei öffnen</strong>
       Hierher ziehen oder auf „+ Datei(en) laden" klicken<br>
-      <span style="font-size:11px;color:#2a3a2a">Unterstützt: DICOM · ZIP-Archive · JPEG Lossless · JPEG Extended</span>
+      <span style="font-size:11px;color:#2a3a2a">Unterstützt: DICOM · ZIP-Archive · JPEG Lossless (Grau &amp; RGB) · JPEG Baseline/Extended · RGB</span>
+      <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="font-size:11px;color:#3a5a4a">itzwieseltal.wordpress.com</a>
     </div>
   </div>
   <div id="canvas-wrap">
@@ -1042,132 +1043,349 @@ window.decodeJpegDCT = function(jpegBytes) {
 })(); // end IIFE
 
 // ═══════════════════════════════════════════════════════════════
-// JPEG LOSSLESS DECODER (Process 14 SV1, alle Prädiktoren 1–7)
+// JPEG LOSSLESS DECODER (Process 14, SOF3, Prädiktoren 1–7)
+// Mehrere Komponenten (verschachtelt oder getrennte Scans),
+// Huffman-Tabelle pro Komponente, Restart-Intervalle, Point-Transform.
+// Rückgabe: 1 Komponente  → Int16Array (wie bisher)
+//           n Komponenten → Uint16Array, pixelweise verschachtelt (RGBRGB…)
 // ═══════════════════════════════════════════════════════════════
 function decodeJpegLossless(jpegBytes) {
   const u8 = (jpegBytes instanceof Uint8Array) ? jpegBytes : new Uint8Array(jpegBytes);
+  const N = u8.length;
 
-  // Bitstream mit Byte-Stuffing
-  const stream = {
-    pos:0, buf:0, bitsLeft:0,
-    nextByte() {
-      let b = u8[this.pos++];
-      if (b===0xFF && u8[this.pos]===0x00) this.pos++;
-      return b;
-    },
-    readBit() {
-      if (!this.bitsLeft) { this.buf=this.nextByte(); this.bitsLeft=8; }
-      const b=(this.buf>>7)&1; this.buf=(this.buf<<1)&0xFF; this.bitsLeft--;
-      return b;
-    },
-    readBits(n){ let v=0; for(let i=0;i<n;i++) v=(v<<1)|this.readBit(); return v; },
-    decodeHuffman(tbl) {
-      let code=0;
-      for(let len=1;len<=16;len++){
-        code=(code<<1)|this.readBit();
-        const key=(code<<5)|len;
-        if(tbl.has(key)) return tbl.get(key);
+  // Huffman: 16-Bit-Lookup (Symbol + Codelänge) statt Map-Abfrage pro Bit
+  function buildLut(counts, syms) {
+    const sym = new Uint8Array(65536), len = new Uint8Array(65536);
+    let code = 0, k = 0;
+    for (let L = 1; L <= 16; L++) {
+      for (let n = 0; n < counts[L-1]; n++) {
+        const lo = code << (16 - L), hi = (code + 1) << (16 - L);
+        sym.fill(syms[k], lo, hi); len.fill(L, lo, hi);
+        k++; code++;
       }
-      throw new Error('Huffman-Fehler');
+      code <<= 1;
     }
-  };
+    return { sym, len };
+  }
 
-  function parseHuffTable(pos, endPos) {
-    const tables={};
-    while(pos<endPos){
-      const tcth=u8[pos]; pos++;
-      const counts=Array.from(u8.slice(pos,pos+16)); pos+=16;
-      const total=counts.reduce((a,b)=>a+b,0);
-      const syms=Array.from(u8.slice(pos,pos+total)); pos+=total;
-      const tbl=new Map();
-      let code=0, symIdx=0;
-      for(let bits=1;bits<=16;bits++){
-        for(let i=0;i<counts[bits-1];i++){
-          tbl.set((code<<5)|bits, syms[symIdx++]);
-          code++;
+  // Bitleser mit Byte-Stuffing; bleibt vor Markern stehen und liefert dann Nullen
+  let pos = 0, acc = 0, nbits = 0;
+  function fill() {
+    while (nbits <= 24) {
+      let b = 0;
+      if (pos < N) {
+        b = u8[pos];
+        if (b === 0xFF) {
+          const nx = u8[pos + 1];
+          if (nx === 0x00) pos += 2;
+          else b = 0;                // Marker: nicht verbrauchen, Nullen nachschieben
+        } else pos++;
+      }
+      acc = ((acc << 8) | b) >>> 0;
+      nbits += 8;
+    }
+  }
+  function decodeSym(t) {
+    if (nbits < 16) fill();
+    const peek = (acc >>> (nbits - 16)) & 0xFFFF;
+    const L = t.len[peek];
+    if (!L) throw new Error('JPEG Lossless: ungültiger Huffman-Code');
+    nbits -= L;
+    return t.sym[peek];
+  }
+  function readBits(n) {
+    if (!n) return 0;
+    if (nbits < n) fill();
+    nbits -= n;
+    return (acc >>> nbits) & ((1 << n) - 1);
+  }
+  function resetBits() { acc = 0; nbits = 0; }
+
+  let width = 0, height = 0, precision = 0, restartInterval = 0;
+  const huff = {};                 // Tabellennummer → LUT
+  const comps = [];                // [{id, h, v}]
+  const compIndex = {};            // id → Index
+  let planes = null;               // Uint16Array pro Komponente
+
+  function decodeScan(ps, segLen) {
+    const ns = u8[ps];
+    const sc = [];
+    for (let k = 0; k < ns; k++) {
+      const id = u8[ps + 1 + 2*k], td = u8[ps + 2 + 2*k] >> 4;
+      const ci = compIndex[id];
+      if (ci === undefined) throw new Error('JPEG Lossless: unbekannte Komponente ' + id);
+      if (!huff[td]) throw new Error('JPEG Lossless: Huffman-Tabelle ' + td + ' fehlt');
+      sc.push({ plane: planes[ci], tbl: huff[td] });
+    }
+    const predictor = u8[ps + 1 + 2*ns];
+    const pt = u8[ps + 3 + 2*ns] & 0x0F;
+    const mask = (1 << (precision - pt)) - 1;
+    const initPred = 1 << (precision - pt - 1);
+
+    pos = ps + segLen; resetBits();
+    const W = width, total = width * height;
+    let mcu = 0, restartStart = 0;   // Pixelindex, an dem das aktuelle Intervall begann
+
+    for (let idx = 0; idx < total; idx++) {
+      if (restartInterval && mcu === restartInterval) {
+        // Zum Restart-Marker vorlaufen und Prädiktion neu starten
+        resetBits();
+        while (pos < N - 1 && !(u8[pos] === 0xFF && u8[pos+1] >= 0xD0 && u8[pos+1] <= 0xD7)) pos++;
+        pos += 2;
+        mcu = 0; restartStart = idx;
+      }
+      const col = idx % W;
+      // Lossless: Restart-Intervalle umfassen ganze Zeilen (T.81 H.1.2.1)
+      const firstLine = idx - restartStart < W;
+      for (let k = 0; k < ns; k++) {
+        const c = sc[k], P = c.plane;
+        const t = decodeSym(c.tbl);
+        let diff;
+        if (t === 0) diff = 0;
+        else if (t === 16) diff = 32768;
+        else {
+          const v = readBits(t);
+          diff = v < (1 << (t - 1)) ? v - (1 << t) + 1 : v;
         }
-        code<<=1;
+        let pred;
+        if (idx === restartStart) pred = initPred;
+        else if (firstLine) pred = P[idx - 1];          // erste Zeile: Ra
+        else if (col === 0) pred = P[idx - W];          // erste Spalte: Rb
+        else {
+          const Ra = P[idx - 1], Rb = P[idx - W], Rc = P[idx - W - 1];
+          switch (predictor) {
+            case 1: pred = Ra; break;
+            case 2: pred = Rb; break;
+            case 3: pred = Rc; break;
+            case 4: pred = Ra + Rb - Rc; break;
+            case 5: pred = Ra + ((Rb - Rc) >> 1); break;
+            case 6: pred = Rb + ((Ra - Rc) >> 1); break;
+            case 7: pred = (Ra + Rb) >> 1; break;
+            default: pred = Ra;
+          }
+        }
+        P[idx] = (pred + diff) & mask;
       }
-      tables[tcth]=tbl;
+      mcu++;
     }
-    return {tables,consumed:pos};
+    // hinter die Entropiedaten zum nächsten echten Marker
+    while (pos < N - 1 && !(u8[pos] === 0xFF && u8[pos+1] !== 0x00 && !(u8[pos+1] >= 0xD0 && u8[pos+1] <= 0xD7))) pos++;
+    return pt;
   }
 
-  function extend(val,t){
-    if(!t) return 0;
-    return val<(1<<(t-1)) ? val+((-1)<<t)+1 : val;
-  }
-
-  // Parse JPEG markers
-  let width=0,height=0,precision=0,predictor=1;
-  const huffTables={};
-  let scanStart=-1;
-  let i=0;
-
-  while(i<u8.length-1){
-    if(u8[i]!==0xFF){i++;continue;}
-    const marker=u8[i+1]; i+=2;
-    if(marker===0xD8) continue;
-    if(marker===0xD9) break;
-    const segLen=((u8[i]<<8)|u8[i+1])-2;
-    const ps=i+2;
-    if(marker===0xC3){ // SOF3
-      precision=u8[ps]; height=(u8[ps+1]<<8)|u8[ps+2]; width=(u8[ps+3]<<8)|u8[ps+4];
-    } else if(marker===0xC4){ // DHT
-      const {tables}=parseHuffTable(ps,ps+segLen);
-      Object.assign(huffTables,tables);
-    } else if(marker===0xDA){ // SOS
-      const nComp=u8[ps];
-      predictor=u8[ps+1+nComp*2];
-      scanStart=ps+segLen;
-      break;
+  let i = 0, sawScan = false, pointTransform = 0;
+  while (i < N - 1) {
+    if (u8[i] !== 0xFF) { i++; continue; }
+    const m = u8[i + 1];
+    if (m === 0xFF) { i++; continue; }            // Füllbytes
+    i += 2;
+    if (m === 0xD8 || m === 0x01 || (m >= 0xD0 && m <= 0xD7)) continue;
+    if (m === 0xD9) break;
+    const segLen = ((u8[i] << 8) | u8[i + 1]) - 2;
+    const ps = i + 2;
+    if (m === 0xC3) {                              // SOF3
+      precision = u8[ps];
+      height = (u8[ps+1] << 8) | u8[ps+2];
+      width  = (u8[ps+3] << 8) | u8[ps+4];
+      const nf = u8[ps+5];
+      for (let k = 0; k < nf; k++) {
+        const id = u8[ps+6+3*k], hv = u8[ps+7+3*k];
+        if ((hv >> 4) !== 1 || (hv & 15) !== 1)
+          throw new Error('JPEG Lossless: Unterabtastung (' + (hv>>4) + 'x' + (hv&15) + ') wird nicht unterstützt');
+        compIndex[id] = comps.length;
+        comps.push({ id });
+      }
+      planes = comps.map(() => new Uint16Array(width * height));
+    } else if (m === 0xC0 || m === 0xC1 || m === 0xC2 || (m >= 0xC5 && m <= 0xCF && m !== 0xC8 && m !== 0xCC)) {
+      throw new Error('JPEG Lossless: unerwarteter SOF-Marker 0x' + m.toString(16).toUpperCase());
+    } else if (m === 0xC4) {                       // DHT
+      let p = ps; const end = ps + segLen;
+      while (p < end) {
+        const tcth = u8[p++];
+        const counts = u8.subarray(p, p + 16); p += 16;
+        let total = 0; for (let k = 0; k < 16; k++) total += counts[k];
+        huff[tcth & 0x0F] = buildLut(counts, u8.subarray(p, p + total));
+        p += total;
+      }
+    } else if (m === 0xDD) {                       // DRI
+      restartInterval = (u8[ps] << 8) | u8[ps+1];
+    } else if (m === 0xDA) {                       // SOS
+      if (!planes) throw new Error('JPEG Lossless: SOF3 fehlt vor SOS');
+      pointTransform = decodeScan(ps, segLen);
+      sawScan = true;
+      i = pos;
+      continue;
     }
-    i=ps+segLen;
+    i = ps + segLen;
+  }
+  if (!sawScan) throw new Error('JPEG Lossless: SOS nicht gefunden');
+
+  const sh = pointTransform;
+  if (comps.length === 1) {
+    const p0 = planes[0];
+    if (sh) for (let k = 0; k < p0.length; k++) p0[k] <<= sh;
+    return { pixels: new Int16Array(p0.buffer), width, height, components: 1, precision };
+  }
+  const nc = comps.length, n = width * height;
+  const out = new Uint16Array(n * nc);
+  for (let c = 0; c < nc; c++) {
+    const P = planes[c];
+    for (let k = 0, o = c; k < n; k++, o += nc) out[o] = P[k] << sh;
+  }
+  return { pixels: out, width, height, components: nc, precision };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// GEMEINSAME PIXEL-DEKODIERUNG (Hauptbild, Thumbnails, 3D)
+// Liefert { pixels, width, height, spp, maxVal }
+//   spp=1 → Int16Array (Graustufen, Rescale gilt)
+//   spp=3 → Uint8Array/Uint16Array, verschachtelt RGB
+// ═══════════════════════════════════════════════════════════════
+
+// Erstes Bild aus gekapselten Pixeldaten (Fragmente korrekt zusammenfügen)
+function getEncapsulatedFrame(dicom) {
+  const u8 = dicom.u8, dv = dicom.dv;
+  let off = dicom.pixTag.valueOff;
+  const frags = [];
+  let first = true;
+  while (off + 8 <= u8.length) {
+    const g = dv.getUint16(off, true), e = dv.getUint16(off + 2, true);
+    const len = dv.getUint32(off + 4, true);
+    if (g !== 0xFFFE) break;
+    if (e === 0xE0DD) break;                      // Sequence Delimiter
+    off += 8;
+    if (e === 0xE000) {
+      if (first) { first = false; off += len; continue; }   // Basic Offset Table
+      const end = Math.min(off + len, u8.length);
+      frags.push(u8.subarray(off, end));
+      off = end;
+      // Ende des ersten Bildes erreicht? (EOI, evtl. mit Füll-Null)
+      let t = end - 1;
+      while (t > off - len && u8[t] === 0x00) t--;
+      if (u8[t - 1] === 0xFF && u8[t] === 0xD9) break;
+    } else break;
+  }
+  if (!frags.length) {
+    // Fallback: altes Verhalten – nach SOI/EOI suchen
+    const s0 = dicom.pixTag.valueOff;
+    let s = s0;
+    while (s < u8.length - 1 && !(u8[s] === 0xFF && u8[s+1] === 0xD8)) s++;
+    let e = s + 2;
+    while (e < u8.length - 1 && !(u8[e] === 0xFF && u8[e+1] === 0xD9)) e++;
+    if (s >= u8.length - 1) throw new Error('JPEG SOI-Marker nicht in Pixel-Daten gefunden');
+    return u8.slice(s, e + 2);
+  }
+  if (frags.length === 1) return frags[0];
+  const total = frags.reduce((a, f) => a + f.length, 0);
+  const out = new Uint8Array(total);
+  let o = 0; for (const f of frags) { out.set(f, o); o += f.length; }
+  return out;
+}
+
+function ybrFullToRgbInPlace(px) {
+  for (let k = 0; k < px.length; k += 3) {
+    const Y = px[k], Cb = px[k+1] - 128, Cr = px[k+2] - 128;
+    let r = Y + 1.402 * Cr, g = Y - 0.344136 * Cb - 0.714136 * Cr, b = Y + 1.772 * Cb;
+    px[k]   = r < 0 ? 0 : r > 255 ? 255 : Math.round(r);
+    px[k+1] = g < 0 ? 0 : g > 255 ? 255 : Math.round(g);
+    px[k+2] = b < 0 ? 0 : b > 255 ? 255 : Math.round(b);
+  }
+}
+
+// Farb-JPEG (Baseline 8 Bit) über den Browser-Decoder
+async function decodeJpegViaBrowser(jpegBytes) {
+  const bmp = await createImageBitmap(new Blob([jpegBytes], { type: 'image/jpeg' }));
+  const c = document.createElement('canvas');
+  c.width = bmp.width; c.height = bmp.height;
+  const cx = c.getContext('2d');
+  cx.drawImage(bmp, 0, 0);
+  const rgba = cx.getImageData(0, 0, c.width, c.height).data;
+  const n = c.width * c.height, out = new Uint8Array(n * 3);
+  for (let k = 0, o = 0; k < n * 4; k += 4, o += 3) { out[o] = rgba[k]; out[o+1] = rgba[k+1]; out[o+2] = rgba[k+2]; }
+  return { pixels: out, width: c.width, height: c.height };
+}
+
+async function decodePixelData(dicom, buf) {
+  if (!dicom.pixTag) throw new Error('Kein Pixel-Datenelement (7FE0,0010) gefunden.\nTransfer-Syntax: ' + dicom.transferSyntax);
+  let w = dicom.getU16(0x00280011) || 0;
+  let h = dicom.getU16(0x00280010) || 0;
+  const bitsAlloc = dicom.getU16(0x00280100) || 16;
+  const bitsStored = dicom.getU16(0x00280101) || bitsAlloc;
+  const pixelRep  = dicom.getU16(0x00280103) || 0;
+  const spp       = dicom.getU16(0x00280002) || 1;
+  const planar    = dicom.getU16(0x00280006) || 0;
+  const photo     = (dicom.getStr(0x00280004) || '').toUpperCase();
+  const ts   = dicom.transferSyntax;
+  const mode = KNOWN_TS[ts] || 'explicit_le';
+
+  if (mode === 'jpeg_lossless' || mode === 'jpeg_dct') {
+    const jpeg = getEncapsulatedFrame(dicom);
+    if (mode === 'jpeg_lossless') {
+      const res = decodeJpegLossless(jpeg);
+      if (res.components >= 3) {
+        const n = res.width * res.height;
+        const out = res.precision <= 8 ? new Uint8Array(n * 3) : new Uint16Array(n * 3);
+        const nc = res.components;
+        for (let k = 0, o = 0, s = 0; k < n; k++, o += 3, s += nc) {
+          out[o] = res.pixels[s]; out[o+1] = res.pixels[s+1]; out[o+2] = res.pixels[s+2];
+        }
+        if (photo.startsWith('YBR') && res.precision <= 8) ybrFullToRgbInPlace(out);
+        return { pixels: out, width: res.width, height: res.height, spp: 3, maxVal: (1 << res.precision) - 1 };
+      }
+      return { pixels: res.pixels, width: res.width, height: res.height, spp: 1 };
+    }
+    // DCT: Farbe über Browser, Graustufen (auch 12 Bit) über eigenen Decoder
+    if (spp >= 3) {
+      const res = await decodeJpegViaBrowser(jpeg);
+      return { pixels: res.pixels, width: res.width, height: res.height, spp: 3, maxVal: 255 };
+    }
+    const res = decodeJpegDCT(jpeg);
+    const pd = new Int16Array(res.pixels.length);
+    for (let k = 0; k < res.pixels.length; k++) pd[k] = res.pixels[k];
+    return { pixels: pd, width: res.width, height: res.height, spp: 1 };
   }
 
-  if(scanStart<0) throw new Error('JPEG Lossless: SOS nicht gefunden');
-  stream.pos=scanStart;
+  if (mode === 'explicit_le' || mode === 'implicit_le' || mode === 'explicit_be') {
+    const pt = dicom.pixTag;
+    const rawLen = (pt.length === 0xFFFFFFFF) ? (buf.byteLength - pt.valueOff) : pt.length;
+    const raw = new Uint8Array(buf, pt.valueOff, Math.min(rawLen, buf.byteLength - pt.valueOff));
 
-  const huff=huffTables[0]; // DC table 0
-  const MOD=1<<precision, MASK=MOD-1;
-  const Ra0=1<<(precision-1);
-
-  // Use Uint16Array internally, reinterpret as Int16 at the end
-  const pU=new Uint16Array(width*height);
-
-  for(let row=0;row<height;row++){
-    for(let col=0;col<width;col++){
-      const t=stream.decodeHuffman(huff);
-      // JPEG standard: category 16 = fixed diff of 32768, no extra bits
-      const diff=t===16?32768:extend(t>0?stream.readBits(t):0,t);
-      let pred;
-      const idx=row*width+col;
-      if(col===0&&row===0){
-        pred=Ra0;
-      } else if(predictor===1){
-        pred=col===0 ? pU[(row-1)*width] : pU[idx-1];
-      } else if(predictor===2){
-        pred=pU[(row-1)*width+col];
-      } else if(predictor===3){
-        pred=pU[(row-1)*width+col-1];
-      } else if(predictor===4){
-        const Ra=pU[idx-1], Rb=pU[(row-1)*width+col], Rc=pU[(row-1)*width+col-1];
-        pred=Ra+Rb-Rc;
-      } else if(predictor===5){
-        const Ra=pU[idx-1], Rb=pU[(row-1)*width+col], Rc=pU[(row-1)*width+col-1];
-        pred=Ra+((Rb-Rc)>>1);
-      } else if(predictor===6){
-        const Ra=pU[idx-1], Rb=pU[(row-1)*width+col], Rc=pU[(row-1)*width+col-1];
-        pred=Rb+((Ra-Rc)>>1);
+    if (spp >= 3) {
+      const n = w * h;
+      const is16 = bitsAlloc === 16;
+      const src = is16 ? new Uint16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + n * 3 * 2)) : raw;
+      const out = is16 ? new Uint16Array(n * 3) : new Uint8Array(n * 3);
+      if (planar === 1) {
+        for (let k = 0; k < n; k++) { out[k*3] = src[k]; out[k*3+1] = src[n+k]; out[k*3+2] = src[2*n+k]; }
       } else {
-        const Ra=pU[idx-1], Rb=pU[(row-1)*width+col];
-        pred=(Ra+Rb)>>1;
+        out.set(src.subarray(0, n * 3));
       }
-      pU[idx]=(pred+diff)&MASK;
+      if (photo.startsWith('YBR') && !is16) ybrFullToRgbInPlace(out);
+      return { pixels: out, width: w, height: h, spp: 3, maxVal: (1 << Math.min(bitsStored, 16)) - 1 };
     }
+
+    let pd;
+    if (bitsAlloc === 16) {
+      const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength - (raw.byteLength & 1)));
+      if (pixelRep === 1) pd = new Int16Array(src.buffer);
+      else {
+        const u = new Uint16Array(src.buffer); pd = new Int16Array(u.length);
+        for (let k = 0; k < u.length; k++) pd[k] = u[k] > 32767 ? u[k] - 65536 : u[k];
+      }
+    } else {
+      pd = new Int16Array(raw.length);
+      for (let k = 0; k < raw.length; k++) pd[k] = raw[k];
+    }
+    return { pixels: pd, width: w, height: h, spp: 1 };
   }
-  // Reinterpret as signed int16
-  return { pixels:new Int16Array(pU.buffer), width, height };
+  throw new Error(`Transfer-Syntax nicht unterstützt: ${ts}\n(${mode})`);
+}
+
+// RGB → Luminanz (für 3D-Volumen)
+function rgbToLuma(px) {
+  const n = px.length / 3, out = new Int16Array(n);
+  for (let k = 0, s = 0; k < n; k++, s += 3) out[k] = Math.round(0.299 * px[s] + 0.587 * px[s+1] + 0.114 * px[s+2]);
+  return out;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1175,6 +1393,7 @@ function decodeJpegLossless(jpegBytes) {
 // ═══════════════════════════════════════════════════════════════
 let files=[], currentIdx=0;
 let pixelData=null, imgW=0, imgH=0;
+let samplesPP=1;   // 1 = Graustufen, 3 = RGB (pixelData verschachtelt)
 let slope=1, intercept=0;
 let zoom=1, panX=0, panY=0, rotation=0;
 let dragging=false, dragStart={x:0,y:0};
@@ -1344,66 +1563,30 @@ async function displayFrame(idx){
   const {name,buf,dicom}=files[idx];
   clearError(); showSpinner('Lade Bilddaten…');
   try{
-    imgW=dicom.getU16(0x00280011)||0;
-    imgH=dicom.getU16(0x00280010)||0;
-    const bitsAlloc=dicom.getU16(0x00280100)||16;
-    const pixelRep =dicom.getU16(0x00280103)||0;
-    slope    =parseFloat(dicom.getStr(0x00281053)||'1')||1;
-    intercept=parseFloat(dicom.getStr(0x00281052)||'0')||0;
-
-    if(!dicom.pixTag) throw new Error('Kein Pixel-Datenelement (7FE0,0010) gefunden.\nTransfer-Syntax: '+dicom.transferSyntax);
-
     const ts=dicom.transferSyntax;
     const mode=KNOWN_TS[ts]||'explicit_le';
-
     if(mode==='jpeg_lossless'||mode==='jpeg_dct'){
-      const label = mode==='jpeg_lossless' ? 'JPEG Lossless' : 'JPEG DCT (12-bit)';
-      showSpinner(`Dekomprimiere ${label}…`);
-      const u8f=dicom.u8;
-      let jStart=-1;
-      for(let s=dicom.pixTag.valueOff; s<Math.min(dicom.pixTag.valueOff+256,u8f.length-1); s++){
-        if(u8f[s]===0xFF&&u8f[s+1]===0xD8){jStart=s;break;}
-      }
-      if(jStart<0) throw new Error('JPEG SOI-Marker nicht in Pixel-Daten gefunden');
-      let jEnd=jStart+2;
-      while(jEnd<u8f.length-1){if(u8f[jEnd]===0xFF&&u8f[jEnd+1]===0xD9){jEnd+=2;break;}jEnd++;}
+      showSpinner(`Dekomprimiere ${mode==='jpeg_lossless'?'JPEG Lossless':'JPEG DCT'}…`);
       await new Promise(r=>setTimeout(r,10));
-      const res = mode==='jpeg_lossless'
-        ? decodeJpegLossless(u8f.slice(jStart,jEnd))
-        : decodeJpegDCT(u8f.slice(jStart,jEnd));
-      // DCT returns Int32Array (unsigned), lossless returns Int16Array (signed)
-      // Normalize both to Int16Array with rescale applied at render time
-      if(mode==='jpeg_dct'){
-        pixelData=new Int16Array(res.pixels.length);
-        for(let pi=0;pi<res.pixels.length;pi++) pixelData[pi]=res.pixels[pi];
-      } else {
-        pixelData=res.pixels;
-      }
-      imgW=res.width; imgH=res.height;
-
-    } else if(mode==='explicit_le'||mode==='implicit_le'||mode==='explicit_be'){
-      const pt=dicom.pixTag;
-      const rawLen2=(pt.length===0xFFFFFFFF||pt.length===4294967295)?(buf.byteLength-pt.valueOff):pt.length;
-      const raw=new Uint8Array(buf, pt.valueOff, rawLen2);
-      if(bitsAlloc===16){
-        const src=new Uint8Array(raw.buffer.slice(raw.byteOffset,raw.byteOffset+raw.byteLength));
-        pixelData=pixelRep===1
-          ? new Int16Array(src.buffer)
-          : (()=>{ const u=new Uint16Array(src.buffer); const s=new Int16Array(u.length); for(let i=0;i<u.length;i++) s[i]=u[i]>32767?u[i]-65536:u[i]; return s; })();
-      } else {
-        pixelData=new Int16Array(raw.length);
-        for(let i=0;i<raw.length;i++) pixelData[i]=raw[i];
-      }
-    } else {
-      throw new Error(`Transfer-Syntax nicht unterstützt: ${ts}\n(${mode})`);
     }
+    const dec=await decodePixelData(dicom,buf);
+    pixelData=dec.pixels; imgW=dec.width; imgH=dec.height; samplesPP=dec.spp;
 
-    // Auto window
-    let mn=Infinity,mx=-Infinity;
-    for(let i=0;i<pixelData.length;i++){const v=pixelData[i]*slope+intercept;if(v<mn)mn=v;if(v>mx)mx=v;}
-    let ww=parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
-    let wc=parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
-    if(!ww){ww=mx-mn;wc=(mx+mn)/2;}
+    let ww, wc;
+    if(samplesPP===3){
+      // Farbbild: Rescale gilt nicht, Fenster = voller Wertebereich (1:1-Darstellung)
+      slope=1; intercept=0;
+      ww=dec.maxVal||255; wc=Math.ceil(ww/2);
+    } else {
+      slope    =parseFloat(dicom.getStr(0x00281053)||'1')||1;
+      intercept=parseFloat(dicom.getStr(0x00281052)||'0')||0;
+      // Auto window
+      let mn=Infinity,mx=-Infinity;
+      for(let i=0;i<pixelData.length;i++){const v=pixelData[i]*slope+intercept;if(v<mn)mn=v;if(v>mx)mx=v;}
+      ww=parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
+      wc=parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
+      if(!ww){ww=mx-mn;wc=(mx+mn)/2;}
+    }
 
     const slWW=document.getElementById('sl-ww'), slWC=document.getElementById('sl-wc');
     const wwR=Math.max(ww*3,8000), wcR=Math.max(Math.abs(wc)*3,4000);
@@ -1415,7 +1598,7 @@ async function displayFrame(idx){
     renderFrame();
     showMeta(dicom,name);
     // Cache pixel data for thumbnail (store reference, not copy)
-    cacheThumbData(idx, pixelData, imgW, imgH, slope, intercept);
+    cacheThumbData(idx, pixelData, imgW, imgH, slope, intercept, samplesPP);
     updateFileList();
     showViewer();
     document.getElementById('slice-info').textContent=
@@ -1435,6 +1618,19 @@ function renderFrame(){
   const lo=wc-ww/2, scale=255/(ww);
   const id=ctx.createImageData(imgW,imgH);
   const d=id.data;
+  if(samplesPP===3){
+    // RGB: Fenster je Kanal über Lookup-Tabelle
+    const maxV=(pixelData instanceof Uint8Array)?255:65535;
+    const lut=new Uint8Array(maxV+1);
+    for(let x=0;x<=maxV;x++){let v=Math.round((x-lo)*scale);if(v<0)v=0;else if(v>255)v=255;lut[x]=inv?255-v:v;}
+    const n=imgW*imgH;
+    for(let i=0,s=0,k=0;i<n;i++,s+=3,k+=4){
+      d[k]=lut[pixelData[s]]; d[k+1]=lut[pixelData[s+1]]; d[k+2]=lut[pixelData[s+2]]; d[k+3]=255;
+    }
+    ctx.putImageData(id,0,0);
+    applyTransform();
+    return;
+  }
   for(let i=0;i<pixelData.length;i++){
     const hu=pixelData[i]*slope+intercept;
     let v=Math.round((hu-lo)*scale);
@@ -1505,6 +1701,11 @@ canvas.addEventListener('mousemove',e=>{
   const px=Math.floor((e.clientX-r.left)/r.width*imgW);
   const py=Math.floor((e.clientY-r.top)/r.height*imgH);
   if(px>=0&&px<imgW&&py>=0&&py<imgH){
+    if(samplesPP===3){
+      const s=(py*imgW+px)*3;
+      document.querySelector('#pixel-val span').textContent=`RGB ${pixelData[s]},${pixelData[s+1]},${pixelData[s+2]}  (${px}, ${py})`;
+      return;
+    }
     const hu=pixelData[py*imgW+px]*slope+intercept;
     document.querySelector('#pixel-val span').textContent=`HU ${Math.round(hu)}  (${px}, ${py})`;
   }
@@ -1525,13 +1726,22 @@ const META_TAGS=[
   [0x0008103E,'Serie'],[0x00080060,'Modalität'],[0x00080070,'Hersteller'],
   [0x00081090,'Modell'],[0x00180060,'kVp'],[0x00280030,'Pixelabstand'],
   [0x00280010,'Zeilen'],[0x00280011,'Spalten'],[0x00280100,'Bits'],
+  [0x00280004,'Photometrie'],
   [0x00281053,'Slope'],[0x00281052,'Intercept'],[0x00200013,'Instanz-Nr.'],
   [0x00020010,'Transfer Syntax'],
 ];
 function showMeta(dicom,filename){
   let h=`<tr><td>Datei</td><td style="word-break:break-all">${filename}</td></tr>`;
+  const US_TAGS=new Set([0x00280010,0x00280011,0x00280100,0x00280101,0x00280002]);
+  const utf8=(dicom.getStr(0x00080005)||'').includes('ISO_IR 192');
   for(const [key,label] of META_TAGS){
-    let val=dicom.getStr(key)||'—';
+    let val;
+    if(US_TAGS.has(key)){ const n=dicom.getU16(key); val=(n===undefined)?'—':String(n); }
+    else {
+      val=dicom.getStr(key)||'—';
+      if(utf8&&val!=='—'){ try{ val=new TextDecoder('utf-8').decode(Uint8Array.from(val,c=>c.charCodeAt(0)&0xFF)); }catch(e){} }
+    }
+    val=val.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
     if(key===0x00100010&&val!=='—') val='█████████';
     h+=`<tr><td>${label}</td><td>${val}</td></tr>`;
   }
@@ -1558,62 +1768,28 @@ async function scheduleThumbnails(skipIdx) {
 
 async function decodeForThumb(idx) {
   const {buf, dicom} = files[idx];
-  const w  = dicom.getU16(0x00280011)||0;
-  const h  = dicom.getU16(0x00280010)||0;
-  const sl = parseFloat(dicom.getStr(0x00281053)||'1')||1;
-  const ic = parseFloat(dicom.getStr(0x00281052)||'0')||0;
-  const ts = dicom.transferSyntax;
-  const mode = KNOWN_TS[ts]||'explicit_le';
-  const bitsAlloc = dicom.getU16(0x00280100)||16;
-  const pixelRep  = dicom.getU16(0x00280103)||0;
+  if (!dicom.pixTag) return;
+  await new Promise(r=>setTimeout(r,0));
+  const dec = await decodePixelData(dicom, buf);
+  const pd = dec.pixels, w = dec.width, h = dec.height, spp = dec.spp;
+  let sl = parseFloat(dicom.getStr(0x00281053)||'1')||1;
+  let ic = parseFloat(dicom.getStr(0x00281052)||'0')||0;
 
-  let pd;
-  if (mode === 'jpeg_lossless' || mode === 'jpeg_dct') {
-    const u8f = dicom.u8;
-    let jStart = -1;
-    for (let s=dicom.pixTag.valueOff; s<Math.min(dicom.pixTag.valueOff+256,u8f.length-1); s++) {
-      if (u8f[s]===0xFF && u8f[s+1]===0xD8) { jStart=s; break; }
-    }
-    if (jStart < 0) return;
-    let jEnd = jStart+2;
-    while (jEnd < u8f.length-1) { if(u8f[jEnd]===0xFF&&u8f[jEnd+1]===0xD9){jEnd+=2;break;} jEnd++; }
-    await new Promise(r=>setTimeout(r,0));
-    const res = mode==='jpeg_lossless'
-      ? decodeJpegLossless(u8f.slice(jStart, jEnd))
-      : decodeJpegDCT(u8f.slice(jStart, jEnd));
-    if (mode === 'jpeg_dct') {
-      pd = new Int16Array(res.pixels.length);
-      for (let pi=0; pi<res.pixels.length; pi++) pd[pi] = res.pixels[pi];
-    } else {
-      pd = res.pixels;
-    }
+  let ww, wc;
+  if (spp === 3) {
+    sl = 1; ic = 0; ww = dec.maxVal||255; wc = Math.ceil(ww/2);
   } else {
-    const pt = dicom.pixTag;
-    if (!pt) return;
-    const rawLen = (pt.length === 0xFFFFFFFF || pt.length === 4294967295)
-            ? (buf.byteLength - pt.valueOff) : pt.length;
-        const raw = new Uint8Array(buf, pt.valueOff, rawLen);
-    if (bitsAlloc === 16) {
-      const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset+raw.byteLength));
-      pd = pixelRep===1 ? new Int16Array(src.buffer)
-        : (()=>{ const u=new Uint16Array(src.buffer); const s=new Int16Array(u.length);
-                 for(let i=0;i<u.length;i++) s[i]=u[i]>32767?u[i]-65536:u[i]; return s; })();
-    } else {
-      pd = new Int16Array(raw.length);
-      for (let i=0; i<raw.length; i++) pd[i] = raw[i];
+    // Use same window as currently displayed (or auto)
+    ww = parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
+    wc = parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
+    if (!ww) {
+      let mn=Infinity, mx=-Infinity;
+      for (let i=0; i<pd.length; i++) { const v=pd[i]*sl+ic; if(v<mn)mn=v; if(v>mx)mx=v; }
+      ww=mx-mn; wc=(mx+mn)/2;
     }
   }
 
-  // Use same window as currently displayed (or auto)
-  let ww = parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
-  let wc = parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
-  if (!ww) {
-    let mn=Infinity, mx=-Infinity;
-    for (let i=0; i<pd.length; i++) { const v=pd[i]*sl+ic; if(v<mn)mn=v; if(v>mx)mx=v; }
-    ww=mx-mn; wc=(mx+mn)/2;
-  }
-
-  thumbCache.set(idx, {pixData:pd, w, h, sl, ic, ww, wc});
+  thumbCache.set(idx, {pixData:pd, w, h, sl, ic, ww, wc, spp});
 
   // Update the thumb element if it exists
   const strip = document.getElementById('filmstrip');
@@ -1632,6 +1808,7 @@ function renderThumb(idx) {
   const cached = thumbCache.get(idx);
   if (!cached) return;
   const {pixData, w, h, sl, ic, ww, wc} = cached;
+  const spp = cached.spp || 1;
   const tc = document.createElement('canvas');
   tc.width = 72; tc.height = 72;
   const tx = tc.getContext('2d');
@@ -1643,10 +1820,19 @@ function renderThumb(idx) {
     for (let tx2=0; tx2<72; tx2++) {
       const sx = Math.floor(tx2 * w / 72);
       const sy = Math.floor(ty  * h / 72);
+      const k=(ty*72+tx2)*4;
+      if (spp === 3) {
+        const s=(sy*w+sx)*3;
+        for (let c=0; c<3; c++) {
+          let v = Math.round((pixData[s+c]-lo)*scale);
+          d[k+c] = v<0?0:v>255?255:v;
+        }
+        d[k+3]=255;
+        continue;
+      }
       const hu = pixData[sy*w+sx]*sl+ic;
       let v = Math.round((hu-lo)*scale);
       if(v<0)v=0; else if(v>255)v=255;
-      const k=(ty*72+tx2)*4;
       d[k]=d[k+1]=d[k+2]=v; d[k+3]=255;
     }
   }
@@ -1698,12 +1884,12 @@ function updateFilmstrip() {
   if (active) active.scrollIntoView({behavior:'smooth', block:'nearest', inline:'center'});
 }
 
-function cacheThumbData(idx, pd, w, h, sl, ic) {
+function cacheThumbData(idx, pd, w, h, sl, ic, spp) {
   // Store a downsampled copy for thumbnail rendering (avoid re-parsing)
   // Use current window values at time of loading
   const ww = parseInt(document.getElementById('sl-ww').value);
   const wc = parseInt(document.getElementById('sl-wc').value);
-  thumbCache.set(idx, {pixData:pd, w, h, sl, ic, ww, wc});
+  thumbCache.set(idx, {pixData:pd, w, h, sl, ic, ww, wc, spp: spp||1});
 }
 
 function updateFileList(){
@@ -1826,55 +2012,27 @@ async function buildVolume() {
     const d = f.dicom;
     const posStr = d.getStr(0x00200032); // ImagePositionPatient
     const zPos = posStr ? parseFloat(posStr.split('\\').pop()) : i;
-    const w = d.getU16(0x00280011) || 0;
-    const h = d.getU16(0x00280010) || 0;
-    const sl = parseFloat(d.getStr(0x00281053) || '1') || 1;
-    const ic = parseFloat(d.getStr(0x00281052) || '0') || 0;
+    let w = d.getU16(0x00280011) || 0;
+    let h = d.getU16(0x00280010) || 0;
+    let sl = parseFloat(d.getStr(0x00281053) || '1') || 1;
+    let ic = parseFloat(d.getStr(0x00281052) || '0') || 0;
     const spacingStr = d.getStr(0x00280030);
     const spacingXY = spacingStr ? spacingStr.split('\\').map(Number) : [1,1];
 
     // Get pixel data (may already be cached in thumbCache)
-    let pd;
+    let pd, spp = 1;
     if (thumbCache.has(i)) {
-      pd = thumbCache.get(i).pixData;
+      const tc = thumbCache.get(i);
+      pd = tc.pixData; spp = tc.spp || 1; w = tc.w; h = tc.h;
     } else {
-      // Need to decode
-      const ts = d.transferSyntax;
-      const mode = KNOWN_TS[ts] || 'explicit_le';
-      const bitsAlloc = d.getU16(0x00280100) || 16;
-      const pixelRep = d.getU16(0x00280103) || 0;
-
-      if (mode === 'jpeg_lossless' || mode === 'jpeg_dct') {
-        const u8f = d.u8;
-        let jStart = -1;
-        for (let s = d.pixTag.valueOff; s < Math.min(d.pixTag.valueOff+256, u8f.length-1); s++) {
-          if (u8f[s] === 0xFF && u8f[s+1] === 0xD8) { jStart = s; break; }
-        }
-        if (jStart < 0) continue;
-        let jEnd = jStart + 2;
-        while (jEnd < u8f.length-1) { if (u8f[jEnd]===0xFF && u8f[jEnd+1]===0xD9) { jEnd+=2; break; } jEnd++; }
-        const res = mode === 'jpeg_lossless'
-          ? decodeJpegLossless(u8f.slice(jStart, jEnd))
-          : decodeJpegDCT(u8f.slice(jStart, jEnd));
-        pd = mode === 'jpeg_dct' ? new Int16Array(res.pixels.length) : res.pixels;
-        if (mode === 'jpeg_dct') for (let pi = 0; pi < res.pixels.length; pi++) pd[pi] = res.pixels[pi];
-      } else {
-        const pt = d.pixTag;
-        if (!pt) continue;
-        const rawLen3 = (pt.length === 0xFFFFFFFF || pt.length === 4294967295)
-              ? (f.buf.byteLength - pt.valueOff) : pt.length;
-        const raw = new Uint8Array(f.buf, pt.valueOff, rawLen3);
-        if (bitsAlloc === 16) {
-          const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset+raw.byteLength));
-          pd = pixelRep === 1 ? new Int16Array(src.buffer)
-            : (() => { const u = new Uint16Array(src.buffer); const s = new Int16Array(u.length);
-                       for (let i2=0;i2<u.length;i2++) s[i2]=u[i2]>32767?u[i2]-65536:u[i2]; return s; })();
-        } else {
-          pd = new Int16Array(raw.length);
-          for (let i2=0; i2<raw.length; i2++) pd[i2] = raw[i2];
-        }
-      }
+      if (!d.pixTag) continue;
+      try {
+        const dec = await decodePixelData(d, f.buf);
+        pd = dec.pixels; spp = dec.spp; w = dec.width; h = dec.height;
+      } catch (e) { console.warn('Volumen: ' + f.name + ': ' + e.message); continue; }
     }
+    // Farbbilder: für das Volumen in Luminanz umrechnen
+    if (spp === 3) { pd = rgbToLuma(pd); sl = 1; ic = 0; }
 
     slices.push({ zPos, pd, w, h, sl, ic, spacingXY });
     // Read SliceThickness once
