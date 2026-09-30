@@ -75,6 +75,11 @@
   th{color:var(--muted);font-weight:600;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em;}
   tr.skip{opacity:.55;}
   tr.skip td{text-decoration:line-through;}
+  tr.srow{cursor:pointer;}
+  tr.srow:hover td{background:#1c2230;}
+  tr.srow.unsel td{opacity:.45;}
+  tr.srow input[type=checkbox]{cursor:pointer;width:1rem;height:1rem;accent-color:var(--accent);}
+  .selinfo{color:var(--muted);font-size:.85rem;}
   .badge{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.72rem;font-weight:700;text-transform:uppercase;}
   .badge.ok{background:rgba(61,220,151,.15);color:var(--ok);}
   .badge.skip{background:rgba(139,147,163,.15);color:var(--muted);}
@@ -185,6 +190,11 @@
     <h2>3. Ergebnis</h2>
     <div id="messages"></div>
     <div class="summary-grid" id="summary"></div>
+    <div class="row" id="selRow">
+      <button class="secondary small" id="selAllBtn">✓ Alle auswählen</button>
+      <button class="secondary small" id="selNoneBtn">✗ Alle abwählen</button>
+      <span class="selinfo" id="selInfo"></span>
+    </div>
     <div id="tableWrap"></div>
     <div class="row">
       <button id="downloadBtn" disabled>SEPA-XML herunterladen</button>
@@ -575,7 +585,8 @@ function parseCsv(text) {
       mandateId: mandateIdRaw,
       mandateDate: validateDate(mandateDateRaw, `${label} Mandats-datum`),
       sequenceType: "RCUR",
-      description: "Jahresbeitrag"
+      description: "Jahresbeitrag",
+      selected: true
     };
     debitors.push(entry);
   });
@@ -801,6 +812,7 @@ function processCsv(text) {
   showXmlBtn.disabled = true;
   xmlDetails.style.display = "none";
   generatedXml = null;
+  selInfo.textContent = "";
 
   try {
     parsedData = parseCsv(text);
@@ -852,13 +864,16 @@ function renderResults() {
   const painVersion = painVersionSelect.value;
   creditor.painVersion = painVersion;
 
-  const totalAmount = debitors.reduce((s,d) => s + d.amount, 0);
+  // Nur ausgewählte Schuldner gehen in die XML
+  const sel = debitors.filter(d => d.selected);
+  const totalAmount = sel.reduce((s,d) => s + d.amount, 0);
+  selInfo.textContent = `${sel.length} von ${debitors.length} ausgewählt`;
 
   // Lead-time check
   const today = new Date();
   today.setUTCHours(0,0,0,0);
   const todayUtc = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
-  const seqTypes = new Set(debitors.map(d => d.sequenceType));
+  const seqTypes = new Set((sel.length ? sel : debitors).map(d => d.sequenceType));
   const requiredDays = Math.max(...[...seqTypes].map(s => LEAD_DAYS[s]));
   const deltaDays = Math.round((collDate - todayUtc) / 86400000);
 
@@ -875,7 +890,12 @@ function renderResults() {
     msgs.push(`<div class="msg warn">⏭ ${skipped.length} Einträge übersprungen:<br>${items}</div>`);
   }
 
-  msgs.push(`<div class="msg ok">✅ ${debitors.length} gültige Schuldner-Einträge, Gesamtbetrag ${totalAmount.toFixed(2)} EUR.</div>`);
+  if (sel.length) {
+    const part = sel.length < debitors.length ? ` (von ${debitors.length} gültigen)` : "";
+    msgs.push(`<div class="msg ok">✅ ${sel.length} Schuldner ausgewählt${part}, Gesamtbetrag ${totalAmount.toFixed(2)} EUR.</div>`);
+  } else {
+    msgs.push(`<div class="msg err">Keine Schuldner ausgewählt – bitte mindestens einen Eintrag anhaken.</div>`);
+  }
   messagesDiv.innerHTML = msgs.join("");
 
   // Summary stats
@@ -884,14 +904,15 @@ function renderResults() {
     <div class="stat"><span class="k">Gläubiger-IBAN</span><span class="v">${esc(creditor.iban)}</span></div>
     <div class="stat"><span class="k">Format</span><span class="v">${esc(painVersion)}</span></div>
     <div class="stat"><span class="k">Einzugsdatum</span><span class="v">${fmtDate(collDate)}</span></div>
-    <div class="stat"><span class="k">Anzahl Lastschriften</span><span class="v">${debitors.length}</span></div>
+    <div class="stat"><span class="k">Anzahl Lastschriften</span><span class="v">${sel.length}</span></div>
     <div class="stat"><span class="k">Gesamtbetrag</span><span class="v">${totalAmount.toFixed(2)} EUR</span></div>
   `;
 
   // Table
   let rows = "";
-  for (const d of debitors) {
-    rows += `<tr>
+  debitors.forEach((d, i) => {
+    rows += `<tr class="srow${d.selected ? "" : " unsel"}" data-di="${i}">
+      <td><input type="checkbox" data-di="${i}"${d.selected ? " checked" : ""}></td>
       <td>${d.row}</td>
       <td>${esc(d.name)}</td>
       <td>${esc(d.iban)}</td>
@@ -899,34 +920,62 @@ function renderResults() {
       <td>${d.amount.toFixed(2)}</td>
       <td>${esc(d.mandateId)}</td>
       <td>${fmtDate(d.mandateDate)}</td>
-      <td><span class="badge ok">OK</span></td>
+      <td>${d.selected ? `<span class="badge ok">OK</span>` : `<span class="badge skip">aus</span>`}</td>
     </tr>`;
-  }
+  });
   for (const s of skipped) {
     rows += `<tr class="skip">
+      <td></td>
       <td>${s.row}</td>
       <td>${esc(s.name)}</td>
       <td colspan="5">${esc(s.reason)}</td>
       <td><span class="badge skip">SKIP</span></td>
     </tr>`;
   }
-  tableWrap.innerHTML = `<table>
+  tableWrap.innerHTML = `<div class="tscroll"><table>
     <thead><tr>
-      <th>Zeile</th><th>Name</th><th>IBAN</th><th>BIC</th><th>Betrag</th><th>Mandats-Nr.</th><th>Mandatsdatum</th><th>Status</th>
+      <th style="width:1.8rem"></th><th>Zeile</th><th>Name</th><th>IBAN</th><th>BIC</th><th>Betrag</th><th>Mandats-Nr.</th><th>Mandatsdatum</th><th>Status</th>
     </tr></thead>
     <tbody>${rows}</tbody>
-  </table>`;
+  </table></div>`;
 
   // Generate XML
+  generatedXml = null;
+  downloadBtn.disabled = true;
+  showXmlBtn.disabled = true;
+  if (!sel.length) {
+    xmlDetails.style.display = "none";
+    return;
+  }
   try {
-    generatedXml = buildXml(creditor, debitors, fmtDate(collDate));
+    generatedXml = buildXml(creditor, sel, fmtDate(collDate));
     downloadBtn.disabled = false;
     showXmlBtn.disabled = false;
+    // offene Vorschau aktuell halten
+    if (xmlDetails.style.display !== "none") xmlPreview.textContent = generatedXml;
   } catch (e) {
     showError("Fehler beim Erzeugen der XML: " + e.message);
     generatedXml = null;
   }
 }
+
+/* Auswahl einzelner Schuldner */
+const selInfo = document.getElementById("selInfo");
+function setAllSelected(v) {
+  if (!parsedData) return;
+  parsedData.debitors.forEach(d => d.selected = v);
+  renderResults();
+}
+document.getElementById("selAllBtn").addEventListener("click", () => setAllSelected(true));
+document.getElementById("selNoneBtn").addEventListener("click", () => setAllSelected(false));
+tableWrap.addEventListener("click", e => {
+  const tr = e.target.closest("tr.srow");
+  if (!tr || !parsedData) return;
+  const d = parsedData.debitors[+tr.dataset.di];
+  // Klick auf Checkbox oder irgendwo in der Zeile schaltet um
+  d.selected = e.target.matches("input[type=checkbox]") ? e.target.checked : !d.selected;
+  renderResults();
+});
 
 downloadBtn.addEventListener("click", () => {
   if (!generatedXml) return;
