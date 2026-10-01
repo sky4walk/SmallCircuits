@@ -862,6 +862,652 @@ got1:
 ` }
 };
 
+// ===== Universelle Turingmaschine (Beispiele) =====
+Object.assign(EXAMPLES, {
+  utm_inc: { w: 32, title: 'UTM: Binärzahl + 1', input: '',
+    desc: 'Universelle Turingmaschine (w = 32). Oben im Quelltext steht die simulierte Maschine als Daten: Alphabet, Band, Startzustand und Übergangstabelle. Der Interpreter darunter bleibt für jede Maschine gleich. Turbo drücken: aus 1011 wird 1100.',
+    src: String.raw`// =====================================================================
+//  Universelle Turingmaschine in FlipJump  (w = 32)
+//
+//  Oben steht die zu simulierende Maschine als Daten: Alphabet, Band,
+//  Startzustand und Übergangstabelle. Darunter folgt der Interpreter,
+//  der für jede Maschine gleich bleibt.
+// =====================================================================
+
+// ---------- Die Maschine: Binärzahl um 1 erhöhen ----------
+
+SYM0 = '_'          // Symbol 0 ist immer das Leerzeichen
+SYM1 = '0'
+SYM2 = '1'
+SYM3 = 'x'
+
+Q      = 2          // Anzahl Zustände 0 .. Q-1, Zustand Q heißt HALT
+START  = 0          // Startzustand
+ZELLEN = 16         // Bandlänge
+HEAD   = 2          // Startposition des Kopfes
+TAPE   = "1011"     // Bandinhalt ab der Kopfposition
+
+// Hilfskonstanten (nicht ändern; sie müssen vor den Makros stehen)
+dw   = 2*w
+L    = 0                  // nach links
+R    = 1                  // nach rechts
+N    = 2                  // stehen bleiben
+HALT = Q
+QT   = 1 << (#Q)          // Zweierpotenz > Q für die Zustandstabelle
+P    = 512                // Befehle pro Zellblock
+CS   = P*dw               // Abstand zweier Zellblöcke in Bit
+
+// Übergangstabelle: pro Zustand genau vier Zeilen,
+// in der Reihenfolge der gelesenen Symbole SYM0, SYM1, SYM2, SYM3.
+//   t neuer_zustand, zu_schreibendes_symbol, richtung   (L, R oder N)
+//   stop                                                (sofort anhalten)
+def regeln {
+    // Zustand 0: nach rechts bis hinter die Zahl laufen
+    t 1,    '_', L      // liest '_'
+    t 0,    '0', R      // liest '0'
+    t 0,    '1', R      // liest '1'
+    stop                // liest 'x'
+    // Zustand 1: Übertrag von rechts nach links
+    t HALT, '1', N      // liest '_'
+    t HALT, '1', N      // liest '0'
+    t 1,    '0', L      // liest '1'
+    stop                // liest 'x'
+}
+
+// =====================================================================
+//  Interpreter – ab hier nichts ändern
+// =====================================================================
+//
+//  Bandzelle   : ein Befehl ";s*dw" (s = Symbolnummer 0..3) in einem
+//                eigenen Zellblock, der seine Nachbarn kennt.
+//  Kopf        : der Zellblock, in dem die IP gerade steht.
+//  Zustand     : Variable STATE = ";q*dw".
+//  Regel (q,s) : ein Befehl in TABLE, der in eine Handlerbank springt.
+//                Ein Handler setzt den neuen Zustand und meldet
+//                (neues Symbol, Richtung) per Rücksprungadresse RET.
+//
+//  Ablauf eines Schritts in Zelle i:
+//    Symbol s lesen -> RET auf Rücksprungtabelle der Zelle setzen
+//    -> Zustand q lesen -> Regel (q,s) -> Handler -> zurück in Zelle i
+//    -> Symbol schreiben -> in Nachbarzelle springen
+
+// ---------- Ein-/Ausgabe ----------
+def startup @ code_start > IO {
+    ;code_start
+  IO:
+    ;0
+  code_start:
+}
+def out_bit bit < IO {
+    IO + bit;
+}
+def output_char ascii {
+    rep(8, i) out_bit ((ascii>>i)&1)
+}
+def output_text str {
+    rep(((#str)+7)/8, k) output_char ((str>>(8*k))&255)
+}
+
+// ---------- Bausteine ----------
+def jmp_entry target {
+    ;target
+}
+
+// Symbolnummer eines Zeichens
+def cellvar ch {
+    ;((((ch)==SYM1) ? 1 : (((ch)==SYM2) ? 2 : (((ch)==SYM3) ? 3 : 0))))*dw
+}
+
+// Regel: in den Handler (neuer Zustand, neues Symbol, Richtung) springen
+def t q2, c2, d {
+    ;HAND + (((((q2)*4) + ((((c2)==SYM1) ? 1 : (((c2)==SYM2) ? 2 : (((c2)==SYM3) ? 3 : 0))))) * 4 + (d)) * 2 * dw)
+}
+def stop {
+    ;print
+}
+
+// ---------- Zellblock i ----------
+//  Offset   0      Einsprung: Symbol lesen
+//  Offset   1      die Bandzelle C
+//  Offset   4..7   Lesetabelle rd (4 Symbole)
+//  Offset   8..23  vier Blöcke rs: RET setzen, zum Zustands-Dispatch
+//  Offset  32..95  Rücksprungtabellen bkb (4 alte Symbole x 16 Ergebnisse)
+//  Offset  96..351 Schreib-und-weiter-Blöcke bkt
+def cell i @ C, rd, rsb, bkb, bkt {
+    pad P
+    wflip C+w, rd, C
+  C:
+    cellvar ((((TAPE << (8*HEAD)) >> (8*(i))) & 255))
+  pad 4
+  rd:
+    rep(4, s) jmp_entry rsb + s*4*dw
+  rsb:
+    rep(4, s) rs_block C, rd, bkb + s*16*dw, SHB + s*dw
+  pad 16
+  bkb:
+    rep(64, k) jmp_entry bkt + k*4*dw
+  bkt:
+    rep(64, k) bk_block C, bkb + k*dw, ((k>>4) ^ ((k>>2)&3))*dw, i, (k&3)
+}
+
+def rs_block C, rd, bk, sh {
+  pad 4
+    wflip C+w, rd          // Lesetabelle wieder austragen
+    wflip RET+w, bk        // Rücksprung auf die Tabelle dieser Zelle/dieses Symbols
+    ;sh                    // weiter zum Zustands-Dispatch für dieses Symbol
+}
+
+def bk_block C, entry, delta, i, d {
+  pad 4
+    wflip RET+w, entry     // RET wieder auf 0
+    wflip C+w, delta       // altes Symbol XOR neues Symbol
+    ;(((d)==L) ? (((i)==0) ? edge : cells+((i)-1)*CS) : (((d)==R) ? (((i)==ZELLEN-1) ? edge : cells+((i)+1)*CS) : (((d)==N) ? cells+(i)*CS : edge)))
+}
+
+// ---------- Zustands-Dispatch ----------
+def sh_op s {
+    wflip STATE+w, TB + s*QT*dw, STATE
+}
+def b_op k {
+    wflip STATE+w, TB + k*dw, ((((k)%QT) < Q) ? (TABLE + ((((k)%QT)*4 + ((k)/QT))*dw)) : print)
+}
+
+// ---------- Handler: neuer Zustand, Ergebnis an die Zelle melden ----------
+def handler h {
+    wflip STATE+w, ((h)>>4)*dw
+    wflip RET+w, ((h)&15)*dw, RET
+}
+
+// ---------- Ausgabe des Bandes ----------
+def print_cell i @ pt, pob, next {
+    wflip cells+(i)*CS+dw+w, pt, cells+(i)*CS+dw
+  pad 4
+  pt:
+    rep(4, s) jmp_entry pob + s*16*dw
+  pad 16
+  pob:
+    rep(4, s) po_block cells+(i)*CS+dw, pt, s, next
+  next:
+}
+def po_block C, pt, s, next {
+  pad 16
+    wflip C+w, pt
+    output_char ((((s)==0) ? SYM0 : (((s)==1) ? SYM1 : (((s)==2) ? SYM2 : SYM3))))
+    ;next
+}
+
+// =====================================================================
+//  Programm
+// =====================================================================
+    startup
+    ;cells + HEAD*CS          // los geht es in der Startzelle
+
+STATE:  ;START*dw
+RET:    ;0
+
+edge:
+    output_text "Bandende erreicht!\n"
+    ;print
+
+print:
+    output_text "Band: "
+    rep(ZELLEN, i) print_cell i
+    output_char '\n'
+ende:
+    ;ende
+
+SHB:
+    rep(4, s) sh_op s
+pad QT
+TB:
+    rep(4*QT, k) jmp_entry BB + k*dw
+BB:
+    rep(4*QT, k) b_op k
+
+HAND:
+    rep((Q+1)*16, h) handler h
+
+TABLE:
+    regeln
+
+pad P
+cells:
+    rep(ZELLEN, i) cell i
+` },
+
+  utm_add: { w: 32, title: 'UTM: unäre Addition 111x11', input: '',
+    desc: 'Derselbe Interpreter, andere Tabelle: 111x11 (3 + 2) wird zu 11111. Nutzt das vierte Symbol x.',
+    src: String.raw`// =====================================================================
+//  Universelle Turingmaschine in FlipJump  (w = 32)
+//
+//  Oben steht die zu simulierende Maschine als Daten: Alphabet, Band,
+//  Startzustand und Übergangstabelle. Darunter folgt der Interpreter,
+//  der für jede Maschine gleich bleibt.
+// =====================================================================
+
+// ---------- Die Maschine: unäre Addition 111x11 -> 11111 ----------
+
+SYM0 = '_'          // Symbol 0 ist immer das Leerzeichen
+SYM1 = '0'
+SYM2 = '1'
+SYM3 = 'x'
+
+Q      = 3
+START  = 0
+ZELLEN = 16
+HEAD   = 2
+TAPE   = "111x11"
+
+// Hilfskonstanten (nicht ändern; sie müssen vor den Makros stehen)
+dw   = 2*w
+L    = 0                  // nach links
+R    = 1                  // nach rechts
+N    = 2                  // stehen bleiben
+HALT = Q
+QT   = 1 << (#Q)          // Zweierpotenz > Q für die Zustandstabelle
+P    = 512                // Befehle pro Zellblock
+CS   = P*dw               // Abstand zweier Zellblöcke in Bit
+
+// Übergangstabelle: pro Zustand genau vier Zeilen in der Reihenfolge SYM0..SYM3
+def regeln {
+    // Zustand 0: über den ersten Summanden, das x durch 1 ersetzen
+    stop                // liest '_'
+    stop                // liest '0'
+    t 0,    '1', R      // liest '1'
+    t 1,    '1', R      // liest 'x'
+    // Zustand 1: bis ans Ende des zweiten Summanden
+    t 2,    '_', L
+    stop
+    t 1,    '1', R
+    stop
+    // Zustand 2: die letzte 1 löschen
+    stop
+    stop
+    t HALT, '_', N
+    stop
+}
+
+// =====================================================================
+//  Interpreter – ab hier nichts ändern
+// =====================================================================
+//
+//  Bandzelle   : ein Befehl ";s*dw" (s = Symbolnummer 0..3) in einem
+//                eigenen Zellblock, der seine Nachbarn kennt.
+//  Kopf        : der Zellblock, in dem die IP gerade steht.
+//  Zustand     : Variable STATE = ";q*dw".
+//  Regel (q,s) : ein Befehl in TABLE, der in eine Handlerbank springt.
+//                Ein Handler setzt den neuen Zustand und meldet
+//                (neues Symbol, Richtung) per Rücksprungadresse RET.
+//
+//  Ablauf eines Schritts in Zelle i:
+//    Symbol s lesen -> RET auf Rücksprungtabelle der Zelle setzen
+//    -> Zustand q lesen -> Regel (q,s) -> Handler -> zurück in Zelle i
+//    -> Symbol schreiben -> in Nachbarzelle springen
+
+// ---------- Ein-/Ausgabe ----------
+def startup @ code_start > IO {
+    ;code_start
+  IO:
+    ;0
+  code_start:
+}
+def out_bit bit < IO {
+    IO + bit;
+}
+def output_char ascii {
+    rep(8, i) out_bit ((ascii>>i)&1)
+}
+def output_text str {
+    rep(((#str)+7)/8, k) output_char ((str>>(8*k))&255)
+}
+
+// ---------- Bausteine ----------
+def jmp_entry target {
+    ;target
+}
+
+// Symbolnummer eines Zeichens
+def cellvar ch {
+    ;((((ch)==SYM1) ? 1 : (((ch)==SYM2) ? 2 : (((ch)==SYM3) ? 3 : 0))))*dw
+}
+
+// Regel: in den Handler (neuer Zustand, neues Symbol, Richtung) springen
+def t q2, c2, d {
+    ;HAND + (((((q2)*4) + ((((c2)==SYM1) ? 1 : (((c2)==SYM2) ? 2 : (((c2)==SYM3) ? 3 : 0))))) * 4 + (d)) * 2 * dw)
+}
+def stop {
+    ;print
+}
+
+// ---------- Zellblock i ----------
+//  Offset   0      Einsprung: Symbol lesen
+//  Offset   1      die Bandzelle C
+//  Offset   4..7   Lesetabelle rd (4 Symbole)
+//  Offset   8..23  vier Blöcke rs: RET setzen, zum Zustands-Dispatch
+//  Offset  32..95  Rücksprungtabellen bkb (4 alte Symbole x 16 Ergebnisse)
+//  Offset  96..351 Schreib-und-weiter-Blöcke bkt
+def cell i @ C, rd, rsb, bkb, bkt {
+    pad P
+    wflip C+w, rd, C
+  C:
+    cellvar ((((TAPE << (8*HEAD)) >> (8*(i))) & 255))
+  pad 4
+  rd:
+    rep(4, s) jmp_entry rsb + s*4*dw
+  rsb:
+    rep(4, s) rs_block C, rd, bkb + s*16*dw, SHB + s*dw
+  pad 16
+  bkb:
+    rep(64, k) jmp_entry bkt + k*4*dw
+  bkt:
+    rep(64, k) bk_block C, bkb + k*dw, ((k>>4) ^ ((k>>2)&3))*dw, i, (k&3)
+}
+
+def rs_block C, rd, bk, sh {
+  pad 4
+    wflip C+w, rd          // Lesetabelle wieder austragen
+    wflip RET+w, bk        // Rücksprung auf die Tabelle dieser Zelle/dieses Symbols
+    ;sh                    // weiter zum Zustands-Dispatch für dieses Symbol
+}
+
+def bk_block C, entry, delta, i, d {
+  pad 4
+    wflip RET+w, entry     // RET wieder auf 0
+    wflip C+w, delta       // altes Symbol XOR neues Symbol
+    ;(((d)==L) ? (((i)==0) ? edge : cells+((i)-1)*CS) : (((d)==R) ? (((i)==ZELLEN-1) ? edge : cells+((i)+1)*CS) : (((d)==N) ? cells+(i)*CS : edge)))
+}
+
+// ---------- Zustands-Dispatch ----------
+def sh_op s {
+    wflip STATE+w, TB + s*QT*dw, STATE
+}
+def b_op k {
+    wflip STATE+w, TB + k*dw, ((((k)%QT) < Q) ? (TABLE + ((((k)%QT)*4 + ((k)/QT))*dw)) : print)
+}
+
+// ---------- Handler: neuer Zustand, Ergebnis an die Zelle melden ----------
+def handler h {
+    wflip STATE+w, ((h)>>4)*dw
+    wflip RET+w, ((h)&15)*dw, RET
+}
+
+// ---------- Ausgabe des Bandes ----------
+def print_cell i @ pt, pob, next {
+    wflip cells+(i)*CS+dw+w, pt, cells+(i)*CS+dw
+  pad 4
+  pt:
+    rep(4, s) jmp_entry pob + s*16*dw
+  pad 16
+  pob:
+    rep(4, s) po_block cells+(i)*CS+dw, pt, s, next
+  next:
+}
+def po_block C, pt, s, next {
+  pad 16
+    wflip C+w, pt
+    output_char ((((s)==0) ? SYM0 : (((s)==1) ? SYM1 : (((s)==2) ? SYM2 : SYM3))))
+    ;next
+}
+
+// =====================================================================
+//  Programm
+// =====================================================================
+    startup
+    ;cells + HEAD*CS          // los geht es in der Startzelle
+
+STATE:  ;START*dw
+RET:    ;0
+
+edge:
+    output_text "Bandende erreicht!\n"
+    ;print
+
+print:
+    output_text "Band: "
+    rep(ZELLEN, i) print_cell i
+    output_char '\n'
+ende:
+    ;ende
+
+SHB:
+    rep(4, s) sh_op s
+pad QT
+TB:
+    rep(4*QT, k) jmp_entry BB + k*dw
+BB:
+    rep(4*QT, k) b_op k
+
+HAND:
+    rep((Q+1)*16, h) handler h
+
+TABLE:
+    regeln
+
+pad P
+cells:
+    rep(ZELLEN, i) cell i
+` },
+
+  utm_bb4: { w: 32, title: 'UTM: Busy Beaver mit 4 Zuständen', input: '',
+    desc: 'Derselbe Interpreter mit dem fleißigen Biber BB(4): 107 Schritte auf leerem Band, am Ende stehen 13 Einsen. Rund 5.000 FlipJump-Befehle.',
+    src: String.raw`// =====================================================================
+//  Universelle Turingmaschine in FlipJump  (w = 32)
+//
+//  Oben steht die zu simulierende Maschine als Daten: Alphabet, Band,
+//  Startzustand und Übergangstabelle. Darunter folgt der Interpreter,
+//  der für jede Maschine gleich bleibt.
+// =====================================================================
+
+// ---------- Die Maschine: Busy Beaver mit 4 Zuständen ----------
+
+SYM0 = '_'          // Symbol 0 ist immer das Leerzeichen
+SYM1 = '0'
+SYM2 = '1'
+SYM3 = 'x'
+
+Q      = 4          // Zustände A=0, B=1, C=2, D=3
+START  = 0
+ZELLEN = 24
+HEAD   = 12
+TAPE   = 0          // leeres Band
+
+// Hilfskonstanten (nicht ändern; sie müssen vor den Makros stehen)
+dw   = 2*w
+L    = 0                  // nach links
+R    = 1                  // nach rechts
+N    = 2                  // stehen bleiben
+HALT = Q
+QT   = 1 << (#Q)          // Zweierpotenz > Q für die Zustandstabelle
+P    = 512                // Befehle pro Zellblock
+CS   = P*dw               // Abstand zweier Zellblöcke in Bit
+
+// Übergangstabelle: pro Zustand genau vier Zeilen in der Reihenfolge SYM0..SYM3
+def regeln {
+    // A
+    t 1,    '1', R      // liest '_'
+    stop                // liest '0'
+    t 1,    '1', L      // liest '1'
+    stop                // liest 'x'
+    // B
+    t 0,    '1', L
+    stop
+    t 2,    '_', L
+    stop
+    // C
+    t HALT, '1', R
+    stop
+    t 3,    '1', L
+    stop
+    // D
+    t 3,    '1', R
+    stop
+    t 0,    '_', R
+    stop
+}
+
+// =====================================================================
+//  Interpreter – ab hier nichts ändern
+// =====================================================================
+//
+//  Bandzelle   : ein Befehl ";s*dw" (s = Symbolnummer 0..3) in einem
+//                eigenen Zellblock, der seine Nachbarn kennt.
+//  Kopf        : der Zellblock, in dem die IP gerade steht.
+//  Zustand     : Variable STATE = ";q*dw".
+//  Regel (q,s) : ein Befehl in TABLE, der in eine Handlerbank springt.
+//                Ein Handler setzt den neuen Zustand und meldet
+//                (neues Symbol, Richtung) per Rücksprungadresse RET.
+//
+//  Ablauf eines Schritts in Zelle i:
+//    Symbol s lesen -> RET auf Rücksprungtabelle der Zelle setzen
+//    -> Zustand q lesen -> Regel (q,s) -> Handler -> zurück in Zelle i
+//    -> Symbol schreiben -> in Nachbarzelle springen
+
+// ---------- Ein-/Ausgabe ----------
+def startup @ code_start > IO {
+    ;code_start
+  IO:
+    ;0
+  code_start:
+}
+def out_bit bit < IO {
+    IO + bit;
+}
+def output_char ascii {
+    rep(8, i) out_bit ((ascii>>i)&1)
+}
+def output_text str {
+    rep(((#str)+7)/8, k) output_char ((str>>(8*k))&255)
+}
+
+// ---------- Bausteine ----------
+def jmp_entry target {
+    ;target
+}
+
+// Symbolnummer eines Zeichens
+def cellvar ch {
+    ;((((ch)==SYM1) ? 1 : (((ch)==SYM2) ? 2 : (((ch)==SYM3) ? 3 : 0))))*dw
+}
+
+// Regel: in den Handler (neuer Zustand, neues Symbol, Richtung) springen
+def t q2, c2, d {
+    ;HAND + (((((q2)*4) + ((((c2)==SYM1) ? 1 : (((c2)==SYM2) ? 2 : (((c2)==SYM3) ? 3 : 0))))) * 4 + (d)) * 2 * dw)
+}
+def stop {
+    ;print
+}
+
+// ---------- Zellblock i ----------
+//  Offset   0      Einsprung: Symbol lesen
+//  Offset   1      die Bandzelle C
+//  Offset   4..7   Lesetabelle rd (4 Symbole)
+//  Offset   8..23  vier Blöcke rs: RET setzen, zum Zustands-Dispatch
+//  Offset  32..95  Rücksprungtabellen bkb (4 alte Symbole x 16 Ergebnisse)
+//  Offset  96..351 Schreib-und-weiter-Blöcke bkt
+def cell i @ C, rd, rsb, bkb, bkt {
+    pad P
+    wflip C+w, rd, C
+  C:
+    cellvar ((((TAPE << (8*HEAD)) >> (8*(i))) & 255))
+  pad 4
+  rd:
+    rep(4, s) jmp_entry rsb + s*4*dw
+  rsb:
+    rep(4, s) rs_block C, rd, bkb + s*16*dw, SHB + s*dw
+  pad 16
+  bkb:
+    rep(64, k) jmp_entry bkt + k*4*dw
+  bkt:
+    rep(64, k) bk_block C, bkb + k*dw, ((k>>4) ^ ((k>>2)&3))*dw, i, (k&3)
+}
+
+def rs_block C, rd, bk, sh {
+  pad 4
+    wflip C+w, rd          // Lesetabelle wieder austragen
+    wflip RET+w, bk        // Rücksprung auf die Tabelle dieser Zelle/dieses Symbols
+    ;sh                    // weiter zum Zustands-Dispatch für dieses Symbol
+}
+
+def bk_block C, entry, delta, i, d {
+  pad 4
+    wflip RET+w, entry     // RET wieder auf 0
+    wflip C+w, delta       // altes Symbol XOR neues Symbol
+    ;(((d)==L) ? (((i)==0) ? edge : cells+((i)-1)*CS) : (((d)==R) ? (((i)==ZELLEN-1) ? edge : cells+((i)+1)*CS) : (((d)==N) ? cells+(i)*CS : edge)))
+}
+
+// ---------- Zustands-Dispatch ----------
+def sh_op s {
+    wflip STATE+w, TB + s*QT*dw, STATE
+}
+def b_op k {
+    wflip STATE+w, TB + k*dw, ((((k)%QT) < Q) ? (TABLE + ((((k)%QT)*4 + ((k)/QT))*dw)) : print)
+}
+
+// ---------- Handler: neuer Zustand, Ergebnis an die Zelle melden ----------
+def handler h {
+    wflip STATE+w, ((h)>>4)*dw
+    wflip RET+w, ((h)&15)*dw, RET
+}
+
+// ---------- Ausgabe des Bandes ----------
+def print_cell i @ pt, pob, next {
+    wflip cells+(i)*CS+dw+w, pt, cells+(i)*CS+dw
+  pad 4
+  pt:
+    rep(4, s) jmp_entry pob + s*16*dw
+  pad 16
+  pob:
+    rep(4, s) po_block cells+(i)*CS+dw, pt, s, next
+  next:
+}
+def po_block C, pt, s, next {
+  pad 16
+    wflip C+w, pt
+    output_char ((((s)==0) ? SYM0 : (((s)==1) ? SYM1 : (((s)==2) ? SYM2 : SYM3))))
+    ;next
+}
+
+// =====================================================================
+//  Programm
+// =====================================================================
+    startup
+    ;cells + HEAD*CS          // los geht es in der Startzelle
+
+STATE:  ;START*dw
+RET:    ;0
+
+edge:
+    output_text "Bandende erreicht!\n"
+    ;print
+
+print:
+    output_text "Band: "
+    rep(ZELLEN, i) print_cell i
+    output_char '\n'
+ende:
+    ;ende
+
+SHB:
+    rep(4, s) sh_op s
+pad QT
+TB:
+    rep(4*QT, k) jmp_entry BB + k*dw
+BB:
+    rep(4*QT, k) b_op k
+
+HAND:
+    rep((Q+1)*16, h) handler h
+
+TABLE:
+    regeln
+
+pad P
+cells:
+    rep(ZELLEN, i) cell i
+` },
+
+});
+
 // ===== Oberfläche =====
 const $ = id => document.getElementById(id);
 let prog = null;      // Ergebnis des Assemblers (oder null bei Bitstring-Import)
