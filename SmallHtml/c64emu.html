@@ -249,14 +249,36 @@ class Pla {
   constructor() { this.reset(); }
   reset() {
     this.charen = true; this.hiram = true; this.loram = true;
-    this.exrom = true; this.game = true; this.processorPort = 0x07;
+    this.exrom = true; this.game = true;
+    this.ddr = 0x2F;                 // $00: Datenrichtung (1 = Ausgang)
+    this.processorPort = 0x37;       // $01: zuletzt geschriebener Datenwert
+    this._applyPort();
   }
+  // Der 6510-Port wirkt nur über die Bits, die $00 als Ausgang schaltet.
+  // Eingänge an LORAM/HIRAM/CHAREN liegen an Pull-ups → lesen sich als 1.
+  // (Dallas Quest schreibt beim Bildaufbau über $FFFF hinaus $20 nach $00
+  // und $01 — am echten C64 bleiben die ROMs dadurch eingeblendet.)
   get prozessorport() { return this.processorPort & 0xFF; }
   set prozessorport(port) {
     this.processorPort = port & 0xFF;
-    this.charen = !!(port & 4);
-    this.hiram = !!(port & 2);
-    this.loram = !!(port & 1);
+    this._applyPort();
+  }
+  setDdr(val) {
+    this.ddr = val & 0xFF;
+    this._applyPort();
+  }
+  _applyPort() {
+    const eff = (this.processorPort & this.ddr) | (~this.ddr & 0x07);
+    this.charen = !!(eff & 4);
+    this.hiram = !!(eff & 2);
+    this.loram = !!(eff & 1);
+  }
+  // Lesewert von $01: Ausgänge = Datenregister; Eingänge: Bit 0-2 Pull-up,
+  // Bit 4 Datasetten-Taste (1 = nicht gedrückt), Bit 5 Motor 0,
+  // Bit 6/7 offen (behalten den letzten Wert — Verblassen nicht emuliert).
+  readPort() {
+    const inp = 0x17 | (this.processorPort & 0xC0);
+    return ((this.processorPort & this.ddr) | (~this.ddr & inp)) & 0xFF;
   }
   addressSpace(addr) {
     if (addr >= 0x1000 && addr <= 0x7FFF) {
@@ -1399,6 +1421,7 @@ class Memory {
   }
   readSystemByte(addr) {
     addr &= 0xFFFF;
+    if (addr < 2) return addr ? this.pla.readPort() : this.pla.ddr;
     if (addr >= 0xD000 && addr <= 0xDFFF) {
       const space = this.pla.addressSpace(addr);
       if (space === AddressSpace.CHARSET_ROM) return this.rom[addr];
@@ -1448,6 +1471,11 @@ class Memory {
     addr &= 0xFFFF; val &= 0xFF;
     if (addr === Config.ADDR_PROCESSOR_PORT_REG) {
       this.pla.prozessorport = val;
+      this.ram[addr] = val;            // der Schreibzugriff landet auch im RAM
+      return;
+    }
+    if (addr === 0x0000) {
+      this.pla.setDdr(val);
       this.ram[addr] = val;
       return;
     }
@@ -2994,7 +3022,7 @@ Object.assign(System.prototype, {
     this._currentOutputLa = null;
     this._daBuffers = new Map();
     this._cmdOut = [];
-    this._diskStatus = this._statusBytes("00, OK,00,00\r");
+    this._setDiskStatus("00, OK,00,00\r");
     this.diskBlocks = 0;
     this.diskLedTimer = 0;
     this.pendingAutostart = null;
@@ -3021,7 +3049,7 @@ Object.assign(System.prototype, {
     this._currentInputLa = this._currentOutputLa = null;
     this._daBuffers.clear();
     this._cmdOut = [];
-    this._diskStatus = this._statusBytes("00, OK,00,00\r");
+    this._setDiskStatus("00, OK,00,00\r");
     this._isTape = false;
     this._iecReset();
     if (this.drive === null)
@@ -3041,7 +3069,7 @@ Object.assign(System.prototype, {
     this._currentInputLa = this._currentOutputLa = null;
     this._daBuffers.clear();
     this._cmdOut = [];
-    this._diskStatus = this._statusBytes("00, OK,00,00\r");
+    this._setDiskStatus("00, OK,00,00\r");
     this._isTape = true;
     this._iecReset();
     if (this.drive === null)
@@ -3094,13 +3122,14 @@ Object.assign(System.prototype, {
     const name = this._readName(fnaddr, fnlen);
     if (sa === 15) {                            // Kommandokanal
       this._openFiles.set(la, { dev, sa, name, cmd: true, pos: 0 });
+      if (name.length) this._execDiskCommand(name);   // OPEN 15,8,15,"I0"
       cpu.setFlag(CPU.FC, false);
       mem.ram[0x90] = 0;
       this._doRts();
       return;
     }
     if (name.length && name[0] === 0x23) {      // "#": Direktzugriffspuffer
-      this._daBuffers.set(sa, { data: new Uint8Array(256), pos: 0 });
+      this._daOpen(sa, name);
       this._openFiles.set(la, { dev, sa, name, daChan: sa });
       cpu.setFlag(CPU.FC, false);
       mem.ram[0x90] = 0;
@@ -3135,6 +3164,9 @@ Object.assign(System.prototype, {
   _trapClose() {
     const la = this.cpu.a;
     if (!this._openFiles.has(la)) return this._passthroughKernalJmp();
+    const f = this._openFiles.get(la);
+    if (f && f.cmd) this._flushCmdOut();
+    if (f && f.daChan !== undefined) this._daBuffers.delete(f.daChan);
     this._openFiles.delete(la);
     if (this._currentInputLa === la) this._currentInputLa = null;
     if (this._currentOutputLa === la) this._currentOutputLa = null;
@@ -3154,6 +3186,7 @@ Object.assign(System.prototype, {
   _trapClrchn() {
     if (this._currentInputLa === null && this._currentOutputLa === null)
       return this._passthroughKernalJmp();
+    this._flushCmdOut();
     this._currentInputLa = null;
     this._currentOutputLa = null;
     this.mem.ram[0x99] = 0;
@@ -3167,33 +3200,19 @@ Object.assign(System.prototype, {
     if (la === null || !this._openFiles.has(la)) return this._passthroughKernalJmp();
     const cpu = this.cpu, mem = this.mem;
     const f = this._openFiles.get(la);
-    if (f.cmd) {                                 // Kommandokanal → Status
-      const data = this._diskStatus;
-      const pos = f.pos || 0;
-      if (pos < data.length) {
-        cpu.a = data[pos];
-        f.pos = pos + 1;
-        mem.ram[0x90] = (pos + 1 >= data.length) ? 0x40 : 0;
-      } else {
-        cpu.a = 0x0D;
-        mem.ram[0x90] = 0x40;
-      }
+    if (f.cmd) {                                 // Kommandokanal → Status / M-R
+      this._flushCmdOut();
+      const [b, eoi] = this._readCmdChannel();
+      cpu.a = b;
+      mem.ram[0x90] = eoi ? 0x40 : 0;
       cpu.setFlag(CPU.FC, false);
       this._doRts();
       return;
     }
     if (f.daChan !== undefined) {                // Direktzugriffspuffer
-      const buf = this._daBuffers.get(f.daChan);
-      const data = buf ? buf.data : new Uint8Array(0);
-      const pos = buf ? buf.pos : 0;
-      if (pos < data.length) {
-        cpu.a = data[pos];
-        buf.pos = pos + 1;
-        mem.ram[0x90] = (pos + 1 >= data.length) ? 0x40 : 0;
-      } else {
-        cpu.a = 0;
-        mem.ram[0x90] = 0x40;
-      }
+      const [b, eoi] = this._daRead(f.daChan);
+      cpu.a = b;
+      mem.ram[0x90] = eoi ? 0x40 : 0;
       cpu.setFlag(CPU.FC, false);
       this._doRts();
       return;
@@ -3225,19 +3244,16 @@ Object.assign(System.prototype, {
     const f = this._openFiles.get(la);
     if (f.cmd) {
       const b = this.cpu.a & 0xFF;
-      if (b === 0x0D) {
-        this._execDiskCommand(Uint8Array.from(this._cmdOut));
-        this._cmdOut = [];
-      } else {
-        this._cmdOut.push(b);
-      }
+      const binary = this._cmdOut.length >= 2 &&
+                     this._cmdOut[0] === 0x4D && this._cmdOut[1] === 0x2D;   // "M-"
+      if (b === 0x0D && !binary) this._flushCmdOut();
+      else this._cmdOut.push(b);
       this.cpu.setFlag(CPU.FC, false);
       this._doRts();
       return;
     }
     if (f.daChan !== undefined) {
-      const buf = this._daBuffers.get(f.daChan);
-      if (buf && buf.pos < 256) buf.pos += 1;
+      this._daWrite(f.daChan, this.cpu.a & 0xFF);
       this.cpu.setFlag(CPU.FC, false);
       this._doRts();
       return;
@@ -3245,40 +3261,153 @@ Object.assign(System.prototype, {
     return this._passthroughKernalJmp();
   },
 
+  // ---------- Mini-DOS: Kommandokanal 15 und Direktzugriffspuffer ----------
+  // Gemeinsam für KERNAL-Traps (OPEN/CHROUT/CHRIN) und IEC-Primitiven
+  // (LISTEN/SECOND/CIOUT/TALK/ACPTR), wie sie eigene Diskroutinen benutzen
+  // (z. B. Dallas Quest: "#0" öffnen, "U1:" + "M-R" $0300 über Kanal 15).
+  _flushCmdOut() {
+    if (!this._cmdOut.length) return;
+    const cmd = Uint8Array.from(this._cmdOut);
+    this._cmdOut = [];
+    this._execDiskCommand(cmd);
+  },
+  _setDiskStatus(s) {
+    this._diskStatus = typeof s === "string" ? this._statusBytes(s) : s;
+    this._diskStatusPos = 0;
+  },
+  // Ein Byte vom Kommandokanal: Fehlerstatus bzw. M-R-Ergebnis. Nach dem
+  // letzten Byte (EOI) steht der Status wieder auf "00, OK,00,00".
+  _readCmdChannel() {
+    let pos = this._diskStatusPos || 0;
+    if (pos >= this._diskStatus.length) { this._setDiskStatus("00, OK,00,00\r"); pos = 0; }
+    const b = this._diskStatus[pos++];
+    const eoi = pos >= this._diskStatus.length;
+    if (eoi) this._setDiskStatus("00, OK,00,00\r");
+    else this._diskStatusPos = pos;
+    return [b, eoi];
+  },
+  // "#" / "#n": Puffer n liegt im 1541-RAM bei $0300 + n*256
+  _daOpen(chan, name) {
+    let n = parseInt(String.fromCharCode(...name.subarray(1)).trim(), 10);
+    if (isNaN(n) || n < 0 || n > 4) {
+      const used = new Set([...this._daBuffers.values()].map((b) => b && b.n));
+      n = [3, 2, 1, 0, 4].find((k) => !used.has(k));
+      if (n === undefined) n = 0;
+    }
+    this._daBuffers.set(chan, { data: new Uint8Array(256), pos: 0, n });
+  },
+  _daRead(chan) {
+    const buf = this._daBuffers.get(chan);
+    if (!buf) return [0, true];
+    const b = buf.data[buf.pos & 0xFF];
+    buf.pos += 1;
+    const eoi = buf.pos >= 256;
+    if (eoi) buf.pos = 0;
+    return [b, eoi];
+  },
+  _daWrite(chan, val) {
+    const buf = this._daBuffers.get(chan);
+    if (!buf) return;
+    buf.data[buf.pos & 0xFF] = val;
+    buf.pos = (buf.pos + 1) & 0xFF;
+  },
+  // 1541-RAM für M-R/M-W: Pufferbereiche gehören den offenen "#"-Kanälen
+  _dosBufferAt(addr) {
+    if (addr < 0x300 || addr >= 0x800) return null;
+    const n = (addr - 0x300) >> 8;
+    for (const b of this._daBuffers.values()) if (b && b.n === n) return b;
+    return null;
+  },
+  // DOS-ROM für M-R: eigenes (per Drop) oder das eingebettete. Laufwerks-
+  // erkennungen lesen z. B. $FFFF (1541: $FE) oder die Kennung bei $E5C5.
+  _dosRomImage() {
+    if (typeof customDosRom !== "undefined" && customDosRom) return customDosRom;
+    if (!this._dosRomEmb) this._dosRomEmb = b64ToU8(ROMS.dos1541);
+    return this._dosRomEmb;
+  },
+  _dosPeek(addr) {
+    addr &= 0xFFFF;
+    if (addr >= 0x8000) return this._dosRomImage()[addr & 0x3FFF];
+    if (addr >= 0x0800) return 0;                // VIAs/offen: nicht emuliert
+    const buf = this._dosBufferAt(addr);
+    if (buf) return buf.data[addr & 0xFF];
+    return this._dosRam ? this._dosRam[addr] : 0;
+  },
+  _dosPoke(addr, val) {
+    addr &= 0xFFFF;
+    if (addr >= 0x0800) return;
+    const buf = this._dosBufferAt(addr);
+    if (buf) { buf.data[addr & 0xFF] = val & 0xFF; return; }
+    if (!this._dosRam) this._dosRam = new Uint8Array(0x800);
+    this._dosRam[addr] = val & 0xFF;
+  },
   _execDiskCommand(cmd) {
-    // U1/UA/B-R-Blocklesen und B-P-Pufferzeiger; alles andere: OK quittieren
-    this._diskStatus = this._statusBytes("00, OK,00,00\r");
+    this._setDiskStatus("00, OK,00,00\r");
     if (this._d64 === null) return;
-    const s = String.fromCharCode(...cmd).trim();
+    // Speicherbefehle mit binären Parametern
+    if (cmd.length >= 3 && cmd[0] === 0x4D && cmd[1] === 0x2D) {   // "M-"
+      const op = cmd[2];
+      const addr = (cmd[3] | 0) | ((cmd[4] | 0) << 8);
+      if (op === 0x52) {                                            // M-R
+        let n = cmd.length >= 6 ? cmd[5] : 1;
+        if (n === 0) n = 256;
+        const out = new Uint8Array(n);
+        for (let i = 0; i < n; i++) out[i] = this._dosPeek(addr + i);
+        this._setDiskStatus(out);
+      } else if (op === 0x57) {                                     // M-W
+        const n = cmd[5] | 0;
+        for (let i = 0; i < n && 6 + i < cmd.length; i++)
+          this._dosPoke(addr + i, cmd[6 + i]);
+      }
+      // M-E: Laufwerkscode läuft nur mit echter 1541 (Schalter "1541-Laufwerk")
+      return;
+    }
+    let end = cmd.length;
+    while (end > 0 && cmd[end - 1] === 0x0D) end--;
+    const s = String.fromCharCode(...cmd.subarray(0, end)).trim();
     const up = s.toUpperCase();
-    const nums = (rest) => rest.replace(/[:,]/g, " ").split(/\s+/).filter(Boolean);
-    if (up.startsWith("U1") || up.startsWith("UA") || up.startsWith("B-R")) {
-      const pref = up.startsWith("B-R") ? 3 : 2;
+    const nums = (rest) => rest.replace(/[:,]/g, " ").split(/\s+/).filter(Boolean)
+                               .map((x) => parseInt(x, 10));
+    const isRead = up.startsWith("U1") || up.startsWith("UA") || up.startsWith("B-R");
+    const isWrite = up.startsWith("U2") || up.startsWith("UB") || up.startsWith("B-W");
+    if (isRead || isWrite) {
+      const pref = up.startsWith("B-") ? 3 : 2;
       const parts = nums(s.slice(pref));
-      if (parts.length >= 4) {
-        try {
-          const chan = parseInt(parts[0], 10), track = parseInt(parts[2], 10),
-                sector = parseInt(parts[3], 10);
-          const data = this._d64.readSector(track, sector);
-          this.diskBlocks += 1;
-          this.diskLedTimer = 15;
-          let buf = this._daBuffers.get(chan);
-          if (!buf) { buf = { data: new Uint8Array(256), pos: 0 }; this._daBuffers.set(chan, buf); }
-          buf.data = new Uint8Array(data);
-          buf.pos = 0;
-        } catch (e) {
-          this._diskStatus = this._statusBytes("34,SYNTAX ERROR,00,00\r");
+      if (parts.length < 4 || parts.some((x) => isNaN(x))) {
+        this._setDiskStatus("30,SYNTAX ERROR,00,00\r");
+        return;
+      }
+      const [chan, , track, sector] = parts;
+      try {
+        let buf = this._daBuffers.get(chan);
+        if (!buf) {
+          buf = { data: new Uint8Array(256), pos: 0, n: 0 };
+          this._daBuffers.set(chan, buf);
         }
+        if (isRead) {
+          buf.data = new Uint8Array(this._d64.readSector(track, sector));
+          buf.pos = 0;
+        } else {
+          this._d64.writeSector(track, sector, buf.data);
+        }
+        this.diskBlocks += 1;
+        this.diskLedTimer = 15;
+      } catch (e) {
+        const t2 = String(track).padStart(2, "0"), s2 = String(sector).padStart(2, "0");
+        this._setDiskStatus(`66,ILLEGAL TRACK OR SECTOR,${t2},${s2}\r`);
       }
       return;
     }
     if (up.startsWith("B-P")) {
       const parts = nums(s.slice(3));
       if (parts.length >= 2) {
-        const chan = parseInt(parts[0], 10), pos = parseInt(parts[1], 10);
-        const buf = this._daBuffers.get(chan);
-        if (buf && !isNaN(pos)) buf.pos = pos & 0xFF;
+        const buf = this._daBuffers.get(parts[0]);
+        if (buf && !isNaN(parts[1])) buf.pos = parts[1] & 0xFF;
       }
+      return;
+    }
+    if (up.startsWith("UI") || up.startsWith("UJ") || up.startsWith("U:") || up.startsWith("U;")) {
+      this._setDiskStatus("73,CBM DOS V2.6 1541,00,00\r");
       return;
     }
     // Initialize/Validate/…: als OK quittieren
@@ -3299,11 +3428,21 @@ Object.assign(System.prototype, {
     this._iecName = [];
     this._iecTalkChan = 0;
     this._iecChannels = new Map();
+    this._iecCmd = [];
   },
   _iecOpenCurrent() {
     const name = Uint8Array.from(this._iecName);
     const chan = this._iecOpenChan;
     let data = null;
+    if (chan === 15) {                          // OPEN 15,8,15,"…": Kommando
+      if (name.length) this._execDiskCommand(name);
+      return;
+    }
+    if (name.length && name[0] === 0x23) {     // "#": Direktzugriffspuffer
+      this._daOpen(chan, name);
+      this._iecChannels.delete(chan);
+      return;
+    }
     if (name.length && name[0] === 0x24) {
       const dir = this._buildDirListing(0x0801);
       data = new Uint8Array(dir.length + 2);
@@ -3339,14 +3478,20 @@ Object.assign(System.prototype, {
       this._iecName = [];
     } else {
       this._iecOpening = false;
-      if (cmd === 0xE0) this._iecChannels.delete(chan);
+      if (cmd === 0xE0) {                       // CLOSE
+        this._iecChannels.delete(chan);
+        this._daBuffers.delete(chan);
+      }
     }
     this._doRts();
   },
   _trapIecCiout() {
     if (this._iecMode !== "listen" || this._iecDev !== 8)
       return this._passthroughKernalJmp();
-    if (this._iecOpening) this._iecName.push(this.cpu.a & 0xFF);
+    const b = this.cpu.a & 0xFF;
+    if (this._iecOpening) this._iecName.push(b);
+    else if (this._iecOpenChan === 15) this._iecCmd.push(b);      // Kommandokanal
+    else if (this._daBuffers.has(this._iecOpenChan)) this._daWrite(this._iecOpenChan, b);
     this._doRts();
   },
   _trapIecUnlsn() {
@@ -3355,6 +3500,10 @@ Object.assign(System.prototype, {
     if (this._iecOpening) {
       this._iecOpenCurrent();
       this._iecOpening = false;
+    } else if (this._iecCmd.length) {           // UNLISTEN beendet das Kommando
+      const cmd = Uint8Array.from(this._iecCmd);
+      this._iecCmd = [];
+      this._execDiskCommand(cmd);
     }
     this._iecMode = null;
     this._iecDev = null;
@@ -3379,7 +3528,16 @@ Object.assign(System.prototype, {
     if (this._iecMode !== "talk" || this._iecDev !== 8)
       return this._passthroughKernalJmp();
     const cpu = this.cpu, mem = this.mem;
-    const stream = this._iecChannels.get(this._iecTalkChan);
+    const tch = this._iecTalkChan;
+    if (tch === 15 || (this._daBuffers.has(tch) && !this._iecChannels.get(tch))) {
+      const [b, eoi] = tch === 15 ? this._readCmdChannel() : this._daRead(tch);
+      cpu.a = b;
+      mem.ram[0x90] = eoi ? 0x40 : 0;
+      cpu.setFlag(CPU.FC, false);
+      this._doRts();
+      return;
+    }
+    const stream = this._iecChannels.get(tch);
     if (!stream) {
       cpu.a = 0;
       mem.ram[0x90] = 0x42;                     // Timeout + EOI
@@ -4560,7 +4718,7 @@ Object.assign(System.prototype, {
       version: SNAPSHOT_VERSION,
       ts: Date.now(),
       cpu: captureState(this.cpu, new Set(["mem", "traps", "_dispatch", "_micro", "_pending"])),
-      mem: { ram: this.mem.ram.slice(), port: this.mem.pla.prozessorport },
+      mem: { ram: this.mem.ram.slice(), port: this.mem.pla.prozessorport, ddr: this.mem.pla.ddr },
       color: this.colorRam.ram.slice(),
       vic: captureState(this.vic, new Set(["mem", "colorRam", "_sprPix", "_occ", "_fgBuf"])),
       cia1: captureState(this.cia1, new Set(["keyboardMatrix", "portAInFn", "portAWriteHook"])),
@@ -4604,6 +4762,8 @@ Object.assign(System.prototype, {
       currentOutputLa: this._currentOutputLa,
       cmdOut: this._cmdOut.slice(),
       diskStatus: this._diskStatus.slice(),
+      diskStatusPos: this._diskStatusPos || 0,
+      iecCmd: this._iecCmd.slice(),
       isTape: this._isTape,
       diskBlocks: this.diskBlocks,
       iec: captureState(this, new Set()),   // _iecDev/_iecMode/_iecOpening/... (primitive Felder)
@@ -4651,6 +4811,8 @@ Object.assign(System.prototype, {
     // 2) Chips
     restoreState(this.cpu, snap.cpu);
     this.mem.ram.set(snap.mem.ram);
+    // Ältere Snapshots ohne DDR: der letzte Schreibwert auf $00 steht im RAM
+    this.mem.pla.ddr = snap.mem.ddr !== undefined ? snap.mem.ddr : this.mem.ram[0];
     this.mem.pla.prozessorport = snap.mem.port;
     this.colorRam.ram.set(snap.color);
     restoreState(this.vic, snap.vic);
@@ -4673,11 +4835,13 @@ Object.assign(System.prototype, {
     this._currentOutputLa = t.currentOutputLa;
     this._cmdOut = t.cmdOut.slice();
     this._diskStatus = t.diskStatus.slice();
+    this._diskStatusPos = t.diskStatusPos || 0;
     this._isTape = t.isTape;
     this.diskBlocks = t.diskBlocks;
     for (const k of ["_iecDev", "_iecMode", "_iecOpening", "_iecOpenChan", "_iecTalkChan"])
       if (k in t.iec) this[k] = t.iec[k];
     this._iecName = t.iecName.slice();
+    this._iecCmd = t.iecCmd ? t.iecCmd.slice() : [];
     this.pendingAutostart = t.pendingAutostart;
     this._autostartSawBusy = t.autostartSawBusy;
     this._autostartFrames = t.autostartFrames;
