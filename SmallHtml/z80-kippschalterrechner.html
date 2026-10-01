@@ -1,0 +1,1084 @@
+<title>Z80-Kippschalterrechner</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=JetBrains+Mono:wght@400;600&family=Source+Sans+3:wght@400;600&display=swap">
+<style>
+/* Layout: links die Frontplatte als Hardware-Objekt, rechts „Blick ins Innere“; darunter Speicher, Disassembler, Programme */
+:root{
+  --bg:#e8edeb; --wire:#22302c; --net:#1d5aa8; --pwr:#b0281f; --led:#c27a00; --chip:#ffffff; --sheet:#fbfcfb; --ink:#19231f; --muted:#596762; --line:#cad4d0; --soft:#f0f4f2; --accent:#1d5aa8; --warn:#a33a12;
+  /* Frontplatte: bewusst in beiden Themen gleich (eloxiertes Aluminium) */
+  --plate:#2b3133; --plate2:#363d40; --plate-ink:#e7ecea; --plate-mut:#9aa7a3; --plate-line:#4a5357;
+  --led-on:#ff3b1f; --led-off:#4a1b14; --halt-on:#ffb000; --halt-off:#4a3608;
+  --f-disp:"Barlow Semi Condensed","Arial Narrow",Arial,sans-serif;
+  --f-body:"Source Sans 3","Segoe UI",Helvetica,Arial,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0e1312; --wire:#c3cfca; --net:#8db9ff; --pwr:#ff8b82; --led:#ffb23e; --chip:#1b2320; --sheet:#151b19; --ink:#dde6e2; --muted:#93a29c; --line:#2b3632; --soft:#1a211f; --accent:#8db9ff; --warn:#ff9b6b; color-scheme:dark }}
+:root[data-theme="dark"]{ --bg:#0e1312; --wire:#c3cfca; --net:#8db9ff; --pwr:#ff8b82; --led:#ffb23e; --chip:#1b2320; --sheet:#151b19; --ink:#dde6e2; --muted:#93a29c; --line:#2b3632; --soft:#1a211f; --accent:#8db9ff; --warn:#ff9b6b; color-scheme:dark }
+body{background:var(--bg);color:var(--ink);font:16px/1.5 var(--f-body)}
+.wrap{max-width:1240px;margin:0 auto;padding-inline:18px;padding-block:24px 44px;display:grid;gap:26px}
+header{display:grid;gap:8px}
+.eyebrow{font:600 12px/1 var(--f-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+h1{font:700 clamp(30px,4.6vw,46px)/1.05 var(--f-disp);margin:0;text-wrap:balance}
+h2{font:600 22px/1.15 var(--f-disp);margin:0 0 10px}
+h3{font:600 17px/1.2 var(--f-disp);margin:0 0 8px}
+p{margin:0;max-width:72ch}
+.lead{font-size:17px}
+.note{font-size:14px;color:var(--muted)}
+a{color:var(--accent)}
+.main{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:22px;align-items:start}
+@media (max-width:980px){.main{grid-template-columns:minmax(0,1fr)}}
+.card{background:var(--sheet);border:1px solid var(--line);border-radius:4px;padding:14px 16px;min-width:0}
+/* ---------- Frontplatte ---------- */
+.plate{background:linear-gradient(180deg,var(--plate2),var(--plate));color:var(--plate-ink);border-radius:10px;padding:18px 18px 16px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 2px 0 rgba(0,0,0,.25);overflow-x:auto}
+.plate-in{min-width:560px;display:grid;gap:16px}
+.ptop{display:flex;justify-content:space-between;align-items:baseline;gap:10px;border-bottom:1px solid var(--plate-line);padding-bottom:8px}
+.brand{font:700 18px var(--f-disp);letter-spacing:.14em;text-transform:uppercase}
+.brand small{font:500 11px var(--f-mono);letter-spacing:.08em;color:var(--plate-mut);margin-left:8px}
+.prow{display:grid;grid-template-columns:96px 1fr 120px;align-items:center;gap:10px}
+.plab{font:600 12px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--plate-mut);line-height:1.3}
+.bits{display:flex;gap:6px;align-items:flex-end}
+.nib{display:flex;gap:6px}
+.bits .gap{width:14px}
+.cell{display:grid;justify-items:center;gap:4px;width:40px}
+.cell .tag{font:600 10px var(--f-mono);color:var(--plate-mut)}
+.cell .num{font:500 9px var(--f-mono);color:var(--plate-mut);opacity:.8}
+.readout{font:600 13px var(--f-mono);color:var(--plate-ink);background:#141819;border:1px solid var(--plate-line);border-radius:4px;padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums}
+.readout span{display:block;font-size:10px;color:var(--plate-mut);font-weight:400}
+.led{width:18px;height:18px;border-radius:50%;--b:0;
+  background:radial-gradient(circle at 40% 35%,color-mix(in srgb,#fff calc(var(--b)*45%),var(--led-on)) 0,var(--led-on) 45%,#7a160a 100%);
+  box-shadow:0 0 calc(var(--b)*16px) calc(var(--b)*3px) rgba(255,70,30,calc(var(--b)*.75)),inset 0 -2px 3px rgba(0,0,0,.35);
+  filter:brightness(calc(.28 + var(--b)*.9)) saturate(calc(.55 + var(--b)*.6))}
+.led.halt{background:radial-gradient(circle at 40% 35%,color-mix(in srgb,#fff calc(var(--b)*45%),var(--halt-on)) 0,var(--halt-on) 45%,#6a4300 100%);
+  box-shadow:0 0 calc(var(--b)*16px) calc(var(--b)*3px) rgba(255,176,0,calc(var(--b)*.7)),inset 0 -2px 3px rgba(0,0,0,.35)}
+.led.pwr{width:10px;height:10px}
+/* Kippschalter */
+.tog{appearance:none;border:0;background:none;padding:0;width:34px;height:52px;position:relative;cursor:pointer;border-radius:6px}
+.tog:focus-visible{outline:2px solid #8db9ff;outline-offset:2px}
+.tog .nut{position:absolute;left:5px;top:14px;width:24px;height:24px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#f4f6f6,#a9b1b3 55%,#6c7477);box-shadow:0 1px 2px rgba(0,0,0,.6)}
+.tog .lever{position:absolute;left:12px;width:10px;height:24px;border-radius:5px;
+  background:linear-gradient(90deg,#8d9598,#f2f4f4 45%,#9aa2a5);box-shadow:0 1px 2px rgba(0,0,0,.5);transition:top .08s, bottom .08s}
+.tog[aria-pressed="true"] .lever{top:0}
+.tog[aria-pressed="false"] .lever{top:28px}
+.tog .lever::after{content:"";position:absolute;left:-2px;width:14px;height:8px;border-radius:4px;background:#e9eded;box-shadow:0 1px 1px rgba(0,0,0,.4)}
+.tog[aria-pressed="true"] .lever::after{top:-2px}
+.tog[aria-pressed="false"] .lever::after{bottom:-2px}
+.tog:disabled{cursor:default;opacity:.55}
+.ctrl{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-end;border-top:1px solid var(--plate-line);padding-top:12px}
+.cg{display:grid;justify-items:center;gap:3px;min-width:58px}
+.cg .up,.cg .dn{font:600 10px var(--f-mono);color:var(--plate-mut);letter-spacing:.05em}
+.cg .nm{font:600 11px var(--f-mono);color:var(--plate-ink)}
+.cg .up.on,.cg .dn.on{color:#ffd166}
+.push{appearance:none;width:44px;height:44px;border-radius:50%;border:3px solid #1b1f20;cursor:pointer;
+  background:radial-gradient(circle at 40% 35%,#ff6a4d,#c8261a 60%,#7c140c);box-shadow:0 3px 0 #111,0 4px 6px rgba(0,0,0,.4);touch-action:none;margin:4px 0}
+.push.down{transform:translateY(2px);box-shadow:0 1px 0 #111,inset 0 2px 4px rgba(0,0,0,.4)}
+.push.blue{background:radial-gradient(circle at 40% 35%,#6aa8ff,#2a64c8 60%,#163a7a)}
+.push:focus-visible{outline:2px solid #8db9ff;outline-offset:3px}
+.push:disabled{opacity:.4;cursor:default}
+.status{font:600 12px var(--f-mono);color:var(--plate-mut);margin-left:auto;text-align:right;line-height:1.5}
+.status b{color:#ffd166;font-weight:600}
+/* ---------- Innenleben ---------- */
+.regs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px 10px;font:14px var(--f-mono);font-variant-numeric:tabular-nums}
+.regs div{display:flex;justify-content:space-between;gap:6px;border-bottom:1px dotted var(--line);padding:2px 0}
+.regs span{color:var(--muted)}
+.flags{display:flex;gap:4px;margin-top:8px;flex-wrap:wrap}
+.flags i{font:600 12px var(--f-mono);font-style:normal;padding:2px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.flags i.on{background:var(--accent);border-color:var(--accent);color:var(--sheet)}
+.sig{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.sig i{font:600 12px var(--f-mono);font-style:normal;padding:2px 7px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.sig i.on{background:var(--warn);border-color:var(--warn);color:var(--sheet)}
+.busline{font:14px var(--f-mono);display:grid;grid-template-columns:auto 1fr;gap:4px 12px;margin-top:10px;font-variant-numeric:tabular-nums}
+.busline span{color:var(--muted)}
+.abits{display:flex;gap:3px;margin-top:6px;flex-wrap:wrap}
+.abits i{width:10px;height:10px;border-radius:50%;background:var(--line)}
+.abits i.on{background:var(--accent)}
+.abits b{width:6px}
+/* ---------- Werkzeuge ---------- */
+.tools{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,330px),1fr));gap:22px}
+label{font-size:14px;color:var(--muted)}
+select{max-width:100%}
+select,input[type=text],textarea{font:14px var(--f-mono);background:var(--sheet);color:var(--ink);border:1px solid var(--line);border-radius:3px;padding:6px 8px}
+textarea{width:100%;min-height:110px;resize:vertical;box-sizing:border-box}
+.btn{font:600 14px var(--f-body);background:var(--soft);color:var(--ink);border:1px solid var(--line);border-radius:3px;padding:6px 12px;cursor:pointer}
+.btn:hover{border-color:var(--accent)} .btn:focus-visible,select:focus-visible,textarea:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.mem{overflow-x:auto}
+.mem table{border-collapse:collapse;font:13px var(--f-mono);font-variant-numeric:tabular-nums}
+.mem th{color:var(--muted);font-weight:400;padding:1px 4px}
+.mem td{padding:1px 4px;text-align:center;border-radius:2px}
+.mem td.cur{outline:2px solid var(--warn)}
+.mem td.pc{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.mem td.hot{color:var(--warn);font-weight:600}
+.dis{font:13px/1.6 var(--f-mono);max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:3px;padding:6px 8px;background:var(--soft)}
+.dis div{white-space:pre;display:flex;gap:12px}
+.dis div.pc{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.dis .ad{color:var(--muted)} .dis .by{color:var(--muted);min-width:9ch}
+.msg{font-size:14px;color:var(--accent);min-height:1.4em}
+ul.info{margin:0;padding-left:1.2em;display:grid;gap:6px;max-width:80ch;font-size:15px}
+footer{border-top:1px solid var(--line);padding-top:14px;font-size:14px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px 20px;justify-content:space-between}
+@media (prefers-reduced-motion: reduce){.tog .lever{transition:none}}
+
+
+[hidden]{display:none!important}
+.top{display:grid;gap:12px}
+.tabs{display:flex;gap:4px;border-bottom:2px solid var(--line);flex-wrap:wrap}
+.tabs button{font:600 18px var(--f-disp);letter-spacing:.02em;background:none;border:0;border-bottom:3px solid transparent;margin-bottom:-2px;padding:8px 16px;color:var(--muted);cursor:pointer}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tabs button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tabpanel{display:grid;gap:26px;min-width:0}
+#bau{gap:36px}
+.intro{display:grid;gap:10px}
+.panelh{font:700 clamp(24px,3.4vw,32px)/1.1 var(--f-disp);margin:0}
+
+/* ---- Bauanleitung (auf #bau begrenzt) ---- */
+#bau .wrap{max-width:1180px;margin:0 auto;padding-inline:20px;padding-block:28px 48px;display:grid;gap:36px}
+#bau header{display:grid;gap:12px}
+#bau .eyebrow{font:600 12px/1 var(--f-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+#bau h1{font:700 clamp(32px,5vw,52px)/1.02 var(--f-disp);letter-spacing:-.01em;margin:0;text-wrap:balance}
+#bau h2{font:600 26px/1.1 var(--f-disp);margin:0 0 12px;text-wrap:balance}
+#bau h3{font:600 19px/1.2 var(--f-disp);margin:18px 0 8px}
+#bau p{margin:0;max-width:68ch}
+#bau .lead{font-size:18px;color:var(--ink)}
+#bau .facts{display:flex;flex-wrap:wrap;gap:10px;margin-top:4px}
+#bau .fact{border:1px solid var(--line);background:var(--sheet);padding:6px 12px;font:14px var(--f-mono);border-radius:3px}
+#bau .fact b{color:var(--net);font-weight:600}
+#bau section{display:grid;gap:12px;min-width:0}
+#bau .sheetbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+#bau .sheetbar p{color:var(--muted);font-size:14px}
+#bau button{font:600 14px var(--f-body);background:var(--sheet);color:var(--ink);border:1px solid var(--line);padding:6px 12px;border-radius:3px;cursor:pointer}
+#bau button:hover{border-color:var(--net)}
+#bau button:focus-visible{outline:2px solid var(--net);outline-offset:2px}
+#bau .scroll{overflow-x:auto;border:1px solid var(--line);background:var(--sheet);border-radius:3px}
+#bau .scroll svg{display:block;width:100%;min-width:1000px;height:auto}
+#bau .scroll.big svg{min-width:1500px}
+#bau svg text{font-family:var(--f-mono)}
+#bau .frame{fill:var(--sheet);stroke:var(--ink);stroke-width:1.5}
+#bau .w{stroke:var(--wire);stroke-width:1.5;fill:none;stroke-linecap:round}
+#bau .thin{stroke:var(--ink);stroke-width:1}
+#bau .box{fill:var(--chip);stroke:var(--ink);stroke-width:2}
+#bau .notch{fill:none;stroke:var(--ink);stroke-width:1.5}
+#bau .part{fill:var(--chip);stroke:var(--ink);stroke-width:1.6}
+#bau .pl{stroke:var(--ink);stroke-width:2.4}
+#bau .lever{stroke:var(--ink);stroke-width:2;stroke-linecap:round}
+#bau .ct{fill:var(--sheet);stroke:var(--ink);stroke-width:1.4}
+#bau .dot{fill:var(--wire)}
+#bau .arr{stroke:var(--led);stroke-width:1.3}
+#bau .arrh{fill:var(--led)}
+#bau .gndbar{stroke:var(--ink);stroke-width:3.5}
+#bau .pwrbar{stroke:var(--pwr);stroke-width:3}
+#bau line.nc{stroke:var(--muted);stroke-width:1.3}
+#bau .tb{fill:none;stroke:var(--ink);stroke-width:1.5}
+#bau text.t,#bau text.pin{fill:var(--ink);font-size:12px}
+#bau text.pn{fill:var(--muted);font-size:10px}
+#bau text.net{fill:var(--net);font-size:12px;font-weight:600}
+#bau text.pwr{fill:var(--pwr);font-size:11px;font-weight:600}
+#bau text.ref,#bau text.refs{fill:var(--ink);font-size:11px;font-weight:600}
+#bau text.refbig{fill:var(--ink);font-size:15px;font-weight:600}
+#bau text.val,#bau text.cap,#bau text.nc{fill:var(--muted);font-size:11px}
+#bau text.h2{fill:var(--ink);font:600 17px var(--f-disp);letter-spacing:.02em}
+#bau text.h3{fill:var(--ink);font:600 14px var(--f-disp)}
+#bau text.tbtitle{fill:var(--ink);font:700 22px var(--f-disp)}
+#bau text.tblab{fill:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:.08em}
+#bau text.tbval{fill:var(--ink);font-size:12px}
+#bau .how{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+#bau .how div{background:var(--sheet);border:1px solid var(--line);padding:14px 16px;border-radius:3px;min-width:0}
+#bau .how h3{margin:0 0 6px}
+#bau .how p{font-size:15px}
+#bau .tw{overflow-x:auto;border:1px solid var(--line);border-radius:3px;background:var(--sheet)}
+#bau table{border-collapse:collapse;width:100%;font-size:14.5px}
+#bau th,#bau td{text-align:left;padding:7px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+#bau th{font:600 12px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);background:var(--soft)}
+#bau tr:last-child td{border-bottom:0}
+#bau td.n{font:600 14px var(--f-mono);color:var(--net);white-space:nowrap}
+#bau td.m{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+#bau td.b{letter-spacing:.08em}
+#bau .two{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:24px}
+#bau .two>div{min-width:0}
+#bau ol.steps{margin:0;padding-left:1.4em;display:grid;gap:8px;max-width:75ch}
+#bau ul.notes{margin:0;padding-left:1.2em;display:grid;gap:8px;max-width:78ch}
+#bau .note{font-size:14px;color:var(--muted);max-width:75ch}
+#bau kbd{font:600 13px var(--f-mono);border:1px solid var(--line);border-bottom-width:2px;padding:0 5px;border-radius:3px;background:var(--sheet)}
+#bau footer{border-top:1px solid var(--line);padding-top:16px;font-size:14px;color:var(--muted);display:flex;flex-wrap:wrap;gap:8px 20px;justify-content:space-between}
+#bau a{color:var(--net)}
+</style>
+<div class="wrap">
+<div class="top">
+  <div class="eyebrow">Minimalrechner ohne ROM · Schaltplan, Bauanleitung und Emulator</div>
+  <h1>Z80-Kippschalterrechner</h1>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" id="tab-emu" aria-controls="emu" aria-selected="true">Emulator</button>
+    <button type="button" role="tab" id="tab-bau" aria-controls="bau" aria-selected="false">Bauanleitung &amp; Schaltplan</button>
+  </div>
+</div>
+<div id="emu" class="tabpanel" role="tabpanel" aria-labelledby="tab-emu">
+<div class="intro">
+  <h2 class="panelh">Emulator</h2>
+  <p class="lead">Die Frontplatte verhält sich wie die Schaltung: Im PROG-Modus zeigen die LEDs den Speicherinhalt an der eingestellten Adresse, der rote Taster schreibt das Byte der Datenschalter. Im RUN-Modus zeigen die LEDs, was Takt für Takt auf dem Datenbus liegt.</p>
+  <p class="note">Beim Öffnen ist Beispiel 1 (Addition 5 + 3) bereits eingetippt. Die Adressschalter stehen auf 42h, wo das Ergebnis landet. Zum Ausprobieren: S17 auf RUN, warten bis die gelbe HALT-LED leuchtet (bei 10,5 Hz etwa 5 Sekunden), zurück auf PROG – die LEDs zeigen 00001000 = 8.</p>
+</div>
+
+<div class="main">
+  <section aria-label="Frontplatte">
+    <div class="plate"><div class="plate-in">
+      <div class="ptop">
+        <div class="brand">Z80 · Kippschalterrechner<small>U1 Z84C00 · U2 62256 · U3 TLC555</small></div>
+        <div class="row" style="gap:6px"><span class="led pwr" id="pwrLed"></span><span class="plab" style="font-size:10px">Netz</span></div>
+      </div>
+
+      <div class="prow">
+        <div class="plab">Daten-LEDs<br>LED1–8</div>
+        <div class="bits" id="ledRow"></div>
+        <div class="readout" id="ledRead">--<span>Hilfsanzeige</span></div>
+      </div>
+      <div class="prow">
+        <div class="plab">Daten<br>S9–S16</div>
+        <div class="bits" id="dRow"></div>
+        <div class="readout" id="dRead">--<span>Schalter</span></div>
+      </div>
+      <div class="prow">
+        <div class="plab">Adresse<br>S1–S8</div>
+        <div class="bits" id="aRow"></div>
+        <div class="readout" id="aRead">--<span>Schalter</span></div>
+      </div>
+
+      <div class="ctrl">
+        <div class="cg"><span class="up" id="pwrUp">EIN</span><button class="tog" id="pwrSw" aria-pressed="true" aria-label="Netzschalter"><span class="nut"></span><span class="lever"></span></button><span class="dn" id="pwrDn">AUS</span><span class="nm">Netz</span></div>
+        <div class="cg"><span class="up" id="runUp">RUN</span><button class="tog" id="runSw" aria-pressed="false" aria-label="S17 PROG/RUN"><span class="nut"></span><span class="lever"></span></button><span class="dn" id="runDn">PROG</span><span class="nm">S17</span></div>
+        <div class="cg"><span class="up">&nbsp;</span><button class="push" id="wrBtn" aria-label="S18 WR – gedrückt halten zum Schreiben"></button><span class="dn">WR</span><span class="nm">S18</span></div>
+        <div class="cg"><span class="up" id="clkUp">1,05 kHz</span><button class="tog" id="clkSw" aria-pressed="false" aria-label="S19 Taktwahl"><span class="nut"></span><span class="lever"></span></button><span class="dn" id="clkDn">10,5 Hz</span><span class="nm">S19</span></div>
+        <div class="cg"><span class="up">&nbsp;</span><span class="led halt" id="haltLed"></span><span class="dn" style="margin-top:14px">HALT</span><span class="nm">LED9</span></div>
+        <div class="status" id="status">–</div>
+      </div>
+    </div></div>
+    <p class="note" style="margin-top:8px">Kippschalter: oben = 1. WR gedrückt halten (Maus, Finger oder Leertaste bei Fokus). Gedämpft leuchtende LEDs zeigen, dass gerade niemand den Datenbus treibt und nur die Datenschalter über ihre 4,7-kΩ-Widerstände den Pegel bestimmen.</p>
+  </section>
+
+  <section class="card" aria-label="Blick ins Innere">
+    <h2>Blick ins Innere</h2>
+    <p class="note" style="margin-bottom:10px">Diese Anzeigen gibt es an der echten Schaltung nicht – sie helfen beim Verstehen und Fehlersuchen.</p>
+    <div class="regs" id="regs"></div>
+    <div class="flags" id="flags"></div>
+    <div class="busline">
+      <span>Adressbus</span><b id="busA">----</b>
+      <span>Datenbus</span><b id="busD">--</b>
+      <span>treibt</span><b id="busDrv">–</b>
+      <span>Takte</span><b id="busT">0</b>
+      <span>Befehl</span><b id="busI">–</b>
+    </div>
+    <div class="abits" id="abits" aria-label="Adressbus A15 bis A0"></div>
+    <div class="sig" id="sigs"></div>
+    <h3 style="margin-top:16px">Takt</h3>
+    <div class="row">
+      <label for="clkMode">Taktquelle</label>
+      <select id="clkMode">
+        <option value="s19" selected>wie S19 (10,5 Hz / 1,05 kHz)</option>
+        <option value="step">Einzeltakt per Taster</option>
+        <option value="1">1 Hz</option>
+        <option value="100000">100 kHz (nur Emulator)</option>
+        <option value="4000000">4 MHz (nur Emulator)</option>
+      </select>
+      <button class="btn" id="tStep" type="button">1 Takt</button>
+      <button class="btn" id="iStep" type="button">Befehlsende</button>
+    </div>
+  </section>
+</div>
+
+<section class="tools" aria-label="Speicher und Programme">
+  <div class="card">
+    <h2>Speicher</h2>
+    <div class="row" style="margin-bottom:8px">
+      <label for="page">Seite</label>
+      <select id="page"></select>
+      <span class="note">Rahmen = Adresse auf dem Bus bzw. an den Schaltern, blau = PC</span>
+    </div>
+    <div class="mem" id="mem"></div>
+  </div>
+  <div class="card">
+    <h2>Disassembler</h2>
+    <div class="row" style="margin-bottom:8px"><label for="disFrom">ab Adresse</label><input type="text" id="disFrom" value="0000" size="6" aria-label="Startadresse hexadezimal"><button class="btn" id="disPC" type="button">ab PC</button></div>
+    <div class="dis" id="dis"></div>
+  </div>
+  <div class="card">
+    <h2>Programm laden</h2>
+    <p class="note" style="margin-bottom:8px">Abkürzung für das Eintippen per Schalter: schreibt direkt ins RAM. Format: Hexbytes, optional mit „Adresse:“ davor.</p>
+    <div class="row" style="margin-bottom:8px">
+      <label for="ex">Beispiel</label>
+      <select id="ex">
+        <option value="1">1 · Addition 5 + 3 → 42h</option>
+        <option value="2">2 · Zähler in 80h</option>
+        <option value="3">3 · Datenschalter lesen, verdoppeln → 82h</option>
+        <option value="4">4 · Speicher füllen mit LDIR</option>
+      </select>
+      <button class="btn" id="exLoad" type="button">In Textfeld</button>
+    </div>
+    <textarea id="hexIn" spellcheck="false" aria-label="Hexbytes"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="hexGo" type="button">Ins RAM schreiben</button>
+      <button class="btn" id="ramClr" type="button">RAM löschen</button>
+      <button class="btn" id="ramDump" type="button">Seite als Hex</button>
+    </div>
+    <div class="msg" id="msg" role="status"></div>
+  </div>
+</section>
+
+<section class="card" aria-label="Was emuliert wird">
+  <h2>Was der Emulator nachbildet</h2>
+  <ul class="info">
+    <li><b>Z80-Kern</b> aus cpcemu.html, gegen SingleStepTests/z80 geprüft (alle Befehle, Flags, Taktzahlen). Die Wartezyklen des CPC sind abgeschaltet.</li>
+    <li><b>Bus Takt für Takt:</b> M1-Zyklen (2 Takte Lesen, 2 Takte Refresh), Lese- und Schreibzyklen mit 3 Takten, E/A-Zyklen mit 4 Takten, dazwischen interne Takte. In jedem Takt wird ermittelt, wer den Datenbus treibt: RAM, Z80 oder niemand – dann bestimmen die Datenschalter den Pegel.</li>
+    <li><b>RAM-Steuerung wie im Schaltplan:</b> /CE folgt /MREQ, /OE folgt /RD, /WE folgt /WR. Refresh-Zyklen lesen also nichts, E/A-Zyklen erreichen das RAM nicht. A15 ist nicht angeschlossen: 8000h–FFFFh spiegelt 0000h–7FFFh, der Stapel ab FFFFh landet bei 7FFFh.</li>
+    <li><b>IN liest die Datenschalter:</b> Bei einem E/A-Lesezyklus treibt niemand den Bus, der Z80 übernimmt den Schalterwert. Das folgt direkt aus der Schaltung und wird in Beispiel 3 genutzt. OUT legt den Wert für 4 Takte auf den Bus – die LEDs zeigen ihn kurz an, gespeichert wird er nirgends.</li>
+    <li><b>LED-Helligkeit</b> ist der Mittelwert über ein Bild (ca. 16 ms). Treiben nur die Schalter den Bus, fließt etwa halber Strom – die LED leuchtet gedämpft. Bei 1 kHz verschwimmen die einzelnen Zugriffe zu Mischhelligkeiten, wie am echten Gerät.</li>
+    <li><b>Vereinfachung:</b> Ein Befehl wird beim Start seiner Takte vollständig ausgeführt, die Anzeige spielt seine Buszyklen danach ab. Wird mitten im Befehl auf PROG geschaltet, gilt der Befehl als beendet – an der echten Schaltung könnte ein Schreibzugriff abgebrochen werden.</li>
+    <li><b>Einschalten</b> füllt das RAM mit Zufallswerten, wie ein echtes SRAM nach dem Anlegen der Spannung.</li>
+  </ul>
+</section>
+
+</div>
+
+
+<div id="bau" class="tabpanel" role="tabpanel" aria-labelledby="tab-bau" hidden>
+<div class="intro">
+  <h2 class="panelh">Bauanleitung</h2>
+  <p class="lead">Ein Rechner ohne ROM und ohne Logikbausteine: Adresse und Daten werden über Kippschalter eingestellt, acht LEDs zeigen den Speicherinhalt, ein Taster schreibt. Danach läuft das Programm ab Adresse 0000h.</p>
+  <div class="facts">
+    <span class="fact"><b>3</b> ICs: Z80, SRAM, 555</span>
+    <span class="fact">Takt <b>≈ 10 Hz</b> oder <b>≈ 1 kHz</b></span>
+    <span class="fact"><b>256</b> Byte per Schalter erreichbar</span>
+    <span class="fact">Versorgung <b>5 V</b>, ca. 50 mA</span>
+  </div>
+</div>
+
+<section aria-labelledby="s-plan">
+  <div class="sheetbar">
+    <h2 id="s-plan" style="margin:0">Schaltplan</h2>
+    <button id="zoomBtn" type="button" aria-pressed="false">Originalgröße</button>
+  </div>
+  <div class="scroll" id="plan"><svg viewBox="0 0 1500 1080" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Schaltplan des Z80-Kippschalterrechners"><rect class="frame" x="8" y="8" width="1484" height="1064"/><rect class="box" x="170" y="90" width="150" height="420"/><path class="notch" d="M235.0,90 a10,10 0 0 0 20,0"/><text class="refbig" x="245.0" y="60" text-anchor="middle">U1</text><text class="val" x="245.0" y="76" text-anchor="middle">Z84C00 (CMOS-Z80), DIP-40</text><line class="w" x1="120" y1="110" x2="170" y2="110"/><text class="pn" x="164" y="106" text-anchor="end">1</text><text class="pin" x="176" y="114" text-anchor="start">A11</text><text class="net" x="115" y="114" text-anchor="end">A11</text><line class="w" x1="120" y1="130" x2="170" y2="130"/><text class="pn" x="164" y="126" text-anchor="end">2</text><text class="pin" x="176" y="134" text-anchor="start">A12</text><text class="net" x="115" y="134" text-anchor="end">A12</text><line class="w" x1="120" y1="150" x2="170" y2="150"/><text class="pn" x="164" y="146" text-anchor="end">3</text><text class="pin" x="176" y="154" text-anchor="start">A13</text><text class="net" x="115" y="154" text-anchor="end">A13</text><line class="w" x1="120" y1="170" x2="170" y2="170"/><text class="pn" x="164" y="166" text-anchor="end">4</text><text class="pin" x="176" y="174" text-anchor="start">A14</text><text class="net" x="115" y="174" text-anchor="end">A14</text><line class="w" x1="120" y1="190" x2="170" y2="190"/><text class="pn" x="164" y="186" text-anchor="end">5</text><text class="pin" x="176" y="194" text-anchor="start">A15</text><text class="nc" x="116" y="194" text-anchor="end">nc</text><line class="nc" x1="118" y1="186" x2="126" y2="194"/><line class="nc" x1="118" y1="194" x2="126" y2="186"/><line class="w" x1="120" y1="210" x2="170" y2="210"/><text class="pn" x="164" y="206" text-anchor="end">6</text><text class="pin" x="176" y="214" text-anchor="start">CLK</text><text class="net" x="115" y="214" text-anchor="end">CLK</text><line class="w" x1="120" y1="230" x2="170" y2="230"/><text class="pn" x="164" y="226" text-anchor="end">7</text><text class="pin" x="176" y="234" text-anchor="start">D4</text><text class="net" x="115" y="234" text-anchor="end">D4</text><line class="w" x1="120" y1="250" x2="170" y2="250"/><text class="pn" x="164" y="246" text-anchor="end">8</text><text class="pin" x="176" y="254" text-anchor="start">D3</text><text class="net" x="115" y="254" text-anchor="end">D3</text><line class="w" x1="120" y1="270" x2="170" y2="270"/><text class="pn" x="164" y="266" text-anchor="end">9</text><text class="pin" x="176" y="274" text-anchor="start">D5</text><text class="net" x="115" y="274" text-anchor="end">D5</text><line class="w" x1="120" y1="290" x2="170" y2="290"/><text class="pn" x="164" y="286" text-anchor="end">10</text><text class="pin" x="176" y="294" text-anchor="start">D6</text><text class="net" x="115" y="294" text-anchor="end">D6</text><line class="w" x1="120" y1="310" x2="170" y2="310"/><text class="pn" x="164" y="306" text-anchor="end">11</text><text class="pin" x="176" y="314" text-anchor="start">+5V</text><text class="net" x="115" y="314" text-anchor="end">+5V</text><line class="w" x1="120" y1="330" x2="170" y2="330"/><text class="pn" x="164" y="326" text-anchor="end">12</text><text class="pin" x="176" y="334" text-anchor="start">D2</text><text class="net" x="115" y="334" text-anchor="end">D2</text><line class="w" x1="120" y1="350" x2="170" y2="350"/><text class="pn" x="164" y="346" text-anchor="end">13</text><text class="pin" x="176" y="354" text-anchor="start">D7</text><text class="net" x="115" y="354" text-anchor="end">D7</text><line class="w" x1="120" y1="370" x2="170" y2="370"/><text class="pn" x="164" y="366" text-anchor="end">14</text><text class="pin" x="176" y="374" text-anchor="start">D0</text><text class="net" x="115" y="374" text-anchor="end">D0</text><line class="w" x1="120" y1="390" x2="170" y2="390"/><text class="pn" x="164" y="386" text-anchor="end">15</text><text class="pin" x="176" y="394" text-anchor="start">D1</text><text class="net" x="115" y="394" text-anchor="end">D1</text><line class="w" x1="120" y1="410" x2="170" y2="410"/><text class="pn" x="164" y="406" text-anchor="end">16</text><text class="pin" x="176" y="414" text-anchor="start">/INT</text><text class="net" x="115" y="414" text-anchor="end">/INT</text><line class="w" x1="120" y1="430" x2="170" y2="430"/><text class="pn" x="164" y="426" text-anchor="end">17</text><text class="pin" x="176" y="434" text-anchor="start">/NMI</text><text class="net" x="115" y="434" text-anchor="end">/NMI</text><line class="w" x1="120" y1="450" x2="170" y2="450"/><text class="pn" x="164" y="446" text-anchor="end">18</text><text class="pin" x="176" y="454" text-anchor="start">/HALT</text><text class="net" x="115" y="454" text-anchor="end">/HALT</text><line class="w" x1="120" y1="470" x2="170" y2="470"/><text class="pn" x="164" y="466" text-anchor="end">19</text><text class="pin" x="176" y="474" text-anchor="start">/MREQ</text><text class="net" x="115" y="474" text-anchor="end">/MREQ</text><line class="w" x1="120" y1="490" x2="170" y2="490"/><text class="pn" x="164" y="486" text-anchor="end">20</text><text class="pin" x="176" y="494" text-anchor="start">/IORQ</text><text class="nc" x="116" y="494" text-anchor="end">nc</text><line class="nc" x1="118" y1="486" x2="126" y2="494"/><line class="nc" x1="118" y1="494" x2="126" y2="486"/><line class="w" x1="320" y1="110" x2="370" y2="110"/><text class="pn" x="326" y="106" text-anchor="start">40</text><text class="pin" x="314" y="114" text-anchor="end">A10</text><text class="net" x="375" y="114" text-anchor="start">A10</text><line class="w" x1="320" y1="130" x2="370" y2="130"/><text class="pn" x="326" y="126" text-anchor="start">39</text><text class="pin" x="314" y="134" text-anchor="end">A9</text><text class="net" x="375" y="134" text-anchor="start">A9</text><line class="w" x1="320" y1="150" x2="370" y2="150"/><text class="pn" x="326" y="146" text-anchor="start">38</text><text class="pin" x="314" y="154" text-anchor="end">A8</text><text class="net" x="375" y="154" text-anchor="start">A8</text><line class="w" x1="320" y1="170" x2="370" y2="170"/><text class="pn" x="326" y="166" text-anchor="start">37</text><text class="pin" x="314" y="174" text-anchor="end">A7</text><text class="net" x="375" y="174" text-anchor="start">A7</text><line class="w" x1="320" y1="190" x2="370" y2="190"/><text class="pn" x="326" y="186" text-anchor="start">36</text><text class="pin" x="314" y="194" text-anchor="end">A6</text><text class="net" x="375" y="194" text-anchor="start">A6</text><line class="w" x1="320" y1="210" x2="370" y2="210"/><text class="pn" x="326" y="206" text-anchor="start">35</text><text class="pin" x="314" y="214" text-anchor="end">A5</text><text class="net" x="375" y="214" text-anchor="start">A5</text><line class="w" x1="320" y1="230" x2="370" y2="230"/><text class="pn" x="326" y="226" text-anchor="start">34</text><text class="pin" x="314" y="234" text-anchor="end">A4</text><text class="net" x="375" y="234" text-anchor="start">A4</text><line class="w" x1="320" y1="250" x2="370" y2="250"/><text class="pn" x="326" y="246" text-anchor="start">33</text><text class="pin" x="314" y="254" text-anchor="end">A3</text><text class="net" x="375" y="254" text-anchor="start">A3</text><line class="w" x1="320" y1="270" x2="370" y2="270"/><text class="pn" x="326" y="266" text-anchor="start">32</text><text class="pin" x="314" y="274" text-anchor="end">A2</text><text class="net" x="375" y="274" text-anchor="start">A2</text><line class="w" x1="320" y1="290" x2="370" y2="290"/><text class="pn" x="326" y="286" text-anchor="start">31</text><text class="pin" x="314" y="294" text-anchor="end">A1</text><text class="net" x="375" y="294" text-anchor="start">A1</text><line class="w" x1="320" y1="310" x2="370" y2="310"/><text class="pn" x="326" y="306" text-anchor="start">30</text><text class="pin" x="314" y="314" text-anchor="end">A0</text><text class="net" x="375" y="314" text-anchor="start">A0</text><line class="w" x1="320" y1="330" x2="370" y2="330"/><text class="pn" x="326" y="326" text-anchor="start">29</text><text class="pin" x="314" y="334" text-anchor="end">GND</text><text class="net" x="375" y="334" text-anchor="start">GND</text><line class="w" x1="320" y1="350" x2="370" y2="350"/><text class="pn" x="326" y="346" text-anchor="start">28</text><text class="pin" x="314" y="354" text-anchor="end">/RFSH</text><text class="nc" x="374" y="354" text-anchor="start">nc</text><line class="nc" x1="364" y1="346" x2="372" y2="354"/><line class="nc" x1="364" y1="354" x2="372" y2="346"/><line class="w" x1="320" y1="370" x2="370" y2="370"/><text class="pn" x="326" y="366" text-anchor="start">27</text><text class="pin" x="314" y="374" text-anchor="end">/M1</text><text class="nc" x="374" y="374" text-anchor="start">nc</text><line class="nc" x1="364" y1="366" x2="372" y2="374"/><line class="nc" x1="364" y1="374" x2="372" y2="366"/><line class="w" x1="320" y1="390" x2="370" y2="390"/><text class="pn" x="326" y="386" text-anchor="start">26</text><text class="pin" x="314" y="394" text-anchor="end">/RESET</text><text class="net" x="375" y="394" text-anchor="start">/RESET</text><line class="w" x1="320" y1="410" x2="370" y2="410"/><text class="pn" x="326" y="406" text-anchor="start">25</text><text class="pin" x="314" y="414" text-anchor="end">/BUSREQ</text><text class="net" x="375" y="414" text-anchor="start">/BUSREQ</text><line class="w" x1="320" y1="430" x2="370" y2="430"/><text class="pn" x="326" y="426" text-anchor="start">24</text><text class="pin" x="314" y="434" text-anchor="end">/WAIT</text><text class="net" x="375" y="434" text-anchor="start">/WAIT</text><line class="w" x1="320" y1="450" x2="370" y2="450"/><text class="pn" x="326" y="446" text-anchor="start">23</text><text class="pin" x="314" y="454" text-anchor="end">/BUSACK</text><text class="nc" x="374" y="454" text-anchor="start">nc</text><line class="nc" x1="364" y1="446" x2="372" y2="454"/><line class="nc" x1="364" y1="454" x2="372" y2="446"/><line class="w" x1="320" y1="470" x2="370" y2="470"/><text class="pn" x="326" y="466" text-anchor="start">22</text><text class="pin" x="314" y="474" text-anchor="end">/WR</text><text class="net" x="375" y="474" text-anchor="start">/WR</text><line class="w" x1="320" y1="490" x2="370" y2="490"/><text class="pn" x="326" y="486" text-anchor="start">21</text><text class="pin" x="314" y="494" text-anchor="end">/RD</text><text class="net" x="375" y="494" text-anchor="start">/RD</text><rect class="box" x="600" y="90" width="130" height="300"/><path class="notch" d="M655.0,90 a10,10 0 0 0 20,0"/><text class="refbig" x="665.0" y="60" text-anchor="middle">U2</text><text class="val" x="665.0" y="76" text-anchor="middle">62256 SRAM 32K×8, DIP-28</text><line class="w" x1="550" y1="110" x2="600" y2="110"/><text class="pn" x="594" y="106" text-anchor="end">1</text><text class="pin" x="606" y="114" text-anchor="start">A14</text><text class="net" x="545" y="114" text-anchor="end">A14</text><line class="w" x1="550" y1="130" x2="600" y2="130"/><text class="pn" x="594" y="126" text-anchor="end">2</text><text class="pin" x="606" y="134" text-anchor="start">A12</text><text class="net" x="545" y="134" text-anchor="end">A12</text><line class="w" x1="550" y1="150" x2="600" y2="150"/><text class="pn" x="594" y="146" text-anchor="end">3</text><text class="pin" x="606" y="154" text-anchor="start">A7</text><text class="net" x="545" y="154" text-anchor="end">A7</text><line class="w" x1="550" y1="170" x2="600" y2="170"/><text class="pn" x="594" y="166" text-anchor="end">4</text><text class="pin" x="606" y="174" text-anchor="start">A6</text><text class="net" x="545" y="174" text-anchor="end">A6</text><line class="w" x1="550" y1="190" x2="600" y2="190"/><text class="pn" x="594" y="186" text-anchor="end">5</text><text class="pin" x="606" y="194" text-anchor="start">A5</text><text class="net" x="545" y="194" text-anchor="end">A5</text><line class="w" x1="550" y1="210" x2="600" y2="210"/><text class="pn" x="594" y="206" text-anchor="end">6</text><text class="pin" x="606" y="214" text-anchor="start">A4</text><text class="net" x="545" y="214" text-anchor="end">A4</text><line class="w" x1="550" y1="230" x2="600" y2="230"/><text class="pn" x="594" y="226" text-anchor="end">7</text><text class="pin" x="606" y="234" text-anchor="start">A3</text><text class="net" x="545" y="234" text-anchor="end">A3</text><line class="w" x1="550" y1="250" x2="600" y2="250"/><text class="pn" x="594" y="246" text-anchor="end">8</text><text class="pin" x="606" y="254" text-anchor="start">A2</text><text class="net" x="545" y="254" text-anchor="end">A2</text><line class="w" x1="550" y1="270" x2="600" y2="270"/><text class="pn" x="594" y="266" text-anchor="end">9</text><text class="pin" x="606" y="274" text-anchor="start">A1</text><text class="net" x="545" y="274" text-anchor="end">A1</text><line class="w" x1="550" y1="290" x2="600" y2="290"/><text class="pn" x="594" y="286" text-anchor="end">10</text><text class="pin" x="606" y="294" text-anchor="start">A0</text><text class="net" x="545" y="294" text-anchor="end">A0</text><line class="w" x1="550" y1="310" x2="600" y2="310"/><text class="pn" x="594" y="306" text-anchor="end">11</text><text class="pin" x="606" y="314" text-anchor="start">D0</text><text class="net" x="545" y="314" text-anchor="end">D0</text><line class="w" x1="550" y1="330" x2="600" y2="330"/><text class="pn" x="594" y="326" text-anchor="end">12</text><text class="pin" x="606" y="334" text-anchor="start">D1</text><text class="net" x="545" y="334" text-anchor="end">D1</text><line class="w" x1="550" y1="350" x2="600" y2="350"/><text class="pn" x="594" y="346" text-anchor="end">13</text><text class="pin" x="606" y="354" text-anchor="start">D2</text><text class="net" x="545" y="354" text-anchor="end">D2</text><line class="w" x1="550" y1="370" x2="600" y2="370"/><text class="pn" x="594" y="366" text-anchor="end">14</text><text class="pin" x="606" y="374" text-anchor="start">GND</text><text class="net" x="545" y="374" text-anchor="end">GND</text><line class="w" x1="730" y1="110" x2="780" y2="110"/><text class="pn" x="736" y="106" text-anchor="start">28</text><text class="pin" x="724" y="114" text-anchor="end">VCC</text><text class="net" x="785" y="114" text-anchor="start">+5V</text><line class="w" x1="730" y1="130" x2="780" y2="130"/><text class="pn" x="736" y="126" text-anchor="start">27</text><text class="pin" x="724" y="134" text-anchor="end">/WE</text><text class="net" x="785" y="134" text-anchor="start">/WE</text><line class="w" x1="730" y1="150" x2="780" y2="150"/><text class="pn" x="736" y="146" text-anchor="start">26</text><text class="pin" x="724" y="154" text-anchor="end">A13</text><text class="net" x="785" y="154" text-anchor="start">A13</text><line class="w" x1="730" y1="170" x2="780" y2="170"/><text class="pn" x="736" y="166" text-anchor="start">25</text><text class="pin" x="724" y="174" text-anchor="end">A8</text><text class="net" x="785" y="174" text-anchor="start">A8</text><line class="w" x1="730" y1="190" x2="780" y2="190"/><text class="pn" x="736" y="186" text-anchor="start">24</text><text class="pin" x="724" y="194" text-anchor="end">A9</text><text class="net" x="785" y="194" text-anchor="start">A9</text><line class="w" x1="730" y1="210" x2="780" y2="210"/><text class="pn" x="736" y="206" text-anchor="start">23</text><text class="pin" x="724" y="214" text-anchor="end">A11</text><text class="net" x="785" y="214" text-anchor="start">A11</text><line class="w" x1="730" y1="230" x2="780" y2="230"/><text class="pn" x="736" y="226" text-anchor="start">22</text><text class="pin" x="724" y="234" text-anchor="end">/OE</text><text class="net" x="785" y="234" text-anchor="start">/OE</text><line class="w" x1="730" y1="250" x2="780" y2="250"/><text class="pn" x="736" y="246" text-anchor="start">21</text><text class="pin" x="724" y="254" text-anchor="end">A10</text><text class="net" x="785" y="254" text-anchor="start">A10</text><line class="w" x1="730" y1="270" x2="780" y2="270"/><text class="pn" x="736" y="266" text-anchor="start">20</text><text class="pin" x="724" y="274" text-anchor="end">/CE</text><text class="net" x="785" y="274" text-anchor="start">/CE</text><line class="w" x1="730" y1="290" x2="780" y2="290"/><text class="pn" x="736" y="286" text-anchor="start">19</text><text class="pin" x="724" y="294" text-anchor="end">D7</text><text class="net" x="785" y="294" text-anchor="start">D7</text><line class="w" x1="730" y1="310" x2="780" y2="310"/><text class="pn" x="736" y="306" text-anchor="start">18</text><text class="pin" x="724" y="314" text-anchor="end">D6</text><text class="net" x="785" y="314" text-anchor="start">D6</text><line class="w" x1="730" y1="330" x2="780" y2="330"/><text class="pn" x="736" y="326" text-anchor="start">17</text><text class="pin" x="724" y="334" text-anchor="end">D5</text><text class="net" x="785" y="334" text-anchor="start">D5</text><line class="w" x1="730" y1="350" x2="780" y2="350"/><text class="pn" x="736" y="346" text-anchor="start">16</text><text class="pin" x="724" y="354" text-anchor="end">D4</text><text class="net" x="785" y="354" text-anchor="start">D4</text><line class="w" x1="730" y1="370" x2="780" y2="370"/><text class="pn" x="736" y="366" text-anchor="start">15</text><text class="pin" x="724" y="374" text-anchor="end">D3</text><text class="net" x="785" y="374" text-anchor="start">D3</text><text class="cap" x="560" y="442" text-anchor="start">Pull-downs obere Adressleitungen (im PROG-Modus = 0)</text><text class="net" x="580" y="470" text-anchor="middle">A8</text><line class="w" x1="580" y1="476" x2="580" y2="486"/><line class="w" x1="580" y1="476" x2="580" y2="492.0"/><line class="w" x1="580" y1="524.0" x2="580" y2="540"/><rect class="part" x="574" y="492.0" width="12" height="32"/><text class="ref" x="590" y="506.0" text-anchor="start">R25</text><line class="gndbar" x1="571" y1="540" x2="589" y2="540"/><text class="net" x="628" y="470" text-anchor="middle">A9</text><line class="w" x1="628" y1="476" x2="628" y2="486"/><line class="w" x1="628" y1="476" x2="628" y2="492.0"/><line class="w" x1="628" y1="524.0" x2="628" y2="540"/><rect class="part" x="622" y="492.0" width="12" height="32"/><text class="ref" x="638" y="506.0" text-anchor="start">R26</text><line class="gndbar" x1="619" y1="540" x2="637" y2="540"/><text class="net" x="676" y="470" text-anchor="middle">A10</text><line class="w" x1="676" y1="476" x2="676" y2="486"/><line class="w" x1="676" y1="476" x2="676" y2="492.0"/><line class="w" x1="676" y1="524.0" x2="676" y2="540"/><rect class="part" x="670" y="492.0" width="12" height="32"/><text class="ref" x="686" y="506.0" text-anchor="start">R27</text><line class="gndbar" x1="667" y1="540" x2="685" y2="540"/><text class="net" x="724" y="470" text-anchor="middle">A11</text><line class="w" x1="724" y1="476" x2="724" y2="486"/><line class="w" x1="724" y1="476" x2="724" y2="492.0"/><line class="w" x1="724" y1="524.0" x2="724" y2="540"/><rect class="part" x="718" y="492.0" width="12" height="32"/><text class="ref" x="734" y="506.0" text-anchor="start">R28</text><line class="gndbar" x1="715" y1="540" x2="733" y2="540"/><text class="net" x="772" y="470" text-anchor="middle">A12</text><line class="w" x1="772" y1="476" x2="772" y2="486"/><line class="w" x1="772" y1="476" x2="772" y2="492.0"/><line class="w" x1="772" y1="524.0" x2="772" y2="540"/><rect class="part" x="766" y="492.0" width="12" height="32"/><text class="ref" x="782" y="506.0" text-anchor="start">R29</text><line class="gndbar" x1="763" y1="540" x2="781" y2="540"/><text class="net" x="820" y="470" text-anchor="middle">A13</text><line class="w" x1="820" y1="476" x2="820" y2="486"/><line class="w" x1="820" y1="476" x2="820" y2="492.0"/><line class="w" x1="820" y1="524.0" x2="820" y2="540"/><rect class="part" x="814" y="492.0" width="12" height="32"/><text class="ref" x="830" y="506.0" text-anchor="start">R30</text><line class="gndbar" x1="811" y1="540" x2="829" y2="540"/><text class="net" x="868" y="470" text-anchor="middle">A14</text><line class="w" x1="868" y1="476" x2="868" y2="486"/><line class="w" x1="868" y1="476" x2="868" y2="492.0"/><line class="w" x1="868" y1="524.0" x2="868" y2="540"/><rect class="part" x="862" y="492.0" width="12" height="32"/><text class="ref" x="878" y="506.0" text-anchor="start">R31</text><line class="gndbar" x1="859" y1="540" x2="877" y2="540"/><text class="val" x="724" y="562" text-anchor="middle">R25–R31 · 7× 10 kΩ nach GND</text><text class="h2" x="1000" y="72" text-anchor="start">Adressschalter</text><text class="cap" x="1000" y="88" text-anchor="start">S1–S8 Kippschalter EIN-EIN (1×UM): oben = 1, unten = 0</text><line class="w" x1="930" y1="94" x2="930" y2="322"/><line class="pwrbar" x1="921" y1="94" x2="939" y2="94"/><text class="pwr" x="930" y="88" text-anchor="middle">+5V</text><line class="w" x1="952" y1="102" x2="952" y2="334"/><line class="gndbar" x1="943" y1="334" x2="961" y2="334"/><line class="w" x1="930" y1="109" x2="975" y2="109"/><circle class="dot" cx="930" cy="109" r="3"/><line class="w" x1="952" y1="123" x2="975" y2="123"/><circle class="dot" cx="952" cy="123" r="3"/><circle class="ct" cx="978" cy="109" r="2.6"/><circle class="ct" cx="978" cy="123" r="2.6"/><circle class="ct" cx="1004" cy="116" r="2.6"/><line class="lever" x1="1004" y1="116" x2="979" y2="107"/><text class="refs" x="990" y="104" text-anchor="middle">S1</text><line class="w" x1="1006" y1="116" x2="1027.0" y2="116"/><line class="w" x1="1059.0" y1="116" x2="1080" y2="116"/><rect class="part" x="1027.0" y="110" width="32" height="12"/><text class="val" x="1043.0" y="106" text-anchor="middle">R1 4k7</text><line class="w" x1="1080" y1="116" x2="1110" y2="116"/><text class="net" x="1115" y="120" text-anchor="start">A7</text><line class="w" x1="930" y1="137" x2="975" y2="137"/><circle class="dot" cx="930" cy="137" r="3"/><line class="w" x1="952" y1="151" x2="975" y2="151"/><circle class="dot" cx="952" cy="151" r="3"/><circle class="ct" cx="978" cy="137" r="2.6"/><circle class="ct" cx="978" cy="151" r="2.6"/><circle class="ct" cx="1004" cy="144" r="2.6"/><line class="lever" x1="1004" y1="144" x2="979" y2="135"/><text class="refs" x="990" y="132" text-anchor="middle">S2</text><line class="w" x1="1006" y1="144" x2="1027.0" y2="144"/><line class="w" x1="1059.0" y1="144" x2="1080" y2="144"/><rect class="part" x="1027.0" y="138" width="32" height="12"/><text class="val" x="1043.0" y="134" text-anchor="middle">R2 4k7</text><line class="w" x1="1080" y1="144" x2="1110" y2="144"/><text class="net" x="1115" y="148" text-anchor="start">A6</text><line class="w" x1="930" y1="165" x2="975" y2="165"/><circle class="dot" cx="930" cy="165" r="3"/><line class="w" x1="952" y1="179" x2="975" y2="179"/><circle class="dot" cx="952" cy="179" r="3"/><circle class="ct" cx="978" cy="165" r="2.6"/><circle class="ct" cx="978" cy="179" r="2.6"/><circle class="ct" cx="1004" cy="172" r="2.6"/><line class="lever" x1="1004" y1="172" x2="979" y2="163"/><text class="refs" x="990" y="160" text-anchor="middle">S3</text><line class="w" x1="1006" y1="172" x2="1027.0" y2="172"/><line class="w" x1="1059.0" y1="172" x2="1080" y2="172"/><rect class="part" x="1027.0" y="166" width="32" height="12"/><text class="val" x="1043.0" y="162" text-anchor="middle">R3 4k7</text><line class="w" x1="1080" y1="172" x2="1110" y2="172"/><text class="net" x="1115" y="176" text-anchor="start">A5</text><line class="w" x1="930" y1="193" x2="975" y2="193"/><circle class="dot" cx="930" cy="193" r="3"/><line class="w" x1="952" y1="207" x2="975" y2="207"/><circle class="dot" cx="952" cy="207" r="3"/><circle class="ct" cx="978" cy="193" r="2.6"/><circle class="ct" cx="978" cy="207" r="2.6"/><circle class="ct" cx="1004" cy="200" r="2.6"/><line class="lever" x1="1004" y1="200" x2="979" y2="191"/><text class="refs" x="990" y="188" text-anchor="middle">S4</text><line class="w" x1="1006" y1="200" x2="1027.0" y2="200"/><line class="w" x1="1059.0" y1="200" x2="1080" y2="200"/><rect class="part" x="1027.0" y="194" width="32" height="12"/><text class="val" x="1043.0" y="190" text-anchor="middle">R4 4k7</text><line class="w" x1="1080" y1="200" x2="1110" y2="200"/><text class="net" x="1115" y="204" text-anchor="start">A4</text><line class="w" x1="930" y1="221" x2="975" y2="221"/><circle class="dot" cx="930" cy="221" r="3"/><line class="w" x1="952" y1="235" x2="975" y2="235"/><circle class="dot" cx="952" cy="235" r="3"/><circle class="ct" cx="978" cy="221" r="2.6"/><circle class="ct" cx="978" cy="235" r="2.6"/><circle class="ct" cx="1004" cy="228" r="2.6"/><line class="lever" x1="1004" y1="228" x2="979" y2="219"/><text class="refs" x="990" y="216" text-anchor="middle">S5</text><line class="w" x1="1006" y1="228" x2="1027.0" y2="228"/><line class="w" x1="1059.0" y1="228" x2="1080" y2="228"/><rect class="part" x="1027.0" y="222" width="32" height="12"/><text class="val" x="1043.0" y="218" text-anchor="middle">R5 4k7</text><line class="w" x1="1080" y1="228" x2="1110" y2="228"/><text class="net" x="1115" y="232" text-anchor="start">A3</text><line class="w" x1="930" y1="249" x2="975" y2="249"/><circle class="dot" cx="930" cy="249" r="3"/><line class="w" x1="952" y1="263" x2="975" y2="263"/><circle class="dot" cx="952" cy="263" r="3"/><circle class="ct" cx="978" cy="249" r="2.6"/><circle class="ct" cx="978" cy="263" r="2.6"/><circle class="ct" cx="1004" cy="256" r="2.6"/><line class="lever" x1="1004" y1="256" x2="979" y2="247"/><text class="refs" x="990" y="244" text-anchor="middle">S6</text><line class="w" x1="1006" y1="256" x2="1027.0" y2="256"/><line class="w" x1="1059.0" y1="256" x2="1080" y2="256"/><rect class="part" x="1027.0" y="250" width="32" height="12"/><text class="val" x="1043.0" y="246" text-anchor="middle">R6 4k7</text><line class="w" x1="1080" y1="256" x2="1110" y2="256"/><text class="net" x="1115" y="260" text-anchor="start">A2</text><line class="w" x1="930" y1="277" x2="975" y2="277"/><circle class="dot" cx="930" cy="277" r="3"/><line class="w" x1="952" y1="291" x2="975" y2="291"/><circle class="dot" cx="952" cy="291" r="3"/><circle class="ct" cx="978" cy="277" r="2.6"/><circle class="ct" cx="978" cy="291" r="2.6"/><circle class="ct" cx="1004" cy="284" r="2.6"/><line class="lever" x1="1004" y1="284" x2="979" y2="275"/><text class="refs" x="990" y="272" text-anchor="middle">S7</text><line class="w" x1="1006" y1="284" x2="1027.0" y2="284"/><line class="w" x1="1059.0" y1="284" x2="1080" y2="284"/><rect class="part" x="1027.0" y="278" width="32" height="12"/><text class="val" x="1043.0" y="274" text-anchor="middle">R7 4k7</text><line class="w" x1="1080" y1="284" x2="1110" y2="284"/><text class="net" x="1115" y="288" text-anchor="start">A1</text><line class="w" x1="930" y1="305" x2="975" y2="305"/><circle class="dot" cx="930" cy="305" r="3"/><line class="w" x1="952" y1="319" x2="975" y2="319"/><circle class="dot" cx="952" cy="319" r="3"/><circle class="ct" cx="978" cy="305" r="2.6"/><circle class="ct" cx="978" cy="319" r="2.6"/><circle class="ct" cx="1004" cy="312" r="2.6"/><line class="lever" x1="1004" y1="312" x2="979" y2="303"/><text class="refs" x="990" y="300" text-anchor="middle">S8</text><line class="w" x1="1006" y1="312" x2="1027.0" y2="312"/><line class="w" x1="1059.0" y1="312" x2="1080" y2="312"/><rect class="part" x="1027.0" y="306" width="32" height="12"/><text class="val" x="1043.0" y="302" text-anchor="middle">R8 4k7</text><line class="w" x1="1080" y1="312" x2="1110" y2="312"/><text class="net" x="1115" y="316" text-anchor="start">A0</text><text class="h2" x="1000" y="350" text-anchor="start">Datenschalter und Anzeige</text><text class="cap" x="1000" y="366" text-anchor="start">S9–S16 Kippschalter EIN-EIN: oben = 1 · LED leuchtet = Bit ist 1</text><line class="w" x1="930" y1="374" x2="930" y2="602"/><line class="pwrbar" x1="921" y1="374" x2="939" y2="374"/><text class="pwr" x="930" y="368" text-anchor="middle">+5V</text><line class="w" x1="952" y1="382" x2="952" y2="614"/><line class="gndbar" x1="943" y1="614" x2="961" y2="614"/><line class="w" x1="930" y1="389" x2="975" y2="389"/><circle class="dot" cx="930" cy="389" r="3"/><line class="w" x1="952" y1="403" x2="975" y2="403"/><circle class="dot" cx="952" cy="403" r="3"/><circle class="ct" cx="978" cy="389" r="2.6"/><circle class="ct" cx="978" cy="403" r="2.6"/><circle class="ct" cx="1004" cy="396" r="2.6"/><line class="lever" x1="1004" y1="396" x2="979" y2="387"/><text class="refs" x="990" y="384" text-anchor="middle">S9</text><line class="w" x1="1006" y1="396" x2="1027.0" y2="396"/><line class="w" x1="1059.0" y1="396" x2="1080" y2="396"/><rect class="part" x="1027.0" y="390" width="32" height="12"/><text class="val" x="1043.0" y="386" text-anchor="middle">R9 4k7</text><line class="w" x1="1080" y1="396" x2="1170" y2="396"/><circle class="dot" cx="1120" cy="396" r="3"/><text class="net" x="1120" y="390" text-anchor="middle">D7</text><line class="w" x1="1170" y1="396" x2="1191.0" y2="396"/><line class="w" x1="1223.0" y1="396" x2="1244" y2="396"/><rect class="part" x="1191.0" y="390" width="32" height="12"/><text class="val" x="1207.0" y="386" text-anchor="middle">R17 4k7</text><line class="w" x1="1244" y1="396" x2="1263.0" y2="396"/><line class="w" x1="1277.0" y1="396" x2="1296" y2="396"/><polygon class="part" points="1263.0,389 1263.0,403 1276.0,396"/><line class="pl" x1="1277.0" y1="389" x2="1277.0" y2="403"/><line class="arr" x1="1267.0" y1="387" x2="1273.0" y2="380"/><polygon class="arrh" points="1273.0,380 1268.0,381 1272.0,385"/><line class="arr" x1="1274.0" y1="387" x2="1280.0" y2="380"/><polygon class="arrh" points="1280.0,380 1275.0,381 1279.0,385"/><line class="w" x1="1296" y1="396" x2="1330" y2="396"/><line class="w" x1="930" y1="417" x2="975" y2="417"/><circle class="dot" cx="930" cy="417" r="3"/><line class="w" x1="952" y1="431" x2="975" y2="431"/><circle class="dot" cx="952" cy="431" r="3"/><circle class="ct" cx="978" cy="417" r="2.6"/><circle class="ct" cx="978" cy="431" r="2.6"/><circle class="ct" cx="1004" cy="424" r="2.6"/><line class="lever" x1="1004" y1="424" x2="979" y2="415"/><text class="refs" x="990" y="412" text-anchor="middle">S10</text><line class="w" x1="1006" y1="424" x2="1027.0" y2="424"/><line class="w" x1="1059.0" y1="424" x2="1080" y2="424"/><rect class="part" x="1027.0" y="418" width="32" height="12"/><text class="val" x="1043.0" y="414" text-anchor="middle">R10 4k7</text><line class="w" x1="1080" y1="424" x2="1170" y2="424"/><circle class="dot" cx="1120" cy="424" r="3"/><text class="net" x="1120" y="418" text-anchor="middle">D6</text><line class="w" x1="1170" y1="424" x2="1191.0" y2="424"/><line class="w" x1="1223.0" y1="424" x2="1244" y2="424"/><rect class="part" x="1191.0" y="418" width="32" height="12"/><text class="val" x="1207.0" y="414" text-anchor="middle">R18 4k7</text><line class="w" x1="1244" y1="424" x2="1263.0" y2="424"/><line class="w" x1="1277.0" y1="424" x2="1296" y2="424"/><polygon class="part" points="1263.0,417 1263.0,431 1276.0,424"/><line class="pl" x1="1277.0" y1="417" x2="1277.0" y2="431"/><line class="arr" x1="1267.0" y1="415" x2="1273.0" y2="408"/><polygon class="arrh" points="1273.0,408 1268.0,409 1272.0,413"/><line class="arr" x1="1274.0" y1="415" x2="1280.0" y2="408"/><polygon class="arrh" points="1280.0,408 1275.0,409 1279.0,413"/><line class="w" x1="1296" y1="424" x2="1330" y2="424"/><line class="w" x1="930" y1="445" x2="975" y2="445"/><circle class="dot" cx="930" cy="445" r="3"/><line class="w" x1="952" y1="459" x2="975" y2="459"/><circle class="dot" cx="952" cy="459" r="3"/><circle class="ct" cx="978" cy="445" r="2.6"/><circle class="ct" cx="978" cy="459" r="2.6"/><circle class="ct" cx="1004" cy="452" r="2.6"/><line class="lever" x1="1004" y1="452" x2="979" y2="443"/><text class="refs" x="990" y="440" text-anchor="middle">S11</text><line class="w" x1="1006" y1="452" x2="1027.0" y2="452"/><line class="w" x1="1059.0" y1="452" x2="1080" y2="452"/><rect class="part" x="1027.0" y="446" width="32" height="12"/><text class="val" x="1043.0" y="442" text-anchor="middle">R11 4k7</text><line class="w" x1="1080" y1="452" x2="1170" y2="452"/><circle class="dot" cx="1120" cy="452" r="3"/><text class="net" x="1120" y="446" text-anchor="middle">D5</text><line class="w" x1="1170" y1="452" x2="1191.0" y2="452"/><line class="w" x1="1223.0" y1="452" x2="1244" y2="452"/><rect class="part" x="1191.0" y="446" width="32" height="12"/><text class="val" x="1207.0" y="442" text-anchor="middle">R19 4k7</text><line class="w" x1="1244" y1="452" x2="1263.0" y2="452"/><line class="w" x1="1277.0" y1="452" x2="1296" y2="452"/><polygon class="part" points="1263.0,445 1263.0,459 1276.0,452"/><line class="pl" x1="1277.0" y1="445" x2="1277.0" y2="459"/><line class="arr" x1="1267.0" y1="443" x2="1273.0" y2="436"/><polygon class="arrh" points="1273.0,436 1268.0,437 1272.0,441"/><line class="arr" x1="1274.0" y1="443" x2="1280.0" y2="436"/><polygon class="arrh" points="1280.0,436 1275.0,437 1279.0,441"/><line class="w" x1="1296" y1="452" x2="1330" y2="452"/><line class="w" x1="930" y1="473" x2="975" y2="473"/><circle class="dot" cx="930" cy="473" r="3"/><line class="w" x1="952" y1="487" x2="975" y2="487"/><circle class="dot" cx="952" cy="487" r="3"/><circle class="ct" cx="978" cy="473" r="2.6"/><circle class="ct" cx="978" cy="487" r="2.6"/><circle class="ct" cx="1004" cy="480" r="2.6"/><line class="lever" x1="1004" y1="480" x2="979" y2="471"/><text class="refs" x="990" y="468" text-anchor="middle">S12</text><line class="w" x1="1006" y1="480" x2="1027.0" y2="480"/><line class="w" x1="1059.0" y1="480" x2="1080" y2="480"/><rect class="part" x="1027.0" y="474" width="32" height="12"/><text class="val" x="1043.0" y="470" text-anchor="middle">R12 4k7</text><line class="w" x1="1080" y1="480" x2="1170" y2="480"/><circle class="dot" cx="1120" cy="480" r="3"/><text class="net" x="1120" y="474" text-anchor="middle">D4</text><line class="w" x1="1170" y1="480" x2="1191.0" y2="480"/><line class="w" x1="1223.0" y1="480" x2="1244" y2="480"/><rect class="part" x="1191.0" y="474" width="32" height="12"/><text class="val" x="1207.0" y="470" text-anchor="middle">R20 4k7</text><line class="w" x1="1244" y1="480" x2="1263.0" y2="480"/><line class="w" x1="1277.0" y1="480" x2="1296" y2="480"/><polygon class="part" points="1263.0,473 1263.0,487 1276.0,480"/><line class="pl" x1="1277.0" y1="473" x2="1277.0" y2="487"/><line class="arr" x1="1267.0" y1="471" x2="1273.0" y2="464"/><polygon class="arrh" points="1273.0,464 1268.0,465 1272.0,469"/><line class="arr" x1="1274.0" y1="471" x2="1280.0" y2="464"/><polygon class="arrh" points="1280.0,464 1275.0,465 1279.0,469"/><line class="w" x1="1296" y1="480" x2="1330" y2="480"/><line class="w" x1="930" y1="501" x2="975" y2="501"/><circle class="dot" cx="930" cy="501" r="3"/><line class="w" x1="952" y1="515" x2="975" y2="515"/><circle class="dot" cx="952" cy="515" r="3"/><circle class="ct" cx="978" cy="501" r="2.6"/><circle class="ct" cx="978" cy="515" r="2.6"/><circle class="ct" cx="1004" cy="508" r="2.6"/><line class="lever" x1="1004" y1="508" x2="979" y2="499"/><text class="refs" x="990" y="496" text-anchor="middle">S13</text><line class="w" x1="1006" y1="508" x2="1027.0" y2="508"/><line class="w" x1="1059.0" y1="508" x2="1080" y2="508"/><rect class="part" x="1027.0" y="502" width="32" height="12"/><text class="val" x="1043.0" y="498" text-anchor="middle">R13 4k7</text><line class="w" x1="1080" y1="508" x2="1170" y2="508"/><circle class="dot" cx="1120" cy="508" r="3"/><text class="net" x="1120" y="502" text-anchor="middle">D3</text><line class="w" x1="1170" y1="508" x2="1191.0" y2="508"/><line class="w" x1="1223.0" y1="508" x2="1244" y2="508"/><rect class="part" x="1191.0" y="502" width="32" height="12"/><text class="val" x="1207.0" y="498" text-anchor="middle">R21 4k7</text><line class="w" x1="1244" y1="508" x2="1263.0" y2="508"/><line class="w" x1="1277.0" y1="508" x2="1296" y2="508"/><polygon class="part" points="1263.0,501 1263.0,515 1276.0,508"/><line class="pl" x1="1277.0" y1="501" x2="1277.0" y2="515"/><line class="arr" x1="1267.0" y1="499" x2="1273.0" y2="492"/><polygon class="arrh" points="1273.0,492 1268.0,493 1272.0,497"/><line class="arr" x1="1274.0" y1="499" x2="1280.0" y2="492"/><polygon class="arrh" points="1280.0,492 1275.0,493 1279.0,497"/><line class="w" x1="1296" y1="508" x2="1330" y2="508"/><line class="w" x1="930" y1="529" x2="975" y2="529"/><circle class="dot" cx="930" cy="529" r="3"/><line class="w" x1="952" y1="543" x2="975" y2="543"/><circle class="dot" cx="952" cy="543" r="3"/><circle class="ct" cx="978" cy="529" r="2.6"/><circle class="ct" cx="978" cy="543" r="2.6"/><circle class="ct" cx="1004" cy="536" r="2.6"/><line class="lever" x1="1004" y1="536" x2="979" y2="527"/><text class="refs" x="990" y="524" text-anchor="middle">S14</text><line class="w" x1="1006" y1="536" x2="1027.0" y2="536"/><line class="w" x1="1059.0" y1="536" x2="1080" y2="536"/><rect class="part" x="1027.0" y="530" width="32" height="12"/><text class="val" x="1043.0" y="526" text-anchor="middle">R14 4k7</text><line class="w" x1="1080" y1="536" x2="1170" y2="536"/><circle class="dot" cx="1120" cy="536" r="3"/><text class="net" x="1120" y="530" text-anchor="middle">D2</text><line class="w" x1="1170" y1="536" x2="1191.0" y2="536"/><line class="w" x1="1223.0" y1="536" x2="1244" y2="536"/><rect class="part" x="1191.0" y="530" width="32" height="12"/><text class="val" x="1207.0" y="526" text-anchor="middle">R22 4k7</text><line class="w" x1="1244" y1="536" x2="1263.0" y2="536"/><line class="w" x1="1277.0" y1="536" x2="1296" y2="536"/><polygon class="part" points="1263.0,529 1263.0,543 1276.0,536"/><line class="pl" x1="1277.0" y1="529" x2="1277.0" y2="543"/><line class="arr" x1="1267.0" y1="527" x2="1273.0" y2="520"/><polygon class="arrh" points="1273.0,520 1268.0,521 1272.0,525"/><line class="arr" x1="1274.0" y1="527" x2="1280.0" y2="520"/><polygon class="arrh" points="1280.0,520 1275.0,521 1279.0,525"/><line class="w" x1="1296" y1="536" x2="1330" y2="536"/><line class="w" x1="930" y1="557" x2="975" y2="557"/><circle class="dot" cx="930" cy="557" r="3"/><line class="w" x1="952" y1="571" x2="975" y2="571"/><circle class="dot" cx="952" cy="571" r="3"/><circle class="ct" cx="978" cy="557" r="2.6"/><circle class="ct" cx="978" cy="571" r="2.6"/><circle class="ct" cx="1004" cy="564" r="2.6"/><line class="lever" x1="1004" y1="564" x2="979" y2="555"/><text class="refs" x="990" y="552" text-anchor="middle">S15</text><line class="w" x1="1006" y1="564" x2="1027.0" y2="564"/><line class="w" x1="1059.0" y1="564" x2="1080" y2="564"/><rect class="part" x="1027.0" y="558" width="32" height="12"/><text class="val" x="1043.0" y="554" text-anchor="middle">R15 4k7</text><line class="w" x1="1080" y1="564" x2="1170" y2="564"/><circle class="dot" cx="1120" cy="564" r="3"/><text class="net" x="1120" y="558" text-anchor="middle">D1</text><line class="w" x1="1170" y1="564" x2="1191.0" y2="564"/><line class="w" x1="1223.0" y1="564" x2="1244" y2="564"/><rect class="part" x="1191.0" y="558" width="32" height="12"/><text class="val" x="1207.0" y="554" text-anchor="middle">R23 4k7</text><line class="w" x1="1244" y1="564" x2="1263.0" y2="564"/><line class="w" x1="1277.0" y1="564" x2="1296" y2="564"/><polygon class="part" points="1263.0,557 1263.0,571 1276.0,564"/><line class="pl" x1="1277.0" y1="557" x2="1277.0" y2="571"/><line class="arr" x1="1267.0" y1="555" x2="1273.0" y2="548"/><polygon class="arrh" points="1273.0,548 1268.0,549 1272.0,553"/><line class="arr" x1="1274.0" y1="555" x2="1280.0" y2="548"/><polygon class="arrh" points="1280.0,548 1275.0,549 1279.0,553"/><line class="w" x1="1296" y1="564" x2="1330" y2="564"/><line class="w" x1="930" y1="585" x2="975" y2="585"/><circle class="dot" cx="930" cy="585" r="3"/><line class="w" x1="952" y1="599" x2="975" y2="599"/><circle class="dot" cx="952" cy="599" r="3"/><circle class="ct" cx="978" cy="585" r="2.6"/><circle class="ct" cx="978" cy="599" r="2.6"/><circle class="ct" cx="1004" cy="592" r="2.6"/><line class="lever" x1="1004" y1="592" x2="979" y2="583"/><text class="refs" x="990" y="580" text-anchor="middle">S16</text><line class="w" x1="1006" y1="592" x2="1027.0" y2="592"/><line class="w" x1="1059.0" y1="592" x2="1080" y2="592"/><rect class="part" x="1027.0" y="586" width="32" height="12"/><text class="val" x="1043.0" y="582" text-anchor="middle">R16 4k7</text><line class="w" x1="1080" y1="592" x2="1170" y2="592"/><circle class="dot" cx="1120" cy="592" r="3"/><text class="net" x="1120" y="586" text-anchor="middle">D0</text><line class="w" x1="1170" y1="592" x2="1191.0" y2="592"/><line class="w" x1="1223.0" y1="592" x2="1244" y2="592"/><rect class="part" x="1191.0" y="586" width="32" height="12"/><text class="val" x="1207.0" y="582" text-anchor="middle">R24 4k7</text><line class="w" x1="1244" y1="592" x2="1263.0" y2="592"/><line class="w" x1="1277.0" y1="592" x2="1296" y2="592"/><polygon class="part" points="1263.0,585 1263.0,599 1276.0,592"/><line class="pl" x1="1277.0" y1="585" x2="1277.0" y2="599"/><line class="arr" x1="1267.0" y1="583" x2="1273.0" y2="576"/><polygon class="arrh" points="1273.0,576 1268.0,577 1272.0,581"/><line class="arr" x1="1274.0" y1="583" x2="1280.0" y2="576"/><polygon class="arrh" points="1280.0,576 1275.0,577 1279.0,581"/><line class="w" x1="1296" y1="592" x2="1330" y2="592"/><line class="w" x1="1330" y1="396" x2="1330" y2="614"/><line class="gndbar" x1="1321" y1="614" x2="1339" y2="614"/><text class="refs" x="1405" y="468" text-anchor="middle">LED1–LED8</text><text class="cap" x="1405" y="484" text-anchor="middle">Low-Current-</text><text class="cap" x="1405" y="498" text-anchor="middle">LEDs (2 mA)</text><text class="h2" x="40" y="620" text-anchor="start">Takt</text><text class="cap" x="40" y="636" text-anchor="start">≈ 10 Hz (C1) oder ≈ 1 kHz (C2)</text><rect class="box" x="200" y="680" width="120" height="130"/><text class="refbig" x="332" y="776" text-anchor="start">U3</text><text class="val" x="332" y="792" text-anchor="start">TLC555 /</text><text class="val" x="332" y="806" text-anchor="start">ICM7555 (CMOS)</text><line class="w" x1="230" y1="680" x2="230" y2="680"/><line class="w" x1="230" y1="680" x2="230" y2="660"/><line class="pwrbar" x1="221" y1="660" x2="239" y2="660"/><text class="pwr" x="230" y="654" text-anchor="middle">+5V</text><text class="pin" x="230" y="696" text-anchor="middle">VCC</text><text class="pn" x="224" y="676" text-anchor="end">8</text><line class="w" x1="290" y1="680" x2="290" y2="660"/><line class="pwrbar" x1="281" y1="660" x2="299" y2="660"/><text class="pwr" x="290" y="654" text-anchor="middle">+5V</text><text class="pin" x="290" y="696" text-anchor="middle">/RES</text><text class="pn" x="284" y="676" text-anchor="end">4</text><line class="w" x1="230" y1="810" x2="230" y2="840"/><line class="gndbar" x1="221" y1="840" x2="239" y2="840"/><text class="pin" x="230" y="802" text-anchor="middle">GND</text><text class="pn" x="224" y="822" text-anchor="end">1</text><text class="pin" x="290" y="802" text-anchor="middle">CV</text><text class="pn" x="284" y="822" text-anchor="end">5</text><line class="w" x1="290" y1="810" x2="290" y2="827.0"/><line class="w" x1="290" y1="833.0" x2="290" y2="850"/><line class="pl" x1="280" y1="827.0" x2="300" y2="827.0"/><line class="pl" x1="280" y1="833.0" x2="300" y2="833.0"/><text class="ref" x="304" y="828.0" text-anchor="start">C3</text><text class="val" x="304" y="841.0" text-anchor="start">10 nF</text><line class="gndbar" x1="281" y1="850" x2="299" y2="850"/><line class="w" x1="130" y1="705" x2="200" y2="705"/><text class="pin" x="206" y="709" text-anchor="start">DIS</text><text class="pn" x="194" y="701" text-anchor="end">7</text><line class="w" x1="130" y1="750" x2="200" y2="750"/><text class="pin" x="206" y="754" text-anchor="start">THR</text><text class="pn" x="194" y="746" text-anchor="end">6</text><line class="w" x1="130" y1="780" x2="200" y2="780"/><text class="pin" x="206" y="784" text-anchor="start">TRIG</text><text class="pn" x="194" y="776" text-anchor="end">2</text><line class="w" x1="320" y1="740" x2="370" y2="740"/><text class="pin" x="314" y="744" text-anchor="end">OUT</text><text class="pn" x="326" y="736" text-anchor="start">3</text><text class="net" x="375" y="744" text-anchor="start">CLK</text><line class="pwrbar" x1="91" y1="650" x2="109" y2="650"/><text class="pwr" x="100" y="644" text-anchor="middle">+5V</text><line class="w" x1="100" y1="650" x2="100" y2="659.0"/><line class="w" x1="100" y1="691.0" x2="100" y2="700"/><rect class="part" x="94" y="659.0" width="12" height="32"/><text class="ref" x="110" y="673.0" text-anchor="start">R32</text><text class="val" x="110" y="686.0" text-anchor="start">1 kΩ</text><line class="w" x1="100" y1="700" x2="100" y2="705"/><circle class="dot" cx="100" cy="705" r="3"/><line class="w" x1="100" y1="705" x2="130" y2="705"/><line class="w" x1="100" y1="705" x2="100" y2="711.5"/><line class="w" x1="100" y1="743.5" x2="100" y2="750"/><rect class="part" x="94" y="711.5" width="12" height="32"/><text class="ref" x="110" y="725.5" text-anchor="start">R33</text><text class="val" x="110" y="738.5" text-anchor="start">68 kΩ</text><circle class="dot" cx="100" cy="750" r="3"/><line class="w" x1="100" y1="750" x2="130" y2="750"/><line class="w" x1="100" y1="750" x2="100" y2="780"/><circle class="dot" cx="100" cy="780" r="3"/><line class="w" x1="100" y1="780" x2="130" y2="780"/><line class="w" x1="100" y1="780" x2="100" y2="810"/><circle class="ct" cx="100" cy="810" r="2.6"/><circle class="ct" cx="80" cy="835" r="2.6"/><circle class="ct" cx="120" cy="835" r="2.6"/><line class="lever" x1="100" y1="810" x2="118" y2="832"/><text class="refs" x="130" y="818" text-anchor="start">S19</text><line class="w" x1="80" y1="835" x2="80" y2="854.5"/><line class="w" x1="80" y1="860.5" x2="80" y2="880"/><line class="pl" x1="70" y1="854.5" x2="90" y2="854.5"/><line class="pl" x1="70" y1="860.5" x2="90" y2="860.5"/><text class="ref" x="52" y="855" text-anchor="end">C1</text><text class="val" x="52" y="868" text-anchor="end">1 µF</text><line class="gndbar" x1="71" y1="880" x2="89" y2="880"/><line class="w" x1="120" y1="835" x2="120" y2="854.5"/><line class="w" x1="120" y1="860.5" x2="120" y2="880"/><line class="pl" x1="110" y1="854.5" x2="130" y2="854.5"/><line class="pl" x1="110" y1="860.5" x2="130" y2="860.5"/><text class="ref" x="134" y="855.5" text-anchor="start">C2</text><text class="val" x="134" y="868.5" text-anchor="start">10 nF</text><line class="gndbar" x1="111" y1="880" x2="129" y2="880"/><text class="cap" x="40" y="912" text-anchor="start">f ≈ 1,44 / ((R32 + 2·R33) · C)</text><text class="h2" x="430" y="620" text-anchor="start">Reset / PROG–RUN</text><line class="pwrbar" x1="451" y1="650" x2="469" y2="650"/><text class="pwr" x="460" y="644" text-anchor="middle">+5V</text><line class="w" x1="460" y1="650" x2="460" y2="659.0"/><line class="w" x1="460" y1="691.0" x2="460" y2="700"/><rect class="part" x="454" y="659.0" width="12" height="32"/><text class="ref" x="470" y="673.0" text-anchor="start">R34</text><text class="val" x="470" y="686.0" text-anchor="start">10 kΩ</text><line class="w" x1="460" y1="700" x2="460" y2="720"/><circle class="dot" cx="460" cy="720" r="3"/><line class="w" x1="460" y1="720" x2="500" y2="720"/><text class="net" x="505" y="724" text-anchor="start">/RESET</text><line class="w" x1="460" y1="720" x2="460" y2="740"/><circle class="ct" cx="460" cy="740" r="2.6"/><circle class="ct" cx="460" cy="770" r="2.6"/><line class="lever" x1="460" y1="740" x2="474" y2="767"/><line class="w" x1="460" y1="770" x2="460" y2="785"/><line class="gndbar" x1="451" y1="785" x2="469" y2="785"/><text class="refs" x="482" y="760" text-anchor="start">S17</text><text class="cap" x="482" y="774" text-anchor="start">zu = PROG</text><text class="cap" x="482" y="788" text-anchor="start">offen = RUN</text><text class="h2" x="640" y="620" text-anchor="start">Pull-ups (unbenutzte Eingänge)</text><line class="w" x1="660" y1="650" x2="840" y2="650"/><text class="pwr" x="640" y="646" text-anchor="end">+5V</text><circle class="dot" cx="670" cy="650" r="3"/><line class="w" x1="670" y1="650" x2="670" y2="664.0"/><line class="w" x1="670" y1="696.0" x2="670" y2="710"/><rect class="part" x="664" y="664.0" width="12" height="32"/><text class="ref" x="680" y="678.0" text-anchor="start">R35</text><text class="net" x="670" y="724" text-anchor="middle">/INT</text><circle class="dot" cx="722" cy="650" r="3"/><line class="w" x1="722" y1="650" x2="722" y2="664.0"/><line class="w" x1="722" y1="696.0" x2="722" y2="710"/><rect class="part" x="716" y="664.0" width="12" height="32"/><text class="ref" x="732" y="678.0" text-anchor="start">R36</text><text class="net" x="722" y="724" text-anchor="middle">/NMI</text><circle class="dot" cx="774" cy="650" r="3"/><line class="w" x1="774" y1="650" x2="774" y2="664.0"/><line class="w" x1="774" y1="696.0" x2="774" y2="710"/><rect class="part" x="768" y="664.0" width="12" height="32"/><text class="ref" x="784" y="678.0" text-anchor="start">R37</text><text class="net" x="774" y="724" text-anchor="middle">/WAIT</text><circle class="dot" cx="826" cy="650" r="3"/><line class="w" x1="826" y1="650" x2="826" y2="664.0"/><line class="w" x1="826" y1="696.0" x2="826" y2="710"/><rect class="part" x="820" y="664.0" width="12" height="32"/><text class="ref" x="836" y="678.0" text-anchor="start">R38</text><text class="net" x="826" y="724" text-anchor="middle">/BUSREQ</text><text class="val" x="748" y="742" text-anchor="middle">R35–R38 · 4× 10 kΩ</text><line class="w" x1="640" y1="650" x2="660" y2="650"/><text class="h2" x="430" y="830" text-anchor="start">Steuerung RAM</text><text class="cap" x="430" y="846" text-anchor="start">Dioden-UND:</text><text class="cap" x="430" y="860" text-anchor="start">Ausgang low,</text><text class="cap" x="430" y="874" text-anchor="start">sobald ein</text><text class="cap" x="430" y="888" text-anchor="start">Eingang low ist</text><text class="h3" x="580" y="800" text-anchor="middle">Schreiben</text><line class="pwrbar" x1="571" y1="820" x2="589" y2="820"/><text class="pwr" x="580" y="814" text-anchor="middle">+5V</text><line class="w" x1="580" y1="820" x2="580" y2="829.0"/><line class="w" x1="580" y1="861.0" x2="580" y2="870"/><rect class="part" x="574" y="829.0" width="12" height="32"/><text class="ref" x="590" y="843.0" text-anchor="start">R39</text><text class="val" x="590" y="856.0" text-anchor="start">10 kΩ</text><line class="w" x1="580" y1="870" x2="580" y2="885"/><circle class="dot" cx="580" cy="885" r="3"/><line class="w" x1="580" y1="885" x2="626" y2="885"/><text class="net" x="631" y="889" text-anchor="start">/WE</text><line class="w" x1="552" y1="885" x2="608" y2="885"/><line class="w" x1="552" y1="885" x2="552" y2="895"/><line class="w" x1="608" y1="885" x2="608" y2="895"/><line class="w" x1="552" y1="895" x2="552" y2="908.0"/><line class="w" x1="552" y1="922.0" x2="552" y2="935"/><polygon class="part" points="545,908.0 559,908.0 552,921.0"/><line class="pl" x1="545" y1="922.0" x2="559" y2="922.0"/><line class="w" x1="608" y1="895" x2="608" y2="908.0"/><line class="w" x1="608" y1="922.0" x2="608" y2="935"/><polygon class="part" points="601,908.0 615,908.0 608,921.0"/><line class="pl" x1="601" y1="922.0" x2="615" y2="922.0"/><text class="refs" x="546" y="918" text-anchor="end">D1</text><text class="refs" x="618" y="918" text-anchor="start">D2</text><line class="w" x1="552" y1="935" x2="552" y2="942"/><circle class="ct" cx="552" cy="944" r="2.6"/><circle class="ct" cx="552" cy="968" r="2.6"/><line class="lever" x1="543" y1="940" x2="543" y2="972"/><line class="lever" x1="543" y1="956" x2="530" y2="956"/><line class="lever" x1="530" y1="950" x2="530" y2="962"/><line class="w" x1="552" y1="970" x2="552" y2="980"/><line class="gndbar" x1="543" y1="980" x2="561" y2="980"/><text class="refs" x="524" y="948" text-anchor="end">S18</text><text class="cap" x="524" y="962" text-anchor="end">WR</text><text class="net" x="608" y="950" text-anchor="middle">/WR</text><text class="h3" x="740" y="800" text-anchor="middle">Lesen</text><line class="pwrbar" x1="731" y1="820" x2="749" y2="820"/><text class="pwr" x="740" y="814" text-anchor="middle">+5V</text><line class="w" x1="740" y1="820" x2="740" y2="829.0"/><line class="w" x1="740" y1="861.0" x2="740" y2="870"/><rect class="part" x="734" y="829.0" width="12" height="32"/><text class="ref" x="750" y="843.0" text-anchor="start">R40</text><text class="val" x="750" y="856.0" text-anchor="start">10 kΩ</text><line class="w" x1="740" y1="870" x2="740" y2="885"/><circle class="dot" cx="740" cy="885" r="3"/><line class="w" x1="740" y1="885" x2="786" y2="885"/><text class="net" x="791" y="889" text-anchor="start">/OE</text><line class="w" x1="712" y1="885" x2="768" y2="885"/><line class="w" x1="712" y1="885" x2="712" y2="895"/><line class="w" x1="768" y1="885" x2="768" y2="895"/><line class="w" x1="712" y1="895" x2="712" y2="908.0"/><line class="w" x1="712" y1="922.0" x2="712" y2="935"/><polygon class="part" points="705,908.0 719,908.0 712,921.0"/><line class="pl" x1="705" y1="922.0" x2="719" y2="922.0"/><line class="w" x1="768" y1="895" x2="768" y2="908.0"/><line class="w" x1="768" y1="922.0" x2="768" y2="935"/><polygon class="part" points="761,908.0 775,908.0 768,921.0"/><line class="pl" x1="761" y1="922.0" x2="775" y2="922.0"/><text class="refs" x="706" y="918" text-anchor="end">D3</text><text class="refs" x="778" y="918" text-anchor="start">D4</text><text class="net" x="712" y="950" text-anchor="middle">/RD</text><text class="net" x="768" y="950" text-anchor="middle">/RESET</text><text class="h3" x="900" y="800" text-anchor="middle">Auswahl</text><line class="pwrbar" x1="891" y1="820" x2="909" y2="820"/><text class="pwr" x="900" y="814" text-anchor="middle">+5V</text><line class="w" x1="900" y1="820" x2="900" y2="829.0"/><line class="w" x1="900" y1="861.0" x2="900" y2="870"/><rect class="part" x="894" y="829.0" width="12" height="32"/><text class="ref" x="910" y="843.0" text-anchor="start">R41</text><text class="val" x="910" y="856.0" text-anchor="start">10 kΩ</text><line class="w" x1="900" y1="870" x2="900" y2="885"/><circle class="dot" cx="900" cy="885" r="3"/><line class="w" x1="900" y1="885" x2="946" y2="885"/><text class="net" x="951" y="889" text-anchor="start">/CE</text><line class="w" x1="872" y1="885" x2="928" y2="885"/><line class="w" x1="872" y1="885" x2="872" y2="895"/><line class="w" x1="928" y1="885" x2="928" y2="895"/><line class="w" x1="872" y1="895" x2="872" y2="908.0"/><line class="w" x1="872" y1="922.0" x2="872" y2="935"/><polygon class="part" points="865,908.0 879,908.0 872,921.0"/><line class="pl" x1="865" y1="922.0" x2="879" y2="922.0"/><line class="w" x1="928" y1="895" x2="928" y2="908.0"/><line class="w" x1="928" y1="922.0" x2="928" y2="935"/><polygon class="part" points="921,908.0 935,908.0 928,921.0"/><line class="pl" x1="921" y1="922.0" x2="935" y2="922.0"/><text class="refs" x="866" y="918" text-anchor="end">D5</text><text class="refs" x="938" y="918" text-anchor="start">D6</text><text class="net" x="872" y="950" text-anchor="middle">/MREQ</text><text class="net" x="928" y="950" text-anchor="middle">/RESET</text><text class="cap" x="740" y="1000" text-anchor="middle">D1–D6: Schottky-Dioden BAT85 (oder 1N5817) – normale 1N4148 sind zu hoch im Low-Pegel</text><text class="h2" x="1040" y="620" text-anchor="start">Anzeige HALT</text><line class="pwrbar" x1="1051" y1="650" x2="1069" y2="650"/><text class="pwr" x="1060" y="644" text-anchor="middle">+5V</text><line class="w" x1="1060" y1="650" x2="1060" y2="659.0"/><line class="w" x1="1060" y1="691.0" x2="1060" y2="700"/><rect class="part" x="1054" y="659.0" width="12" height="32"/><text class="ref" x="1070" y="673.0" text-anchor="start">R42</text><text class="val" x="1070" y="686.0" text-anchor="start">4k7</text><line class="w" x1="1060" y1="700" x2="1060" y2="718.0"/><line class="w" x1="1060" y1="732.0" x2="1060" y2="750"/><polygon class="part" points="1053,718.0 1067,718.0 1060,731.0"/><line class="pl" x1="1053" y1="732.0" x2="1067" y2="732.0"/><line class="arr" x1="1069" y1="719.0" x2="1077" y2="712.0"/><polygon class="arrh" points="1077,712.0 1072,713.0 1076,717.0"/><line class="arr" x1="1069" y1="726.0" x2="1077" y2="719.0"/><polygon class="arrh" points="1077,719.0 1072,720.0 1076,724.0"/><text class="ref" x="1080" y="733.0" text-anchor="start">LED9</text><line class="w" x1="1060" y1="750" x2="1060" y2="770"/><text class="net" x="1060" y="786" text-anchor="middle">/HALT</text><text class="cap" x="1100" y="770" text-anchor="start">leuchtet, wenn</text><text class="cap" x="1100" y="784" text-anchor="start">HALT erreicht</text><text class="h2" x="1200" y="620" text-anchor="start">Versorgung</text><line class="pwrbar" x1="1211" y1="660" x2="1229" y2="660"/><text class="pwr" x="1220" y="654" text-anchor="middle">+5V</text><line class="w" x1="1220" y1="660" x2="1220" y2="680"/><line class="w" x1="1220" y1="680" x2="1440" y2="680"/><circle class="dot" cx="1220" cy="680" r="3"/><line class="w" x1="1220" y1="760" x2="1440" y2="760"/><line class="w" x1="1240" y1="680" x2="1240" y2="717.0"/><line class="w" x1="1240" y1="723.0" x2="1240" y2="760"/><line class="pl" x1="1230" y1="717.0" x2="1250" y2="717.0"/><line class="pl" x1="1230" y1="723.0" x2="1250" y2="723.0"/><text class="ref" x="1254" y="718.0" text-anchor="start">C4</text><text class="val" x="1254" y="731.0" text-anchor="start">100 µF</text><circle class="dot" cx="1240" cy="680" r="3"/><circle class="dot" cx="1240" cy="760" r="3"/><circle class="dot" cx="1310" cy="680" r="3"/><circle class="dot" cx="1310" cy="760" r="3"/><line class="w" x1="1310" y1="680" x2="1310" y2="717.0"/><line class="w" x1="1310" y1="723.0" x2="1310" y2="760"/><line class="pl" x1="1300" y1="717.0" x2="1320" y2="717.0"/><line class="pl" x1="1300" y1="723.0" x2="1320" y2="723.0"/><text class="ref" x="1324" y="718.0" text-anchor="start">C5</text><text class="val" x="1324" y="731.0" text-anchor="start">100 n</text><text class="cap" x="1310" y="775" text-anchor="middle">an U1</text><circle class="dot" cx="1365" cy="680" r="3"/><circle class="dot" cx="1365" cy="760" r="3"/><line class="w" x1="1365" y1="680" x2="1365" y2="717.0"/><line class="w" x1="1365" y1="723.0" x2="1365" y2="760"/><line class="pl" x1="1355" y1="717.0" x2="1375" y2="717.0"/><line class="pl" x1="1355" y1="723.0" x2="1375" y2="723.0"/><text class="ref" x="1379" y="718.0" text-anchor="start">C6</text><text class="val" x="1379" y="731.0" text-anchor="start">100 n</text><text class="cap" x="1365" y="775" text-anchor="middle">an U2</text><circle class="dot" cx="1420" cy="680" r="3"/><circle class="dot" cx="1420" cy="760" r="3"/><line class="w" x1="1420" y1="680" x2="1420" y2="717.0"/><line class="w" x1="1420" y1="723.0" x2="1420" y2="760"/><line class="pl" x1="1410" y1="717.0" x2="1430" y2="717.0"/><line class="pl" x1="1410" y1="723.0" x2="1430" y2="723.0"/><text class="ref" x="1434" y="718.0" text-anchor="start">C7</text><text class="val" x="1434" y="731.0" text-anchor="start">100 n</text><text class="cap" x="1420" y="775" text-anchor="middle">an U3</text><line class="w" x1="1220" y1="680" x2="1220" y2="680"/><line class="w" x1="1220" y1="760" x2="1220" y2="790"/><line class="gndbar" x1="1211" y1="790" x2="1229" y2="790"/><text class="cap" x="1200" y="812" text-anchor="start">J1: 5 V DC (USB-Netzteil), ca. 50 mA</text><text class="cap" x="1200" y="826" text-anchor="start">100 nF jeweils direkt an VCC/GND des ICs</text><rect class="tb" x="1110" y="900" width="374" height="164"/><line class="thin" x1="1110" y1="940" x2="1484" y2="940"/><line class="thin" x1="1110" y1="980" x2="1484" y2="980"/><line class="thin" x1="1110" y1="1020" x2="1484" y2="1020"/><line class="thin" x1="1300" y1="980" x2="1300" y2="1064"/><text class="tbtitle" x="1122" y="930" text-anchor="start">Z80-Kippschalterrechner</text><text class="cap" x="1122" y="968" text-anchor="start">Minimalrechner ohne ROM, Eingabe über Schalter</text><text class="tblab" x="1122" y="998" text-anchor="start">Blatt</text><text class="tbval" x="1122" y="1013" text-anchor="start">1 / 1</text><text class="tblab" x="1312" y="998" text-anchor="start">Stand</text><text class="tbval" x="1312" y="1013" text-anchor="start">2026-10-01</text><text class="tblab" x="1122" y="1038" text-anchor="start">Takt</text><text class="tbval" x="1122" y="1053" text-anchor="start">10 Hz … 1 kHz</text><text class="tblab" x="1312" y="1038" text-anchor="start">Netze</text><text class="tbval" x="1312" y="1053" text-anchor="start">gleichnamig verbunden</text><text class="cap" x="40" y="1060" text-anchor="start">Gleichnamige Netzlabels sind miteinander verbunden. Leitungskreuzungen ohne Punkt sind nicht verbunden.</text></svg></div>
+  <p class="note">Gleichnamige Netzlabels (blau) sind verbunden. Die Pinnummern stehen außen an den ICs, die Signalnamen innen. Auf dem Telefon lässt sich das Blatt seitlich verschieben.</p>
+</section>
+
+<section aria-labelledby="s-how">
+  <h2 id="s-how">Warum das ohne Logik-ICs funktioniert</h2>
+  <div class="how">
+    <div><h3>Z80 im Reset gibt den Bus frei</h3><p>Solange <b>/RESET</b> low ist (Schalter S17 auf PROG), sind Adress- und Datenbus des Z80 hochohmig. Die Kippschalter legen über ihre 4,7-kΩ-Widerstände die Pegel fest.</p></div>
+    <div><h3>Widerstände ersetzen Bustreiber</h3><p>Wer direkt treibt, gewinnt: Im Betrieb überstimmen Z80 und RAM die Schalter mühelos. Die Schalter wirken nur, wenn sonst niemand den Bus treibt.</p></div>
+    <div><h3>Schreiben schaltet das RAM stumm</h3><p>Solange <b>/WE</b> low ist, schaltet das SRAM seine Datenausgänge ab. Im PROG-Modus zeigen die LEDs daher den Speicherinhalt, beim Drücken von S18 wird der Schalterwert geschrieben.</p></div>
+    <div><h3>Dioden statt Gatter</h3><p>Je zwei Schottky-Dioden mit Pull-up bilden ein UND für Low-aktive Signale. So steuern CPU und Bedienelemente dieselben RAM-Eingänge, ohne sich zu stören.</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="s-net">
+  <h2 id="s-net">Verdrahtung (Netzliste)</h2>
+  <p>Jede Zeile ist eine Leitung. U1 = Z80, U2 = 62256, U3 = 555; „U1-30“ heißt Pin 30 am Z80.</p>
+  <div class="tw"><table>
+    <thead><tr><th>Netz</th><th>U1 Z80</th><th>U2 RAM</th><th>weitere Anschlüsse</th></tr></thead>
+    <tbody><tr><td class="n">A0</td><td>U1-30</td><td>U2-10</td><td>R8 (Adressschalter S8)</td></tr><tr><td class="n">A1</td><td>U1-31</td><td>U2-9</td><td>R7 (Adressschalter S7)</td></tr><tr><td class="n">A2</td><td>U1-32</td><td>U2-8</td><td>R6 (Adressschalter S6)</td></tr><tr><td class="n">A3</td><td>U1-33</td><td>U2-7</td><td>R5 (Adressschalter S5)</td></tr><tr><td class="n">A4</td><td>U1-34</td><td>U2-6</td><td>R4 (Adressschalter S4)</td></tr><tr><td class="n">A5</td><td>U1-35</td><td>U2-5</td><td>R3 (Adressschalter S3)</td></tr><tr><td class="n">A6</td><td>U1-36</td><td>U2-4</td><td>R2 (Adressschalter S2)</td></tr><tr><td class="n">A7</td><td>U1-37</td><td>U2-3</td><td>R1 (Adressschalter S1)</td></tr><tr><td class="n">A8</td><td>U1-38</td><td>U2-25</td><td>R25 (10 kΩ nach GND)</td></tr><tr><td class="n">A9</td><td>U1-39</td><td>U2-24</td><td>R26 (10 kΩ nach GND)</td></tr><tr><td class="n">A10</td><td>U1-40</td><td>U2-21</td><td>R27 (10 kΩ nach GND)</td></tr><tr><td class="n">A11</td><td>U1-1</td><td>U2-23</td><td>R28 (10 kΩ nach GND)</td></tr><tr><td class="n">A12</td><td>U1-2</td><td>U2-2</td><td>R29 (10 kΩ nach GND)</td></tr><tr><td class="n">A13</td><td>U1-3</td><td>U2-26</td><td>R30 (10 kΩ nach GND)</td></tr><tr><td class="n">A14</td><td>U1-4</td><td>U2-1</td><td>R31 (10 kΩ nach GND)</td></tr><tr><td class="n">D0</td><td>U1-14</td><td>U2-11</td><td>R16 (Datenschalter S16), R24 → LED8</td></tr><tr><td class="n">D1</td><td>U1-15</td><td>U2-12</td><td>R15 (Datenschalter S15), R23 → LED7</td></tr><tr><td class="n">D2</td><td>U1-12</td><td>U2-13</td><td>R14 (Datenschalter S14), R22 → LED6</td></tr><tr><td class="n">D3</td><td>U1-8</td><td>U2-15</td><td>R13 (Datenschalter S13), R21 → LED5</td></tr><tr><td class="n">D4</td><td>U1-7</td><td>U2-16</td><td>R12 (Datenschalter S12), R20 → LED4</td></tr><tr><td class="n">D5</td><td>U1-9</td><td>U2-17</td><td>R11 (Datenschalter S11), R19 → LED3</td></tr><tr><td class="n">D6</td><td>U1-10</td><td>U2-18</td><td>R10 (Datenschalter S10), R18 → LED2</td></tr><tr><td class="n">D7</td><td>U1-13</td><td>U2-19</td><td>R9 (Datenschalter S9), R17 → LED1</td></tr><tr><td class="n">CLK</td><td>U1-6</td><td>–</td><td>U3-3 (Ausgang 555)</td></tr><tr><td class="n">/RESET</td><td>U1-26</td><td>–</td><td>R34 nach +5V, S17 nach GND, Kathoden D4 und D6</td></tr><tr><td class="n">/WR</td><td>U1-22</td><td>–</td><td>Kathode D2</td></tr><tr><td class="n">/RD</td><td>U1-21</td><td>–</td><td>Kathode D3</td></tr><tr><td class="n">/MREQ</td><td>U1-19</td><td>–</td><td>Kathode D5</td></tr><tr><td class="n">/WE</td><td>–</td><td>U2-27</td><td>R39 nach +5V, Anoden D1 und D2; Kathode D1 an Taster S18 → GND</td></tr><tr><td class="n">/OE</td><td>–</td><td>U2-22</td><td>R40 nach +5V, Anoden D3 und D4</td></tr><tr><td class="n">/CE</td><td>–</td><td>U2-20</td><td>R41 nach +5V, Anoden D5 und D6</td></tr><tr><td class="n">/HALT</td><td>U1-18</td><td>–</td><td>Kathode LED9 (Anode über R42 an +5V)</td></tr><tr><td class="n">/INT</td><td>U1-16</td><td>–</td><td>R35 nach +5V</td></tr><tr><td class="n">/NMI</td><td>U1-17</td><td>–</td><td>R36 nach +5V</td></tr><tr><td class="n">/WAIT</td><td>U1-24</td><td>–</td><td>R37 nach +5V</td></tr><tr><td class="n">/BUSREQ</td><td>U1-25</td><td>–</td><td>R38 nach +5V</td></tr><tr><td class="n">+5V</td><td>U1-11</td><td>U2-28</td><td>U3-8, U3-4, Schalter-Oberkontakte, Pull-ups, C4–C7</td></tr><tr><td class="n">GND</td><td>U1-29</td><td>U2-14</td><td>U3-1, Schalter-Unterkontakte, LED-Kathoden, C1–C7</td></tr><tr><td class="n">frei</td><td>U1-5 (A15), 20 (/IORQ), 23 (/BUSACK), 27 (/M1), 28 (/RFSH)</td><td>–</td><td>offen lassen</td></tr></tbody>
+  </table></div>
+  <p class="note">Kippschalter S1–S16 (je 1×UM): Mittelkontakt über den genannten 4,7-kΩ-Widerstand an das Netz, oberer Kontakt an +5V, unterer an GND. LEDs LED1–LED8: Anode über R17–R24 am Datennetz, Kathode an GND.</p>
+</section>
+
+<section class="two" aria-label="Stückliste und Bedienung">
+  <div>
+    <h2>Stückliste</h2>
+    <div class="tw"><table>
+      <thead><tr><th>Bezeichnung</th><th>Bauteil</th><th>Anz.</th></tr></thead>
+      <tbody>
+        <tr><td class="n">U1</td><td>Z84C00 (CMOS-Z80), beliebige Taktklasse – kein NMOS-Z80</td><td class="m">1</td></tr>
+        <tr><td class="n">U2</td><td>62256 SRAM 32K×8 (auch 43256, 55257)</td><td class="m">1</td></tr>
+        <tr><td class="n">U3</td><td>TLC555 oder ICM7555 (CMOS-555)</td><td class="m">1</td></tr>
+        <tr><td class="n">R1–R24</td><td>4,7 kΩ (Schalter und LEDs)</td><td class="m">24</td></tr>
+        <tr><td class="n">R25–R31</td><td>10 kΩ (Pull-downs A8–A14)</td><td class="m">7</td></tr>
+        <tr><td class="n">R32 · R33</td><td>1 kΩ · 68 kΩ (Takt)</td><td class="m">2</td></tr>
+        <tr><td class="n">R34–R41</td><td>10 kΩ (Reset, Pull-ups, Dioden-UND)</td><td class="m">8</td></tr>
+        <tr><td class="n">R42</td><td>4,7 kΩ (HALT-LED)</td><td class="m">1</td></tr>
+        <tr><td class="n">C1</td><td>1 µF Folie oder Keramik</td><td class="m">1</td></tr>
+        <tr><td class="n">C2 · C3</td><td>10 nF</td><td class="m">2</td></tr>
+        <tr><td class="n">C4</td><td>100 µF Elko</td><td class="m">1</td></tr>
+        <tr><td class="n">C5–C7</td><td>100 nF Keramik (je IC)</td><td class="m">3</td></tr>
+        <tr><td class="n">D1–D6</td><td>Schottky BAT85 oder 1N5817</td><td class="m">6</td></tr>
+        <tr><td class="n">LED1–LED9</td><td>Low-Current-LED 2 mA, 3 oder 5 mm</td><td class="m">9</td></tr>
+        <tr><td class="n">S1–S16</td><td>Kippschalter EIN-EIN, 1×UM</td><td class="m">16</td></tr>
+        <tr><td class="n">S17</td><td>Kippschalter EIN-AUS (PROG/RUN)</td><td class="m">1</td></tr>
+        <tr><td class="n">S18</td><td>Taster, Schließer (WR)</td><td class="m">1</td></tr>
+        <tr><td class="n">S19</td><td>Kippschalter EIN-EIN, 1×UM (Takt)</td><td class="m">1</td></tr>
+        <tr><td class="n">J1</td><td>5-V-Anschluss, z. B. USB-Buchse</td><td class="m">1</td></tr>
+        <tr><td class="n">–</td><td>IC-Fassungen DIP-40, DIP-28, DIP-8; Lochraster oder Steckbrett</td><td class="m">3</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+  <div>
+    <h2>Bedienung</h2>
+    <ol class="steps">
+      <li><b>S17 auf PROG</b> (geschlossen), dann einschalten. Der Z80 steht, das RAM gehört den Schaltern.</li>
+      <li><b>Adresse</b> mit S1–S8 einstellen (S1 = A7 … S8 = A0). Die LEDs zeigen sofort den Inhalt dieser Speicherstelle.</li>
+      <li><b>Datenbyte</b> mit S9–S16 einstellen (S9 = D7 … S16 = D0) und <kbd>S18</kbd> drücken. Nach dem Loslassen zeigen die LEDs den neuen Wert.</li>
+      <li>Nächste Adresse einstellen, nächstes Byte, <kbd>S18</kbd> – bis das Programm drin ist.</li>
+      <li><b>Takt wählen</b> mit S19: C1 ≈ 10 Hz zum Zuschauen, C2 ≈ 1 kHz.</li>
+      <li><b>S17 auf RUN</b>: Der Z80 startet bei 0000h. Die Daten-LEDs flackern mit jedem Buszugriff; bei 10 Hz kann man die einzelnen Zugriffe verfolgen.</li>
+      <li>Ergebnis ansehen: <b>S17 zurück auf PROG</b>. Das RAM behält seinen Inhalt; die Ergebnisadresse einstellen und an den LEDs ablesen.</li>
+    </ol>
+    <p class="note" style="margin-top:12px">Am besten erst auf PROG schalten, wenn das Programm auf HALT steht (LED9 leuchtet). Ein Reset mitten in einem Schreibzugriff kann ein Byte verfälschen.</p>
+  </div>
+</section>
+
+<section aria-labelledby="s-prog">
+  <h2 id="s-prog">Testprogramme zum Eintippen</h2>
+  <p>Spalten „Schalter“ zeigen die Stellung von links nach rechts: 1 = oben, 0 = unten.</p>
+  <div class="two">
+    <div>
+      <h3>1 · Zwei Zahlen addieren</h3>
+      <div class="tw"><table>
+        <thead><tr><th>Adr.</th><th>S1–S8</th><th>Byte</th><th>S9–S16</th><th>Bedeutung</th></tr></thead>
+        <tbody><tr><td class="m">00</td><td class="m b">00000000</td><td class="m">3A</td><td class="m b">00111010</td><td>LD A,(0040h) – ersten Wert laden</td></tr><tr><td class="m">01</td><td class="m b">00000001</td><td class="m">40</td><td class="m b">01000000</td><td></td></tr><tr><td class="m">02</td><td class="m b">00000010</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr><tr><td class="m">03</td><td class="m b">00000011</td><td class="m">47</td><td class="m b">01000111</td><td>LD B,A</td></tr><tr><td class="m">04</td><td class="m b">00000100</td><td class="m">3A</td><td class="m b">00111010</td><td>LD A,(0041h) – zweiten Wert laden</td></tr><tr><td class="m">05</td><td class="m b">00000101</td><td class="m">41</td><td class="m b">01000001</td><td></td></tr><tr><td class="m">06</td><td class="m b">00000110</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr><tr><td class="m">07</td><td class="m b">00000111</td><td class="m">80</td><td class="m b">10000000</td><td>ADD A,B</td></tr><tr><td class="m">08</td><td class="m b">00001000</td><td class="m">32</td><td class="m b">00110010</td><td>LD (0042h),A – Summe ablegen</td></tr><tr><td class="m">09</td><td class="m b">00001001</td><td class="m">42</td><td class="m b">01000010</td><td></td></tr><tr><td class="m">0A</td><td class="m b">00001010</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr><tr><td class="m">0B</td><td class="m b">00001011</td><td class="m">76</td><td class="m b">01110110</td><td>HALT – LED9 leuchtet</td></tr><tr><td class="m">40</td><td class="m b">01000000</td><td class="m">05</td><td class="m b">00000101</td><td>Daten: erster Summand (5)</td></tr><tr><td class="m">41</td><td class="m b">01000001</td><td class="m">03</td><td class="m b">00000011</td><td>Daten: zweiter Summand (3)</td></tr></tbody>
+      </table></div>
+      <p class="note" style="margin-top:8px">RUN, warten bis LED9 leuchtet, PROG, Adresse 42h (<span style="font-family:var(--f-mono)">01000010</span>) einstellen: Die LEDs zeigen <span style="font-family:var(--f-mono)">00001000</span> = 8.</p>
+    </div>
+    <div>
+      <h3>2 · Zähler</h3>
+      <div class="tw"><table>
+        <thead><tr><th>Adr.</th><th>S1–S8</th><th>Byte</th><th>S9–S16</th><th>Bedeutung</th></tr></thead>
+        <tbody><tr><td class="m">00</td><td class="m b">00000000</td><td class="m">3E</td><td class="m b">00111110</td><td>LD A,00h</td></tr><tr><td class="m">01</td><td class="m b">00000001</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr><tr><td class="m">02</td><td class="m b">00000010</td><td class="m">3C</td><td class="m b">00111100</td><td>INC A</td></tr><tr><td class="m">03</td><td class="m b">00000011</td><td class="m">32</td><td class="m b">00110010</td><td>LD (0080h),A</td></tr><tr><td class="m">04</td><td class="m b">00000100</td><td class="m">80</td><td class="m b">10000000</td><td></td></tr><tr><td class="m">05</td><td class="m b">00000101</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr><tr><td class="m">06</td><td class="m b">00000110</td><td class="m">C3</td><td class="m b">11000011</td><td>JP 0002h</td></tr><tr><td class="m">07</td><td class="m b">00000111</td><td class="m">02</td><td class="m b">00000010</td><td></td></tr><tr><td class="m">08</td><td class="m b">00001000</td><td class="m">00</td><td class="m b">00000000</td><td></td></tr></tbody>
+      </table></div>
+      <p class="note" style="margin-top:8px">Die Schleife braucht 27 Takte: bei 10 Hz zählt Adresse 80h etwa alle 2,7 s weiter, bei 1 kHz rund 37-mal pro Sekunde. Anhalten mit PROG, dann Adresse 80h (<span style="font-family:var(--f-mono)">10000000</span>) ansehen.</p>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="s-notes">
+  <h2 id="s-notes">Hinweise zum Nachbau</h2>
+  <ul class="notes">
+    <li><b>Nur CMOS-Z80.</b> Der Z84C00 ist statisch und läuft mit beliebig langsamem Takt. Ein alter NMOS-Z80 braucht einen Mindesttakt und verliert sonst seine Registerinhalte.</li>
+    <li><b>Nur CMOS-555.</b> Der TLC555/ICM7555 liefert am Ausgang fast volle 5 V. Der klassische NE555 erreicht den High-Pegel, den der Z80 am Takteingang verlangt, nicht zuverlässig.</li>
+    <li><b>Schottky-Dioden verwenden.</b> Mit 1N4148 läge der Low-Pegel an /WE, /OE und /CE bei etwa 0,7–1 V und damit zu nah an der Schaltschwelle des RAM.</li>
+    <li><b>Widerstandswerte nicht verkleinern.</b> 4,7 kΩ halten den Strom, gegen den Z80 und RAM die Schalter überstimmen, bei etwa 1 mA. Kleinere Werte überlasten die Ausgänge.</li>
+    <li><b>Adresse nicht verstellen, während S18 gedrückt ist.</b> Sonst landet das Byte an mehreren Adressen. Prellen des Tasters schadet dagegen nicht: Es wird nur derselbe Wert mehrmals an dieselbe Stelle geschrieben.</li>
+    <li><b>Programme dürfen das ganze RAM nutzen</b> (0000h–7FFFh). Über die Schalter erreichbar sind nur 0000h–00FFh, weil A8–A14 im PROG-Modus über Pull-downs auf 0 liegen.</li>
+    <li><b>Ein- und Ausgabebefehle stören nicht:</b> /CE hängt an /MREQ, IN- und OUT-Zugriffe erreichen das RAM also nicht. Sie bewirken aber auch nichts, solange kein Port angeschlossen ist.</li>
+    <li><b>Strom aus = Programm weg.</b> Für dauerhafte Programme ein batteriegepuffertes SRAM (z. B. DS1230) verwenden; es ist pinkompatibel.</li>
+    <li><b>Erste Erweiterung:</b> ein Ausgabeport aus 74HC574 und acht LEDs, getaktet über /IORQ und /WR. Dann sind Lauflichter und Anzeigen ohne Umweg über PROG möglich.</li>
+  </ul>
+</section>
+
+</div>
+
+
+<footer>
+  <span>Z80-Kippschalterrechner · Stand 2026-10-01</span>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
+</div>
+<script>
+// ===================== Z80-Kern =====================
+// Zeitmodell CPC: Das Gate Array lässt Speicherzugriffe nur auf 4-Takt-Grenzen zu
+// (Speicher-/Befehlszyklen beginnen bei t ≡ 0 mod 4, E/A-Zyklen bei t ≡ 3 mod 4).
+// Daraus ergeben sich die bekannten NOP-Zeiten des CPC ohne Tabelle.
+const FS=0x80,FZ=0x40,FY=0x20,FH=0x10,FX=0x08,FP=0x04,FN=0x02,FC=0x01;
+const SZ=new Uint8Array(256),SZP=new Uint8Array(256),PAR=new Uint8Array(256);
+for(let i=0;i<256;i++){let p=1;for(let b=0;b<8;b++)if(i&(1<<b))p^=1;PAR[i]=p?FP:0;
+  SZ[i]=(i&(FS|FY|FX))|(i?0:FZ);SZP[i]=SZ[i]|PAR[i];}
+
+class Z80{
+  constructor(bus){this.bus=bus;this.t=0;this.cpcWait=true;this.reset();}
+  reset(){
+    this.a=0xFF;this.f=0xFF;this.b=this.c=this.d=this.e=this.h=this.l=0;
+    this.af_=this.bc_=this.de_=this.hl_=0;this.ix=this.iy=0;this.sp=0xFFFF;this.pc=0;
+    this.i=0;this.r=0;this.iff1=this.iff2=0;this.im=0;this.halted=false;this.wz=0;
+    this.q=0;this.qw=0;this.ei=0;this.irq=false;this.nmi=false;
+  }
+  // ---------- Buszyklen ----------
+  al0(){if(this.cpcWait)this.t=(this.t+3)&~3;}
+  rd(a){this.al0();const v=this.bus.read(a&0xFFFF);this.t+=3;return v;}
+  wr(a,v){this.al0();this.bus.write(a&0xFFFF,v&0xFF);this.t+=3;}
+  m1(){this.al0();const v=this.bus.read(this.pc);this.pc=(this.pc+1)&0xFFFF;this.r=(this.r&0x80)|((this.r+1)&0x7F);this.t+=4;return v;}
+  imm(){const v=this.rd(this.pc);this.pc=(this.pc+1)&0xFFFF;return v;}
+  imm16(){const l=this.imm();return l|(this.imm()<<8);}
+  ioIn(p){if(this.cpcWait)this.t+=(3-this.t)&3;const v=this.bus.ioIn(p&0xFFFF);this.t+=4;return v&0xFF;}
+  ioOut(p,v){if(this.cpcWait)this.t+=(3-this.t)&3;this.bus.ioOut(p&0xFFFF,v&0xFF);this.t+=4;}
+  push(v){this.sp=(this.sp-1)&0xFFFF;this.wr(this.sp,v>>8);this.sp=(this.sp-1)&0xFFFF;this.wr(this.sp,v&0xFF);}
+  pop(){const l=this.rd(this.sp);this.sp=(this.sp+1)&0xFFFF;const h=this.rd(this.sp);this.sp=(this.sp+1)&0xFFFF;return l|(h<<8);}
+  F(v){this.f=v&0xFF;this.qw=1;}
+  // ---------- Registerpaare ----------
+  get bc(){return(this.b<<8)|this.c;} set bc(v){this.b=(v>>8)&0xFF;this.c=v&0xFF;}
+  get de(){return(this.d<<8)|this.e;} set de(v){this.d=(v>>8)&0xFF;this.e=v&0xFF;}
+  get hl(){return(this.h<<8)|this.l;} set hl(v){this.h=(v>>8)&0xFF;this.l=v&0xFF;}
+  get af(){return(this.a<<8)|this.f;} set af(v){this.a=(v>>8)&0xFF;this.f=v&0xFF;}
+  // ---------- ALU ----------
+  add8(v,c){const a=this.a,r=a+v+c;this.F((r&0xFF?0:FZ)|(r&(FS|FY|FX))|((a^v^r)&FH)|(((a^~v)&(a^r)&0x80)?FP:0)|(r>>8&1));this.a=r&0xFF;}
+  sub8(v,c,store){const a=this.a,r=a-v-c;const f=((r&0xFF)?0:FZ)|(r&FS)|((a^v^r)&FH)|(((a^v)&(a^r)&0x80)?FP:0)|FN|((r>>8)&1);
+    if(store){this.F(f|(r&(FY|FX)));this.a=r&0xFF;}else this.F(f|(v&(FY|FX)));}
+  and8(v){this.a&=v;this.F(SZP[this.a]|FH);}
+  xor8(v){this.a^=v;this.F(SZP[this.a]);}
+  or8(v){this.a|=v;this.F(SZP[this.a]);}
+  alu(op,v){switch(op){case 0:this.add8(v,0);break;case 1:this.add8(v,this.f&1);break;case 2:this.sub8(v,0,1);break;case 3:this.sub8(v,this.f&1,1);break;
+    case 4:this.and8(v);break;case 5:this.xor8(v);break;case 6:this.or8(v);break;case 7:this.sub8(v,0,0);break;}}
+  inc8(v){const r=(v+1)&0xFF;this.F((this.f&FC)|SZ[r]|(((v&0xF)==0xF)?FH:0)|(v==0x7F?FP:0));return r;}
+  dec8(v){const r=(v-1)&0xFF;this.F((this.f&FC)|SZ[r]|FN|(((v&0xF)==0)?FH:0)|(v==0x80?FP:0));return r;}
+  add16(a,b){const r=a+b;this.wz=(a+1)&0xFFFF;this.F((this.f&(FS|FZ|FP))|((r>>8)&(FY|FX))|(((a^b^r)>>8)&FH)|((r>>16)&1));this.t+=7;return r&0xFFFF;}
+  adc16(v){const a=this.hl,r=a+v+(this.f&1);this.wz=(a+1)&0xFFFF;
+    this.F(((r>>8)&(FS|FY|FX))|((r&0xFFFF)?0:FZ)|(((a^v^r)>>8)&FH)|(((a^~v)&(a^r)&0x8000)?FP:0)|((r>>16)&1));this.hl=r&0xFFFF;this.t+=7;}
+  sbc16(v){const a=this.hl,r=a-v-(this.f&1);this.wz=(a+1)&0xFFFF;
+    this.F(((r>>8)&(FS|FY|FX))|((r&0xFFFF)?0:FZ)|(((a^v^r)>>8)&FH)|(((a^v)&(a^r)&0x8000)?FP:0)|FN|((r>>16)&1));this.hl=r&0xFFFF;this.t+=7;}
+  rot(op,v){let r,c;switch(op){
+    case 0:c=v>>7;r=((v<<1)|c)&0xFF;break; case 1:c=v&1;r=(v>>1)|(c<<7);break;
+    case 2:c=v>>7;r=((v<<1)|(this.f&1))&0xFF;break; case 3:c=v&1;r=(v>>1)|((this.f&1)<<7);break;
+    case 4:c=v>>7;r=(v<<1)&0xFF;break; case 5:c=v&1;r=(v>>1)|(v&0x80);break;
+    case 6:c=v>>7;r=((v<<1)|1)&0xFF;break; default:c=v&1;r=v>>1;}
+    this.F(SZP[r]|c);return r;}
+  bit(n,v,xy){const r=v&(1<<n);this.F((this.f&FC)|FH|(r?(r&FS):(FZ|FP))|(xy&(FY|FX)));}
+  daa(){let a=this.a,c=this.f&FC,d=0;const h=this.f&FH,n=this.f&FN;
+    if(h||(a&0xF)>9)d=6; if(c||a>0x99){d|=0x60;c=1;}
+    const r=n?(a-d)&0xFF:(a+d)&0xFF;
+    this.F(SZP[r]|c|n|((a^r)&FH));this.a=r;}
+  // ---------- Hilfen für Präfix ----------
+  getIdx(p){return p===0?this.hl:(p===1?this.ix:this.iy);}
+  setIdx(p,v){if(p===0)this.hl=v;else if(p===1)this.ix=v;else this.iy=v;}
+  getR(n,p){switch(n){case 0:return this.b;case 1:return this.c;case 2:return this.d;case 3:return this.e;
+    case 4:return p===0?this.h:(p===1?this.ix>>8:this.iy>>8);case 5:return p===0?this.l:(p===1?this.ix&0xFF:this.iy&0xFF);case 7:return this.a;}}
+  setR(n,p,v){switch(n){case 0:this.b=v;break;case 1:this.c=v;break;case 2:this.d=v;break;case 3:this.e=v;break;
+    case 4:if(p===0)this.h=v;else if(p===1)this.ix=(this.ix&0xFF)|(v<<8);else this.iy=(this.iy&0xFF)|(v<<8);break;
+    case 5:if(p===0)this.l=v;else if(p===1)this.ix=(this.ix&0xFF00)|v;else this.iy=(this.iy&0xFF00)|v;break;case 7:this.a=v;}}
+  getRR(n,p){switch(n){case 0:return this.bc;case 1:return this.de;case 2:return this.getIdx(p);case 3:return this.sp;}}
+  setRR(n,p,v){switch(n){case 0:this.bc=v;break;case 1:this.de=v;break;case 2:this.setIdx(p,v);break;case 3:this.sp=v;}}
+  cond(c){const f=this.f;switch(c){case 0:return!(f&FZ);case 1:return!!(f&FZ);case 2:return!(f&FC);case 3:return!!(f&FC);
+    case 4:return!(f&FP);case 5:return!!(f&FP);case 6:return!(f&FS);case 7:return!!(f&FS);}}
+  // (HL) bzw. (IX+d): liefert Adresse; bei Index d lesen und 5 Takte intern
+  memAddr(p,extra){if(p===0)return this.hl;const d=this.imm();const a=(this.getIdx(p)+((d<<24)>>24))&0xFFFF;this.wz=a;this.t+=extra;return a;}
+
+  // ---------- Ausführung ----------
+  step(){
+    const t0=this.t;
+    if(this.nmi){this.nmi=false;this.halted=false;this.iff1=0;this.al0();this.t+=5;this.r=(this.r&0x80)|((this.r+1)&0x7F);this.push(this.pc);this.pc=0x66;this.wz=0x66;this.q=0;return this.t-t0;}
+    if(this.irq&&this.iff1&&!this.ei){this.interrupt();return this.t-t0;}
+    this.ei=0;
+    if(this.halted){this.al0();this.bus.read(this.pc);this.t+=4;this.r=(this.r&0x80)|((this.r+1)&0x7F);this.q=0;return this.t-t0;}
+    this.qw=0;
+    this.exec(this.m1(),0);
+    this.q=this.qw?this.f:0;
+    if(this.cpcWait)this.t=(this.t+3)&~3;
+    return this.t-t0;
+  }
+  interrupt(){
+    this.halted=false;this.iff1=this.iff2=0;this.ei=0;
+    this.r=(this.r&0x80)|((this.r+1)&0x7F);
+    if(this.cpcWait)this.t+=(3-this.t)&3; // Ack-Zyklus wie E/A
+    const vec=this.bus.intAck?this.bus.intAck():0xFF;
+    this.t+=6;this.t+=1;
+    if(this.im===2){this.push(this.pc);const a=(this.i<<8)|vec;const l=this.rd(a),h=this.rd((a+1)&0xFFFF);this.pc=l|(h<<8);}
+    else{this.push(this.pc);this.pc=this.im===1?0x38:(vec&0x38);}
+    this.wz=this.pc;this.q=0;
+    if(this.cpcWait)this.t=(this.t+3)&~3;
+  }
+  exec(op,p){
+    const x=op>>6,y=(op>>3)&7,z=op&7;
+    if(x===1){ // LD r,r' / HALT
+      if(op===0x76){this.halted=true;return;}
+      if(z===6){const a=this.memAddr(p,5);this.setR(y,0,this.rd(a));return;}
+      if(y===6){const a=this.memAddr(p,5);this.wr(a,this.getR(z,0));return;}
+      this.setR(y,p,this.getR(z,p));return;}
+    if(x===2){ // ALU r
+      if(z===6){const a=this.memAddr(p,5);this.alu(y,this.rd(a));}else this.alu(y,this.getR(z,p));return;}
+    switch(op){
+      case 0x00:return;
+      case 0x01:case 0x11:case 0x21:case 0x31:this.setRR(y>>1,p,this.imm16());return;
+      case 0x02:this.wr(this.bc,this.a);this.wz=((this.bc+1)&0xFF)|(this.a<<8);return;
+      case 0x12:this.wr(this.de,this.a);this.wz=((this.de+1)&0xFF)|(this.a<<8);return;
+      case 0x0A:this.a=this.rd(this.bc);this.wz=(this.bc+1)&0xFFFF;return;
+      case 0x1A:this.a=this.rd(this.de);this.wz=(this.de+1)&0xFFFF;return;
+      case 0x22:{const a=this.imm16();const v=this.getIdx(p);this.wr(a,v&0xFF);this.wr(a+1,v>>8);this.wz=(a+1)&0xFFFF;return;}
+      case 0x2A:{const a=this.imm16();const l=this.rd(a),h=this.rd(a+1);this.setIdx(p,l|(h<<8));this.wz=(a+1)&0xFFFF;return;}
+      case 0x32:{const a=this.imm16();this.wr(a,this.a);this.wz=((a+1)&0xFF)|(this.a<<8);return;}
+      case 0x3A:{const a=this.imm16();this.a=this.rd(a);this.wz=(a+1)&0xFFFF;return;}
+      case 0x03:case 0x13:case 0x23:case 0x33:this.setRR(y>>1,p,(this.getRR(y>>1,p)+1)&0xFFFF);this.t+=2;return;
+      case 0x0B:case 0x1B:case 0x2B:case 0x3B:this.setRR(y>>1,p,(this.getRR(y>>1,p)-1)&0xFFFF);this.t+=2;return;
+      case 0x09:case 0x19:case 0x29:case 0x39:this.setIdx(p,this.add16(this.getIdx(p),this.getRR(y>>1,p)));return;
+      case 0x34:{const a=this.memAddr(p,5);const v=this.rd(a);this.t+=1;this.wr(a,this.inc8(v));return;}
+      case 0x35:{const a=this.memAddr(p,5);const v=this.rd(a);this.t+=1;this.wr(a,this.dec8(v));return;}
+      case 0x36:{if(p===0){this.wr(this.hl,this.imm());return;}const a=this.memAddr(p,0);const n=this.imm();this.t+=2;this.wr(a,n);return;}
+      case 0x04:case 0x0C:case 0x14:case 0x1C:case 0x24:case 0x2C:case 0x3C:this.setR(y,p,this.inc8(this.getR(y,p)));return;
+      case 0x05:case 0x0D:case 0x15:case 0x1D:case 0x25:case 0x2D:case 0x3D:this.setR(y,p,this.dec8(this.getR(y,p)));return;
+      case 0x06:case 0x0E:case 0x16:case 0x1E:case 0x26:case 0x2E:case 0x3E:this.setR(y,p,this.imm());return;
+      case 0x07:{const c=this.a>>7;this.a=((this.a<<1)|c)&0xFF;this.F((this.f&(FS|FZ|FP))|(this.a&(FY|FX))|c);return;}
+      case 0x0F:{const c=this.a&1;this.a=(this.a>>1)|(c<<7);this.F((this.f&(FS|FZ|FP))|(this.a&(FY|FX))|c);return;}
+      case 0x17:{const c=this.a>>7;this.a=((this.a<<1)|(this.f&1))&0xFF;this.F((this.f&(FS|FZ|FP))|(this.a&(FY|FX))|c);return;}
+      case 0x1F:{const c=this.a&1;this.a=(this.a>>1)|((this.f&1)<<7);this.F((this.f&(FS|FZ|FP))|(this.a&(FY|FX))|c);return;}
+      case 0x27:this.daa();return;
+      case 0x2F:this.a^=0xFF;this.F((this.f&(FS|FZ|FP|FC))|FH|FN|(this.a&(FY|FX)));return;
+      case 0x37:this.F((this.f&(FS|FZ|FP))|FC|(((this.q^this.f)|this.a)&(FY|FX)));return;
+      case 0x3F:{const c=this.f&FC;this.F((this.f&(FS|FZ|FP))|(c?FH:FC)|(((this.q^this.f)|this.a)&(FY|FX)));return;}
+      case 0x08:{const t=this.af;this.af=this.af_;this.af_=t;return;}
+      case 0x10:{this.t+=1;const d=this.imm();this.b=(this.b-1)&0xFF;if(this.b){this.pc=(this.pc+((d<<24)>>24))&0xFFFF;this.wz=this.pc;this.t+=5;}return;}
+      case 0x18:{const d=this.imm();this.pc=(this.pc+((d<<24)>>24))&0xFFFF;this.wz=this.pc;this.t+=5;return;}
+      case 0x20:case 0x28:case 0x30:case 0x38:{const d=this.imm();if(this.cond(y-4)){this.pc=(this.pc+((d<<24)>>24))&0xFFFF;this.wz=this.pc;this.t+=5;}return;}
+      case 0xC3:this.pc=this.imm16();this.wz=this.pc;return;
+      case 0xC9:this.pc=this.pop();this.wz=this.pc;return;
+      case 0xCD:{const a=this.imm16();this.t+=1;this.push(this.pc);this.pc=a;this.wz=a;return;}
+      case 0xE9:this.pc=this.getIdx(p);return;
+      case 0xF9:this.sp=this.getIdx(p);this.t+=2;return;
+      case 0xE3:{const l=this.rd(this.sp),h=this.rd((this.sp+1)&0xFFFF);this.t+=1;const v=this.getIdx(p);
+        this.wr((this.sp+1)&0xFFFF,v>>8);this.wr(this.sp,v&0xFF);this.t+=2;this.setIdx(p,l|(h<<8));this.wz=l|(h<<8);return;}
+      case 0xEB:{const t=this.de;this.de=this.hl;this.hl=t;return;}
+      case 0xD9:{let t=this.bc;this.bc=this.bc_;this.bc_=t;t=this.de;this.de=this.de_;this.de_=t;t=this.hl;this.hl=this.hl_;this.hl_=t;return;}
+      case 0xF3:this.iff1=this.iff2=0;return;
+      case 0xFB:this.iff1=this.iff2=1;this.ei=1;return;
+      case 0xD3:{const n=this.imm();this.ioOut((this.a<<8)|n,this.a);this.wz=((n+1)&0xFF)|(this.a<<8);return;}
+      case 0xDB:{const n=this.imm();const port=(this.a<<8)|n;this.a=this.ioIn(port);this.wz=(port+1)&0xFFFF;return;}
+      case 0xC1:case 0xD1:case 0xE1:this.setRR(y>>1,p,this.pop());return;
+      case 0xF1:this.af=this.pop();return;
+      case 0xC5:case 0xD5:case 0xE5:this.t+=1;this.push(this.getRR(y>>1,p));return;
+      case 0xF5:this.t+=1;this.push(this.af);return;
+      case 0xCB:if(p===0)this.execCB();else this.execXCB(p);return;
+      case 0xED:this.execED();return;
+      case 0xDD:this.q=0;this.exec(this.m1(),1);return;
+      case 0xFD:this.q=0;this.exec(this.m1(),2);return;
+    }
+    if(x===3){
+      switch(z){
+        case 0:this.t+=1;if(this.cond(y)){this.pc=this.pop();this.wz=this.pc;}return;
+        case 2:{const a=this.imm16();this.wz=a;if(this.cond(y))this.pc=a;return;}
+        case 4:{const a=this.imm16();this.wz=a;if(this.cond(y)){this.t+=1;this.push(this.pc);this.pc=a;}return;}
+        case 6:this.alu(y,this.imm());return;
+        case 7:this.t+=1;this.push(this.pc);this.pc=y*8;this.wz=this.pc;return;
+      }
+    }
+  }
+  execCB(){
+    const op=this.m1();const x=op>>6,y=(op>>3)&7,z=op&7;
+    if(z===6){const a=this.hl;const v=this.rd(a);this.t+=1;
+      if(x===0)this.wr(a,this.rot(y,v));else if(x===1)this.bit(y,v,this.wz>>8);
+      else if(x===2)this.wr(a,v&~(1<<y));else this.wr(a,v|(1<<y));return;}
+    const v=this.getR(z,0);
+    if(x===0)this.setR(z,0,this.rot(y,v));else if(x===1)this.bit(y,v,v);
+    else if(x===2)this.setR(z,0,v&~(1<<y));else this.setR(z,0,v|(1<<y));
+  }
+  execXCB(p){
+    const d=this.imm();const op=this.imm();this.t+=2;
+    const a=(this.getIdx(p)+((d<<24)>>24))&0xFFFF;this.wz=a;
+    const x=op>>6,y=(op>>3)&7,z=op&7;
+    const v=this.rd(a);this.t+=1;
+    if(x===1){this.bit(y,v,a>>8);return;}
+    let r;if(x===0)r=this.rot(y,v);else if(x===2)r=v&~(1<<y);else r=v|(1<<y);
+    this.wr(a,r);if(z!==6)this.setR(z,0,r);
+  }
+  blockRepeatXY(){this.f=(this.f&~(FY|FX))|((this.pc>>8)&(FY|FX));}
+  execED(){
+    const op=this.m1();const x=op>>6,y=(op>>3)&7,z=op&7;
+    if(x===1){
+      switch(z){
+        case 0:{const v=this.ioIn(this.bc);this.wz=(this.bc+1)&0xFFFF;if(y!==6)this.setR(y,0,v);this.F((this.f&FC)|SZP[v]);return;}
+        case 1:this.ioOut(this.bc,y===6?0:this.getR(y,0));this.wz=(this.bc+1)&0xFFFF;return;
+        case 2:if(y&1)this.adc16(this.getRR(y>>1,0));else this.sbc16(this.getRR(y>>1,0));return;
+        case 3:{const a=this.imm16();if(y&1){const l=this.rd(a),h=this.rd(a+1);this.setRR(y>>1,0,l|(h<<8));}
+          else{const v=this.getRR(y>>1,0);this.wr(a,v&0xFF);this.wr(a+1,v>>8);}this.wz=(a+1)&0xFFFF;return;}
+        case 4:{const v=this.a;this.a=0;this.sub8(v,0,1);return;}
+        case 5:this.pc=this.pop();this.wz=this.pc;this.iff1=this.iff2;if(y===1&&this.bus.reti)this.bus.reti();return;
+        case 6:this.im=[0,0,1,2,0,0,1,2][y];return;
+        case 7:switch(y){
+          case 0:this.t+=1;this.i=this.a;return;
+          case 1:this.t+=1;this.r=this.a;return;
+          case 2:this.t+=1;this.a=this.i;this.F((this.f&FC)|SZ[this.a]|(this.iff2?FP:0));return;
+          case 3:this.t+=1;this.a=this.r;this.F((this.f&FC)|SZ[this.a]|(this.iff2?FP:0));return;
+          case 4:{const v=this.rd(this.hl);this.t+=4;this.wr(this.hl,((v>>4)|(this.a<<4))&0xFF);this.a=(this.a&0xF0)|(v&0xF);this.F((this.f&FC)|SZP[this.a]);this.wz=(this.hl+1)&0xFFFF;return;}
+          case 5:{const v=this.rd(this.hl);this.t+=4;this.wr(this.hl,((v<<4)|(this.a&0xF))&0xFF);this.a=(this.a&0xF0)|(v>>4);this.F((this.f&FC)|SZP[this.a]);this.wz=(this.hl+1)&0xFFFF;return;}
+          default:return;}
+      }
+    }
+    if(x===2&&y>=4&&z<=3){
+      const dir=(y&1)?-1:1,rep=y>=6;
+      if(z===0){ // LDI/LDD
+        const v=this.rd(this.hl);this.wr(this.de,v);this.t+=2;
+        this.hl=(this.hl+dir)&0xFFFF;this.de=(this.de+dir)&0xFFFF;this.bc=(this.bc-1)&0xFFFF;
+        const n=(v+this.a)&0xFF;
+        this.F((this.f&(FS|FZ|FC))|(n&FX)|((n&2)?FY:0)|(this.bc?FP:0));
+        if(rep&&this.bc){this.pc=(this.pc-2)&0xFFFF;this.wz=(this.pc+1)&0xFFFF;this.blockRepeatXY();this.t+=5;}
+        return;}
+      if(z===1){ // CPI/CPD
+        const v=this.rd(this.hl);this.t+=5;const r=(this.a-v)&0xFF;
+        this.hl=(this.hl+dir)&0xFFFF;this.bc=(this.bc-1)&0xFFFF;this.wz=(this.wz+dir)&0xFFFF;
+        const h=(this.a^v^r)&FH;const n=(r-(h?1:0))&0xFF;
+        this.F((this.f&FC)|FN|h|(r&FS)|(r?0:FZ)|(n&FX)|((n&2)?FY:0)|(this.bc?FP:0));
+        if(rep&&this.bc&&r){this.pc=(this.pc-2)&0xFFFF;this.wz=(this.pc+1)&0xFFFF;this.blockRepeatXY();this.t+=5;}
+        return;}
+      let v,k;
+      if(z===2){ // INI/IND
+        this.t+=1;v=this.ioIn(this.bc);this.wz=(this.bc+dir)&0xFFFF;this.wr(this.hl,v);
+        this.b=(this.b-1)&0xFF;this.hl=(this.hl+dir)&0xFFFF;k=v+((this.c+dir)&0xFF);
+      }else{ // OUTI/OUTD
+        this.t+=1;v=this.rd(this.hl);this.b=(this.b-1)&0xFF;this.ioOut(this.bc,v);this.hl=(this.hl+dir)&0xFFFF;
+        this.wz=(this.bc+dir)&0xFFFF;k=v+this.l;
+      }
+      let f=SZ[this.b]|((v&0x80)?FN:0)|(k>255?(FH|FC):0)|PAR[(k&7)^this.b];
+      this.F(f);
+      if(rep&&this.b){
+        this.pc=(this.pc-2)&0xFFFF;this.wz=(this.pc+1)&0xFFFF;this.t+=5;
+        f=(f&~(FY|FX))|((this.pc>>8)&(FY|FX));
+        if(f&FC){
+          if(v&0x80){f^=(PAR[(this.b-1)&7]^FP);f=(f&~FH)|(((this.b&0x0F)===0)?FH:0);}
+          else{f^=(PAR[(this.b+1)&7]^FP);f=(f&~FH)|(((this.b&0x0F)===0x0F)?FH:0);}
+        }else f^=(PAR[this.b&7]^FP);
+        this.F(f);
+      }
+      return;
+    }
+    // sonst: NOP (8 Takte)
+  }
+}
+
+
+// ===================== Z80-Disassembler =====================
+const DR=['B','C','D','E','H','L','(HL)','A'],DRP=['BC','DE','HL','SP'],DRP2=['BC','DE','HL','AF'],DCC=['NZ','Z','NC','C','PO','PE','P','M'];
+const DALU=['ADD A,','ADC A,','SUB ','SBC A,','AND ','XOR ','OR ','CP '],DROT=['RLC','RRC','RL','RR','SLA','SRA','SLL','SRL'];
+const hx2=v=>v.toString(16).toUpperCase().padStart(2,'0'),hx4=v=>v.toString(16).toUpperCase().padStart(4,'0');
+function disasm(rd,pc){
+  let p=pc;const b=()=>{const v=rd(p&0xFFFF);p++;return v;};
+  const n=()=>'&'+hx2(b());const nn=()=>{const l=b();return '&'+hx4(l|(b()<<8));};
+  let op=b(),ix=null,dd=null;
+  if(op===0xDD||op===0xFD){ix=op===0xDD?'IX':'IY';op=b();if(op===0xDD||op===0xFD||op===0xED){return{len:1,text:'NOP*'};}}
+  const reg=(r,useD)=>{if(!ix)return DR[r];if(r===6){if(dd===null){const d=b();dd=(d<<24)>>24;}return'('+ix+(dd<0?'-':'+')+'&'+hx2(Math.abs(dd))+')';}
+    if(useD)return DR[r];if(r===4)return ix+'H';if(r===5)return ix+'L';return DR[r];};
+  const rp=r=>(r===2&&ix)?ix:DRP[r],rp2=r=>(r===2&&ix)?ix:DRP2[r];
+  let t='';
+  if(op===0xCB){
+    if(ix){const d=(b()<<24)>>24;const o=b();const x=o>>6,y=(o>>3)&7,z=o&7;const m='('+ix+(d<0?'-':'+')+'&'+hx2(Math.abs(d))+')';
+      t=x===0?DROT[y]+' '+m:x===1?'BIT '+y+','+m:(x===2?'RES ':'SET ')+y+','+m;if(x!==1&&z!==6)t+=','+DR[z];}
+    else{const o=b();const x=o>>6,y=(o>>3)&7,z=o&7;t=x===0?DROT[y]+' '+DR[z]:x===1?'BIT '+y+','+DR[z]:(x===2?'RES ':'SET ')+y+','+DR[z];}
+    return{len:p-pc,text:t};}
+  if(op===0xED){const o=b();const x=o>>6,y=(o>>3)&7,z=o&7;
+    if(x===1){switch(z){
+      case 0:t=y===6?'IN (C)':'IN '+DR[y]+',(C)';break;case 1:t=y===6?'OUT (C),0':'OUT (C),'+DR[y];break;
+      case 2:t=(y&1?'ADC HL,':'SBC HL,')+DRP[y>>1];break;case 3:t=y&1?'LD '+DRP[y>>1]+',('+nn()+')':'LD ('+nn()+'),'+DRP[y>>1];break;
+      case 4:t='NEG';break;case 5:t=y===1?'RETI':'RETN';break;case 6:t='IM '+[0,0,1,2,0,0,1,2][y];break;
+      case 7:t=['LD I,A','LD R,A','LD A,I','LD A,R','RRD','RLD','NOP*','NOP*'][y];break;}}
+    else if(x===2&&y>=4&&z<=3)t=[['LDI','CPI','INI','OUTI'],['LDD','CPD','IND','OUTD'],['LDIR','CPIR','INIR','OTIR'],['LDDR','CPDR','INDR','OTDR']][y-4][z];
+    else t='NOP*';
+    return{len:p-pc,text:t};}
+  const x=op>>6,y=(op>>3)&7,z=op&7,q=y&1,pp=y>>1;
+  if(x===1){if(op===0x76)t='HALT';else{const mem=(y===6||z===6);t='LD '+reg(y,mem)+','+reg(z,mem);}}
+  else if(x===2)t=DALU[y]+reg(z);
+  else if(x===0){switch(z){
+    case 0:t=[()=>'NOP',()=>"EX AF,AF'",()=>'DJNZ '+rel(),()=>'JR '+rel(),()=>'JR NZ,'+rel(),()=>'JR Z,'+rel(),()=>'JR NC,'+rel(),()=>'JR C,'+rel()][y]();break;
+    case 1:t=q?'ADD '+rp(2)+','+rp(pp):'LD '+rp(pp)+','+nn();break;
+    case 2:t=['LD (BC),A','LD A,(BC)','LD (DE),A','LD A,(DE)',null,null,null,null][y]||(y===4?'LD ('+nn()+'),'+rp(2):y===5?'LD '+rp(2)+',('+nn()+')':y===6?'LD ('+nn()+'),A':'LD A,('+nn()+')');break;
+    case 3:t=(q?'DEC ':'INC ')+rp(pp);break;case 4:t='INC '+reg(y);break;case 5:t='DEC '+reg(y);break;
+    case 6:{const r=reg(y);t='LD '+r+','+n();break;}
+    case 7:t=['RLCA','RRCA','RLA','RRA','DAA','CPL','SCF','CCF'][y];break;}}
+  else{switch(z){
+    case 0:t='RET '+DCC[y];break;
+    case 1:t=q?['RET','EXX','JP ('+rp(2)+')','LD SP,'+rp(2)][pp]:'POP '+rp2(pp);break;
+    case 2:t='JP '+DCC[y]+','+nn();break;
+    case 3:t=[()=>'JP '+nn(),null,()=>'OUT ('+n()+'),A',()=>'IN A,('+n()+')',()=>'EX (SP),'+rp(2),()=>'EX DE,HL',()=>'DI',()=>'EI'][y]();break;
+    case 4:t='CALL '+DCC[y]+','+nn();break;
+    case 5:t=q?(pp===0?'CALL '+nn():'?'):'PUSH '+rp2(pp);break;
+    case 6:t=DALU[y]+n();break;
+    case 7:t='RST &'+hx2(y*8);break;}}
+  function rel(){const d=(b()<<24)>>24;return'&'+hx4((p+d)&0xFFFF);}
+  return{len:p-pc,text:t};
+}
+
+</script>
+<script>
+(function(){
+'use strict';
+const $=id=>document.getElementById(id);
+const h2=v=>v.toString(16).toUpperCase().padStart(2,'0'), h4=v=>v.toString(16).toUpperCase().padStart(4,'0');
+const b8=v=>v.toString(2).padStart(8,'0');
+
+// ---------------- Maschine ----------------
+const RAM=new Uint8Array(32768);
+const S={power:true,run:false,wr:false,clkHi:false,aSw:0x42,dSw:0x00};
+// Ereignisse eines Befehls (vorab angelegt, keine Objekte pro Takt)
+const EV={n:0,t:new Int32Array(64),len:new Uint8Array(64),typ:new Uint8Array(64),a:new Uint16Array(64),d:new Uint8Array(64),rf:new Uint16Array(64)};
+const TY={M1:1,R:2,W:3,IN:4,OUT:5};
+let lastRAMWrite=-1;
+const bus={
+  read(a){const i=EV.n++;EV.t[i]=cpu.t;EV.typ[i]=cpu.kind;EV.len[i]=cpu.kind===TY.M1?4:3;EV.a[i]=a;const v=RAM[a&0x7FFF];EV.d[i]=v;return v;},
+  write(a,v){const i=EV.n++;EV.t[i]=cpu.t;EV.typ[i]=TY.W;EV.len[i]=3;EV.a[i]=a;EV.d[i]=v;RAM[a&0x7FFF]=v;lastRAMWrite=a&0x7FFF;},
+  ioIn(p){const i=EV.n++;EV.t[i]=cpu.t;EV.typ[i]=TY.IN;EV.len[i]=4;EV.a[i]=p;const v=S.dSw;EV.d[i]=v;return v;},
+  ioOut(p,v){const i=EV.n++;EV.t[i]=cpu.t;EV.typ[i]=TY.OUT;EV.len[i]=4;EV.a[i]=p;EV.d[i]=v;}
+};
+class KZ80 extends Z80{
+  constructor(b){super(b);this.cpcWait=false;this.kind=TY.R;}
+  m1(){const rf=(this.i<<8)|this.r;this.kind=TY.M1;const n=EV.n;const v=super.m1();this.kind=TY.R;EV.rf[n]=rf;return v;}
+  step(){
+    if(this.halted&&!this.nmi&&!(this.irq&&this.iff1&&!this.ei)){const rf=(this.i<<8)|this.r;this.kind=TY.M1;const n=EV.n;const k=super.step();this.kind=TY.R;EV.rf[n]=rf;return k;}
+    return super.step();
+  }
+}
+const cpu=new KZ80(bus);
+
+// Takt-Warteschlange: je Takt Adresse, Daten, Treiber (0 niemand,1 RAM,2 Z80), Signale
+const Q=1024, qA=new Uint16Array(Q), qD=new Uint8Array(Q), qDrv=new Uint8Array(Q), qSig=new Uint8Array(Q);
+let qHead=0,qLen=0,lastAddr=0,curInstrPC=0,curInstrHalt=false,instrCount=0,totalT=0;
+const SG={M1:1,MREQ:2,IORQ:4,RD:8,WR:16,RFSH:32};
+function push(a,d,drv,sig){const k=(qHead+qLen)%Q;qA[k]=a;qD[k]=d;qDrv[k]=drv;qSig[k]=sig;qLen++;lastAddr=a;}
+function runInstr(){
+  EV.n=0;const t0=cpu.t;curInstrPC=cpu.pc;
+  const wasHalted=cpu.halted;
+  const n=cpu.step();
+  curInstrHalt=wasHalted;
+  instrCount++;
+  let t=t0;
+  for(let i=0;i<EV.n;i++){
+    while(t<EV.t[i]){push(lastAddr,0,0,0);t++;}
+    const a=EV.a[i],d=EV.d[i];
+    switch(EV.typ[i]){
+      case TY.M1: push(a,d,1,SG.M1|SG.MREQ|SG.RD);push(a,d,1,SG.M1|SG.MREQ|SG.RD);push(EV.rf[i],0,0,SG.MREQ|SG.RFSH);push(EV.rf[i],0,0,SG.MREQ|SG.RFSH);t+=4;break;
+      case TY.R: push(a,d,1,SG.MREQ|SG.RD);push(a,d,1,SG.MREQ|SG.RD);push(a,d,1,SG.MREQ|SG.RD);t+=3;break;
+      case TY.W: push(a,d,2,SG.MREQ);push(a,d,2,SG.MREQ|SG.WR);push(a,d,2,SG.MREQ|SG.WR);t+=3;break;
+      case TY.IN: push(a,d,0,SG.IORQ);push(a,d,0,SG.IORQ|SG.RD);push(a,d,0,SG.IORQ|SG.RD);push(a,d,0,SG.IORQ|SG.RD);t+=4;break;
+      case TY.OUT: push(a,d,2,SG.IORQ);push(a,d,2,SG.IORQ|SG.WR);push(a,d,2,SG.IORQ|SG.WR);push(a,d,2,SG.IORQ|SG.WR);t+=4;break;
+    }
+  }
+  while(t<t0+n){push(lastAddr,0,0,0);t++;}
+}
+function disTxt(pc){try{return disasm(a=>RAM[a&0x7FFF],pc).text.replace(/&([0-9A-F]+)/g,'$1h');}catch(e){return '?';}}
+// aktueller Takt (für Anzeige bei langsamem Takt)
+const cur={a:0,d:0,drv:0,sig:0,valid:false};
+function nextT(){
+  if(qLen===0)runInstr();
+  const k=qHead;qHead=(qHead+1)%Q;qLen--;totalT++;
+  cur.a=qA[k];cur.d=qD[k];cur.drv=qDrv[k];cur.sig=qSig[k];cur.valid=true;
+}
+
+// ---------------- Frontplatte aufbauen ----------------
+const leds=[],dSw=[],aSw=[];
+function buildRow(el,kind){
+  for(let i=7;i>=0;i--){
+    if(i===3){const g=document.createElement('span');g.className='gap';el.append(g);}
+    const c=document.createElement('div');c.className='cell';
+    if(kind==='led'){
+      const l=document.createElement('span');l.className='led';leds[i]=l;
+      c.append(l);const t=document.createElement('span');t.className='tag';t.textContent='D'+i;c.append(t);
+      const n=document.createElement('span');n.className='num';n.textContent='LED'+(8-i);c.append(n);
+    }else{
+      const isD=kind==='d',sn=isD?16-i:8-i;
+      const b=document.createElement('button');b.className='tog';b.type='button';
+      b.setAttribute('aria-label',(isD?'Datenschalter D':'Adressschalter A')+i+' (S'+sn+')');
+      b.innerHTML='<span class="nut"></span><span class="lever"></span>';
+      b.addEventListener('click',()=>{if(isD)S.dSw^=1<<i;else S.aSw^=1<<i;syncSwitches();});
+      (isD?dSw:aSw)[i]=b;c.append(b);
+      const t=document.createElement('span');t.className='tag';t.textContent=(isD?'D':'A')+i;c.append(t);
+      const n=document.createElement('span');n.className='num';n.textContent='S'+sn;c.append(n);
+    }
+    el.append(c);
+  }
+}
+buildRow($('ledRow'),'led');buildRow($('dRow'),'d');buildRow($('aRow'),'a');
+function syncSwitches(){
+  for(let i=0;i<8;i++){dSw[i].setAttribute('aria-pressed',(S.dSw>>i)&1?'true':'false');aSw[i].setAttribute('aria-pressed',(S.aSw>>i)&1?'true':'false');}
+  $('dRead').innerHTML=h2(S.dSw)+'h · '+S.dSw+'<span>Schalter</span>';
+  $('aRead').innerHTML=h4(S.aSw)+'h<span>Schalter</span>';
+  $('runSw').setAttribute('aria-pressed',S.run?'true':'false');
+  $('runUp').classList.toggle('on',S.run);$('runDn').classList.toggle('on',!S.run);
+  $('clkSw').setAttribute('aria-pressed',S.clkHi?'true':'false');
+  $('clkUp').classList.toggle('on',S.clkHi);$('clkDn').classList.toggle('on',!S.clkHi);
+  $('pwrSw').setAttribute('aria-pressed',S.power?'true':'false');
+  $('pwrUp').classList.toggle('on',S.power);$('pwrDn').classList.toggle('on',!S.power);
+  $('wrBtn').disabled=!S.power;
+}
+// Steuerelemente
+$('runSw').addEventListener('click',()=>{
+  S.run=!S.run;
+  if(S.run){cpu.reset();qHead=qLen=0;totalT=0;instrCount=0;cur.valid=false;acc.t=0;}
+  else{qHead=qLen=0;cur.valid=false;}
+  syncSwitches();
+});
+$('clkSw').addEventListener('click',()=>{S.clkHi=!S.clkHi;syncSwitches();});
+$('pwrSw').addEventListener('click',()=>{
+  S.power=!S.power;
+  if(S.power){for(let i=0;i<RAM.length;i++)RAM[i]=(Math.random()*256)|0;cpu.reset();qHead=qLen=0;cur.valid=false;msg('Eingeschaltet – das RAM enthält Zufallswerte.');}
+  else{msg('Ausgeschaltet – der RAM-Inhalt geht verloren.');}
+  syncSwitches();
+});
+const wr=$('wrBtn');
+const wrDown=e=>{if(!S.power)return;S.wr=true;wr.classList.add('down');if(e&&e.pointerId!==undefined){try{wr.setPointerCapture(e.pointerId);}catch(_){}}e&&e.preventDefault&&e.preventDefault();};
+const wrUp=()=>{S.wr=false;wr.classList.remove('down');};
+wr.addEventListener('pointerdown',wrDown);wr.addEventListener('pointerup',wrUp);wr.addEventListener('pointercancel',wrUp);wr.addEventListener('lostpointercapture',wrUp);
+wr.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')&&!e.repeat){wrDown();e.preventDefault();}});
+wr.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter')wrUp();});
+wr.addEventListener('contextmenu',e=>e.preventDefault());
+
+// ---------------- Taktsteuerung ----------------
+function freq(){
+  const m=$('clkMode').value;
+  if(m==='s19')return S.clkHi?1.44/(137e3*10e-9):1.44/(137e3*1e-6);
+  if(m==='step')return 0;
+  return +m;
+}
+let pendingSteps=0;
+$('tStep').addEventListener('click',()=>{if(S.power&&S.run)pendingSteps++;});
+$('iStep').addEventListener('click',()=>{if(!(S.power&&S.run))return;if(qLen===0)nextT();while(qLen>0)nextT();});
+
+// ---------------- Hauptschleife ----------------
+const acc={t:0,frac:0,b:new Float64Array(8)};
+let lastFrame=performance.now(),uiSlow=0;
+function frame(now){
+  let dt=(now-lastFrame)/1000;lastFrame=now;if(dt>0.1)dt=0.1;
+  const bright=new Float64Array(8);
+  let haltOn=0;
+  if(!S.power){
+    for(let i=0;i<8;i++)leds[i].style.setProperty('--b',0);
+    $('haltLed').style.setProperty('--b',0);$('pwrLed').style.setProperty('--b',0);
+    $('ledRead').innerHTML='--<span>aus</span>';status('aus');requestAnimationFrame(frame);return;
+  }
+  $('pwrLed').style.setProperty('--b',1);
+  if(!S.run){
+    // PROG: Z80 im Reset, Bus gehört den Schaltern
+    const a=S.aSw&0xFF;
+    let d,drv;
+    if(S.wr){RAM[a]=S.dSw;d=S.dSw;drv=0;}else{d=RAM[a];drv=1;}
+    cur.a=a;cur.d=d;cur.drv=drv;cur.sig=0;cur.valid=true;
+    for(let i=0;i<8;i++)bright[i]=((d>>i)&1)?(drv?1:0.5):0;
+    status('PROG · Adresse '+h2(a)+'h · '+(S.wr?'<b>schreibt '+h2(S.dSw)+'h</b>':'liest '+h2(d)+'h'));
+  }else{
+    const f=freq();
+    let n=0;
+    if(f>0){acc.frac+=dt*f;n=Math.floor(acc.frac);acc.frac-=n;if(n>400000)n=400000;}
+    n+=pendingSteps;pendingSteps=0;
+    if(n===0&&!cur.valid)n=1;
+    const sum=new Float64Array(8);
+    for(let k=0;k<n;k++){
+      nextT();
+      const d=cur.drv?cur.d:S.dSw,w=cur.drv?1:0.5;
+      for(let i=0;i<8;i++)if((d>>i)&1)sum[i]+=w;
+    }
+    if(n>0)for(let i=0;i<8;i++)bright[i]=sum[i]/n;
+    else{const d=cur.drv?cur.d:S.dSw,w=cur.drv?1:0.5;for(let i=0;i<8;i++)bright[i]=((d>>i)&1)?w:0;}
+    haltOn=cpu.halted?1:0;
+    const fr=freq();
+    status('RUN · '+(fr===0?'Einzeltakt':fr>=1e6?(fr/1e6).toLocaleString('de-DE',{maximumFractionDigits:2})+' MHz':fr>=1000?(fr/1000).toLocaleString('de-DE',{maximumFractionDigits:2})+' kHz':fr.toLocaleString('de-DE',{maximumFractionDigits:1})+' Hz')+' · PC '+h4(cpu.pc)+'h'+(cpu.halted?' · <b>HALT</b>':''));
+  }
+  for(let i=0;i<8;i++)leds[i].style.setProperty('--b',bright[i].toFixed(3));
+  $('haltLed').style.setProperty('--b',haltOn);
+  const dv=cur.drv?cur.d:S.dSw;
+  $('ledRead').innerHTML=h2(dv)+'h · '+dv+'<span>'+(cur.drv===1?'RAM treibt':cur.drv===2?'Z80 treibt':'Schalter (gedämpft)')+'</span>';
+  if(now-uiSlow>(S.run&&freq()>2000?150:40)){uiSlow=now;inside();}
+  requestAnimationFrame(frame);
+}
+function status(s){$('status').innerHTML=s;}
+
+// ---------------- Innenleben ----------------
+const flagNames=['S','Z','Y','H','X','P/V','N','C'];
+const flagEls=flagNames.map(n=>{const i=document.createElement('i');i.textContent=n;$('flags').append(i);return i;});
+const sigNames=[['/M1',SG.M1],['/MREQ',SG.MREQ],['/IORQ',SG.IORQ],['/RD',SG.RD],['/WR',SG.WR],['/RFSH',SG.RFSH],['/HALT',-1],['/RESET',-2]];
+const sigEls=sigNames.map(([n])=>{const i=document.createElement('i');i.textContent=n;$('sigs').append(i);return i;});
+const abitEls=[];for(let i=15;i>=0;i--){const e=document.createElement('i');e.title='A'+i;$('abits').append(e);abitEls[i]=e;if(i%4===0&&i)$('abits').append(document.createElement('b'));}
+let memPage=0,disStart=0,disFollow=true;
+function inside(){
+  const c=cpu;
+  const regs=[['PC',h4(c.pc)],['SP',h4(c.sp)],['A',h2(c.a)],['F',h2(c.f)],['BC',h4(c.bc)],['DE',h4(c.de)],['HL',h4(c.hl)],['IX',h4(c.ix)],
+    ['IY',h4(c.iy)],['I',h2(c.i)],['R',h2(c.r)],['IM',String(c.im)]];
+  $('regs').innerHTML=regs.map(([k,v])=>'<div><span>'+k+'</span><b>'+v+'</b></div>').join('');
+  for(let i=0;i<8;i++)flagEls[i].classList.toggle('on',!!((c.f>>(7-i))&1));
+  const run=S.power&&S.run;
+  $('busA').textContent=S.power?h4(cur.a)+'h':'----';
+  const dv=cur.drv?cur.d:S.dSw;
+  $('busD').textContent=S.power?h2(dv)+'h  '+b8(dv):'--';
+  $('busDrv').textContent=!S.power?'–':cur.drv===1?'RAM (U2)':cur.drv===2?'Z80 (U1)':'niemand → Datenschalter';
+  $('busT').textContent=run?totalT.toLocaleString('de-DE')+' Takte · '+instrCount.toLocaleString('de-DE')+' Befehle':'– (Z80 im Reset)';
+  $('busI').textContent=run&&instrCount?h4(curInstrPC)+'h  '+(curInstrHalt?'HALT (wartet, liest weiter)':disTxt(curInstrPC)):'–';
+  for(let i=0;i<16;i++)abitEls[i].classList.toggle('on',S.power&&!!((cur.a>>i)&1));
+  sigNames.forEach(([n,m],k)=>{let on=false;
+    if(!S.power)on=false;else if(m===-1)on=run&&c.halted;else if(m===-2)on=!S.run;else on=!!(cur.sig&m);
+    sigEls[k].classList.toggle('on',on);});
+  drawMem();drawDis();
+}
+// Speicherseiten
+for(let p=0;p<128;p++){const o=document.createElement('option');o.value=p;o.textContent=h2(p)+'00h–'+h2(p)+'FFh'+(p===0?' (Schalter)':p===127?' (Stapel)':'');$('page').append(o);}
+$('page').addEventListener('change',e=>{memPage=+e.target.value;drawMem();});
+const memCells=[];
+(function(){
+  let h='<table><thead><tr><th></th>';for(let x=0;x<16;x++)h+='<th>'+x.toString(16).toUpperCase()+'</th>';h+='</tr></thead><tbody>';
+  for(let y=0;y<16;y++){h+='<tr><th id="mr'+y+'">'+h2(y*16)+'</th>';for(let x=0;x<16;x++)h+='<td id="m'+(y*16+x)+'">00</td>';h+='</tr>';}
+  $('mem').innerHTML=h+'</tbody></table>';
+  for(let i=0;i<256;i++)memCells[i]=$('m'+i);
+})();
+const memPrev=new Uint8Array(256);
+function drawMem(){
+  const base=memPage*256;
+  for(let y=0;y<16;y++)$('mr'+y).textContent=h4(base+y*16);
+  const busAdr=S.run?(cur.a&0x7FFF):(S.aSw&0xFF);
+  const pc=cpu.pc&0x7FFF;
+  for(let i=0;i<256;i++){
+    const v=RAM[base+i],e=memCells[i],t=h2(v);
+    if(e.textContent!==t)e.textContent=t;
+    e.classList.toggle('cur',S.power&&busAdr===base+i&&(!S.run||(cur.sig&SG.MREQ)));
+    e.classList.toggle('pc',S.power&&S.run&&pc===base+i);
+    e.classList.toggle('hot',v!==memPrev[i]);memPrev[i]=v;
+  }
+}
+function drawDis(){
+  let p=disStart;
+  if(disFollow&&S.run){const pc=cpu.pc&0x7FFF;let q=disStart,ok=false;for(let k=0;k<40;k++){if(q===pc){ok=true;break;}q+=disasm(a=>RAM[a&0x7FFF],q).len;}if(!ok){disStart=pc;p=pc;}}
+  let h='';
+  for(let k=0;k<40&&p<0x8000;k++){
+    const d=disasm(a=>RAM[a&0x7FFF],p);let by='';for(let j=0;j<d.len;j++)by+=h2(RAM[(p+j)&0x7FFF])+' ';
+    h+='<div'+(S.run&&p===(cpu.pc&0x7FFF)?' class="pc"':'')+'><span class="ad">'+h4(p)+'</span><span class="by">'+by+'</span><span>'+d.text.replace(/&([0-9A-F]+)/g,'$1h')+'</span></div>';
+    p+=d.len;
+  }
+  if($('dis').innerHTML!==h)$('dis').innerHTML=h;
+}
+$('disFrom').addEventListener('change',e=>{const v=parseInt(e.target.value,16);if(!isNaN(v)){disStart=v&0x7FFF;disFollow=false;drawDis();}});
+$('disPC').addEventListener('click',()=>{disFollow=true;disStart=cpu.pc&0x7FFF;$('disFrom').value=h4(disStart);drawDis();});
+
+// ---------------- Programme ----------------
+const EX={
+ 1:'; Addition: (40h) + (41h) -> (42h), dann HALT\n00: 3A 40 00   ; LD A,(0040h)\n03: 47         ; LD B,A\n04: 3A 41 00   ; LD A,(0041h)\n07: 80         ; ADD A,B\n08: 32 42 00   ; LD (0042h),A\n0B: 76         ; HALT\n40: 05 03      ; Daten 5 und 3',
+ 2:'; Zähler: erhöht (80h) endlos\n00: 3E 00      ; LD A,00h\n02: 3C         ; INC A\n03: 32 80 00   ; LD (0080h),A\n06: C3 02 00   ; JP 0002h',
+ 3:'; Datenschalter einlesen, verdoppeln, ablegen\n; vor RUN die Datenschalter auf einen Wert stellen,\n; Ergebnis danach bei Adresse 82h ansehen\n00: DB 00      ; IN A,(00h)  - liest die Datenschalter\n02: 87         ; ADD A,A\n03: 32 82 00   ; LD (0082h),A\n06: 76         ; HALT',
+ 4:'; Bereich 90h–9Fh mit AAh füllen (LDIR)\n00: 21 90 00   ; LD HL,0090h\n03: 36 AA      ; LD (HL),AAh\n05: 11 91 00   ; LD DE,0091h\n08: 01 0F 00   ; LD BC,000Fh\n0B: ED B0      ; LDIR\n0D: 76         ; HALT'
+};
+function parseHex(txt){
+  const out=[];let adr=0;
+  for(const raw of txt.split('\n')){
+    const line=raw.replace(/;.*$/,'').trim();if(!line)continue;
+    let rest=line;const m=line.match(/^([0-9A-Fa-f]{1,4})\s*:/);
+    if(m){adr=parseInt(m[1],16);rest=line.slice(m[0].length);}
+    for(const tok of rest.split(/[\s,]+/)){if(!tok)continue;
+      if(!/^[0-9A-Fa-f]{1,2}$/.test(tok))throw new Error('„'+tok+'“ ist kein Hexbyte');
+      out.push([adr&0x7FFF,parseInt(tok,16)]);adr++;}
+  }
+  return out;
+}
+function msg(t){$('msg').textContent=t;}
+$('exLoad').addEventListener('click',()=>{$('hexIn').value=EX[$('ex').value];msg('Beispiel im Textfeld – „Ins RAM schreiben“ überträgt es.');});
+$('hexGo').addEventListener('click',()=>{
+  if(!S.power){msg('Erst einschalten.');return;}
+  try{const b=parseHex($('hexIn').value);b.forEach(([a,v])=>RAM[a]=v);msg(b.length+' Byte ins RAM geschrieben.');drawMem();drawDis();}
+  catch(e){msg('Nicht übernommen: '+e.message+'.');}
+});
+$('ramClr').addEventListener('click',()=>{RAM.fill(0);msg('RAM auf 00h gesetzt.');drawMem();drawDis();});
+$('ramDump').addEventListener('click',()=>{const base=memPage*256;let s='';for(let y=0;y<16;y++){s+=h4(base+y*16)+':';for(let x=0;x<16;x++)s+=' '+h2(RAM[base+y*16+x]);s+='\n';}$('hexIn').value=s;msg('Seite '+h2(memPage)+' steht im Textfeld.');});
+
+// ---------------- Start: Beispiel 1 eingetippt ----------------
+for(let i=0;i<RAM.length;i++)RAM[i]=(Math.random()*256)|0;
+parseHex(EX[1]).forEach(([a,v])=>RAM[a]=v);
+$('hexIn').value=EX[1];
+syncSwitches();inside();
+requestAnimationFrame(frame);
+})();
+</script>
+
+<script>
+(function(){
+  var b=document.getElementById('zoomBtn'), p=document.getElementById('plan');
+  b.addEventListener('click',function(){
+    var on=p.classList.toggle('big');
+    b.setAttribute('aria-pressed',on?'true':'false');
+    b.textContent=on?'An Breite anpassen':'Originalgröße';
+  });
+})();
+</script>
+
+<script>
+(function(){
+  const tabs=[['emu','tab-emu'],['bau','tab-bau']];
+  function show(id){tabs.forEach(([p,t])=>{const on=p===id;document.getElementById(p).hidden=!on;document.getElementById(t).setAttribute('aria-selected',on?'true':'false');});
+    try{history.replaceState(null,'','#'+(id==='bau'?'bauanleitung':'emulator'));}catch(e){}}
+  tabs.forEach(([p,t])=>document.getElementById(t).addEventListener('click',()=>show(p)));
+  if(location.hash==='#bauanleitung')show('bau');
+})();
+</script>
