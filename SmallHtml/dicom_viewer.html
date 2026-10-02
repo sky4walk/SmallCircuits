@@ -385,6 +385,8 @@
     <span style="width:1px;background:var(--border);margin:2px 4px"></span>
     <button class="tool-btn" onclick="zoomFit()">↔ Fit</button>
     <button class="tool-btn" onclick="rotate90()">↻ 90°</button>
+    <span style="width:1px;background:var(--border);margin:2px 4px"></span>
+    <button class="tool-btn" onclick="exportCurrentImage()" title="Aktuelles Bild speichern (Taste S)">⤓ Bild</button>
   </div>
 </div>
 
@@ -404,6 +406,30 @@
       <div class="toggle-track"></div></label>
     </div>
     <div class="pixel-val" id="pixel-val">Maus über Bild → HU: <span>—</span></div>
+  </div>
+  <div class="sidebar-section">
+    <h3>Bild exportieren</h3>
+    <div class="slider-label" style="margin-bottom:4px">Format</div>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn active" id="exp-fmt-png" onclick="setExportFormat('png')">PNG</button>
+      <button class="mode-btn" id="exp-fmt-jpg" onclick="setExportFormat('jpg')">JPG</button>
+    </div>
+    <div class="slider-group" id="exp-quality-group" style="display:none">
+      <div class="slider-label">JPG-Qualität <span id="lbl-exp-q">92 %</span></div>
+      <input type="range" id="sl-exp-q" min="50" max="100" value="92" oninput="document.getElementById('lbl-exp-q').textContent=this.value+' %'">
+    </div>
+    <div class="slider-label" style="margin-bottom:4px">Größe</div>
+    <div class="mode-group" style="margin-bottom:10px">
+      <button class="mode-btn active" id="exp-sc-1" onclick="setExportScale(1)">1×</button>
+      <button class="mode-btn" id="exp-sc-2" onclick="setExportScale(2)">2×</button>
+      <button class="mode-btn" id="exp-sc-4" onclick="setExportScale(4)">4×</button>
+    </div>
+    <div class="toggle-row">Drehung übernehmen
+      <label class="toggle"><input type="checkbox" id="chk-exp-rot" checked>
+      <div class="toggle-track"></div></label>
+    </div>
+    <button class="btn primary" id="btn-export" onclick="exportCurrentImage()" disabled style="width:100%;margin-top:8px">⤓ Aktuelles Bild speichern</button>
+    <div class="pixel-val" style="margin-top:6px">Gespeichert wird das Bild mit aktueller Fensterung (WW/WC) und Invertierung · Taste <span>S</span></div>
   </div>
   <div class="sidebar-section">
     <h3>DICOM-Metadaten</h3>
@@ -1601,6 +1627,7 @@ async function displayFrame(idx){
     cacheThumbData(idx, pixelData, imgW, imgH, slope, intercept, samplesPP);
     updateFileList();
     showViewer();
+    document.getElementById('btn-export').disabled=false;
     document.getElementById('slice-info').textContent=
       `${idx+1} / ${files.length}  ·  ${imgW}×${imgH}  ·  ${ts.split('.').pop()}`;
   }catch(e){ showError(e.message); }
@@ -1917,6 +1944,7 @@ function resetAll(){
   document.getElementById('section-files').style.display='none';
   document.getElementById('meta-table').innerHTML='<tr><td colspan="2" style="color:var(--muted);font-family:var(--mono);font-size:11px">— Keine Datei geladen —</td></tr>';
   document.getElementById('btn-reset').disabled=true;
+  document.getElementById('btn-export').disabled=true;
   document.getElementById('lbl-ww').textContent='—';
   document.getElementById('lbl-wc').textContent='—';
   document.getElementById('file-input').value='';
@@ -1941,6 +1969,63 @@ window.addEventListener('keydown',e=>{
   if(files.length<2) return;
   if(e.key==='ArrowRight'||e.key==='ArrowDown') displayFrame((currentIdx+1)%files.length);
   else if(e.key==='ArrowLeft'||e.key==='ArrowUp') displayFrame((currentIdx-1+files.length)%files.length);
+});
+
+// ═══════════════════════════════════════════════════════════════
+// EXPORT EINZELBILD (PNG / JPG)
+// ═══════════════════════════════════════════════════════════════
+let exportFormat='png', exportScale=1;
+function setExportFormat(f){
+  exportFormat=f;
+  document.getElementById('exp-fmt-png').classList.toggle('active',f==='png');
+  document.getElementById('exp-fmt-jpg').classList.toggle('active',f==='jpg');
+  document.getElementById('exp-quality-group').style.display=f==='jpg'?'':'none';
+}
+function setExportScale(n){
+  exportScale=n;
+  [1,2,4].forEach(k=>document.getElementById('exp-sc-'+k).classList.toggle('active',k===n));
+}
+function exportFileName(ext){
+  const f=files[currentIdx];
+  let base=(f&&f.name?f.name:'dicom').split(/[\\/]/).pop().replace(/\.(dcm|dicom|ima)$/i,'');
+  base=base.replace(/[^\w.\-äöüÄÖÜß]+/g,'_')||'dicom';
+  if(files.length>1) base+='_'+String(currentIdx+1).padStart(String(files.length).length,'0');
+  return base+'.'+ext;
+}
+function exportCurrentImage(){
+  if(!pixelData||!imgW||!imgH){ showError('Kein Bild geladen.'); return; }
+  renderFrame(); // sicherstellen, dass Canvas die aktuelle Fensterung zeigt
+  const rot=document.getElementById('chk-exp-rot').checked?((rotation%360)+360)%360:0;
+  const sc=exportScale, swap=rot%180!==0;
+  const w=imgW*sc, h=imgH*sc;
+  const out=document.createElement('canvas');
+  out.width=swap?h:w; out.height=swap?w:h;
+  const o=out.getContext('2d');
+  o.imageSmoothingEnabled=false;           // Pixel scharf vergrößern
+  o.fillStyle='#000'; o.fillRect(0,0,out.width,out.height); // JPG hat kein Alpha
+  o.translate(out.width/2,out.height/2);
+  o.rotate(rot*Math.PI/180);
+  o.drawImage(canvas,-w/2,-h/2,w,h);
+  const jpg=exportFormat==='jpg';
+  const mime=jpg?'image/jpeg':'image/png';
+  const q=jpg?parseInt(document.getElementById('sl-exp-q').value)/100:undefined;
+  const name=exportFileName(jpg?'jpg':'png');
+  const save=blob=>{
+    if(!blob){ showError('Export fehlgeschlagen (Bild zu groß für den Browser?).'); return; }
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),2000);
+  };
+  if(out.toBlob) out.toBlob(save,mime,q);
+  else fetch(out.toDataURL(mime,q)).then(r=>r.blob()).then(save);
+}
+window.addEventListener('keydown',e=>{
+  if((e.key==='s'||e.key==='S')&&!e.ctrlKey&&!e.metaKey&&!e.altKey&&pixelData){
+    const t=e.target.tagName; if(t==='INPUT'&&e.target.type!=='range'&&e.target.type!=='checkbox') return;
+    if(document.getElementById('viewer-3d').classList.contains('active')) return;
+    e.preventDefault(); exportCurrentImage();
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════
