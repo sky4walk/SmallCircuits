@@ -5595,9 +5595,31 @@ function keyEvent(ev, down) {
   }
   if (entry === null) return;
   ev.preventDefault();
-  if (down) pressed.set(code, entry);
-  else pressed.delete(code);
+  if (down) {
+    const prev = pressed.get(code);
+    if (prev && prev.releasePending) { prev.releasePending = false; return; }
+    if (!prev) { entry.frames = 0; pressed.set(code, entry); }
+  } else {
+    const e = pressed.get(code);
+    // Kurze Tipper (oder keydown+keyup in derselben Event-Runde, wenn der
+    // Browser während eines langen Frames Ereignisse puffert) sonst nie
+    // für den C64 sichtbar: Taste mindestens MIN_KEY_FRAMES Frames halten.
+    if (e && e.frames < MIN_KEY_FRAMES) { e.releasePending = true; return; }
+    pressed.delete(code);
+  }
   rebuildMatrix();
+}
+const MIN_KEY_FRAMES = 3;          // ~60 ms emulierte Zeit
+function ageKeys() {
+  // Nach jedem emulierten Frame: gehaltene Tasten altern lassen,
+  // vorgemerkte Loslass-Ereignisse nachholen
+  if (!pressed.size) return;
+  let changed = false;
+  for (const [code, e] of pressed) {
+    e.frames = (e.frames || 0) + 1;
+    if (e.releasePending && e.frames >= MIN_KEY_FRAMES) { pressed.delete(code); changed = true; }
+  }
+  if (changed) rebuildMatrix();
 }
 // Tastatur seitenweit abgreifen, nicht nur am Canvas: Nach Datei-Dialog,
 // Drag&Drop oder Klick auf Knöpfe/Checkboxen lag der Fokus oft woanders,
@@ -6883,6 +6905,7 @@ function loop(now) {
         if (sys.sidInfo) { sys.sidPlayTick(); sys.sidRun(CYCLES_PER_FRAME); }
         else sys.runCycles(CYCLES_PER_FRAME);
         sys.sid.drainQueue();          // Warp: kein Audio, Zustand aktuell
+        ageKeys();
         fpsFrames++;
       }
       acc = 0;
@@ -6900,6 +6923,7 @@ function loop(now) {
           audioNode.port.postMessage(sys.sid.generateSamples(n));
         }
         acc -= FRAME_MS;
+        ageKeys();
         frames++;
         fpsFrames++;
       }
