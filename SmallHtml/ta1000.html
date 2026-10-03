@@ -210,6 +210,13 @@ details.ass summary b { color: var(--amber); font-family: var(--f-mono); margin-
 details.ass p { margin: 6px 0 4px 18px; color: var(--ink); }
 details.ass p.src { color: var(--dim); font-size: 12px; }
 
+/* ---------------- Firmware TA 1069 ---------------- */
+ol.fwol { margin: 4px 0; padding-left: 20px; }
+ol.fwol li { margin: 5px 0; max-width: 80ch; }
+.fwcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); gap: 6px; margin: 8px 0; }
+.fwcs > div { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.fwcs canvas, canvas.fwprint { border-radius: 2px; display: block; }
+.fwcs span { font-size: 11px; color: var(--dim); }
 </style>
 </head>
 <body>
@@ -562,6 +569,9 @@ function buildBoard(NETLIST, param) {
       if (p && p[3] === bad) p[3] = good;
     }
   }
+  // Schalter „Befund G1“ (Annahme G1, Reiter Info): aus = Eingang 99_2 Pin 13 nicht an /fg, sondern offen
+  // (High nach N2) → NM2 = /f5. Die Generalsperre wirkt dann nicht mehr auf NM; NM1 bleibt unverändert.
+  if (param.g1 === false) { const i = nl.find(x => x.inst === '99_2'); const p = i && i.pins.find(x => x[0] === 13); if (p && p[3] === '/fg') p[3] = ''; }
   for (const i of nl) for (const p of i.pins) if (p[3] === '/IAO') p[3] = '/IOA';
   for (const i of nl) if (i.type === '7402') { const p = i.pins.find(x => x[0] === 6); if (p) p[1] = '2B'; }
   // kanonische Pinnamen je Bauart (erste Instanz, deren Pin nicht „NC“ heißt)
@@ -930,6 +940,7 @@ class CPU1 {
     this.A = 2 | C; this.P = this.bus.read(1);
   }
   get S() { return this.bus.scPage() << 12; }
+  g1() { return this.bus.g1 ? this.bus.g1() : true; }      // Schalter „Befund G1“ (Machine.cfg.g1)
   rb(a, kind) { this.cycles++; return this.bus.read(a & 0xFFFF, kind); }
   wb(a, v) { this.bus.write(a & 0xFFFF, v & 0xFF); }
   rw(a) { a &= 0xFFFE; return (this.rb(a) << 8) | this.rb(a | 1); }
@@ -1006,7 +1017,7 @@ class CPU1 {
         // allen L-Zyklen gesetzt; ein Byte-Zugriff auf eine gerade Adresse wird damit zum
         // Leerzyklus (liest 0, schreibt nicht). Ungerade Byteadressen und Wortzugriffe
         // (L-Zyklus mit R1 = 1) sind nicht betroffen.
-        const dead = byte && this.fg && !(addr & 1);
+        const dead = byte && this.fg && this.g1() && !(addr & 1);
         if (wb && d.row === 0) { // Abspeichern
           if (dead) this.cycles++;
           else if (byte) this.wb(addr, A); else this.ww(addr, A);
@@ -1066,7 +1077,7 @@ class CPU1 {
     // Befund G1 (Annahme S2, Schaltplan AAM11 „Modulauswahl“): die E/A-Karte ist nur bei
     // /NM = 1 angewählt. Unter der Generalsperre (fg = 1) ist NM in jedem L-Zyklus gesetzt,
     // die Übertragung im L-Zyklus (Einzelbyte bzw. ungerade Zeile) entfällt; Eingabe liest 0.
-    const lOk = !this.fg;
+    const lOk = !(this.fg && this.g1());
     if (pair) {
       const line = a & 6;
       if (out) { if (lOk) this.bus.ioOut(card, line | 1, this.A & 0xFF); this.bus.ioOut(card, line, this.A >> 8); }
@@ -1166,7 +1177,7 @@ const CTRL2_EQ = [
   ['nf1d', '/f1d', s => 1-((1-s.f4) & (1-s.f2)), 'NAND(/f4, /f2)', '97_2 7400'],
   ['f1d', 'f1d', s => 1-(s.nf1d & s.f6), 'NAND(/f1d, f6)', '97_2 7400'],
   ['nfid', '/fid', s => 1-(s.fi1 & (1-s.fg)), 'NAND(fi1, /fg)', '99_2 7400'],
-  ['NM2', 'NM2', s => 1-(s.f5 & (1-s.fg)), 'NAND(f5, /fg)', '99_2 7400'],
+  ['NM2', 'NM2', s => 1-(s.f5 & (1-(s.fg & s.G1))), 'NAND(f5, /fg)  (Schalter G1 aus: /fg-Eingang offen)', '99_2 7400'],
   ['nMIL', '/MIL', s => 1-((1-((s.I>>5)&1)) & ((s.I>>6)&1) & s.DI & (1-s.f0)), 'NAND(/i14, i15, DI, /f0)', '101_2 7420'],
   ['nr1s', '/r1s', s => 1-((1-(s.R&1)) & s.f3 & ((s.I>>3)&1) & (1-((s.I>>2)&1))), 'NAND(/r1, f3, i12, /i11)', '101_2 7420'],
   ['fhd', 'fhd', s => ((s.fc & s.nADS) | (s.ADC & s.ADC & s.c8) | (s.fv & s.fv) | ((s.BR&1) & s.RSP) | (0)), 'fc·/ADS + ADC·ADC·c8 + fv·fv + br1·RSP + 0', '102_2 74H52'],
@@ -1226,7 +1237,7 @@ class CPU2 {
     Object.assign(init, { A: 0, P: 0, R: 0, BR: 0, BA: 0, E: 0, I: 0, b: 0, d: 0, ap: 0, c8: 0, cv: 0, yes: 0, a0: 1, par: 1, pe: 1, pf: 0, f9d: 0,
       f0: 1, f1: 1, f2: 0, f3: 1, f4: 0, f5: 1, f6: 0, fc: 0, fh: 0, fm: 0, fv: 0, fl: 0, fz: 0, nf9: 1,
       fg: 1, fi: 0, fp: 0, fu: 0, fk: 0, RST: 0, RR: 1, TST: 0, INT: 0, PWF: 1, CLK: 0, e9: 0, e10: 0, SHS: 0,
-      SC1: 0, SC2: 1, SC3: 1, SC4: 0, phase: 'W' });
+      SC1: 0, SC2: 1, SC3: 1, SC4: 0, G1: 1, phase: 'W' });
     // Zustandsobjekt mit fester Gestalt (schnelle Eigenschaftszugriffe)
     if (!CPU2.State) CPU2.State = new Function('o', Object.keys(init).map(k => `this.${k}=o.${k};`).join(''));
     this.s = new CPU2.State(init);
@@ -1361,7 +1372,7 @@ class Memory {
     this.data = new Uint8Array(65536);
     this.kind = new Uint8Array(65536);   // 0 = nicht bestückt, 1 = RAM (Kernspeicher), 2 = ROM (Festspeicher)
     this.cfg = { ramBase: 0, ramKB: 64, romBase: 0, romLen: 0, romName: '' };
-    this.rom = null;
+    this.rom = null; this.under = null;
     this.configure(this.cfg);
   }
   configure(cfg) {
@@ -1371,19 +1382,36 @@ class Memory {
     this.kind.fill(1, rb, rb + rl);
     if (this.rom && this.cfg.romLen) {
       const b = this.cfg.romBase & 0xFFFE, n = Math.min(this.rom.length, 65536 - b);
-      this.kind.fill(2, b, b + n); this.data.set(this.rom.subarray(0, n), b);
+      // Lücken (nicht bestückte Sockel, z. B. FAG 25 der Firmware TA 1069): dort bleibt der
+      // Kernspeicher bzw. „nicht bestückt“ sichtbar, das ROM-Abbild wird nicht eingesetzt
+      const holes = (this.cfg.romHoles || []).map(([s, l]) => [s - b, s - b + l]);
+      let i = 0;
+      for (const [hs, he] of holes.concat([[n, n]]).sort((x, y) => x[0] - y[0])) {
+        const e = Math.max(i, Math.min(hs, n));
+        if (e > i) { this.kind.fill(2, b + i, b + e); this.data.set(this.rom.subarray(i, e), b + i); }
+        i = Math.max(i, Math.min(he, n));
+      }
     }
   }
-  loadRom(bytes, base, name) { this.rom = Uint8Array.from(bytes); this.configure({ romBase: base, romLen: bytes.length, romName: name || '' }); }
-  clearRom() { this.rom = null; this.configure({ romLen: 0, romName: '' }); }
+  // Das ROM überdeckt den Kernspeicher nur: beim Einsetzen wird dessen Inhalt gemerkt (under),
+  // beim Entfernen kommt er wieder zum Vorschein – die Maschine ist dann wieder „ohne ROM“.
+  loadRom(bytes, base, name, holes) {
+    if (this.rom) this.clearRom();
+    this.under = this.data.slice();
+    this.rom = Uint8Array.from(bytes); this.configure({ romBase: base, romLen: bytes.length, romName: name || '', romHoles: holes || [] });
+  }
+  clearRom() {
+    for (let a = 0; a < 65536; a++) if (this.kind[a] === 2) this.data[a] = this.under ? this.under[a] : 0;
+    this.rom = null; this.under = null; this.configure({ romLen: 0, romName: '', romHoles: [] });
+  }
   read(a) { return this.kind[a] ? this.data[a] : 0; }       // Annahme S3/S5: nicht bestückt: Bus-Ruhepegel → 0
   write(a, v) { if (this.kind[a] === 1) this.data[a] = v & 0xFF; }
   poke(a, v) { this.data[a & 0xFFFF] = v & 0xFF; }           // Tableau/Lader: schreibt auch ins ROM-Abbild
   word(a) { a &= 0xFFFE; return (this.read(a) << 8) | this.read(a | 1); }
-  snapshot() { return { cfg: { ...this.cfg }, data: b64enc(this.data), rom: this.rom ? b64enc(this.rom) : null }; }
+  snapshot() { return { cfg: { ...this.cfg }, data: b64enc(this.data), rom: this.rom ? b64enc(this.rom) : null, under: this.under ? b64enc(this.under) : null }; }
   restore(o) {
     const dec = (x) => typeof x === 'string' ? b64dec(x) : Uint8Array.from(x);
-    this.rom = o.rom ? dec(o.rom) : null; this.data.set(dec(o.data)); this.configure(o.cfg);
+    this.rom = o.rom ? dec(o.rom) : null; this.under = o.under ? dec(o.under) : null; this.data.set(dec(o.data)); this.configure(o.cfg);
   }
 }
 
@@ -1679,8 +1707,9 @@ const ASM = (() => {
     } else if (d.gi === 3 && d.row === 4 && (d.col === 0 || d.col === 2)) {
       opd = `${(w >> 4) & 63},${w & 6},${(w >> 3) & 1 ? 'A' : 'E'}`;
     } else if (d.gi <= 1) {
+      // Spalte 2: Sprünge über (S+N), Literalgruppe dagegen (N)_Z in der Zeropage (wie CPU1.step)
       if (d.col === 0) eff = N; else if (d.col === 1) eff = page | N;
-      else if (d.col === 2) eff = (sc << 12) | N; else eff = page | N;
+      else if (d.col === 2) eff = d.gi === 1 ? N : (sc << 12) | N; else eff = page | N;
       opd = name(eff);
     } else { eff = (sc << 12) | N; opd = name(eff); }
     return { mn: d.mn, opd, math: d.math, eff, text: `${d.mn.padEnd(4)} ${opd}` };
@@ -1756,7 +1785,8 @@ class Core1 {
 class Core3 {
   constructor(m) {
     this.m = m; this.level = 3;
-    this.board = buildBoard(NETLIST, m.boardParam);
+    this.g1 = m.cfg.g1 !== false;
+    this.board = buildBoard(NETLIST, Object.assign({}, m.boardParam, { g1: this.g1 }));
     this.sim = new GateSim(this.board);
     const id = (n) => { const i = this.sim.netId.get(n); if (i === undefined) throw new Error('Netz fehlt: ' + n); return i; };
     this.id = id;
@@ -1954,7 +1984,7 @@ class Core2 {
   fstate() { return this.cpu.fstate(); }
   cycleKind() { const s = this.cpu.s; if (!s.f4 && !s.f5) return s.f1 ? 1 : 0; if (!s.f4) return 2; return 3; }
   syncIn() {
-    const s = this.cpu.s, m = this.m; s.INT = m.io.intReq ? 1 : 0; s.TST = m.tst ? 1 : 0; s.PWF = m.powerOk ? 1 : 0;
+    const s = this.cpu.s, m = this.m; s.INT = m.io.intReq ? 1 : 0; s.TST = m.tst ? 1 : 0; s.PWF = m.powerOk ? 1 : 0; s.G1 = m.cfg.g1 === false ? 0 : 1;
     // 1-ms-Uhr: ein Impuls (CK5, 0,6 µs) liegt für einen Teilzyklus auf /CLK
     let clk = 0;
     if (m.clockDue()) { clk = 1; m.notePulse(); }
@@ -2029,7 +2059,7 @@ const CLK_FIRST_NS = 497800;   // Annahme N7   // erster 1-ms-Impuls nach dem Ei
 const CLK_PERIOD_NS = 1000000;
 class Machine {
   constructor() {
-    this.cfg = { sc: 6, memTiming: 'schnell', clkJumper: true, initFu: true };
+    this.cfg = { sc: 6, memTiming: 'schnell', clkJumper: true, initFu: true, g1: true };
     this.time = 0; this.ticks3 = 0;
     this.mem = new Memory();
     this.io = new IOSystem(() => this.time);
@@ -2043,7 +2073,7 @@ class Machine {
     const self = this;
     // Bus für Ebene 1 (Transaktionen je Byte)
     this.bus1 = {
-      scPage: () => self.scPage(),
+      scPage: () => self.scPage(), g1: () => self.cfg.g1 !== false,
       read: (a, kind) => { self.time += self.memWait(a, false) * self.boardParam.tickNs; return self.busRead(a, kind === undefined ? 3 : kind); },
       write: (a, v) => self.busWrite(a, v, 3),
       pwf: () => self.powerOk, intReq: () => self.io.intReq,
@@ -2058,6 +2088,18 @@ class Machine {
     this.cores[1].powerOn();
   }
   scPage() { return this.cfg.sc & 15; }
+  // Schalter „Befund G1“: an = Schaltung wie gezeichnet (Generalsperre setzt NM in L-Zyklen), aus = /fg-Eingang
+  // von 99_2 offen. Ebene 3 wird dafür neu aufgebaut und übernimmt den Architekturzustand an der Befehlsgrenze.
+  setG1(on) {
+    on = !!on; if ((this.cfg.g1 !== false) === on) return;
+    if (this.level === 3) {
+      const from = this.cpu; if (from.atFetch && !from.atFetch()) from.step();
+      const st = from.state(), t = this.time;
+      this.cfg.g1 = on; delete this.cores[3];
+      this.core(3).bootTo(st); this.time = t;
+    } else { this.cfg.g1 = on; delete this.cores[3]; }
+    if (this.lock) this.startLockstep();
+  }
   memWait(a, none) {
     if (none || this.cfg.memTiming === 'schnell') return 0;
     // Annahme S4: Festspeicher 1,1 µs / Kernspeicher 1,2 µs je Zyklus statt 0,75 µs (Handbuch S. 32) – Wartetakte à 50 ns
@@ -2226,6 +2268,7 @@ class Machine {
     if (!o || o.format !== 'TA1000-Zustand') throw new Error('Kein TA1000-Zustand');
     this.stopLockstep();
     Object.assign(this.cfg, o.cfg);
+    if (this.cores[3] && this.cores[3].g1 !== (this.cfg.g1 !== false)) delete this.cores[3];
     this.mem.restore(o.mem); this.io.restore(o.io); this.tab.restore(o.tab);
     this.level = o.level;
     const c = this.core(o.level);
@@ -3731,6 +3774,51 @@ const TESTS = (() => {
     const d = m.lock.diff;
     return { ok: !d && m.io.dev.text === 'TA 1000', text: d ? d.text.join(' · ') : `Ausdruck „${m.io.dev.text}“` };
   }, true);
+  // ── 6a. Firmware TA 1069 (Annahmen F1–F6)
+  const fwMachine = (level) => {
+    const m = machine(level); m.mem.loadRom(FW1069.image(), 0, 'TA 1069', FW1069.HOLES); m.cfg.sc = 6; m.powerOn(); return m;
+  };
+  add('Firmware TA 1069', 'Abbildung F1/F2: Startwort, Texte, Modulkette, Lauf bis in die Warteschleife des Startprogramms', () => {
+    const img = FW1069.image(), w = (a) => (img[a] << 8) | img[a + 1];
+    const txt = String.fromCharCode(...img.subarray(0x7BD7, 0x7BD7 + 10));
+    const ch = FW1069.chain(w), mods = ch.list.filter(x => !x.data).length;
+    const m = fwMachine(1); const P0 = m.cpu.state().P;
+    for (let i = 0; i < 3000; i++) m.stepInstr();
+    const P = m.cpu.state().P & 0xFFFE, inLoop = P >= 0x10EE && P <= 0x111C;
+    const ok = img[1] === 4 && P0 === 4 && txt === 'BS7803 IPL' && ch.end === 0x8000 && mods === 12 && inLoop && m.mem.kind[0x6000] === 1 && m.mem.kind[0x6400] === 2;
+    return { ok, text: `Startwort ${fmtT(img[1])}, Text „${txt}“, ${mods} Module bis ${fmtT(ch.end)}, nach 3000 Befehlen P = ${fmtT(P)}${inLoop ? ' (Warteschleife)' : ''}` };
+  });
+  add('Firmware TA 1069', 'Stecken und Ziehen: ohne ROM ist der alte Kernspeicherinhalt wieder da', () => {
+    const m = machine(1); for (let a = 0; a < 65536; a++) m.mem.data[a] = (a * 7 + 3) & 255;
+    const before = m.mem.data.slice();
+    m.mem.loadRom(FW1069.image(), 0, 'TA 1069', FW1069.HOLES); m.powerOn();
+    const romOk = m.mem.kind[0] === 2 && m.mem.read(1) === 4 && m.mem.kind[0x6000] === 1;
+    for (let i = 0; i < 2000; i++) m.stepInstr();
+    m.mem.clearRom();
+    let diff = 0; for (let a = 0; a < 0x8000; a++) if (!(a >= 0x6000 && a < 0x6400) && m.mem.data[a] !== before[a]) diff++;
+    const noRom = m.mem.kind.every(k => k === 1);
+    return { ok: romOk && noRom && diff === 0, text: `gesteckt: ${romOk ? 'ROM ab 0.0.0.0, Startwort 0.0.0.4' : 'FEHLER'}, gezogen: ${noRom ? 'nur Kernspeicher' : 'ROM-Reste'}, ${diff} Bytes außerhalb des Scratchpads verändert` };
+  });
+  add('Firmware TA 1069', 'Befund G1 aus: Startcode 0.14 startet das Betriebssystem, Gleichlauf aller Ebenen', () => {
+    const m = machine(1); m.cfg.g1 = false; m.mem.loadRom(FW1069.image(), 0, 'TA 1069', FW1069.HOLES); m.cfg.sc = 6; m.powerOn();
+    m.io.dev.keyHold = 3e5; m.io.dev.keyGap = 1.5e5; m.startLockstep([1, 2, 3]);
+    let k = 0; for (; k < 300 && !m.lock.diff; k++) m.stepInstr();
+    m.io.dev.pressKey(0x0E);
+    let rt = false, ints = 0;
+    for (; k < 9000 && !m.lock.diff; k++) { if (m.stepInstr().int) ints++; if (m.cpu.state().fg === 0) rt = true; }
+    const d = m.lock.diff;
+    return { ok: !d && rt && ints > 0, text: d ? `Abweichung nach ${d.step} Befehlen (E${d.level}): ${d.text.join(' · ')}` : `${k} Befehle gleich, Generalsperre gelöscht: ${rt ? 'ja' : 'nein'}, ${ints} Uhr-Unterbrechung(en)` };
+  }, true);
+  add('Firmware TA 1069', 'Start und Modulkette nach Tastendruck im Gleichlauf aller Ebenen', () => {
+    const m = fwMachine(1); m.io.dev.keyHold = 3e5; m.io.dev.keyGap = 1.5e5;
+    m.startLockstep([1, 2, 3]);
+    let k = 0; for (; k < 400 && !m.lock.diff; k++) m.stepInstr();
+    m.io.dev.pressKey(0x41);
+    const seen = new Set();
+    for (; k < 6000 && !m.lock.diff; k++) { seen.add(m.cpu.state().P >> 10); m.stepInstr(); }
+    const d = m.lock.diff, chain = seen.has(0x7C00 >> 10) && seen.has(0x5000 >> 10);
+    return { ok: !d && chain, text: d ? `Abweichung nach ${d.step} Befehlen (E${d.level}): ${d.text.join(' · ')}` : `${k} Befehle gleich, Modulkette ${chain ? 'bis 7.12.0.0 durchlaufen' : 'nicht erreicht'}, ${m.io.count} E/A-Zugriffe` };
+  }, true);
   // ── 7. Zustand sichern/laden
   add('Zustand', 'Sichern und Laden mitten im Befehl auf allen Ebenen, danach gleicher Lauf', () => {
     const { img } = asmImg(EXAMPLES.uhr); const out = [];
@@ -3750,6 +3838,94 @@ const TESTS = (() => {
   });
   function bin16(v) { return (v & 0xFFFF).toString(2).padStart(16, '0').replace(/(\d{4})(?=\d)/g, '$1 '); }
   return { list };
+})();
+
+/* ===== src/fw1069.js ===== */
+// ═══════════════════ FIRMWARE TA 1069 (Festspeicher-Abzug) ═══════════════════
+// Inhalt der ROMs/EPROMs FAH 01 … FAG 32 eines TA 1069, ausgelesen von Udo Lechner
+// (http://www.ultronics.de), Datei TA1069ROM.h:
+//   Copyright (C) 2015 Udo Lechner <http://www.ultronics.de/en/contact.html>
+//   This file is free software: you can redistribute and/or modify it under the
+//   terms of the GNU General Public License version 3 as published by the Free
+//   Software Foundation. It is distributed WITHOUT ANY WARRANTY; see
+//   <http://www.gnu.org/licenses/>.
+// RAW = die Bytes genau so, wie sie in TA1069ROM.h stehen (je Baustein ab seiner
+// Bausteinadresse 0, Lücke FAG 25 mit 0x00), 32 KB, Base64.
+// Abbildung auf den Adressraum der CPU (Befund F1/F2, Reiter „Info & Annahmen“):
+//   F1  Datenleitungen invertiert: Byte (CPU) = NOT Byte (Baustein)
+//   F2  Adressleitungen innerhalb des Bausteins invertiert: CPU-Adresse Basis+i
+//       liest Bausteinadresse (Größe−1) XOR i
+//   F3  Bausteinlage (Basis) wie in TA1069ROM.h angegeben
+const FW1069 = (() => {
+  const RAW = '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zYOr8/1/qfPfD/F/jp78f6nzuHeU3n8sjt4/b2f+N/658/1/Cf7H88mDwfO7I83zv/Nd/v4/8f4H/1zurXN99zP3o+vezpVbxbOjy8IX+VvEd8Ozw/PBI8XzrXP+P6PzBO/Fo8OjSN+tU8Nz/w/E95sP9o7El/lbwne2t8PzlSvF881zSJ/q/rujtoe2d8yKyQP5W7cjMM+VW8WzxPf9PZsPKp/Ed8XzrXP/D0zvzbPBs7ezst/HU7dzNs+7c2iP6v40j7uzYs+tU8NzwvdWn2MswpfCd8Ojw/OVe/8PRJ/q/tP+wf3N88EDlQv5W61zu/Os94rPxVPDo62jrPfCd63zlSu388cT+Vuh9JXuxtf+b8ZXyFezc6Hzlnut88fz2wPWc8ravXPT/sH9lI/FA78D+VvDA8EjwaPC38B3w/O7c+DPt1PDo8D3rXPBo8CH7f258939w/PHc7vzw3PC79P++M+3U8ejwaPA98Z36K+7c8HzvxP5W/49u3PLz/89Xf6gjcWjt6Mk3LZ3t7Om6V3+KowYzMdTt3Nw78H907PJnzjMw1PFcxjMxHfFs6z3RMyVW62jrPf/f7fzyXPI17Pz/m/Ed/09tO/T/sH9x/O/c8nzlXvA998P/m/Id3TMyVPHo7+jvvfGd1LMGl/Ud83zrfO/8+8PwfOVe53+Mu+a3L53oMytU8dzfN+VW7+jx6PG97534uzC97kD3f3t/bnzyXPi7MOzwvfJA+39ufOtc939rqy9s8nzt3PS7Mmzt/PCnLoDt3Nz3f0PxtyzLLuDASzJ8/9/v4+6A7fztnO7g0UPNP347MVzc+2287lzEs27o7mDrXMA7alzw7MCrb2zqfPd/e39NP2f68uPBSy788vf/z07/rnz/3+389cD4W+9g2f+B/+f8//N/zGG7b+zvoetc7+jvvetd62DNnlGnVrNuaOt81CdOAmtk61zrYO+d7nz9390zb1zu4O7c62Du3Nqnb3z/T3Gd7vzwnet8/9/v6Oc3bdTx6N07sPz7w+Ve8XzASy/c6TNxVPDo9P+fs3Cd7/zzaOz87Ltxvf/f3zfxVPHo77Nx1PDs8T3wnfFs9TtxbPEh61zufPd/bLdx1PDs8T37f0yz61zufPd/byd7M29o3Dfx1PDszLPwnfe3b3z/T27c8vPXf7Hs8PzxbOd/gzuwnc43sVTw6Myz61zJs7JU8ejxoft/bnz3f1A3sVTw6PG961zu/PSD939lu8xLLtzfN+9c9P+wf043slTx6PHs1LOxVPDowreyVPHo8b3wndI7rvzwndI3iyuu6MojMUT+VvDg/lbASz/Pbuzy8//PV3+nf7W78gH+Vtn/gf/0O/g371TcN/IZ2f+B//27qx38/2t88MDyHfJ/rPz/3/07tLPyBf5W8R3/j/J/sTuyNfEd8n+xO7Ix8R3yf707v4/u8PI58R3yf7y7tazcN/EV8h3/j+hg/l/1vPJ/rPz/3/y77tz4N+zc3Odocu9o8mzxbPI98R3yf5878jX/n8Uz8lTx6PG95oP+Vv/HwafDs/Gd9P+Wu/5e8OzFt98j8lTx6N17fkLN/658/9/1vMz/Tzfwncg38VTw6P/HzKfNs/CJ17PyVPHoyTfxVPDo8b3/w+bD1CPxpf5W8J3/j/w79CvyHdz7c/T8G/PU/d/es/JU8ejZs/Gd9P+c90bX9R3Mu+O38J3gt/FU8OjMo+q7/9/w7Osz8VTw6OQ38lTx6PG96KfYyzGl8J3YK/UV8hXxHed/qzv0/7I1/5vxHdzrbNzwf3I5+F/nf5u7/t/8I9w3/lbtgP5W8Vzbu/+f/CPcN+2k/lbxXP+P27v/X9w3+CPtoPFc/TvtnMALP////////////////////////////////////////////////////////////////////////////////7//v/+//7v3/+//9/v/4D/vv++/////4D/////vv++/4D/vt+u97r9vr/f7/Dv37++3ev3692+gf79+/3+gYf7/f79+4eB/v/+//6Bv/+/wL//v9m2/7b/ts3O/bP/t/+Awr37vv++wc//t/+3/4DBvv++/77Bgv379+/foKDf7/fv36D+//7//v+Avv3b9+//gIH+//7//v3/vv+A/77/gP/3//f/gNG+977/vsG//7f/t/+Avv+2/7b/gMH/vv++wb7dvv++/77Byfe+977BvvDv27/b7/DDvuO+/77Bz7f/uv+/3//3692+///r/+v/6//r//++3ev3////k/2S/////8n/yf//z7f7tf63z8m2/7b/tsmf77f7vf6/+fa/1u/2+bH+r/6v/o375Lvf6/f7udav9r/+vc63/rv+vd7//v+A/97/492+/77d47/f7/f7/f7/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AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////9n22vbydrn2unaUduJ2KXYVdUz1kXa49qF29vbG+et5p3Poc//z+vbrOq++qzK7281c6r6DfMrc6jq0/Lr8v9/qJrrAvlb1iaa6iXzx3/uzumiuPrr8v5/6fLvf+SO6QL5W99/5O68+uvy/H/6jukC+VvwfyXzzX8cz/5v+zPpsrj66/L+f+ny/n8l881/HcP+f57qsvrL0P5vy3DS782A+VvIf57qy8D+f5zqyYDJgMmAyfD6f5zqSo/6D0zfLQP5W9Ymy9D+b8twQN8tI6DqyYDJgMmAyfD6f6Dqbo/6D3DfLQP5W9Ymy9D+b8twQN8tI6TqzbC6+iXzpurNoLj6JfOu6s3w93/R8u9/sOrp8pt/mOrr8vd/JfPHfx3D/n/G77bf6aK4+iXz5X/r8v5/yfD/f+nyzYD5W8kgOq/LcKjff2/LdLTqy8R/f7Ta/W81c7TqyfD/f8v0/3+22v4P6N/9D/+XAAD//////////////////////////////////////////////////////////////////0Ds9PtA3P5vEXBj2K9TsXNj8EeUJ+xplmPoNXCM7Gj3AH/z80Z4dce/f6/sRPhB8K2zr8ysd4TMN2Csd2Htm/NI6FHwr3ymo6bD/H+09/9/r+w1sIDcgKy0Z35/WqyfcIzMRlT+f2bcN2Csd2zMqnOs0zdgrHNH8PwPV/C1c7ejt6Nw/LPMm2tM3Kv8NfD/fzvAN3Bj8Fnoz/P+f+Ls939Z6EjwVnBJ8EhwSfDPDwlwz/P9f9DcrHdX8LVzzNy//L3zxXNZ8E/oxPdIZEZ0SfD+D8VzR/DpDwlwT/C87f9/4u1IcFnoRsT7fxbdSHRJ8OgPCXAW3ftvxHcn0AtgJ3BG1MR3R/DpDwlwRuQEf0egOs1G9AtQRkQLcEfw6A9DcDrdAF9CdFDN+PtB8PkPU/BGcEfw5w8JcDHQOt0LYDFwOt33b0Z0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6uvqKOv8J+zt6hjG+Jet63Bb9tX3mP9P8FT3lh/scfj/bf+ZXer/bxhU95ZOXOog/v9u/39e/39b/dsPH+wo+/8PJ+wo8/9hVPeWE+t99/sPHOsoy/sn7B/rGI72t/eWz/iX/0/wVPeWVPeWVPeW+f9hVPeWG+t9/41R/VfuC+woz/xd6h/rGIj2t/eW4fb+/2/5/xBNXOoh/P8HXeoZ5vbwA/mW/0fw/nb2susqw+v8/xAD/ie96ijr/Cfsv+oY/Sn2teso9/sPveso/Q/sv+so3Pb08/4PJc/4l/9H8Pn/B3frKOb28AP5lv9H8GT3lseX9s7O3LGxsbHcuruv/yXo//////z88P7+FPIKBPcvCfks9XXxKP838d//+f8Q/if2Heso/9v/H/BQ8ob+M/L/fyg58vuf/38mP/L73/9/Jv7/bw748P7h//wvKGT3ltfn+/8QXPeW+Czb5/v/EPgt//eW/3dzUPKT/x9+1f927Op/EfjwDvj37fw3f/L3X/wvJn/y99/8LyZw8vD/Z3dG9JT9C+z6Jyj93ecR7Cj/jWHD8o72/2/2/3//fym08vj+/Q/3fyf7v+cn7CjG+JcN7HD/P3yW8vjq/Tfj8vD/F3Zk9/D/LP8Hdv653vIK/U791+ko/vW5J+wM+Sfsy+co/y0j9PD91+kP7ij9EezX6Sj5X/D9/2v/B/j9+V9q6yf/B/j9+18l7Cf//0/wW/Xo88vn3y8o7/0n7MHnGP/9b/n9X/1fKZz/fybzkA7zkEPzcv3/XxHsKP1ffN/ffbKsfybzkP3/Fx/sKOb28P831eb2968K8iaG/PD9+ycl7Chn83iM/Pv9/RcR7Cee8/j7/yf/Lyd08/f9+xcR7Cf5/2T0LvP8ec+P6iLrKB7rdZ7z+IvqNf8XdP235w3sKPQv//////////////////////////////////////////////////////////////////////////////////////////////////////////////////LwXPeW//L3+kv0H+sn//Lo/yfwZPeW7+f7/xDr5/z/EFz3lv8n8fum6SX/J/j35eej6SfbsbC81Xf08Nvn+/8QEfiXIut1+kv0H+sovPyZHut1+kv0H+soYfa395Yg//f80+clIYPf39/f37Gwsvv//////zmVh4JVlIjqinqM+qPruf+U7pau742r863zxYPbc6PztO5z3bmjxbOts6z3xHe586pzq7Ors6bz2wOqc6uzq7Oo86pz3O7Ff6nzmQutf6b+yu6n85kLrX+p85kLxX+m/rV1reut86xzrbOtswbvrYP7f/LeyVOsc83//s75W6xzrfOsc63z6Hr//////////////////9+vsLTRz8jf9v39///+/4z88MT2dDX18Pgsfy3M5/D+JvXM5yg59f79/vn/EDn1/tf/+f8QSv3w8+v1m+soz+fwDvOQPfNy/v9U//90+yX1xeco//983999/BrrJuwo37Z/UvX+uf/5/xD3L+yA6yj+1//RCv3X/9EK5//R/9Eph/X+1//5/xD3CfKA6yj+0+fT5yn/N/cg/zZv7dr7S/Dee0fw3HtJ8Ox7b+37zzVx++/G345fNfHM35NzZ5Sbed+D/////zL1MfK39f//64O5////2O+5/7n/uf//+/9//v4=';
+  // [Bezeichnung, CPU-Basis, Größe, Bauart, weitere Angaben aus dem Abzug (Datecode · Nummer)]
+  const CHIPS = [
+    ['FAH 01', 0x0000, 0x800, 'SCM39102L', 'AA 78 45 · 00/05'],
+    ['FAH 02', 0x0800, 0x800, 'SCM39103L', 'AA 78 50 · 00/04'],
+    ['FAH 03', 0x1000, 0x800, 'SCM39104L', 'AA 78 48 · 00/03'],
+    ['FAG 50', 0x1800, 0x400, 'MCM2708L', 'AA 80 11 · 03/06'],
+    ['FAG 51', 0x1C00, 0x400, 'iC2708', 'i 2B686 · 03/10'],
+    ['FAG 52', 0x2000, 0x400, 'MCM2708L', 'AA 80 07 · 02/22'],
+    ['FAG 53', 0x2400, 0x400, 'MCM2708L', 'AA 80 03 · 03/26'],
+    ['FAG 54', 0x2800, 0x400, 'MCM2708L', 'AA 80 11 · 02/21'],
+    ['FAG 55', 0x2C00, 0x400, 'MCM2708L', 'AA 80 11 · 03/25'],
+    ['FAG 56', 0x3000, 0x400, 'MCM2708L', 'AA 79 52 · 03/20'],
+    ['FAG 57', 0x3400, 0x400, 'MCM2708L', 'AA 80 11 · 02/24'],
+    ['FAH 08', 0x3800, 0x800, 'SCM39114L', 'AA 78 50 · 01/15'],
+    ['FAG 35', 0x4000, 0x400, 'TMS2708JL', 'TI P7801 · 02/34'],
+    ['FAG 36', 0x4400, 0x400, 'MCM2708L', 'AA 80 38 · 03/38'],
+    ['FAG 37', 0x4800, 0x400, 'MM2708Q', 'NS  8 48 · 01/33'],
+    ['FAG 38', 0x4C00, 0x400, 'MM2708Q', 'NS  8 36 · 01/37'],
+    ['FAH 11', 0x5000, 0x800, 'SCM39119L', 'AA 78 17 · 00/28'],
+    ['FAH 12', 0x5800, 0x800, 'SCM39180L', 'AA 78 23 · 00/27'],
+    ['FAG 25', 0x6000, 0x400, 'nicht bestückt', ''],
+    ['FAG 26', 0x6400, 0x400, 'MCM2708L', 'AA 80 11 · 02/51'],
+    ['FAH 14', 0x6800, 0x800, 'SCM39115L', 'AA 78 23 · 00/41'],
+    ['FAG 29', 0x7000, 0x400, 'MCM2708L', 'AA 78 48 · 05/45'],
+    ['FAG 30', 0x7400, 0x400, 'MCM2708L', 'AA 78 50 · 02/49'],
+    ['FAG 31', 0x7800, 0x400, 'MCM2708L', 'AA 80 38 · 02/44'],
+    ['FAG 32', 0x7C00, 0x400, 'MCM2708L', 'AA 80 11 · 11/48']];
+  const HOLES = CHIPS.filter(c => c[3] === 'nicht bestückt').map(c => [c[1], c[2]]);
+  let raw = null;
+  const rawBytes = () => raw || (raw = typeof b64dec === 'function' ? b64dec(RAW) : Uint8Array.from(Buffer.from(RAW, 'base64')));
+  // Abbild aus Sicht der CPU (0x0000…0x7FFF); Lücken bleiben 0 und werden nicht als ROM eingesetzt
+  function image() {
+    const r = rawBytes(), o = new Uint8Array(0x8000);
+    for (const [, b, n, typ] of CHIPS) {
+      if (typ === 'nicht bestückt') continue;
+      for (let i = 0; i < n; i++) o[b + i] = (~r[b + ((n - 1) ^ i)]) & 0xFF;
+    }
+    return o;
+  }
+  const chipAt = (a) => CHIPS.find(c => a >= c[1] && a < c[1] + c[2]) || null;
+  // Modulkette, wie sie das Programm ab 1.0.8.0 durchläuft: Anfang (0.0.5.12)∧(0.0.6.4)+256,
+  // Ende (0.0.6.6). Kopfwort 0 = nächste 256-Byte-Seite, 0xFFFF = Datenblock (nur Verkettung),
+  // sonst Modul: Wort +2 = Folgeadresse, Einsprung +12 (0.0.12).
+  function chain(word) {
+    const z5c = word(0x5C), mask = word(0x64), end = word(0x66), out = [];
+    let a = ((z5c & mask) + 0x100) & 0xFFFF;
+    for (let g = 0; g < 400 && a !== end && a < 0x10000; g++) {
+      const w = word(a);
+      if (w === 0) { a = ((a & mask) + 0x100) & 0xFFFF; if (a === 0) break; continue; }
+      const next = word(a + 2);
+      out.push(w === 0xFFFF ? { adr: a, data: true, next } : { adr: a, id: w, next, v: [word(a + 4), word(a + 6), word(a + 8), word(a + 10)], entry: a + 12 });
+      if (next <= a) break;
+      a = next;
+    }
+    return { list: out, start: ((z5c & mask) + 0x100) & 0xFFFF, end };
+  }
+  // Zeichensatz des Druckers: Datenblock 1.6.0.0, ab 1.6.0.4 je Zeichen 7 Spalten zu 7 Punkten
+  // (Bit 7 … Bit 1 = oben … unten), Zeichen 0x20 … 0x5F; benachbarte Spalten werden nie
+  // gleichzeitig angesteuert (Halbschritt-Raster).
+  const CHARSET = { base: 0x1604, first: 0x20, count: 64, cols: 7 };
+  // Texte im Abbild (aufsteigend gelesen); rev = im Speicher rückwärts abgelegt
+  const TEXTS = [[0x43F6, 8, 'Modul 3.8.0.0'], [0x700C, 8, 'Modul 6.8.0.0'], [0x7022, 8, 'Modul 6.8.0.0'],
+    [0x7B5E, 5, 'Modul 6.8.0.0'], [0x7B7C, 5, 'Modul 6.8.0.0'], [0x7BAA, 28, 'Meldungen, je 6 Zeichen'],
+    [0x7BD7, 31, 'Kennung der Firmware'], [0x7CDA, 8, 'Modul 7.12.0.0', true], [0x7D7E, 8, 'Modul 7.12.0.0'],
+    [0x7DB4, 5, 'Modul 7.12.0.0'], [0x7FF5, 11, 'Modul 7.12.0.0', true]];
+  // Marken für den Disassembler (nur gesicherte Einsprünge)
+  const SYMS = [['RESET', 0x0004], ['INT_IO', 0x0008], ['INT_UHR', 0x000C], ['MODKETTE', 0x1080], ['IPL_WART', 0x10EE], ['ZEICHEN', 0x1604]];
+  return { RAW, CHIPS, HOLES, image, chipAt, chain, CHARSET, TEXTS, SYMS, rawBytes };
 })();
 
 /* ===== ui/core.js ===== */
@@ -4158,7 +4334,9 @@ UI.pageTab = (() => {
       el('div', { class: 'row' }, el('label', { class: 'inl' }, 'Scratchpadseite (SC)', scSel)),
       el('div', { class: 'row' }, el('label', { class: 'inl' }, 'ROM ab', romBase),
         el('button', { class: 'btn', text: 'ROM laden …', title: 'Binärdatei (Byte für Byte, hohes Byte zuerst) als Festspeicher einsetzen; ab Werk ist kein ROM vorhanden', onclick: () => pickFile('*/*', (b, n) => { const a = parseTA(romBase.value); if (isNaN(a)) { msg('ROM-Adresse nicht lesbar'); return; } m().mem.loadRom(b, a, n); resync(); msg(`ROM „${n}“ (${b.length} Byte) ab ${fmtT(a)} eingesetzt.`, true); refreshMem(); }) }),
-        el('button', { class: 'btn', text: 'ROM entfernen', onclick: () => { m().mem.clearRom(); resync(); refreshMem(); } }), romInfo),
+        el('button', { class: 'btn', text: 'ROM entfernen', title: 'Festspeicher ziehen; der Kernspeicher darunter hat wieder seinen alten Inhalt', onclick: () => { m().mem.clearRom(); resync(); UI.refreshAll(true); } }), romInfo),
+      el('div', { class: 'row' }, mEls.fw = el('input', { type: 'checkbox', id: 'cfgFw', onchange: (e) => UI.pageFw.setFirmware(e.target.checked) }),
+        el('label', { for: 'cfgFw', class: 'inl', title: 'Firmware TA 1069 (Abzug U. Lechner) stecken bzw. ziehen – mit Kaltstart; Einzelheiten im Reiter „Firmware TA 1069“' }, 'Firmware TA 1069 gesteckt')),
       el('div', { class: 'row' }, 'Abbild', imgFrom, '…', imgTo,
         el('button', { class: 'btn', text: 'speichern', title: 'Speicherbereich als Binärdatei herunterladen', onclick: () => { const a = parseTA(imgFrom.value), e = parseTA(imgTo.value); if (isNaN(a) || isNaN(e) || e < a) { msg('Bereich nicht lesbar'); return; } download(`ta1000-${fmtH(a)}-${fmtH(e)}.bin`, EMU.m.mem.data.slice(a, e + 1)); } }),
         el('button', { class: 'btn', text: 'laden …', title: 'Binärdatei ab der ersten Adresse in den Speicher schreiben (auch ROM-Abbild)', onclick: () => pickFile('*/*', (b, n) => { const a = parseTA(imgFrom.value); if (isNaN(a)) return; for (let i = 0; i < b.length && a + i < 65536; i++) m().mem.poke(a + i, b[i]); resync(); msg(`„${n}“ (${b.length} Byte) ab ${fmtT(a)} geladen.`, true); UI.refreshAll(true); }) }),
@@ -4167,7 +4345,8 @@ UI.pageTab = (() => {
         cb('Uhr-Brücke M115 7-8', '1-ms-Uhr der CPU auf /CLK (Brücke M115 7-8)', () => m().cfg.clkJumper, v => { m().cfg.clkJumper = v; }),
         cb('/TST', 'Testbetrieb: sperrt den Uhrwunsch (CKU = /TST·fk)', () => m().tst, v => { m().tst = v; }),
         cb('Netzausfall (/PWI)', 'Netzausfallsignal aktiv (FC liefert 0)', () => !m().powerOk, v => { m().powerOk = !v; }),
-        cb('/INT (IO-Unterbrechung)', 'IO-Unterbrechungswunsch auf der Rückwand anlegen (keine Karte meldet ihn selbst)', () => m().io.intReq, v => { m().io.intReq = v; })),
+        cb('/INT (IO-Unterbrechung)', 'IO-Unterbrechungswunsch auf der Rückwand anlegen (keine Karte meldet ihn selbst)', () => m().io.intReq, v => { m().io.intReq = v; }),
+        cb('Befund G1', 'an: Schaltung wie gezeichnet – die Generalsperre setzt NM in jedem L-Zyklus (Byte auf gerader Adresse und E/A im L-Zyklus entfallen). aus: Eingang 99_2/13 offen statt /fg, NM2 = /f5. Gilt für alle drei Ebenen; Ebene 3 wird neu aufgebaut.', () => m().cfg.g1 !== false, v => { m().setG1(v); msg(v ? 'Befund G1 an: Generalsperre setzt NM in L-Zyklen (Schaltung wie gezeichnet).' : 'Befund G1 aus: /fg-Eingang von 99_2 offen, die Generalsperre wirkt nicht auf NM.', true); })),
       el('p', { class: 'note', text: 'Seitenbelegung (je Kästchen 1 KB): hell = Kernspeicher, braun = Festspeicher, dunkel = nicht bestückt (liest 0).' }), mEls.map);
     for (let p = 0; p < 64; p++) mEls.map.append(el('div', { text: fmtT(p << 10).replace(/\.0\.0$/, '') }));
     return box;
@@ -4178,6 +4357,7 @@ UI.pageTab = (() => {
     if (document.activeElement !== mEls.ramSel) mEls.ramSel.value = String(c.ramKB);
     if (document.activeElement !== mEls.ramBase) mEls.ramBase.value = fmtT(c.ramBase);
     mEls.scSel.value = String(m.cfg.sc); mEls.tim.value = m.cfg.memTiming;
+    if (mEls.fw) mEls.fw.checked = !!(UI.pageFw && UI.pageFw.isIn());
     mEls.romInfo.textContent = m.mem.rom ? `${m.mem.cfg.romName || 'ROM'}: ${m.mem.rom.length} Byte ab ${fmtT(c.romBase)}` : 'kein ROM';
     for (const [c2, g] of mEls.cbs) c2.checked = !!g();
     [...mEls.map.children].forEach((d, p) => { const k = m.mem.kind[p << 10]; d.className = k === 2 ? 'rom' : k === 1 ? '' : 'mon'; if ((p >> 2) === m.cfg.sc) d.classList.add('used'); });
@@ -4703,6 +4883,182 @@ UI.pageAsm = (() => {
   return { build };
 })();
 
+/* ===== ui/p_fw.js ===== */
+/* ===== Reiter: Firmware TA 1069 (Abzug U. Lechner) – Einsetzen und Auswertung ===== */
+UI.pageFw = (() => {
+  const { el, EMU, msg, download } = UI;
+  const IMG = () => FW1069.image();
+  let img = null;
+  const im = () => img || (img = IMG());
+  const wordI = (a) => { const b = im(); a &= 0xFFFE; return a < 0x8000 ? (b[a] << 8) | b[a | 1] : 0; };
+  const T = (a) => fmtT(a), H = (a) => fmtH(a);
+  let E = null;
+  function goDis(a) {
+    UI.ensureBuilt('dbg');
+    const i = document.getElementById('dbgDis'); if (i) { i.value = T(a); EMU.ui.dbgDis = i.value; }
+    UI.show('dbg');
+  }
+  function goMem(a) {
+    UI.ensureBuilt('dbg');
+    const i = document.getElementById('dbgMem'); if (i) { i.value = T(a & 0xFFF0); EMU.ui.dbgMem = i.value; }
+    UI.show('dbg');
+  }
+  const aLink = (a, mem) => el('a', { href: '#dbg', text: T(a), title: (mem ? 'im Speicher' : 'im Disassembler') + ' zeigen (' + H(a) + 'h)', onclick: (e) => { e.preventDefault(); mem ? goMem(a) : goDis(a); } });
+  function symbols() {
+    const s = FW1069.SYMS.slice();
+    for (const m of FW1069.chain(wordI).list) if (!m.data) s.push(['M' + H(m.id).replace(/^00/, ''), m.entry]);
+    return s;
+  }
+  const FW_NAME = 'TA 1069 (Abzug U. Lechner, GPL v3)';
+  const isIn = () => !!EMU.m.mem.rom && EMU.m.mem.cfg.romName === FW_NAME;
+  let clearRam = true;
+  // Firmware stecken bzw. ziehen. Das ROM überdeckt den Kernspeicher nur; beim Ziehen kommt
+  // dessen alter Inhalt zurück und die Maschine ist wieder der TA 1000 ohne Festspeicher.
+  function setFirmware(on) {
+    const m = EMU.m;
+    if (on === isIn()) return;
+    if (EMU.running) UI.setRunning(false, on ? 'Firmware einsetzen' : 'Firmware entfernen');
+    if (m.lock) m.stopLockstep();
+    if (on) {
+      if (clearRam) m.mem.data.fill(0);                   // Kernspeicher leeren (definierter Anfang)
+      m.mem.configure({ ramBase: 0, ramKB: 64 });         // Annahme F5: 64 KB Kernspeicher, vom ROM überdeckt
+      m.mem.loadRom(im(), 0, FW_NAME, FW1069.HOLES);
+      m.cfg.sc = 6;                                       // Annahme F4: Scratchpad in der Lücke FAG 25
+      for (const [k, a] of symbols()) EMU.sym.set(k, a);
+      m.powerOn();
+      msg('Firmware TA 1069 gesteckt (0.0.0.0 … 7.15.15.15, Lücke 6.0.0.0 … 6.3.15.15 = Kernspeicher/Scratchpad, SC = 6)' + (clearRam ? ', Kernspeicher gelöscht' : '') + ', Kaltstart.', true);
+    } else {
+      m.mem.clearRom();
+      for (const [k, a] of symbols()) if (EMU.sym.get(k) === a) EMU.sym.delete(k);
+      m.powerOn();
+      msg('Firmware gezogen: TA ohne Festspeicher, der Kernspeicher unter dem ROM hat wieder seinen alten Inhalt. Kaltstart.', true);
+    }
+    UI.refreshAll(true);
+  }
+  const insert = () => setFirmware(true);
+  const toggle = () => setFirmware(!isIn());
+  // ── Zeichensatz zeichnen (Halbschritt-Raster: Spaltenabstand = halber Punktabstand)
+  function cssVar(n, d) { const v = getComputedStyle(document.documentElement).getPropertyValue(n).trim(); return v || d; }
+  function glyphCols(c) { const { base, first, count, cols } = FW1069.CHARSET; const k = c - first; if (k < 0 || k >= count) return null; const b = im(); return b.subarray(base + cols * k, base + cols * (k + 1)); }
+  function drawText(cv, lines, opt) {
+    const p = opt.pitch, cw = p / 2, gw = 7 * cw + opt.gap, lh = 7 * p + opt.lineGap;
+    const W = Math.max(...lines.map(l => l.length)) * gw + 2 * opt.pad, Hh = lines.length * lh + 2 * opt.pad - opt.lineGap + (opt.label ? 0 : 0);
+    const dpr = window.devicePixelRatio || 1;
+    cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(Hh * dpr); cv.style.width = W + 'px'; cv.style.height = Hh + 'px';
+    const g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = cssVar('--ink', '#e8e3d4'); g.fillRect(0, 0, W, Hh);
+    g.fillStyle = cssVar('--key-ink', '#1b1c1e');
+    lines.forEach((line, li) => [...line].forEach((ch, ci) => {
+      const cols = glyphCols(ch.toUpperCase().charCodeAt(0)); if (!cols) return;
+      const x0 = opt.pad + ci * gw, y0 = opt.pad + li * lh;
+      for (let x = 0; x < 7; x++) for (let r = 0; r < 7; r++) if ((cols[x] >> (6 - r)) & 1) {
+        g.beginPath(); g.arc(x0 + x * cw + p / 2, y0 + r * p + p / 2, p * 0.42, 0, 2 * Math.PI); g.fill();
+      }
+    }));
+  }
+  function drawCharset() {
+    const tbl = el('div', { class: 'fwcs' });
+    for (let c = 0x20; c < 0x60; c++) {
+      const cv = el('canvas', { title: `Zeichen ${H(c).slice(2)}h „${String.fromCharCode(c)}“ – Spalten ab ${T(FW1069.CHARSET.base + 7 * (c - 0x20))}` });
+      drawText(cv, [String.fromCharCode(c)], { pitch: 5, gap: 0, lineGap: 0, pad: 4 });
+      tbl.append(el('div', {}, cv, el('span', { class: 'mono', text: H(c).slice(2) + ' ' + (c === 0x20 ? '␠' : String.fromCharCode(c)) })));
+    }
+    return tbl;
+  }
+  function build(sec) {
+    E = {};
+    const ch = FW1069.chain(wordI);
+    E.state = el('span', { class: 'note' });
+    // Bausteine
+    const chipRows = [el('tr', {}, ...['Baustein', 'Adressen (CPU)', 'hex', 'Größe', 'Bauart', 'Angaben im Abzug'].map(t => el('th', { text: t })))];
+    for (const [n, b, s, typ, d] of FW1069.CHIPS) chipRows.push(el('tr', {}, el('td', { class: 'lbl', text: n }),
+      el('td', {}, aLink(b, typ === 'nicht bestückt'), ' … ' + T(b + s - 1)), el('td', { text: `${H(b)}–${H(b + s - 1)}` }), el('td', { text: (s >> 10) + ' KB' }),
+      el('td', { text: typ === 'nicht bestückt' ? 'nicht bestückt → Scratchpad (Kernspeicher)' : typ + (n.startsWith('FAH') ? ' (Masken-ROM)' : ' (EPROM 2708)') }), el('td', { class: 'cmt', text: d })));
+    // Einsprünge
+    const ent = [
+      [0x0001, 'Startwort', 'Nach /RST führt das Steuerwerk BS→N_Z mit N = Byte auf 0.0.0.1 aus (Befund E3): Programmbeginn 0.0.0.4.', true],
+      [0x0004, 'RESET', 'BRI über die Tabelle 0.0.6.0 → 1.0.14.0 (Startprogramm im Masken-ROM FAH 03).'],
+      [0x0008, 'INT_IO', 'IO-Unterbrechung (BS→8): (A) nach X3 retten, weiter über die Scratchpadzelle X5 (BRX 6.0.0.10) – das Ziel trägt das laufende Programm ein.'],
+      [0x000C, 'INT_UHR', 'Uhr-Unterbrechung (BS→12): Paritätsfehler (SY PC) und Netzausfall (SY FC) prüfen, sonst Rücksprung.'],
+      [0x0040, 'Sprungleiste', 'Ab 0.0.4.0 kurze Stummel „(A)→X58, BR …“ – Standardziel 0.0.4.6 steht in vielen Modulköpfen als leerer Vektor.'],
+      [0x1080, 'MODKETTE', 'Läuft die Modulkette ab (Tabelle unten) und springt jedes Modul über Kopf+12 an.'],
+      [0x10E0, 'Startprogramm', 'Setzt X59 = 0.0.1.15 (E/A-Adresse Karte 1, Zeile 7, Ausgabe) und fragt danach Karte 18 Zeile 6 und Karte 1 Zeilen 6/7 ab.'],
+      [0x10EE, 'IPL_WART', 'Warteschleife des Startprogramms: prüft Netzausfall, Karte 18 Zeile 6 Bit 1 und das Wort von Karte 1 Zeilen 6/7 (Maske 0.2.7.15); Tastencode 0.15/0.14/7.15 wählt den Startmodus (X54).'],
+      [0x1604, 'ZEICHEN', 'Zeichensatz des Druckers (Datenblock 1.6.0.0 der Modulkette).', true]];
+    const entRows = [el('tr', {}, el('th', { text: 'Adresse' }), el('th', { text: 'Marke' }), el('th', { text: 'Bedeutung' }))];
+    for (const [a, n, t, mem] of ent) entRows.push(el('tr', {}, el('td', {}, aLink(a, mem)), el('td', { class: 'lbl', text: n }), el('td', { class: 'cmt', style: 'white-space:normal', text: t })));
+    // Modulkette
+    const mRows = [el('tr', {}, ...['Kopf', 'Kennung', 'Folge', '+4', '+6', '+8', '+10', 'Einsprung (+12)', 'Baustein'].map(t => el('th', { text: t })))];
+    for (const m of ch.list) {
+      const chip = FW1069.chipAt(m.adr);
+      if (m.data) { mRows.push(el('tr', {}, el('td', {}, aLink(m.adr, true)), el('td', { text: 'Datenblock' }), el('td', { text: T(m.next) }), el('td', { colspan: 5, class: 'cmt', text: m.adr === 0x1600 ? 'Zeichensatz des Druckers' : 'Daten (Kopfwort 15.15.15.15)' }), el('td', { text: chip ? chip[0] : '' }))); continue; }
+      const d = ASM.dis(wordI(m.entry), m.entry);
+      mRows.push(el('tr', {}, el('td', {}, aLink(m.adr, true)), el('td', { class: 'lbl', text: T(m.id) }), el('td', { text: T(m.next) }),
+        ...m.v.map(v => el('td', { class: v === 0x46 ? 'cmt' : '', text: T(v) })), el('td', {}, aLink(m.entry), ' ' + d.text + (d.eff !== null && d.eff !== undefined && /^BRI/.test(d.text) ? ` → ${T(wordI(d.eff))}` : '')), el('td', { text: chip ? chip[0] : '' })));
+    }
+    // Texte
+    const tRows = [el('tr', {}, el('th', { text: 'Adresse' }), el('th', { text: 'Text (aufsteigend gelesen)' }), el('th', { text: 'Bemerkung' }))];
+    for (const [a, n, note, rev] of FW1069.TEXTS) {
+      const s = String.fromCharCode(...im().subarray(a, a + n));
+      tRows.push(el('tr', {}, el('td', {}, aLink(a, true)), el('td', { text: '„' + s + '“' + (rev ? '   rückwärts: „' + [...s].reverse().join('') + '“' : '') }), el('td', { class: 'cmt', text: note })));
+    }
+    // Probedruck
+    const pin = el('input', { type: 'text', value: 'BS7803 IPL  TA 1069', style: 'width:22em', maxlength: 60, 'aria-label': 'Text für den Probedruck' });
+    const pcv = el('canvas', { class: 'fwprint' });
+    const redraw = () => drawText(pcv, [pin.value.toUpperCase() || ' '], { pitch: 4, gap: 3, lineGap: 0, pad: 8 });
+    pin.addEventListener('input', redraw);
+    sec.append(el('h2', { text: 'Firmware TA 1069' }),
+      el('p', { class: 'note', html: 'Abzug der Festspeicher eines TA 1069 (Masken-ROMs FAH, EPROMs 2708 FAG) von <a href="http://www.ultronics.de" target="_blank" rel="noopener">Udo Lechner, ultronics.de</a>, © 2015, freigegeben unter der <a href="https://www.gnu.org/licenses/gpl-3.0.html" target="_blank" rel="noopener">GNU GPL Version 3</a>. Der Abzug ist unverändert in dieser Seite enthalten; die Abbildung auf den Adressraum der CPU steht unten und in „Info &amp; Annahmen“ (F1–F6).' }),
+      el('div', { class: 'box' },
+        el('div', { class: 'row' },
+          E.tog = el('button', { class: 'btn primary', title: 'Stecken: ROM 0.0.0.0 … 7.15.15.15 über den Kernspeicher legen (Lücke FAG 25 bleibt Kernspeicher), Scratchpadseite 6, Marken, Kaltstart. Ziehen: ROM entfernen, alter Kernspeicherinhalt kommt zurück, Kaltstart.', onclick: toggle }),
+          el('label', { class: 'inl', title: 'Beim Stecken den ganzen Kernspeicher auf 0 setzen (sonst bleibt er erhalten)' }, E.clr = el('input', { type: 'checkbox', checked: true, onchange: (e) => { clearRam = e.target.checked; } }), 'Kernspeicher beim Stecken löschen'),
+          el('button', { class: 'btn', text: 'Abbild (CPU-Sicht) herunterladen', title: '32 KB ab 0.0.0.0, Byte für Byte, hohes Byte zuerst – passt zu „ROM laden …“ im Tableau', onclick: () => download('ta1069-cpu.bin', im()) }),
+          el('button', { class: 'btn', text: 'Rohdump herunterladen', title: 'Bytes wie in TA1069ROM.h (Bausteinsicht, nicht invertiert)', onclick: () => download('ta1069-roh.bin', FW1069.rawBytes()) }),
+          E.state),
+        el('div', { class: 'row', style: 'margin-top:8px' },
+          el('span', { class: 'note', text: 'Starttaste (Karte 1, Zeilen 6/7):' }),
+          ...[[0x0E, '0.14 → Startmodus 0.0.7.1'], [0x0F, '0.15 → Startmodus 0.0.7.0'], [0x7F, '7.15 → Startmodus 0']].map(([k, t]) =>
+            el('button', { class: 'btn', text: 'Code ' + t, title: 'Taste mit diesem Code drücken (30 ms). Wirkt nur in der Warteschleife 1.0.14.14 und nur, wenn Befund G1 aus ist – sonst liest die Firmware den Code als 0.', onclick: () => { EMU.m.io.dev.pressKey(k); msg(`Taste Code ${fmtT(k).replace(/^0\.0\./, '')} gedrückt${EMU.m.cfg.g1 !== false ? ' – Befund G1 ist an, die Firmware sieht den Code als 0' : ''}.`, EMU.m.cfg.g1 === false); } })),
+          el('label', { class: 'inl', title: 'Derselbe Schalter wie im Tableau (Speicher und Rückwand)' }, E.g1 = el('input', { type: 'checkbox', onchange: (e) => { EMU.m.setG1(e.target.checked); UI.refreshAll(true); } }), 'Befund G1'))),
+      el('div', { class: 'grid2', style: 'margin-top:14px' },
+        el('div', { class: 'box' }, el('h3', { text: 'Vom Rohdump zum Adressraum' }),
+          el('ol', { class: 'plain fwol' },
+            el('li', { text: 'F1 – Datenleitungen invertiert: die Rückwand führt /E1…/E8 low-aktiv; vermutlich gibt die Festspeicherkarte die Bausteinbits ohne Inverter darauf. Erst invertiert ergeben die Bytes Text in ISO-7-Bit-Code („SYSTEM“, „BS7803 IPL“).' }),
+            el('li', { text: 'F2 – Adressleitungen im Baustein invertiert (vermutlich /R-Leitungen direkt an den Adresseingängen): CPU-Adresse Basis+i liest Bausteinadresse (Größe−1)⊕i. Damit stehen Texte vorwärts im Speicher, das Startwort auf 0.0.0.1 zeigt auf 0.0.0.4 und die Unterbrechungsziele 0.0.0.8/0.0.0.12 enthalten passenden Code.' }),
+            el('li', { text: 'F3 – Lage der Bausteine wie im Abzug angegeben (FAH 01 auf 0.0.0.0 …). Die Modulkette verkettet die Bausteine lückenlos über diese Adressen bis 8.0.0.0 – das bestätigt die Lage.' }),
+            el('li', { text: 'F4 – Lücke FAG 25 (6.0.0.0 … 6.3.15.15) = Scratchpad bei SC = 6: alle Scratchpadzugriffe der Firmware (Xn, S+N) fallen genau in diesen Bereich.' })),
+          el('p', { class: 'note', text: 'Gegenprobe: die drei übrigen Kombinationen (nicht invertiert und/oder Adressen nicht gespiegelt) bleiben nach dem Start in kurzen Schleifen ab 0.0.0.0 hängen; nur F1 + F2 ergibt durchgehend sinnvollen Code.' })),
+        el('div', { class: 'box' }, el('h3', { text: 'Einsprünge' }), el('div', { class: 'scroll' }, el('table', { class: 't' }, entRows)))),
+      el('div', { class: 'box', style: 'margin-top:14px' }, el('h3', { text: 'Modulkette' }),
+        el('p', { class: 'note', html: `Das Programm ab ${T(0x1080)} beginnt bei ${T(ch.start)} ((0.0.5.12)∧(0.0.6.4)+256) und folgt den Köpfen bis ${T(ch.end)} (Wort auf 0.0.6.6): Kopfwort 0 → nächste 256-Byte-Seite, 15.15.15.15 → Datenblock, sonst Modul mit Folgeadresse auf +2 und Einsprung auf +12. Die Wörter +4…+10 sind Länge bzw. Vektoren; 0.0.4.6 (grau) ist der leere Vektor. Die Kette läuft durch die Scratchpad-Lücke (dort Kernspeicher = 0) und endet am Kernspeicher ab 8.0.0.0.` }),
+        el('div', { class: 'scroll' }, el('table', { class: 't' }, mRows))),
+      el('div', { class: 'grid2', style: 'margin-top:14px' },
+        el('div', { class: 'box' }, el('h3', { text: 'Zeichensatz des Druckers' }),
+          el('p', { class: 'note', html: `Datenblock ${T(0x1600)}, ab ${T(FW1069.CHARSET.base)} je Zeichen 7 Spalten (Bytes) zu 7 Punkten, Codes 2.0 … 5.15 (64 Zeichen ISO 7 Bit, Spalten 2–5, nur Großbuchstaben). Benachbarte Spalten sind nie zugleich gesetzt: der Nadelkopf druckt im Halbschritt-Raster, der Rechner steuert jede Spalte selbst.` }),
+          drawCharset(),
+          el('h3', { text: 'Probedruck' }), el('div', { class: 'row' }, pin), el('div', { class: 'scroll', style: 'margin-top:6px' }, pcv)),
+        el('div', { class: 'box' }, el('h3', { text: 'Texte im Festspeicher' }), el('div', { class: 'scroll' }, el('table', { class: 't' }, tRows)),
+          el('h3', { text: 'Was nach dem Kaltstart passiert' }),
+          el('p', { class: 'note', text: 'Startwort → 0.0.0.4 → 1.0.14.0. Das Startprogramm legt X59 = Karte 1/Zeile 7 (Ausgabe) an und bleibt in der Schleife ab 1.0.14.14: Netzausfall prüfen, Karte 18 Zeile 6 lesen (Bit 1 = 1 → Zweig 1.1.0.2), dann das Wort der Karte 1 Zeilen 6/7 mit 0.2.7.15 maskieren. Weiter geht es nur bei gedrückter Taste (/DS = 0): Tastencode 0.15 → Startmodus 0.0.7.0, Tastencode 0.14 → Startmodus 0.0.7.1, Code 7.15 (Codebits alle 1) → Startmodus 0. Der Modus steht in X54 und wird von jedem Modul der Kette bei der Einrichtung ausgewertet.' }),
+          el('p', { class: 'note', text: 'Startmodus 0.0.7.1 startet das Betriebssystem: Generalsperre aus (RT), Uhr-Unterbrechung, Tastaturabfrage im Uhrtakt. Ohne geladene Daten im Kernspeicher ab 8.0.0.0 landet es aber über die leere Zelle X7 bei 0.0.0.0 und setzt den Rechner mit SY GR zurück. Startmodus 0.0.7.0 lässt Modul 7.12.0.0 sofort neu starten.' }),
+          el('p', { class: 'note', text: 'Offen: Welche Geräte der TA 1069 an Karte 18 und an Karte 1 erwartet, ist ohne Unterlagen zum TA 1069 nicht belegt; die Drucker/Tastatur-Karten des Emulators stammen aus dem TA-1000-Handbuch. Außerdem bleibt die Generalsperre fg in der Warteschleife gesetzt, so dass nach Befund G1 die L-Bytes der Wort-Eingabe (Zeile 7, Tastencode) als 0 gelesen werden: dann kann nur Startmodus 0 ankommen, die Codes 0.15/0.14 nie. Entweder G1 trifft für E/A nicht zu, oder die Tastatur des TA 1069 war anders angeschlossen.' })))
+    );
+    redraw();
+    refresh();
+  }
+  function refresh() {
+    if (!E) return;
+    const m = EMU.m.mem;
+    const on = isIn();
+    E.g1.checked = EMU.m.cfg.g1 !== false;
+    E.tog.textContent = on ? 'Firmware ziehen (TA ohne ROM)' : 'Firmware stecken und Kaltstart';
+    E.tog.classList.toggle('primary', !on);
+    E.state.textContent = on ? 'gesteckt' : (m.rom ? 'nicht gesteckt – anderes ROM: ' + (m.cfg.romName || '?') : 'nicht gesteckt – TA ohne Festspeicher');
+  }
+  return { build, refresh, insert, toggle, setFirmware, isIn };
+})();
+
 /* ===== ui/p_net.js ===== */
 /* ===== Reiter 6: Netzliste & Prüfbericht ===== */
 UI.pageNet = (() => {
@@ -4892,11 +5248,11 @@ UI.pageInfo = (() => {
     ['Rückwand, Speicher, E/A', [
       ['S1', 'Leerzyklus bei NM ∧ /R1', 'Der Speicher führt keinen Zyklus aus (liest 0, schreibt nicht), wenn NM gesetzt und R1 = 0 ist. Der Speicherschaltplan liegt nicht vor; mit dieser Regel stimmen alle Befehle mit dem Handbuch überein (Byte-Laden mit 0 im hohen Byte, Byte-Abspeichern ändert nur das adressierte Byte).', 'keine – abgeleitet; Logikplan 2 (NM = /NM1 ∨ NM2·f1)', 'src/mach.js cycleStart'],
       ['S2', 'E/A-Karte nur bei /NM = 1', 'Die Modulauswahl der E/A-Karte (7430 „08“) verknüpft die Kartenadresse mit IO und a203 /NM.', 'Schaltplan AAM 11, Planquadrat „Modulauswahl“ – am Scan geprüft', 'src/mach.js cycleStart'],
-      ['G1', 'Befund: Generalsperre und NM', 'Aus Logikplan 2 (99_2: NM2 = NAND(f5, /fg), 97_2: NM = /NM1 ∨ NM2·f1) folgt: bei gesetzter Generalsperre (fg = 1) ist NM in jedem L-Zyklus aktiv. Mit S1/S2 heißt das: Byte-Zugriffe auf gerade Adressen und E/A-Übertragungen im L-Zyklus (IOL, IOB, ungerade Zeile bei IOX) finden unter der Generalsperre nicht statt. Das widerspricht dem Handbuch S. 28 (Geräteprogramm des IO-Interrupts unter Generalsperre). Die Bedeutung von NM auf den Speicherkarten ist nicht dokumentiert; alle drei Ebenen bilden die Schaltung so nach, wie sie gezeichnet ist. Programme sollten die Generalsperre mit RT löschen, bevor sie Bytes oder E/A benutzen (so auch die Beispiele).', 'Logikplan 2 (Scan geprüft: 99 Pins 12/13 = f5, /fg), Handbuch S. 28', 'src/cpu1.js'],
+      ['G1', 'Befund: Generalsperre und NM', 'Aus Logikplan 2 (99_2: NM2 = NAND(f5, /fg), 97_2: NM = /NM1 ∨ NM2·f1) folgt: bei gesetzter Generalsperre (fg = 1) ist NM in jedem L-Zyklus aktiv. Mit S1/S2 heißt das: Byte-Zugriffe auf gerade Adressen und E/A-Übertragungen im L-Zyklus (IOL, IOB, ungerade Zeile bei IOX) finden unter der Generalsperre nicht statt. Das widerspricht dem Handbuch S. 28 (Geräteprogramm des IO-Interrupts unter Generalsperre). Die Bedeutung von NM auf den Speicherkarten ist nicht dokumentiert; alle drei Ebenen bilden die Schaltung so nach, wie sie gezeichnet ist. Programme sollten die Generalsperre mit RT löschen, bevor sie Bytes oder E/A benutzen (so auch die Beispiele). Schalter „Befund G1“ (Tableau und Reiter Firmware): aus = Eingang 99_2 Pin 13 offen statt /fg, also NM2 = /f5 – auf allen drei Ebenen gleich (Ebene 3 wird dafür neu aufgebaut). Die Firmware TA 1069 spricht für „aus“: ihre Startschleife liest den Tastencode unter der Generalsperre per IOX (Zeile 7 im L-Zyklus); mit G1 an kämen die Startcodes 0.14/0.15 nie an.', 'Logikplan 2 (Scan geprüft: 99 Pins 12/13 = f5, /fg), Handbuch S. 28; Firmware TA 1069 (1.0.15.10)', 'src/cpu1.js, src/board.js buildBoard (param.g1), CTRL2_EQ NM2, Machine.setG1'],
       ['U1', 'Speicher beim Unterbrechungseinstieg', 'Während des Einstiegs (fi = 1) sind Lesezyklen ohne Schreibabsicht (/WRT = 1) stumm: kein Lesen, kein Schreiben. Sonst zerstört das STI-Einblenden von 0.0.0.12 in den E-Bus Speicherinhalt. Der Mechanismus wurde in den Unterlagen nicht gefunden.', 'keine – nötig für Handbuch S. 25/27 „(A)→X0, BS→12“', 'src/mach.js cycleStart'],
       ['S3', 'Buszyklus', 'Adresse, NM und IO werden mit der fallenden Flanke von /TR übernommen; Daten liegen zwischen /TR und /TW auf /E; geschrieben wird mit der fallenden Flanke von /TW (M-Bus). Nicht bestückter Speicher liefert 0 (Busleitungen in Ruhe).', 'Rückwandplan, Logikplan 1/2', 'src/cores.js adapt, src/mach.js'],
       ['S4', 'Speicherzeiten', '„ohne Wartezyklen“: 0,75 µs je Zyklus (Voreinstellung). „Originalzeiten“: Festspeicher 1,1 µs, Kernspeicher 1,2 µs über /RD (7 bzw. 9 Wartetakte).', 'Handbuch S. 32', 'src/mach.js memWait'],
-      ['S5', 'Speicherausbau', 'Voreinstellung 64 KB Kernspeicher ab 0.0.0.0, kein ROM (keine Firmware). Kernspeicher behält den Inhalt beim Kaltstart; „Alles zurücksetzen“ löscht ihn.', 'Aufgabenstellung; Handbuch S. 15 (Speicheraufteilung)', 'src/machine.js Memory'],
+      ['S5', 'Speicherausbau', 'Voreinstellung 64 KB Kernspeicher ab 0.0.0.0, kein ROM; die Firmware TA 1069 lässt sich im gleichnamigen Reiter oder im Tableau stecken und wieder ziehen (F1–F6). Kernspeicher behält den Inhalt beim Kaltstart; „Alles zurücksetzen“ löscht ihn.', 'Aufgabenstellung; Handbuch S. 15 (Speicheraufteilung)', 'src/machine.js Memory'],
       ['S6', 'Nicht nachgebildet', 'DMA (/DMA = 1), Paritätsoption (/E9, /E10 = 1, kein 9-Bit-Speicher: PR/PC bleiben wirkungslos), weitere E/A-Karten außer Drucker 2 (Karten 0 und 1).', 'Handbuch S. 29/32', 'src/cores.js adapt'],
       ['D1', 'Drucker bereit', 'Eingang P (Datenanforderung, Karte 1 Zeile 5 Bit 1) ist immer 1; der Drucker ist unendlich schnell.', 'Handbuch S. 110 (nur Belegung)', 'src/machine.js PrinterSystem'],
       ['D2', 'Druckzeitpunkt', 'Ein Zeichen (IXL0–5, 6-Bit-Teilmenge ISO-7 der Spalten 2–5) wird gedruckt, wenn Zeile 4 geschrieben wird, während SEL und KLX (Zeile 5) gesetzt sind. IOX schreibt Zeile 5 vor Zeile 4, damit genügt ein IOX (wie Service Manual 2.01.01.03, Prüfung 2).', 'Handbuch S. 110; SM 2.01.01.03', 'src/machine.js'],
@@ -4935,6 +5291,14 @@ UI.pageInfo = (() => {
       ['X2', 'Testaufbau', 'Speichersteuerung aus Grundbauteilen mit denselben Regeln wie der Emulator (S1, S2, S3); U1 entfällt, weil ohne Unterbrechungen geprüft wird. ROM 0.0.0.0–3.15.15.15 mit Prüfprogramm, RAM darüber, Scratchpadseite 6.', '–', 'src/logisim.js testMainDef'],
       ['X3', 'Logisim-Gleichlauf', 'Der Selbsttest simuliert die erzeugte Datei mit den aus logisim_web.html übernommenen Funktionen (nur Zwischenspeicher ergänzt, s. src/lwsim.js) und vergleicht nach jedem Takt alle Signale mit Ebene 3 auf demselben Testaufbau.', 'logisim_web.html', 'src/lwsim.js, src/lgtest.js'],
     ]],
+    ['Firmware TA 1069 (Reiter „Firmware TA 1069“)', [
+      ['F1', 'Datenleitungen invertiert', 'Byte im Adressraum = NOT Byte im Abzug. Nur so ergeben die Bytes ISO-7-Bit-Text („SYSTEM“, „BS7803 IPL … TA1069“) und lauffähigen Code. Vermutete Ursache: low-aktive Datenleitungen /E1…/E8 der Rückwand ohne Inverter auf der Festspeicherkarte.', 'Abzug TA1069ROM.h (U. Lechner); Rückwandplan (/E-Leitungen low-aktiv)', 'src/fw1069.js image()'],
+      ['F2', 'Adressen im Baustein gespiegelt', 'CPU-Adresse Basis+i liest Bausteinadresse (Größe−1)⊕i (2708: 1 KB, Masken-ROM: 2 KB). Belege: Texte stehen damit vorwärts, Startwort 0.0.0.1 → 0.0.0.4, Code auf 0.0.0.8/0.0.0.12 passt zu den Unterbrechungszielen (Befund E2), Sprungtabelle 0.0.6.0 → 1.0.14.0. Alle anderen Kombinationen aus F1/F2 laufen nach dem Start in kurzen Schleifen fest.', 'Gegenprobe mit Ebene 1', 'src/fw1069.js image()'],
+      ['F3', 'Lage der Bausteine', 'Basisadressen wie im Abzug angegeben (FAH 01 auf 0.0.0.0 … FAG 32 auf 7.12.0.0). Die Modulkette der Firmware verkettet 1.2.0.0 … 7.12.0.0 lückenlos und endet auf 8.0.0.0.', 'Abzug; Modulkette (Reiter Firmware)', 'src/fw1069.js CHIPS, chain()'],
+      ['F4', 'Lücke FAG 25 = Scratchpad', 'Der Sockel FAG 25 (6.0.0.0 … 6.3.15.15) ist nicht bestückt. Die Firmware adressiert ihre Scratchpadzellen genau dort (S+N mit SC = 6); beim Einsetzen wird SC = 6 gewählt und die Lücke bleibt Kernspeicher.', 'Abzug („not assembled“); Zugriffe der Firmware', 'Memory.configure (romHoles), UI.pageFw.insert'],
+      ['F5', 'Kernspeicher beim Einsetzen', 'Ausbau des TA 1069 unbekannt: 64 KB Kernspeicher ab 0.0.0.0, vom ROM überdeckt; frei sind die Lücke 6.0.0.0 … 6.3.15.15 und 8.0.0.0 … 15.15.15.15. Beim Stecken wird der Kernspeicher gelöscht (abwählbar); das ROM überdeckt ihn nur, beim Ziehen kommt sein Inhalt von vor dem Stecken zurück und die Maschine ist wieder ohne Festspeicher.', 'Annahme', 'UI.pageFw.insert'],
+      ['F6', 'E/A-Geräte', 'Die Firmware fragt nach dem Start Karte 18 Zeile 6 und Karte 1 Zeilen 6/7 ab und gibt auf Karte 1 aus. Welche Geräte der TA 1069 dort hatte, ist nicht belegt; angeschlossen sind weiterhin die Drucker-2-Karten des TA-1000-Handbuchs. Da die Generalsperre nach dem Start gesetzt bleibt, liest die Firmware nach Befund G1 die L-Bytes ihrer Wort-Eingaben als 0.', 'offen', 'src/machine.js IOSystem'],
+    ]],
   ];
   function build(sec) {
     sec.append(el('h2', { text: 'Info & Annahmen' }),
@@ -4960,6 +5324,7 @@ UI.addPage('dbg', 'Befehls-Debugger', UI.pageDbg.build, UI.pageDbg.refresh);
 UI.addPage('e2', 'Zustands-Debugger', UI.pageE2.build, UI.pageE2.refresh);
 UI.addPage('e3', 'Gatter-Ansicht', UI.pageE3.build, UI.pageE3.refresh);
 UI.addPage('asm', 'Assembler', UI.pageAsm.build, null);
+UI.addPage('fw', 'Firmware TA 1069', UI.pageFw.build, UI.pageFw.refresh);
 UI.addPage('net', 'Netzliste & Prüfbericht', UI.pageNet.build, null);
 UI.addPage('lgs', 'Logisim-Export', UI.pageLgs.build, null);
 UI.addPage('tests', 'Selbsttests', UI.pageTests.build, null);
