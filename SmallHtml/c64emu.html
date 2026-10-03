@@ -24,7 +24,14 @@
   h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .5px; }
   h1 small { color: #8888aa; font-weight: 400; }
   #main { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; justify-content: center; }
-  #screenwrap { display: flex; flex-direction: column; gap: 8px; }
+  #screenwrap { display: flex; flex-direction: column; gap: 8px; position: relative; }
+  #kbdHint {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    background: rgba(20,20,30,.85); color: #ffd36b; border: 1px solid #ffd36b;
+    border-radius: 6px; padding: 4px 10px; font-size: 13px; pointer-events: none;
+    display: none; white-space: nowrap;
+  }
+  #kbdHint.show { display: block; }
   canvas {
     image-rendering: pixelated;
     background: #000;
@@ -106,6 +113,7 @@
 <div id="main">
   <div id="screenwrap">
     <canvas id="screen" width="384" height="272" tabindex="0"></canvas>
+    <div id="kbdHint">⌨ Tastatur nicht aktiv — einmal ins Bild klicken</div>
 
     <div class="bar" id="runtimebar">
       <button id="btnReset" title="Soft-Reset (F12)">Reset</button>
@@ -526,6 +534,7 @@ class Cia {
 class Vic {
   static ROW_SLOTS = 33;
   static CYCLES_PER_LINE = 63;
+  static BA_START = 12;          // Badline: BA geht low (Batch-Stall ab hier)
   static LINES_PER_FRAME = 312;
   static SAMPLE_LINE = 150;
   static FIRST_DISPLAY_LINE = 51;
@@ -585,6 +594,7 @@ class Vic {
     this.lineCycles = 0;
     this.ba = true;
     this.baDebt = 0;
+    this._baPend = 0;              // Badline-Schuld, fällig ab BA_START
     this.rasterCompare = 0;
     this.irqStatus = 0;
     this.irqEnable = 0;
@@ -758,6 +768,7 @@ class Vic {
       this.irqStatus |= 0x01;
     }
     while (this.lineCycles >= Vic.CYCLES_PER_LINE) {
+      if (this._baPend) { this.baDebt += this._baPend; this._baPend = 0; }
       this.lineCycles -= Vic.CYCLES_PER_LINE;
       this.raster = (this.raster + 1) % Vic.LINES_PER_FRAME;
       const r = this.raster;
@@ -796,7 +807,11 @@ class Vic {
         this.rowModeD016[slot] = regs[0x16];
         this.rowModeD018[slot] = regs[0x18];
         this._fetchRow(row, slot);
-        if (!this.blDefer) this.baDebt += 40;   // Badline-DMA (Batch)
+        // Badline-DMA (Batch): nicht schon ab Zyklus 0 stallen, sondern erst
+        // ab BA-low (~Zyklus 12) — sonst verschluckt sich jeder Loader, der
+        // per $D012-Tabelle Badlines ausweicht und bis kurz vor Zeilenende
+        // zyklengezählt liest (z. B. Interplay/Borrowed Time).
+        if (!this.blDefer) this._baPend += 40;
         this._bookkeeping(r, d011);
       } else if (this._displayState) {
         this._bookkeeping(r, d011);
@@ -874,6 +889,9 @@ class Vic {
       if (mem !== null && this.collisionEnabled &&
           (regs[0x15] || this._sprDispMask))
         this._collideAtRaster(r);
+    }
+    if (this._baPend && this.lineCycles >= Vic.BA_START) {
+      this.baDebt += this._baPend; this._baPend = 0;
     }
   }
 
@@ -4966,7 +4984,8 @@ Object.assign(System.prototype, {
     flag = !!flag;
     if (flag === !!this.cycleAccurate) return flag;
     if (flag) {
-      const d = this.vic.baDebt;
+      const d = this.vic.baDebt + (this.vic._baPend || 0);
+      this.vic._baPend = 0;
       if (d) {
         this.vic.baDebt = 0;
         this.cpu.cycles += d;
@@ -5580,9 +5599,35 @@ function keyEvent(ev, down) {
   else pressed.delete(code);
   rebuildMatrix();
 }
-canvas.addEventListener("keydown", (e) => keyEvent(e, true));
-canvas.addEventListener("keyup", (e) => keyEvent(e, false));
-canvas.addEventListener("click", () => canvas.focus());
+// Tastatur seitenweit abgreifen, nicht nur am Canvas: Nach Datei-Dialog,
+// Drag&Drop oder Klick auf Knöpfe/Checkboxen lag der Fokus oft woanders,
+// dann kamen F1 & Co. nie beim C64 an (und Firefox öffnete ggf. seine Hilfe).
+// Ausgenommen sind nur echte Eingabefelder (Textfeld, Auswahlliste).
+function keyGoesToField(ev) {
+  const t = ev.target;
+  if (!t || t === canvas || !t.tagName) return false;
+  if (t.isContentEditable) return true;
+  const tag = t.tagName;
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  return tag === "INPUT" && /^(text|number|search|password|email|url|tel)$/i.test(t.type || "text");
+}
+window.addEventListener("keydown", (e) => { if (!keyGoesToField(e)) keyEvent(e, true); });
+window.addEventListener("keyup", (e) => { if (!keyGoesToField(e) || pressed.has(e.code)) keyEvent(e, false); });
+// Fenster verliert den Fokus (Alt+Tab, Datei-Dialog): gedrückte Tasten lösen,
+// sonst bleibt eine Taste im Matrix-Zustand hängen
+window.addEventListener("blur", () => { pressed.clear(); joyBits = 0; rebuildMatrix(); updateKbdHint(); });
+window.addEventListener("focus", updateKbdHint);
+canvas.addEventListener("click", () => { canvas.focus(); updateKbdHint(); });
+document.addEventListener("focusin", updateKbdHint);
+document.addEventListener("focusout", () => setTimeout(updateKbdHint, 0));
+function updateKbdHint() {
+  const a = document.activeElement;
+  const ok = document.hasFocus() && !(a && a !== canvas && a.tagName &&
+             (a.tagName === "TEXTAREA" || a.tagName === "SELECT" ||
+              (a.tagName === "INPUT" && /^(text|number|search|password|email|url|tel)$/i.test(a.type || "text"))));
+  const el = document.getElementById("kbdHint");
+  if (el) el.classList.toggle("show", !ok);
+}
 
 // --- Gamepad-API: echtes USB-Pad → dieselben 5 Joystick-Bits ---
 function gamepadBits() {
@@ -6878,6 +6923,7 @@ function loop(now) {
       renderDiskBox();
     }
     $("stRaster").textContent = "Raster " + sys.vic.raster;
+    updateKbdHint();
     fpsFrames = 0; fpsT = now;
   }
 }
