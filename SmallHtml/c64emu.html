@@ -117,6 +117,7 @@
 
     <div class="bar" id="runtimebar">
       <button id="btnReset" title="Soft-Reset (F12)">Reset</button>
+      <button id="btnFreeze" title="Freeze-Knopf eines Freezer-Moduls (Action Replay, Retro Replay, …) drücken (F10)">Freeze</button>
       <button id="btnPause" title="Pause/Weiter">Pause</button>
       <button id="btnWarp" title="Warp-Modus (F11)">Warp</button>
       <button id="btnSound" title="Ton an/aus (Browser verlangt einen Klick, bevor Audio starten darf)">Ton</button>
@@ -179,7 +180,7 @@
       <input type="checkbox" id="chkBundleState"> mit Spielstand (Snapshot)
     </label>
     <div id="diskhint">
-      Tastatur: <kbd>F2</kbd>/<kbd>F4</kbd> Snapshot speichern/laden · <kbd>F11</kbd> Warp · <kbd>Shift+F11</kbd> zyklusgenau · <kbd>F12</kbd> Reset ·
+      Tastatur: <kbd>F2</kbd>/<kbd>F4</kbd> Snapshot speichern/laden · <kbd>F11</kbd> Warp · <kbd>Shift+F11</kbd> zyklusgenau · <kbd>F12</kbd> Reset · <kbd>F10</kbd> Freeze ·
       <kbd>Esc</kbd> RUN/STOP · <kbd>Tab</kbd> CTRL · <kbd>Numpad</kbd> Joystick
       (<kbd>8/2/4/6</kbd> Richtung, <kbd>5</kbd> Feuer, <kbd>0</kbd> Port) ·
       USB-Gamepads werden automatisch erkannt · Ton: Knopf oder erster Klick auf den Bildschirm
@@ -270,11 +271,21 @@ class Pla {
   get prozessorport() { return this.processorPort & 0xFF; }
   set prozessorport(port) {
     this.processorPort = port & 0xFF;
+    this._charge();
     this._applyPort();
   }
   setDdr(val) {
     this.ddr = val & 0xFF;
+    this._charge();
     this._applyPort();
+  }
+  _charge() {
+    // als Ausgang getriebene Bits 6/7 laden die Pin-Kapazität
+    const out = this.ddr & 0xC0;
+    if (out) {
+      this._fall = ((this._fall || 0) & ~out) | (this.processorPort & out);
+      this._fallAt = this.clockFn ? this.clockFn() : 0;
+    }
   }
   _applyPort() {
     const eff = (this.processorPort & this.ddr) | (~this.ddr & 0x07);
@@ -286,7 +297,11 @@ class Pla {
   // Bit 4 Datasetten-Taste (1 = nicht gedrückt), Bit 5 Motor 0,
   // Bit 6/7 offen (behalten den letzten Wert — Verblassen nicht emuliert).
   readPort() {
-    const inp = 0x17 | (this.processorPort & 0xC0);
+    // Bit 6/7 sind offen: sie halten einen zuvor als Ausgang getriebenen
+    // Wert nur eine Weile (Kapazität), danach lesen sie 0.
+    let fall = this._fall || 0;
+    if (fall && this.clockFn && this.clockFn() - this._fallAt > 350000) fall = this._fall = 0;
+    const inp = 0x17 | (fall & 0xC0);
     return ((this.processorPort & this.ddr) | (~this.ddr & inp)) & 0xFF;
   }
   addressSpace(addr) {
@@ -313,6 +328,8 @@ class Pla {
       if (!this.game && this.exrom) return AddressSpace.IO;
       if (!this.hiram && !this.loram) return AddressSpace.RAM;
       if (this.charen) return AddressSpace.IO;
+      // 16K-Modus: Zeichensatz-ROM nur mit HIRAM (sonst RAM)
+      if (!this.exrom && !this.game && !this.hiram) return AddressSpace.RAM;
       return AddressSpace.CHARSET_ROM;
     }
     if (addr >= 0xE000 && addr <= 0xFFFF) {
@@ -337,7 +354,7 @@ class Cia {
   constructor(name = "CIA") {
     this.name = name;
     this.regs = new Uint8Array(0x10);
-    this.pra = 0xFF; this.prb = 0xFF;
+    this.pra = 0x00; this.prb = 0x00;      // nach Reset: Latches 0, alles Eingang
     this.ddra = 0x00; this.ddrb = 0x00;
     this.portAIn = 0xFF; this.portAInFn = null; this.portAWriteHook = null;
     this.portBIn = 0xFF;
@@ -349,7 +366,8 @@ class Cia {
     // TOD (siehe Python: Netzfrequenz-Pin, /5 bei 50-Hz-Bit, /6 sonst)
     this.todTenth = 0; this.todSec = 0; this.todMin = 0; this.todHr = 0x01;
     this.todAlarm = [0, 0, 0, 0];
-    this.todRunning = true; this.todLatched = false; this.todLatch = [0, 0, 0, 0];
+    // TOD steht nach dem Reset, bis das Zehntel-Register beschrieben wird
+    this.todRunning = false; this.todLatched = false; this.todLatch = [0, 0, 0, 0];
     this._todAcc = 0; this._todDiv = 0;
     // CIA1: Tastaturmatrix als Set von "pa*8+pb"-Ints; Joystick wie im Original
     this.keyboardMatrix = new Set();
@@ -362,7 +380,13 @@ class Cia {
   get irqLine() { return (this.icrData & this.icrMask & 0x1F) !== 0; }
 
   _scanPorts() {
-    const inA = this.portAInFn !== null ? this.portAInFn() : this.portAIn;
+    let inA = this.portAInFn !== null ? this.portAInFn() : this.portAIn;
+    if (this.portAInFn === null && this.name === "CIA2") {
+      // IEC ohne Laufwerk: ein als Eingang geschalteter Ausgangspin liegt
+      // hoch und zieht über den 7406 die Leitung auf Masse.
+      const eff = (this.pra & this.ddra) | (~this.ddra & 0xFF);
+      inA = 0x3F | ((eff & 0x10) ? 0 : 0x40) | ((eff & 0x20) ? 0 : 0x80);
+    }
     let a = ((this.pra & this.ddra) | (inA & ~this.ddra)) & 0xFF;
     let b = ((this.prb & this.ddrb) | (this.portBIn & ~this.ddrb)) & 0xFF;
     a &= ~this.joystickState[1] & 0xFF;   // Joystick 2 an Port A
@@ -429,13 +453,13 @@ class Cia {
         else this.icrMask &= ~(val & 0x1F);
         break;
       case 0x0E:
-        this.regs[off] = val;
+        this.regs[off] = val & ~0x10;      // Bit 4 = Lade-Strobe, liest 0
         this.timerARunning = (val & 0x01) !== 0;
         this.timerAOneshot = (val & 0x08) !== 0;
         if (val & 0x10) this.timerA = this.timerALatch;
         break;
       case 0x0F:
-        this.regs[off] = val;
+        this.regs[off] = val & ~0x10;
         this.timerBRunning = (val & 0x01) !== 0;
         this.timerBOneshot = (val & 0x08) !== 0;
         if (val & 0x10) this.timerB = this.timerBLatch;
@@ -509,7 +533,7 @@ class Cia {
       this.timerA -= cycles;
       if (this.timerA <= 0) {
         this.icrData |= Cia.F_TA;
-        if (this.timerAOneshot) { this.timerARunning = false; this.timerA = this.timerALatch; }
+        if (this.timerAOneshot) { this.timerARunning = false; this.timerA = this.timerALatch; this.regs[0x0E] &= ~0x01; }
         else {
           this.timerA += this.timerALatch + 1;
           if (this.timerA <= 0) this.timerA = this.timerALatch || 0xFFFF;
@@ -520,7 +544,7 @@ class Cia {
       this.timerB -= cycles;
       if (this.timerB <= 0) {
         this.icrData |= Cia.F_TB;
-        if (this.timerBOneshot) { this.timerBRunning = false; this.timerB = this.timerBLatch; }
+        if (this.timerBOneshot) { this.timerBRunning = false; this.timerB = this.timerBLatch; this.regs[0x0F] &= ~0x01; }
         else {
           this.timerB += this.timerBLatch + 1;
           if (this.timerB <= 0) this.timerB = this.timerBLatch || 0xFFFF;
@@ -535,6 +559,8 @@ class Vic {
   static ROW_SLOTS = 33;
   static CYCLES_PER_LINE = 63;
   static BA_START = 12;          // Badline: BA geht low (Batch-Stall ab hier)
+  static PHI1_SHIFT = 0;        // Zuordnung lineCycles -> VIC-Zyklus (offener Bus)
+  static EARLY_WRITE = 14;      // bis hierhin wirken Writes noch auf die laufende Zeile
   static LINES_PER_FRAME = 312;
   static SAMPLE_LINE = 150;
   static FIRST_DISPLAY_LINE = 51;
@@ -637,6 +663,43 @@ class Vic {
 
   get irqLine() { return (this.irqStatus & this.irqEnable & 0x0F) !== 0; }
 
+  // Offener Bus ($DE00-$DFFF ohne Modul): Die CPU liest dort, was der VIC
+  // in der ersten Takthälfte zuletzt geholt hat. Zyklus-Schema (PAL):
+  // Sprites 3-7 und 0-2 (p-/s-Zugriff), 5 Refresh-Zyklen, 40 g-Zugriffe,
+  // sonst Idle-Byte $3FFF ($39FF bei ECM).
+  phi1Byte() {
+    const mem = this.mem;
+    if (mem === null) return 0xFF;
+    const c = ((this.lineCycles | 0) + Vic.PHI1_SHIFT + 63) % 63, r = this.raster, regs = this.regs;
+    const ecm = (regs[0x11] & 0x40) !== 0;
+    let sp = -1, half = 0;
+    if (c >= 57) { sp = (c - 57) >> 1; half = (c - 57) & 1; }
+    else if (c < 10) { sp = 3 + (c >> 1); half = c & 1; }
+    if (sp >= 0) {
+      const vm = ((regs[0x18] >> 4) & 0x0F) * 0x400;
+      const ptr = mem.readVic(vm + 0x3F8 + sp);
+      if (half === 0) return ptr;                                // p-Zugriff
+      if ((this._sprDispMask >> sp) & 1)                         // s-Zugriff
+        return mem.readVic(ptr * 64 + Math.min(this._sprRow[sp], 20) * 3 + 1);
+      return mem.readVic(ecm ? 0x39FF : 0x3FFF);
+    }
+    if (c < 15)                                                  // Refresh
+      return mem.readVic(0x3F00 | ((0xFF - (r * 5 + c - 10)) & 0xFF));
+    if (c < 55 && !this.lineIdle[r]) {                           // g-Zugriff
+      const col = c - 15, slot = this.lineTextRow[r], rc = this.lineRc[r];
+      if (slot !== 0xFF) {
+        if (regs[0x11] & 0x20) {
+          const vc = (this.rowLogical[slot] * 40 + col) & 0x3FF;
+          return mem.readVic((regs[0x18] & 0x08) * 0x400 + vc * 8 + rc);
+        }
+        let code = this.lineScreen[slot * 40 + col];
+        if (ecm) code &= 0x3F;
+        return mem.readVic(((regs[0x18] >> 1) & 0x07) * 0x800 + code * 8 + rc);
+      }
+    }
+    return mem.readVic(ecm ? 0x39FF : 0x3FFF);
+  }
+
   read(off) {
     off &= 0x3F;
     if (off >= 0x2F) return 0xFF;
@@ -648,6 +711,9 @@ class Vic {
       return v | 0x70;
     }
     if (off === 0x1A) return this.irqEnable | 0xF0;
+    if (off === 0x16) return this.regs[off] | 0xC0;          // unbenutzte Bits lesen 1
+    if (off === 0x18) return this.regs[off] | 0x01;
+    if (off >= 0x20) return this.regs[off] | 0xF0;           // Farbregister: 4 Bit
     if (off === 0x1E) { const v = this.spriteSpriteColl; this.spriteSpriteColl = 0; return v; }
     if (off === 0x1F) { const v = this.spriteDataColl; this.spriteDataColl = 0; return v; }
     return this.regs[off];
@@ -687,6 +753,10 @@ class Vic {
     if (off === 0x19) { this.irqStatus &= ~(val & 0x0F); return; }
     if (off === 0x1A) { this.irqEnable = val & 0x0F; return; }
     this.regs[off] = val;
+    // Schreibzugriff noch vor dem sichtbaren Teil der Zeile (vor dem ersten
+    // Grafik-Fetch): wirkt schon auf die laufende Rasterzeile, nicht erst
+    // auf die nächste.
+    if (this.lineCycles < Vic.EARLY_WRITE) this._applyEarly(off, val);
     // Kontinuierlicher Y-Vergleich: ein Write, der ein ruhendes, aktiviertes
     // Sprite auf die AKTUELLE Rasterzeile setzt, startet die Anzeige sofort
     // (Multiplexer schreiben das nächste Segment in genau dieser Zeile).
@@ -702,6 +772,28 @@ class Vic {
             this.regs[i * 2 + 1] === r8)
           this._startSpriteDisplayNow(i);
       }
+    }
+  }
+
+  _applyEarly(off, val) {
+    const r = this.raster;
+    switch (off) {
+      case 0x16: this.lineD016[r] = val; break;
+      case 0x18:
+        this.lineD018[r] = val;
+        // Badline dieser Zeile: Videomatrix mit neuer Basis/Bank neu holen
+        if (!this.lineIdle[r] && this.lineRc[r] === 0 && this.lineTextRow[r] !== 0xFF) {
+          const slot = this.lineTextRow[r];
+          this.rowModeD018[slot] = val;
+          this._fetchRow(this.rowLogical[slot], slot);
+        }
+        break;
+      case 0x20: this.lineD020[r] = val; break;
+      case 0x21: this.lineD021[r] = val; break;
+      case 0x22: this.lineD022[r] = val; break;
+      case 0x23: this.lineD023[r] = val; break;
+      case 0x24: this.lineD024[r] = val; break;
+      case 0x1B: this.lineD01b[r] = val; break;
     }
   }
 
@@ -751,11 +843,11 @@ class Vic {
     if (mem === null) return;
     const bank = mem.vicBank();
     this.rowModeBank[slot] = bank;
-    const base = bank * 0x4000 + (((this.regs[0x18] >> 4) & 0x0F) * 0x400);
+    const vm = ((this.regs[0x18] >> 4) & 0x0F) * 0x400;
     const vc = (row * 40) % 1024;
     const dst = slot * 40;
     for (let i = 0; i < 40; i++) {
-      this.lineScreen[dst + i] = mem.ram[base + ((vc + i) & 0x3FF)];
+      this.lineScreen[dst + i] = mem.readVic(vm + ((vc + i) & 0x3FF), true);
       if (this.colorRam !== null)
         this.lineColor[dst + i] = this.colorRam.ram[(vc + i) & 0x3FF];
     }
@@ -836,10 +928,9 @@ class Vic {
         this.lineD026[r] = regs[0x26];
         const sbank = mem.vicBank();
         this.lineSprBank[r] = sbank;
-        const pbase = sbank * 0x4000 +
-                      (((regs[0x18] >> 4) & 0x0F) * 0x400) + 0x3F8;
+        const pbase = (((regs[0x18] >> 4) & 0x0F) * 0x400) + 0x3F8;
         for (let i = 0; i < 8; i++)
-          this.lineSprPtr[ras8 + i] = mem.ram[pbase + i];
+          this.lineSprPtr[ras8 + i] = mem.readVic(pbase + i);
         const en = regs[0x15];
         if (en || this._sprDispMask) {
           const r8 = r & 0xFF;
@@ -1477,9 +1568,31 @@ class Sid {
 }
 
 // ============================= Memory =====================================
+// Einschaltmuster des DRAM: Ein echter C64 startet nicht mit lauter Nullen,
+// sondern mit Blöcken aus $FF/$00 und vereinzelt gekippten Bits. Manche
+// Programme (Kopierschutz, Cracks, Lader) verlassen sich darauf. Das Muster
+// "00 00 FF FF FF FF 00 00 …" stammt aus RAM-Abzügen echter Geräte (C64G,
+// C64C); Parameter wie bei VICE (value_invert, value_offset, random_chance
+// = Kippwahrscheinlichkeit je Bit in 1/4096).
+const RAM_INIT = { startValue: 0x00, valueInvert: 4, valueOffset: 2,
+                   patternInvert: 0, patternInvertValue: 0xFF, randomChance: 10 };
+function initRamPattern(ram, p = RAM_INIT) {
+  for (let i = 0; i < ram.length; i++) {
+    const o = i + p.valueOffset;
+    let v = p.startValue;
+    if (p.valueInvert > 0 && ((o / p.valueInvert) | 0) & 1) v ^= 0xFF;
+    if (p.patternInvert > 0 && ((o / p.patternInvert) | 0) & 1) v ^= p.patternInvertValue;
+    if (p.randomChance > 0)
+      for (let b = 1; b < 0x100; b <<= 1)
+        if (Math.random() * 0x1000 < p.randomChance) v ^= b;
+    ram[i] = v;
+  }
+  return ram;
+}
+
 class Memory {
   constructor(basicRom, charRom, kernalRom, vic, sid, colorRam, cia1, cia2) {
-    this.ram = new Uint8Array(0x10000);
+    this.ram = initRamPattern(new Uint8Array(0x10000));
     this.rom = new Uint8Array(0x10000);
     this.pla = new Pla();
     this.cart = null;
@@ -1503,14 +1616,19 @@ class Memory {
     const end = Math.min(start + data.length, 0x10000);
     this.ram.set(data.subarray(0, end - start), start);
   }
-  vicBank() { return 3 - (this.cia2.pra & 0x03); }
-  readVic(addr) {
+  vicBank() { return 3 - ((this.cia2.pra | ~this.cia2.ddra) & 0x03); }
+  readVic(addr, phi2 = false) {
     addr &= 0x3FFF;
     const bank = this.vicBank();
-    if ((bank === 0 || bank === 2) && addr >= 0x1000 && addr < 0x2000)
+    // VIC-Zugriffe in Phi1 (Zeichen-/Grafikdaten) sehen das Modul so, wie es
+    // in Phi1 angeschlossen ist; die Videomatrix (Phi2, Badline) sieht die
+    // CPU-Leitungen. Retro Replay/Atomic Power legen Ultimax nur in Phi2 an.
+    const ultimax = this.cart !== null && this.pla.exrom && !this.pla.game &&
+                    (phi2 || this.cart.vicUltimax !== false);
+    if ((bank === 0 || bank === 2) && addr >= 0x1000 && addr < 0x2000 && !ultimax)
       return this.rom[0xD000 + (addr & 0x0FFF)];
     // Ultimax: der VIC holt $3000-$3FFF jeder Bank aus ROMH
-    if (addr >= 0x3000 && this.cart !== null && this.pla.exrom && !this.pla.game)
+    if (addr >= 0x3000 && ultimax)
       return this.cart.readRomhRaw(0x1000 + (addr & 0x0FFF));
     return this.ram[bank * 0x4000 + addr];
   }
@@ -1523,7 +1641,8 @@ class Memory {
       if (space === AddressSpace.IO) {
         if (addr < 0xD400) return this.vic.read(addr - 0xD000);
         if (addr < 0xD800) return this.sid.read(addr - 0xD400);
-        if (addr < 0xDC00) return this.colorRam.read(addr - 0xD800);
+        if (addr < 0xDC00)                   // Farb-RAM: obere 4 Bit = offener Bus
+          return this.colorRam.read(addr - 0xD800) | (this.vic.phi1Byte() & 0xF0);
         if (addr < 0xDD00) return this.cia1.read(addr - 0xDC00);
         if (addr < 0xDE00) return this.cia2.read(addr - 0xDD00);
         // $DE00-$DFFF: Expansion-Port (I/O1 / I/O2)
@@ -1531,7 +1650,7 @@ class Memory {
           if (addr < 0xDF00) return this.cart.io1Read(addr) & 0xFF;
           return this.cart.io2Read(addr) & 0xFF;
         }
-        return 0xFF;
+        return this.vic.phi1Byte();          // offener Bus: VIC-Daten
       }
       return this.ram[addr];
     }
@@ -1539,7 +1658,7 @@ class Memory {
       const space = this.pla.addressSpace(addr);
       if (space === AddressSpace.BASIC_ROM) return this.rom[addr];
       if (space === AddressSpace.CART_HIGH) return this.cart.readRomh(addr) & 0xFF;
-      if (space === AddressSpace.OPEN) return this._openBus();
+      if (space === AddressSpace.OPEN) return this.cart.ultimaxA000Read(addr) & 0xFF;
       return this.ram[addr];
     }
     if (addr >= 0xE000) {
@@ -1559,8 +1678,8 @@ class Memory {
     return this.ram[addr];
   }
   _openBus() {
-    // Offener Bus (nur Ultimax): letzter VIC-Wert — hier: Idle-Byte
-    return 0xFF;
+    // Offener Bus (nur Ultimax): was der VIC zuletzt geholt hat
+    return this.vic.phi1Byte();
   }
   writeSystemByte(addr, val, phase = 0) {
     addr &= 0xFFFF; val &= 0xFF;
@@ -1589,6 +1708,24 @@ class Memory {
       }
       this.ram[addr] = val;
       return;
+    }
+    if (this.cart !== null && addr >= 0x1000) {
+      const pla = this.pla;
+      const ultimax = pla.exrom && !pla.game;
+      if (addr < 0x8000 || (addr >= 0xC000 && addr < 0xD000)) {
+        if (ultimax) return;                          // offener Bus
+      } else if (addr < 0xA000) {                     // ROML-Bereich
+        if (ultimax) { this.cart.romlStore(addr, val); return; }
+        if (!pla.exrom &&
+            this.cart.romlNoUltimaxStore(addr, val, pla.hiram && pla.loram)) return;
+      } else if (addr < 0xC000) {                     // ROMH-Bereich (16K)
+        if (ultimax) { this.cart.ultimaxA000Store(addr, val); return; }
+        if (!pla.exrom && !pla.game &&
+            this.cart.romhNoUltimaxStore(addr, val, pla.hiram)) return;
+      } else if (addr >= 0xE000 && ultimax) {
+        this.cart.romhStore(addr, val);
+        return;
+      }
     }
     this.ram[addr] = val;
   }
@@ -2269,6 +2406,7 @@ class System {
     this.chargenRom = charRom;
     this.cpu = new CPU(this.mem);
     this.mem.cpu = this.cpu;
+    this.mem.pla.clockFn = () => this.cpu.cycles;
     this.sid._cpu = this.cpu;
     this.drive = null;
     this.iec = null;
@@ -2292,7 +2430,7 @@ class System {
       return true;
     }
     const before = this.cpu.cycles;
-    const curNmi = this.cia2.irqLine;
+    const curNmi = this.cia2.irqLine || (this.cart !== null && this.cart.nmiLine === true);
     if (curNmi && !this.cpu._prevNmi) this.cpu.nmiPending = true;
     this.cpu._prevNmi = curNmi;
     this.cpu.irqLine = this.cia1.irqLine || this.vic.irqLine;
@@ -2512,7 +2650,8 @@ class IecBus {
     this._atnPrev = false;
   }
   _cpuOut() {
-    const eff = this.cia2.pra & this.cia2.ddra;
+    // als Eingang geschaltete Pins liegen hoch -> 7406 zieht die Leitung
+    const eff = (this.cia2.pra & this.cia2.ddra) | (~this.cia2.ddra & 0xFF);
     return [!!(eff & 0x08), !!(eff & 0x10), !!(eff & 0x20)];  // ATN, CLK, DATA
   }
   _drvOut() {
@@ -3613,8 +3752,11 @@ Object.assign(System.prototype, {
         const n = cmd[5] | 0;
         for (let i = 0; i < n && 6 + i < cmd.length; i++)
           this._dosPoke(addr + i, cmd[6 + i]);
+      } else if (op === 0x45) {                                     // M-E
+        // Laufwerkscode läuft nur mit echter 1541: das Frontend schaltet
+        // sie ein und startet das Programm neu (Trap-DOS hat keine 6502).
+        this.needsRealDrive = { addr };
       }
-      // M-E: Laufwerkscode läuft nur mit echter 1541 (Schalter "1541-Laufwerk")
       return;
     }
     let end = cmd.length;
@@ -4125,7 +4267,9 @@ const CRT_TYPE_NAMES = {
   20: "Super Snapshot V5", 21: "Comal-80", 22: "Structured BASIC",
   23: "Ross", 24: "Dela EP64", 25: "Dela EP7x8", 26: "Dela EP256",
   27: "Rex EP256", 32: "EasyFlash", 33: "EasyFlash Xbank",
-  36: "Prophet64", 51: "MACH 5",
+  36: "Retro Replay", 37: "MMC64", 38: "MMC Replay", 43: "Prophet64",
+  51: "MACH 5", 53: "Pagefox", 60: "GMod2", 61: "MAX Basic",
+  70: "MultiMAX",
 };
 
 class Cartridge {
@@ -4212,9 +4356,17 @@ class Cartridge {
     if (!b) return 0xFF;
     return b[off % b.length];
   }
-  io1Read(_addr) { return 0xFF; }
+  io1Read(_addr) { return this.mem !== null ? this.mem.vic.phi1Byte() : 0xFF; }   // nicht belegt: offener Bus
   io1Write(_addr, _val) {}
-  io2Read(_addr) { return 0xFF; }
+  // Schreibzugriffe in Modulbereiche (Ultimax: nur das Modul; 8K/16K: Modul
+  // darf mitschreiben, Rückgabe true = C64-RAM NICHT beschreiben)
+  romlStore(_addr, _val) {}
+  romhStore(_addr, _val) {}
+  romlNoUltimaxStore(_addr, _val, _selected) { return false; }
+  romhNoUltimaxStore(_addr, _val, _selected) { return false; }
+  ultimaxA000Read(_addr) { return this.mem !== null ? this.mem._openBus() : 0xFF; }
+  ultimaxA000Store(_addr, _val) {}
+  io2Read(_addr) { return this.mem !== null ? this.mem.vic.phi1Byte() : 0xFF; }
   io2Write(_addr, _val) {}
   describe() {
     let total = 0;
@@ -4261,11 +4413,14 @@ class FunPlayCart extends Cartridge {        // Typ 7
 class SuperGamesCart extends Cartridge {     // Typ 8
   static crtType = 8; static fixedLines = [false, false];
   setup() { this._locked = false; }
-  io1Write(_a, val) {
+  // Register liegt in I/O2 ($DF00): Bit 0-1 Bank, Bit 2 = ROM aus,
+  // Bit 3 = Register sperren (bis Reset)
+  io2Write(_a, val) {
     if (this._locked) return;
     this.bank = val & 0x03;
-    this.setLines(false, !!(val & 0x04));
-    if (val & 0x08) { this._locked = true; this.setLines(true, true); }
+    if (val & 0x04) this.setLines(true, true);
+    else this.setLines(false, false);
+    if (val & 0x08) this._locked = true;
   }
 }
 class SimonsBasicCart extends Cartridge {    // Typ 4
@@ -4336,9 +4491,71 @@ class EpyxFastloadCart extends Cartridge {   // Typ 10
     return (b && b.length > 0x1FFF) ? b[0x1F00 + (addr & 0xFF)] : 0xFF;
   }
 }
+// AM29F040B-Flash (EasyFlash): Kommando-Automat wie VICEs flash040core,
+// Programmieren/Löschen ohne Wartezeit.
+class Flash040 {
+  constructor(data) { this.data = data; this.state = 0; this.base = 0; }
+  // Zustände: 0 Lesen, 1/2 Magic, 3 Autoselect, 4 Programmieren,
+  //           5/6 Lösch-Magic, 7 Lösch-Auswahl
+  read(a) {
+    if (this.state === 3) {
+      const l = a & 0xFF;
+      if (l === 0) return 0x01;                 // Hersteller AMD
+      if (l === 1) return 0xA4;                 // Am29F040
+      if (l === 2) return 0x00;                 // Sektor nicht geschützt
+    }
+    return this.data[a];
+  }
+  write(a, v) {
+    const m1 = (a & 0x7FF) === 0x555, m2 = (a & 0x7FF) === 0x2AA;
+    switch (this.state) {
+      case 0: if (m1 && v === 0xAA) this.state = 1; break;
+      case 1: this.state = (m2 && v === 0x55) ? 2 : this.base; break;
+      case 2:
+        if (!m1) { this.state = this.base; break; }
+        if (v === 0x90) { this.state = this.base = 3; }
+        else if (v === 0xF0) { this.state = this.base = 0; }
+        else if (v === 0xA0) this.state = 4;
+        else if (v === 0x80) this.state = 5;
+        else this.state = this.base;
+        break;
+      case 4: this.data[a] &= v; this.state = this.base; break;
+      case 5: this.state = (m1 && v === 0xAA) ? 6 : this.base; break;
+      case 6: this.state = (m2 && v === 0x55) ? 7 : this.base; break;
+      case 7:
+        if (m1 && v === 0x10) this.data.fill(0xFF);
+        else if (v === 0x30) { const s = a & 0x70000; this.data.fill(0xFF, s, s + 0x10000); }
+        this.state = this.base;
+        break;
+      case 3:
+        if (m1 && v === 0xAA) this.state = 1;
+        if (v === 0xF0) this.state = this.base = 0;
+        break;
+    }
+  }
+}
+
 class EasyFlashCart extends Cartridge {      // Typ 32
   static crtType = 32;
-  setup() { this.ram = new Uint8Array(256); this._ctrl = 0; }
+  setup() {
+    this.ram = this.ram || new Uint8Array(256); this._ctrl = 0;
+    if (!this.flashL) {
+      const mk = (banks) => {
+        const d = new Uint8Array(0x80000).fill(0xFF);
+        for (const [b, c] of banks) if (b < 64) d.set(c.subarray(0, 0x2000), b * 0x2000);
+        return new Flash040(d);
+      };
+      this.flashL = mk(this.romlBanks);
+      this.flashH = mk(this.romhBanks);
+    }
+    this.flashL.state = this.flashL.base = 0;
+    this.flashH.state = this.flashH.base = 0;
+  }
+  readRoml(addr) { return this.flashL.read((this.bank << 13) | (addr & 0x1FFF)); }
+  readRomh(addr) { return this.flashH.read((this.bank << 13) | (addr & 0x1FFF)); }
+  readRomhRaw(off) { return this.flashH.data[(this.bank << 13) | (off & 0x1FFF)]; }
+  romlStore(addr, val) { this.flashL.write((this.bank << 13) | (addr & 0x1FFF), val); }
+  romhStore(addr, val) { this.flashH.write((this.bank << 13) | (addr & 0x1FFF), val); }
   io1Write(addr, val) {
     const a = addr & 0xFF;
     if (a === 0x00) this.bank = val & 0x3F;
@@ -4359,11 +4576,305 @@ class EasyFlashCart extends Cartridge {      // Typ 32
   io2Write(addr, val) { this.ram[addr & 0xFF] = val & 0xFF; }
 }
 
+// ---- Freezer-Module: Action Replay, Atomic/Nordic Power, Retro/Nordic Replay ----
+// Nachbau nach VICE (actionreplay.c, atomicpower.c, retroreplay.c).
+// cmode wie VICE: 0 = 8K, 1 = 16K, 2 = aus (RAM), 3 = Ultimax.
+const CMODE_8K = 0, CMODE_16K = 1, CMODE_OFF = 2, CMODE_ULTIMAX = 3;
+const CART_RAM_INIT = { startValue: 0xFF, valueInvert: 2, valueOffset: 1,
+                        patternInvert: 0x100, patternInvertValue: 0xFF, randomChance: 0 };
+class FreezerCart extends Cartridge {
+  static ramSize = 0x2000;
+  setup() {
+    if (!this.rom) {
+      // ROM linear: Bank b liegt bei b*8K (Chips sind 8K-Bänke ab $8000)
+      const n = Math.max(4, ...[...this.romlBanks.keys()].map((b) => b + 1));
+      this.rom = new Uint8Array(n * 0x2000).fill(0xFF);
+      for (const [b, d] of this.romlBanks) this.rom.set(d.subarray(0, 0x2000), b * 0x2000);
+      this.romBanks = n;
+      this.ram = initRamPattern(new Uint8Array(this.constructor.ramSize), CART_RAM_INIT);
+      this.powerUp();
+    }
+    this.resetState();
+  }
+  powerUp() {}
+  resetState() {
+    this.active = true; this.frozen = false; this.nmiLine = false;
+    this.reg = 0; this.exportRam = false; this.ramA000 = false;
+    this.config(CMODE_8K, 0, false);
+  }
+  reset() { this.enabled = true; this.setup(); }
+  config(cmode, bank, exportRam) {
+    this.cmode = cmode; this.bank = bank; this.exportRam = !!exportRam;
+    this.setLines(!!(cmode & 2), !(cmode & 1));       // EXROM hoch / GAME hoch
+  }
+  _open() { return this.mem !== null ? this.mem.vic.phi1Byte() : 0xFF; }
+  _romByte(bank, off) { return this.rom[((bank % this.romBanks) << 13) + (off & 0x1FFF)]; }
+  // Freeze-Knopf: NMI + Ultimax; Rückgabe = ob eingefroren wurde
+  freezeAllowed() { return true; }
+  freeze() {
+    if (!this.freezeAllowed()) return false;
+    this.doFreeze();
+    this.nmiLine = true;
+    return true;
+  }
+  releaseFreeze() { this.nmiLine = false; this.frozen = false; }
+  describe() {
+    return `${CRT_TYPE_NAMES[this.crtType] || "Freezer"}: ${this.romBanks * 8}K ROM, ` +
+           `${this.ram.length >> 10}K RAM — Freeze mit F10`;
+  }
+}
+
+class ActionReplayCart extends FreezerCart {        // Typ 1 (AR 4.2/5/6)
+  static crtType = 1;
+  io1Write(_a, val) {
+    if (!this.active) return;
+    this.reg = val;
+    if (val & 0x40) this.releaseFreeze();
+    const bank = (val >> 3) & 3;
+    // Modus $22 ist am Original kaputt (Buskonflikt): 8K + RAM
+    if ((val & 0x23) === 0x22) this.config(CMODE_8K, bank, true);
+    else this.config(val & 3, bank, !!(val & 0x20));
+    if (val & 4) this.active = false;
+  }
+  io1Read(addr) {
+    if (!this.active) return this._open();
+    const v = this._open();          // R/W nicht dekodiert: Lesen schreibt den Businhalt
+    this.io1Write(addr, v);
+    return v;
+  }
+  io2Read(addr) {
+    if (!this.active) return this._open();
+    if (this.exportRam) return this.ram[0x1F00 + (addr & 0xFF)];
+    return this._romByte(this.bank, 0x1F00 + (addr & 0xFF));
+  }
+  io2Write(addr, val) { if (this.active && this.exportRam) this.ram[0x1F00 + (addr & 0xFF)] = val; }
+  readRoml(addr) {
+    if ((this.reg & 0x23) === 0x22) return this.mem.ram[addr] | this.ram[addr & 0x1FFF];
+    if (this.exportRam) return this.ram[addr & 0x1FFF];
+    return this._romByte(this.bank, addr);
+  }
+  readRomh(addr) { return this._romByte(this.bank, addr); }
+  readRomhRaw(off) { return this._romByte(this.bank, off); }
+  romlStore(addr, val) { if (this.exportRam) this.ram[addr & 0x1FFF] = val; }
+  romlNoUltimaxStore(addr, val) { this.romlStore(addr, val); return false; }
+  doFreeze() { this.active = true; this.frozen = true; this.config(CMODE_ULTIMAX, 0, true); }
+}
+
+class AtomicPowerCart extends ActionReplayCart {    // Typ 9 (Atomic/Nordic Power)
+  static crtType = 9;
+  get vicUltimax() { return false; }                 // Phi1 immer ohne Ultimax
+  io1Write(_a, val) {
+    if (!this.active) return;
+    this.reg = val;
+    const bank = (val >> 3) & 3;
+    if ((val & 0xE7) === 0x22) {               // Nordic-Power-Modus: RAM bei $A000
+      this.ramA000 = true;
+      this.config(CMODE_16K, bank, false);
+    } else {
+      this.ramA000 = false;
+      if (val & 0x40) this.releaseFreeze();
+      this.config(val & 3, bank, !!(val & 0x20));
+    }
+    if (val & 4) this.active = false;
+  }
+  io2Read(addr) {
+    if (!this.active) return this._open();
+    if (this.exportRam || this.ramA000) return this.ram[0x1F00 + (addr & 0xFF)];
+    return this._romByte(this.bank, 0x1F00 + (addr & 0xFF));
+  }
+  io2Write(addr, val) {
+    if (this.active && (this.exportRam || this.ramA000)) this.ram[0x1F00 + (addr & 0xFF)] = val;
+  }
+  readRoml(addr) {
+    if (this.exportRam) return this.ram[addr & 0x1FFF];
+    return this._romByte(this.bank, addr);
+  }
+  readRomh(addr) {
+    if (this.ramA000) return this.ram[addr & 0x1FFF];
+    return this._romByte(this.bank, addr);
+  }
+  romhNoUltimaxStore(addr, val, selected) {
+    if (selected && this.ramA000) { this.ram[addr & 0x1FFF] = val; return true; }
+    return false;
+  }
+}
+
+class RetroReplayCart extends FreezerCart {         // Typ 36 (Retro/Nordic Replay)
+  static crtType = 36;
+  get vicUltimax() { return false; }                 // VIC sieht in Phi1 den 8K-Modus
+  static ramSize = 0x8000;
+  powerUp() {
+    this.nordic = this.subtype > 0;
+    this.writeOnce = false; this.allowBank = false; this.noFreeze = false;
+    this.reuMapping = false; this.freezeButtonUntil = 0;
+  }
+  _now() { return this.mem !== null && this.mem.cpu ? this.mem.cpu.cycles : 0; }
+  _ramOff(off) { return (this.allowBank ? (this.bank & 3) << 13 : 0) + off; }
+  io1Read(addr) {
+    if (!this.active) return this._open();
+    const a = addr & 0xFF;
+    if (a < 2) {
+      const b = this.bank;
+      return ((b & 3) << 3) | ((b & 4) << 5) | ((b & 8) << 2) |
+             (this.allowBank ? 2 : 0) | (this.reuMapping ? 0x40 : 0) |
+             (this._now() < this.freezeButtonUntil ? 4 : 0);
+    }
+    if (this.reuMapping && !this.frozen) {
+      if (this.exportRam || this.ramA000) return this.ram[this._ramOff(0x1E00 + a)];
+      if (this.cmode !== CMODE_ULTIMAX && this.cmode !== CMODE_16K)
+        return this._romByte(this.bank, 0x1E00 + a);
+    }
+    return this._open();
+  }
+  io1Write(addr, val) {
+    if (!this.active) return;
+    const a = addr & 0xFF;
+    if (a === 0) {
+      this.reg = val;
+      const bank = ((val >> 3) & 3) | ((val >> 5) & 4);
+      let cmode = val & 3, exportRam = false;
+      if (this.nordic && (val & 0x67) === 0x22) {
+        cmode = CMODE_16K; this.ramA000 = true;        // Nordic-Power-Modus
+      } else {
+        this.ramA000 = false;
+        if (val & 0x40) this.releaseFreeze();
+        exportRam = !!(val & 0x20);
+        if (!this.nordic && (val & 0x67) === 0x22) {    // am Retro Replay kaputt
+          this.ramA000 = true; cmode = CMODE_OFF;
+        }
+      }
+      if (this.frozen) cmode = CMODE_ULTIMAX;    // bis Bit 6 bestätigt ist
+      this.config(cmode, bank, exportRam);
+      if (val & 4) this.active = false;
+    } else if (a === 1) {
+      if (!this.writeOnce) {
+        this.allowBank = !!(val & 2);
+        this.noFreeze = !!(val & 4);
+        this.reuMapping = !!(val & 0x40);
+        this.writeOnce = true;
+      }
+      this.bank = ((val >> 3) & 3) | ((val >> 5) & 4);
+    } else if (this.reuMapping && !this.frozen &&
+               (this.exportRam || (this.nordic && this.ramA000))) {
+      this.ram[this._ramOff(0x1E00 + a)] = val;
+    }
+  }
+  io2Read(addr) {
+    const a = addr & 0xFF;
+    if (this.active && !this.reuMapping && !this.frozen) {
+      if (this.exportRam || this.ramA000) return this.ram[this._ramOff(0x1F00 + a)];
+      if (this.cmode !== CMODE_ULTIMAX && this.cmode !== CMODE_16K)
+        return this._romByte(this.bank, 0x1F00 + a);
+    }
+    return this._open();
+  }
+  io2Write(addr, val) {
+    if (this.active && !this.reuMapping && !this.frozen &&
+        (this.exportRam || (this.nordic && this.ramA000)))
+      this.ram[this._ramOff(0x1F00 + (addr & 0xFF))] = val;
+  }
+  readRoml(addr) {
+    if (this.frozen) return this._open();
+    if (this.exportRam) return this.ram[(addr & 0x1FFF) + ((this.bank & 3) << 13)];
+    if (this.nordic && this.ramA000) return this._romByte(this.bank, addr);
+    if (this.cmode === CMODE_16K) return this._open();
+    return this._romByte(this.bank, addr);
+  }
+  romlStore(addr, val) {
+    if (this.exportRam) this.ram[(addr & 0x1FFF) + ((this.bank & 3) << 13)] = val;
+  }
+  romlNoUltimaxStore(addr, val) {
+    // nur das Nordic Replay schreibt hier ins Modul-RAM (und ins C64-RAM)
+    if (this.nordic && this.exportRam) this.ram[(addr & 0x1FFF) + ((this.bank & 3) << 13)] = val;
+    return false;
+  }
+  readRomh(addr) {
+    if (this.nordic && this.ramA000) {
+      if (this.frozen)
+        return this._romByte(this.allowBank ? this.bank : this.bank & ~3, addr);
+      return this.ram[this._ramOff(addr & 0x1FFF)];
+    }
+    if (this.allowBank || !this.exportRam) return this._romByte(this.bank, addr);
+    return this._romByte(this.bank & ~3, addr);
+  }
+  readRomhRaw(off) { return this.readRomh(0xE000 + (off & 0x1FFF)); }
+  romhNoUltimaxStore(addr, val, selected) {
+    if (selected && this.nordic && this.ramA000 && !this.frozen) {
+      this.ram[this._ramOff(addr & 0x1FFF)] = val;
+      return true;
+    }
+    return false;
+  }
+  ultimaxA000Read(addr) {
+    if (this.nordic && this.ramA000 && this.frozen) return this.ram[this._ramOff(addr & 0x1FFF)];
+    return this._open();
+  }
+  ultimaxA000Store(addr, val) {
+    if (this.nordic && this.ramA000 && this.frozen) this.ram[this._ramOff(addr & 0x1FFF)] = val;
+  }
+  freezeAllowed() {
+    this.freezeButtonUntil = this._now() + 312 * 63 * 30;   // Knopf-Bit ~30 Frames
+    return !this.noFreeze;
+  }
+  doFreeze() { this.active = true; this.frozen = true; this.config(CMODE_ULTIMAX, 0, false); }
+}
+
+class MaxBasicCart extends Cartridge {              // Typ 61: Ultimax, 8K+8K
+  static crtType = 61; static fixedLines = [true, false];
+  setup() { if (!this.xram) this.xram = initRamPattern(new Uint8Array(0x800), CART_RAM_INIT); }
+  io1Read(addr) { return this.xram[addr & 0x7FF]; }
+}
+class MultiMaxCart extends Cartridge {              // Typ 70: Ultimax, 64 x 16K
+  static crtType = 70; static fixedLines = [true, false];
+  setup() {
+    if (!this.xram) this.xram = initRamPattern(new Uint8Array(0x800), CART_RAM_INIT);
+    this.bank = 0; this._regOn = true;
+  }
+  io1Write(addr) {        // Register latcht die ADRESSE, nicht den Wert
+    if (!this._regOn) return;
+    this.bank = addr & 0x3F;
+    this._regOn = !(addr & 0x80);
+  }
+  io1Read(addr) { return this.xram[addr & 0x7FF]; }
+}
+class PagefoxCart extends Cartridge {               // Typ 53
+  static crtType = 53; static fixedLines = [false, false];
+  setup() {
+    if (!this.pram) this.pram = initRamPattern(new Uint8Array(0x8000), CART_RAM_INIT);
+    this._write(0xDE80, 0);
+  }
+  _write(_a, val) {
+    this._bsel = (val >> 1) & 1;
+    this._csel = (val >> 2) & 3;
+    this.bank = ((this._csel << 1) | this._bsel) & 3;
+    if (val & 0x10) this.setLines(true, true); else this.setLines(false, false);
+  }
+  io1Write(addr, val) { if ((addr & 0xFF) >= 0x80) this._write(addr, val); }
+  readRoml(addr) {
+    if (this._csel === 2) return this.pram[(addr & 0x1FFF) + (this._bsel << 14)];
+    return super.readRoml(addr);
+  }
+  readRomh(addr) {
+    if (this._csel === 2) return this.pram[0x2000 + (addr & 0x1FFF) + (this._bsel << 14)];
+    return super.readRomh(addr);
+  }
+  romlNoUltimaxStore(addr, val) {
+    if (this._csel === 2) this.pram[(addr & 0x1FFF) + (this._bsel << 14)] = val;
+    return false;
+  }
+  romlStore(addr, val) { this.romlNoUltimaxStore(addr, val); }
+  romhNoUltimaxStore(addr, val) {
+    if (this._csel === 2) this.pram[0x2000 + (addr & 0x1FFF) + (this._bsel << 14)] = val;
+    return false;
+  }
+}
+
 const CRT_HANDLERS = {
   0: Cartridge, 3: FinalIIICart, 4: SimonsBasicCart, 5: OceanCart,
   7: FunPlayCart, 8: SuperGamesCart, 10: EpyxFastloadCart, 15: GameSystemCart,
   16: WarpSpeedCart, 17: DinamicCart, 18: ZaxxonCart, 19: MagicDeskCart,
-  21: Comal80Cart, 32: EasyFlashCart,
+  21: Comal80Cart, 32: EasyFlashCart, 1: ActionReplayCart, 9: AtomicPowerCart,
+  36: RetroReplayCart, 53: PagefoxCart, 61: MaxBasicCart, 70: MultiMaxCart,
 };
 
 function parseCrt(data) {
@@ -4459,6 +4970,11 @@ Object.assign(System.prototype, {
     this.cart = null;
     this._crtData = null;
     this.reset();
+  },
+  freezeCart() {
+    // Freeze-Knopf am Modul: NMI + Modul übernimmt (Ultimax)
+    if (this.cart === null || typeof this.cart.freeze !== "function") return null;
+    return this.cart.freeze();
   },
   cartSignature() {
     if (!this.cart) return false;
@@ -4960,7 +5476,7 @@ Object.assign(System.prototype, {
   clock() {
     // Reihenfolge wie im Original: VIC zuerst (entscheidet über BA), dann die
     // CPU nur, wenn sie den Bus hat, dann die CIAs.
-    const curNmi = this.cia2.irqLine;
+    const curNmi = this.cia2.irqLine || (this.cart !== null && this.cart.nmiLine === true);
     if (curNmi && !this.cpu._prevNmi) this.cpu.nmiPending = true;
     this.cpu._prevNmi = curNmi;
     this.cpu.irqLine = this.cia1.irqLine || this.vic.irqLine;
@@ -5202,7 +5718,7 @@ Object.assign(System.prototype, {
       d.idleUntil = 0;
       if (this.iec) this.iec._atnPrev = false;
     }
-    this.cpu._prevNmi = this.cia2.irqLine;
+    this.cpu._prevNmi = this.cia2.irqLine || (this.cart !== null && this.cart.nmiLine === true);
   },
 });
 
@@ -5285,9 +5801,11 @@ const fgRow = new Uint8Array(SCR_W);   // Vordergrundmaske der aktuellen Zeile
 
 function vicRead(mem, bank, addr) {
   addr &= 0x3FFF;
-  if ((bank === 0 || bank === 2) && addr >= 0x1000 && addr < 0x2000)
+  const ultimax = mem.cart !== null && mem.pla.exrom && !mem.pla.game &&
+                  mem.cart.vicUltimax !== false;
+  if ((bank === 0 || bank === 2) && addr >= 0x1000 && addr < 0x2000 && !ultimax)
     return mem.rom[0xD000 + (addr & 0x0FFF)];
-  if (addr >= 0x3000 && mem.cart !== null && mem.pla.exrom && !mem.pla.game)
+  if (addr >= 0x3000 && ultimax)
     return mem.cart.readRomhRaw(0x1000 + (addr & 0x0FFF));     // Ultimax
   return mem.ram[bank * 0x4000 + addr];
 }
@@ -5580,6 +6098,7 @@ function keyEvent(ev, down) {
     if (code === "PageDown" && sys.sidInfo) { sidSong(-1); ev.preventDefault(); return; }
     if (code === "F12") { doReset(); ev.preventDefault(); return; }
     if (code === "F8") { toggleColl(); ev.preventDefault(); return; }
+    if (code === "F10") { doFreeze(); ev.preventDefault(); return; }
     if (code === "F6") { nextDisk(); ev.preventDefault(); return; }
     if (code === "F2") { saveSlot(); ev.preventDefault(); return; }
     if (code === "F4") { loadSlot(); ev.preventDefault(); return; }
@@ -5688,6 +6207,14 @@ function doReset() {
   setMsg("Reset");
 }
 $("btnReset").onclick = doReset;
+function doFreeze() {
+  const r = sys.freezeCart();
+  if (r === null) setMsg("Freeze: kein Freezer-Modul gesteckt (Action Replay, Retro Replay, …)");
+  else if (r === false) setMsg("Freeze: vom Modul gesperrt (NoFreeze-Bit)");
+  else setMsg("Freeze ausgelöst");
+  canvas.focus();
+}
+$("btnFreeze").onclick = doFreeze;
 $("btnWarp").onclick = toggleWarp;
 $("btnColl").onclick = toggleColl;
 $("btnJoy").onclick = cycleJoyPort;
@@ -5769,6 +6296,26 @@ function mountEntry(idx, mode) {
 }
 // Einmal pro Bildschirm-Tick: Tipp-Warteschlange, Autostart, Wachhund.
 function serviceAutoload() {
+  if (sys.needsRealDrive) {
+    const me = sys.needsRealDrive;
+    sys.needsRealDrive = null;
+    if (!sys.drive && sys._d64 instanceof D64Image) {
+      $("chkDrive").checked = true;
+      setDrive(true);
+      if (sys.drive) {
+        doReset();
+        autoLoadDisk();
+        autoloadDeadline = 300;
+        autoloadHardStart = true;
+        setMsg("Programm startet eigenen Laufwerkscode (M-E $" +
+               me.addr.toString(16).toUpperCase().padStart(4, "0") +
+               ") — echte 1541 eingeschaltet, Neustart …");
+        clearTimeout(setMsg._t);               // Hinweis länger stehen lassen
+        setMsg._t = setTimeout(() => { $("stMsg").textContent = ""; }, 10000);
+        return;
+      }
+    }
+  }
   if (keyQueue.length && sys.mem.ram[0xC6] === 0 && sys.mem.ram[0xCC] === 0 &&
       sys.cpu.cycles - lastResetCycles > BOOT_CYCLES) {
     sys.typeString(keyQueue.shift());
