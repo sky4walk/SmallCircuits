@@ -192,7 +192,7 @@
 <div id="diskbox">
   <h2>Programme &amp; Disketten</h2>
   <div id="filedrop">Dateien hierher ziehen oder klicken<br>
-    <b>.prg</b> lädt und startet · <b>.d80/.d82/.d64</b> kommen in die Box (die erste startet) ·
+    <b>.prg</b> lädt und startet (eigenständige Abbilder bis $FFFF, z. B. P500-Spiele, laufen direkt in Bank 0) · <b>.d80/.d82/.d64</b> kommen in die Box (die erste startet) ·
     <b>.t64</b> wird in seine Programme zerlegt · <b>.seq</b> Datendatei ·
     <b>.zip</b> (Sammlung) und <b>.gz</b> werden entpackt · <b>.bin</b> bis 8 KB wird Erweiterungs-ROM in Bank 15<br>Gerät 8 findet auch Box-Dateien, die nicht auf der Diskette stehen</div>
   <input type="file" id="fileInput" multiple accept=".prg,.p00,.seq,.usr,.s00,.d64,.d80,.d82,.t64,.zip,.gz,.json,.bin,.rom">
@@ -4849,6 +4849,21 @@ Object.assign(Cbm2System.prototype, {
     }
     return { fileAddr, loadAddr, end, bank: b, length: payload.length, basic };
   },
+  // Eigenständige Bank-Abbilder (z. B. P500-Spiele wie Wizowar 500): Ladeadresse
+  // ≥ $0002, reichen bis $FFFF und bringen eigene Vektoren mit. Sie laufen ohne
+  // Kernal in einer RAM-Bank (P500: Bank 0 = Videobank) und greifen über die
+  // Indirektbank 15 und LDA/STA (zp),Y auf VIC, SID, CIA und TPIs zu.
+  bootBankImage(data) {
+    const addr = data[0] | (data[1] << 8), payload = data.subarray(2);
+    const bank = this.mem.p500 ? 0 : [1, 2, 0].find((b) => this.mem.valid[b]);
+    for (let i = 0; i < payload.length; i++) this.mem.write(bank, addr + i, payload[i]);
+    const M = this.mem, cpu = this.cpu;
+    M.exec = bank; M.ind = 15;
+    cpu._micro = null; cpu._pending = null;
+    cpu.a = 0; cpu.x = 0; cpu.y = 0; cpu.sp = 0xFD; cpu.sr = 1 << CPU.FI;
+    cpu.pc = M.readSystemWord(0xFFFC);
+    return { bank, loadAddr: addr, end: addr + payload.length, start: cpu.pc };
+  },
   _basicEnd() {
     const rd = (a) => this.mem.read(CBM2_TEXT_BANK, a & 0xFFFF);
     let p = this.txttab || 3;
@@ -4975,6 +4990,14 @@ Cbm2System.looksLikeBasic = (data) => {
     last = ln; lines++; p = q;
   }
   return false;
+};
+// Programm bis $FFFF mit gültigem Reset-Vektor in sich selbst → eigenständiges Bankabbild
+Cbm2System.isBankImage = (data) => {
+  if (data.length < 8) return false;
+  const addr = data[0] | (data[1] << 8);
+  if (addr < 0x0002 || addr + data.length - 2 !== 0x10000) return false;
+  const rv = data[data.length - 4] | (data[data.length - 3] << 8);
+  return rv >= addr && rv < 0xFFFA;
 };
 Cbm2System.isBasicPrg = (data) => data.length >= 3 &&
   (Cbm2System.isBasicAddr(data[0] | (data[1] << 8)) || Cbm2System.looksLikeBasic(data));
@@ -6853,6 +6876,12 @@ function driveStatusText() {
 function loadPrgFile(name, data) {
   if (data.length < 3) { setMsg(name + ": zu kurz für ein PRG"); return; }
   const addr = data[0] | (data[1] << 8);
+  if (Cbm2System.isBankImage(data)) {
+    if (!bootReady()) pendingPrg = { name, data };
+    else finishPrgLoad(name, data);
+    canvas.focus();
+    return;
+  }
   if (!Cbm2System.isBasicPrg(data)) {
     const nm = boxCbmName(name);
     setMsg(`${name}: Maschinenprogramm für ${hex4(addr)} — in der Box, laden mit BLOAD"${nm}",B15 bzw. B1 (Bank) und starten mit SYS`);
@@ -6863,6 +6892,14 @@ function loadPrgFile(name, data) {
   canvas.focus();
 }
 function finishPrgLoad(name, data) {
+  if (Cbm2System.isBankImage(data)) {
+    try {
+      const info = sys.bootBankImage(data);
+      setMsg(`${name}: eigenständiges Programm, nach Bank ${info.bank} ${hex4(info.loadAddr)}–${hex4(info.end - 1)} geladen und bei ${hex4(info.start)} gestartet` +
+             (sys.mem.p500 ? "" : " — Hinweis: meist P500-Software, ggf. Modell auf P500 stellen"));
+    } catch (err) { setMsg("Fehler: " + err.message); }
+    return;
+  }
   try {
     const info = sys.loadPrg(data, true);
     setMsg(`${name}: geladen nach Bank ${info.bank}, ${hex4(info.loadAddr)}–${hex4(info.end - 1)}`);
