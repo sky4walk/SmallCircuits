@@ -634,7 +634,8 @@ class Cia {
       this._todAcc += cycles;
       if (this._todAcc >= Cia.TOD_PIN_CYCLES) this._todPinEdge();
     }
-    if (this.timerARunning) {
+    let underA = 0;                       // Unterläufe von Timer A (für Timer B im Kaskadenbetrieb)
+    if (this.timerARunning && !(this.regs[0x0E] & 0x20)) {   // Bit 5: zählt CNT-Flanken statt Takt
       this.timerA -= cycles;
       if (this.timerA <= 0) {
         this.icrData |= Cia.F_TA;
@@ -646,6 +647,7 @@ class Cia {
           this.timerA += under * per;
           if (this.timerA <= 0) this.timerA = this.timerALatch || 0xFFFF;
         }
+        underA = under;
         if (this._sdrCount > 0 && (this.regs[0x0E] & 0x40)) {
           this._sdrCount -= under;
           if (this._sdrCount <= 0) {
@@ -657,8 +659,11 @@ class Cia {
       }
     }
     if (this.timerBRunning) {
-      this.timerB -= cycles;
-      if (this.timerB <= 0) {
+      // CRB Bit 5/6: 00 Systemtakt, 01 CNT-Flanken, 1x Unterläufe von Timer A
+      const inB = (this.regs[0x0F] >> 5) & 3;
+      const dec = inB === 0 ? cycles : inB >= 2 ? underA : 0;
+      if (dec) this.timerB -= dec;
+      if (dec && this.timerB <= 0) {
         this.icrData |= Cia.F_TB;
         if (this.timerBOneshot) { this.timerBRunning = false; this.timerB = this.timerBLatch; this.regs[0x0F] &= ~0x01; }
         else {
@@ -5320,13 +5325,20 @@ Object.assign(System.prototype, {
         const dummy = addr === 0x0801 &&
                       (data.length <= 4 || (data[2] === 0 && data[3] === 0));
         if (!dummy) {
-          if (first) return { pattern: "0:*", addr };   // "*" allein lädt bei echter Floppy die zuletzt geladene Datei
+          // exakter Name (für DLOAD: BASIC 7.0 legt "0:NAME" im DOS-Puffer $1100
+          // ab, manche Lader bauen daraus den Namen der nächsten Datei)
+          let exact = "";
+          for (const c of name) {
+            if (c < 0x20 || c > 0x5F || c === 0x22 || c === 0x2A || c === 0x3F) { exact = null; break; }
+            exact += String.fromCharCode(c);
+          }
+          if (first) return { pattern: "0:*", addr, exact };   // "*" allein lädt bei echter Floppy die zuletzt geladene Datei
           let pat = "";
           for (const c of name) {
             if (c < 0x20 || c > 0x5F || c === 0x22) { pat += "*"; break; }
             pat += String.fromCharCode(c);
           }
-          return { pattern: pat || "*", addr };
+          return { pattern: pat || "*", addr, exact };
         }
         first = false;
       }
@@ -7921,6 +7933,7 @@ class Vdc {
     if (!(addr & 1)) { this.sel = val & 0x3F; return; }
     const s = this.sel;
     if (s >= 38) return;
+    this.writes = (this.writes + 1) | 0;      // Aktivität (für die Auto-Anzeige)
     const old = this.regs[s];
     this.regs[s] = val;
     switch (s) {
@@ -8548,13 +8561,13 @@ class System128 extends System {
   _readName(fnaddr, fnlen) {
     const out = new Uint8Array(fnlen);
     const m = this.mem;
-    const bank = m.c64mode ? m.c64Bank : (m.ram[0xC7] & 1);
+    const bank = m.c64mode ? m.c64Bank : kernalRamBank(m.ram[0xC7]);
     for (let i = 0; i < fnlen; i++) out[i] = m.peekBank(bank, fnaddr + i);
     return out;
   }
   _trapLoad() {
     const m = this.mem;
-    m._loadBank = m.c64mode ? m.c64Bank : (m.ram[0xC6] & 1);
+    m._loadBank = m.c64mode ? m.c64Bank : kernalRamBank(m.ram[0xC6]);
     try { return System.prototype._trapLoad.call(this); }
     finally { m._loadBank = null; }
   }
@@ -8595,6 +8608,12 @@ Object.assign(Memory128.prototype, {
   applyCartLines: Memory.prototype.applyCartLines,
   isUltimax: Memory.prototype.isUltimax,
 });
+
+// Kernal-Banknummer (0-15, wie bei SETBNK/BANK) -> RAM-Bank; Tabelle wie im
+// Kernal bei $F7F0 (MMU-Konfiguration, Bit 6 = RAM-Bank). Bank 15 ist die
+// Systemkonfiguration mit ROMs -> RAM 0, nicht RAM 1.
+const KERNAL_BANK_CR = [0x3F, 0x7F, 0xBF, 0xFF, 0x16, 0x56, 0x96, 0xD6, 0x2A, 0x6A, 0xAA, 0xEA, 0x06, 0x0A, 0x01, 0x00];
+function kernalRamBank(b) { return (KERNAL_BANK_CR[b & 15] >> 6) & 1; }
 
 // ---- C128: SID-Player im C64-Modus, Snapshots mit 128 KB, MMU, VDC, Z80 ----
 Object.assign(System128.prototype, {
@@ -8783,9 +8802,23 @@ function renderVdc() {
 }
 // Welcher Bildschirm ist "aktiv"? C64-Modus: VIC; C128: Editor-Flag $D7 Bit 7;
 // beim Booten bzw. unter CP/M: Stellung der 40/80-Taste.
+// Programme, die $D7 als eigene Zeropage-Zelle nutzen (VDC-Spiele), würden
+// sonst den abgeschalteten VIC-Bildschirm zeigen: Ist der VIC länger als
+// eine halbe Sekunde dunkel (DEN aus), zeigt "Auto" den VDC.
+let vicBlankFrames = 0, vdcQuietFrames = 1000, vdcLastWrites = 0;
 function activeScreen() {
-  if (sys.mem.c64mode) return 40;
-  if (sys.mode === "c128" && sys.cpu.cycles > 1500000) return (sys.mem.ram[0xD7] & 0x80) ? 80 : 40;
+  if (sys.mem.c64mode) { vicBlankFrames = 0; return 40; }
+  if (sys.mode === "c128" && sys.cpu.cycles > 1500000) {
+    vicBlankFrames = (sys.vic.regs[0x11] & 0x10) ? 0 : Math.min(vicBlankFrames + 1, 1000);
+    const w = sys.vdc.writes | 0;
+    vdcQuietFrames = w !== vdcLastWrites ? 0 : Math.min(vdcQuietFrames + 1, 1000);
+    vdcLastWrites = w;
+    // nur wenn das Programm den VDC auch benutzt (sonst blendet ein
+    // 40-Zeichen-Spiel beim Nachladen nur kurz den VIC aus)
+    if (vicBlankFrames > 25 && vdcQuietFrames < 150) return 80;
+    return (sys.mem.ram[0xD7] & 0x80) ? 80 : 40;
+  }
+  vicBlankFrames = 0;
   return sys.mem.key4080 ? 80 : 40;
 }
 let shown40 = true, shown80 = false;
@@ -9464,7 +9497,8 @@ function mountEntry(idx, mode) {
       autoloadDeadline = 300;                    // ~6 s auf den Prompt warten
       autoloadHardStart = (mode === "start");
       const tg = sys.autoloadTarget();
-      setMsg(`Diskette eingelegt: ${nm || d.name} — LOAD"${tg ? tg.pattern : "*"}",8 sobald READY …`);
+      const c128b = tg && (tg.addr === 0x1C01 || tg.addr === 0x4001) && tg.exact;
+      setMsg(`Diskette eingelegt: ${nm || d.name} — ${c128b ? 'DLOAD"' + tg.exact + '"' : 'LOAD"' + (tg ? tg.pattern : "*") + '",8'} sobald READY …`);
     } else {
       setMsg(`Diskette eingelegt: ${nm || d.name}`);
     }
@@ -9551,7 +9585,11 @@ function autoLoadDisk() {
   else if (c128Basic) ensureMode("c128");
   keyQueue = [];
   armAfterQueue = null;
-  if (addr === 0x0801 || c128Basic) {
+  if (c128Basic && tgt.exact) {
+    // wie von Hand: DLOAD"NAME" — füllt auch den DOS-Puffer von BASIC 7.0
+    queueType('DLOAD"' + tgt.exact + '"\r');
+    if ($("chkAutorun").checked) armAfterQueue = "RUN\r";
+  } else if (addr === 0x0801 || c128Basic) {
     queueType('LOAD"' + tgt.pattern + '",8\r');
     if ($("chkAutorun").checked) armAfterQueue = "RUN\r";
   } else {
