@@ -2537,7 +2537,7 @@ function makeMachine() {
       copPC = (copPC + 4) >>> 0;             // ueber den erfuellten WAIT hinweg
     } else { copH = copCarry; copCarry = 0; }
     const xstart = (cst[0x08e >> 1] & 0xff) * 2 - 2;
-    const fetchEnd = Math.min(HMAX, (cst[0x094 >> 1] & 0xfc) + 8);
+    const fetchEnd = Math.min(HMAX, Math.min(cst[0x094 >> 1] & 0xfc, 0xd8) + 8);
     for (let guard = 0; guard < 512; guard++) {
       const i1 = chipR16(copPC), i2 = chipR16(copPC + 2);
       copPC = (copPC + 4) >>> 0;
@@ -2616,7 +2616,11 @@ function makeMachine() {
   // Bitplane-DMA laeuft in Einheiten von 8 Farbtakten ab DDFSTRT. Trifft DDFSTOP
   // genau einen Einheitenanfang, ist diese Einheit die letzte; liegt es mitten in
   // einer Einheit, folgt noch eine weitere. Lores: ein Wort je Einheit, Hires: zwei.
+  // Agnus holt hoechstens von $18 bis $D8: ein DDFSTOP dahinter (Intros setzen gern $E0)
+  // wird an der Hardwaregrenze abgeschnitten, sonst stimmt die Zeilenbreite nicht.
   function fetchUnits(ddfstrt, ddfstop) {
+    if (ddfstrt < 0x18) ddfstrt = 0x18;
+    if (ddfstop > 0xd8) ddfstop = 0xd8;
     const diff = ddfstop - ddfstrt;
     if (diff < 0) return 1;
     return (diff >> 3) + 1 + ((diff & 7) ? 1 : 0);
@@ -2681,7 +2685,7 @@ function makeMachine() {
     // Hires ab 2h + 9 (HRM: DDFSTRT = DIWSTRT_H/2 - 8,5 bzw. - 4,5). Fuer DIWSTRT $81
     // mit DDFSTRT $38 (Lores) bzw. $3c (Hires) faellt beides zusammen; holt ein
     // Programm zum Scrollen ein Wort frueher (DDFSTRT $30), liegt es 16 Pixel links.
-    const dataStart = ddfstrt * 4 + (hires ? 16 : 32);
+    const dataStart = Math.max(ddfstrt, 0x18) * 4 + (hires ? 16 : 32);
     const bplcon1 = cst[0x102 >> 1];
     // Scroll-Schrittweite ist auf OCS immer ein Lores-Pixel, in Hires also zwei Pixel
     const scroll1 = (bplcon1 & 15) * (hires ? 2 : 1), scroll2 = ((bplcon1 >> 4) & 15) * (hires ? 2 : 1);   // ungerade / gerade Ebenen
@@ -2776,7 +2780,11 @@ function makeMachine() {
     if (!(dmacon & 0x0200)) return;
     const base = vpos * FB_W;
     // DMA: Steuer- und Datenworte holen und in die Register schreiben
-    if (dmacon & 0x0020) {
+    // Zustaende: 0 = Steuerworte holen, 1 = warten auf VSTART, 3 = Daten holen bis VSTOP, 2 = fertig.
+    // Agnus vergleicht auf Gleichheit (vpos == VSTART / VSTOP), nicht auf "groesser":
+    // ein Sprite, dessen VSTART schon vorbei ist (oder im Austastbereich liegt), erscheint
+    // in diesem Bild nicht mehr. Waehrend der Austastluecke (Zeilen < $19) laeuft keine Sprite-DMA.
+    if ((dmacon & 0x0020) && vpos >= 0x19) {
       for (let sp = 0; sp < 8; sp++) {
         for (let guard = 0; guard < 4; guard++) {
           if (sprState[sp] === 0) {
@@ -2789,9 +2797,13 @@ function makeMachine() {
             sprState[sp] = 1;
             continue;
           }
-          if (sprState[sp] !== 1) break;
-          if (vpos >= sprV2[sp]) { sprState[sp] = 0; continue; }
-          if (vpos < sprV1[sp]) break;
+          if (sprState[sp] === 1) {
+            if (vpos !== sprV1[sp]) break;
+            if (sprV1[sp] === sprV2[sp]) { sprState[sp] = 0; break; }   // leeres Sprite
+            sprState[sp] = 3;
+          }
+          if (sprState[sp] !== 3) break;
+          if (vpos === sprV2[sp]) { sprState[sp] = 0; continue; }
           const a = chipR16(sprPt[sp]), b = chipR16(sprPt[sp] + 2);
           sprPt[sp] = (sprPt[sp] + 4) >>> 0;
           sprWrite(0x144 + sp * 8, a); sprWrite(0x146 + sp * 8, b);
@@ -3201,7 +3213,7 @@ const BUILTIN_TESTS = [["c903 [ABCD D3, D4] 5284",[2636742918,4193478974,7923469
 
 
   // --- Bildausgabe --------------------------------------------------------
-  const CROP_X = 232, CROP_W = 720;
+  const CROP_X = 224, CROP_W = 720;   // links ab DIW-H $71 (uebliches Overscan der Intros), rechts bis $1D9
   // PAL: 312 Zeilen, Ausschnitt 280 Zeilen ab Zeile 24. NTSC: 263 Zeilen, Ausschnitt
   // 234 Zeilen ab Zeile 27 - der 200-Zeilen-Bildschirm (ab $2c) sitzt mittig, und die
   // Zeilen sind wie auf einem NTSC-Monitor um 1,2 hoeher, damit das Bild wieder 4:3 hat.
