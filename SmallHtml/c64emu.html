@@ -585,6 +585,16 @@ class Vic {
     this.lineSprMsb = new Uint8Array(L);
     this.lineSprBank = new Uint8Array(L);
     this.lineSprRow = new Uint8Array(L * 8).fill(0xFF);
+    // Sprite-Daten (s-Zugriffe) pro Zeile gelatcht, flach [raster*24 + sprite*3]:
+    // Spiele mit doppelt gepufferten Sprites (Maniac Mansion) überschreiben
+    // den gerade gezeigten Puffer, sobald der Strahl durch ist — gelesen wird
+    // deshalb zum Fetch-Zeitpunkt, nicht erst beim Zeichnen am Bildende.
+    this.lineSprData = new Uint8Array(L * 24);
+    // Grafikbytes (g-Zugriffe) jeder Rasterzeile, flach [raster*40 + spalte],
+    // gelatcht am Zeilenende: Scroller, die den Zeichensatz während des
+    // Bildaufbaus umschreiben (Mayhem in Monsterland), zeigen sonst oben
+    // und unten verschiedene Stände — das Bild springt seitlich.
+    this.lineGfx = new Uint8Array(L * 40);
     this.lineSprCol = new Uint8Array(L * 8);
     this.lineD01c = new Uint8Array(L);
     this.lineD01d = new Uint8Array(L);
@@ -609,6 +619,12 @@ class Vic {
     this.rowModeD018 = new Uint8Array(Vic.ROW_SLOTS);
     this.rowModeBank = new Uint8Array(Vic.ROW_SLOTS).fill(0xFF);
     this.rowLogical = new Uint8Array(Vic.ROW_SLOTS).map((_, i) => i < 25 ? i : 0);
+    // Videozähler-Basis (VC, 10 Bit) jedes Slots. Normal Zeile*40; VSP
+    // (DMA-Delay) verschiebt sie um _vcOff Zeichen für den Rest des Frames.
+    this.rowVc = new Uint16Array(Vic.ROW_SLOTS).map((_, i) => i < 25 ? i * 40 : 0);
+    this._vcOff = 0;
+    this._vspLine = -1;
+    this.vspSeen = false;          // Frontend: VSP braucht den Cycle-Kern
     this.lineScreen = new Uint8Array(Vic.ROW_SLOTS * 40);
     this.lineColor = new Uint8Array(Vic.ROW_SLOTS * 40);
     this._rowSeen = 0;             // Bitmaske: Zeile hat in diesem Frame schon Pixelzeilen
@@ -689,7 +705,7 @@ class Vic {
       const col = c - 15, slot = this.lineTextRow[r], rc = this.lineRc[r];
       if (slot !== 0xFF) {
         if (regs[0x11] & 0x20) {
-          const vc = (this.rowLogical[slot] * 40 + col) & 0x3FF;
+          const vc = (this.rowVc[slot] + col) & 0x3FF;
           return mem.readVic((regs[0x18] & 0x08) * 0x400 + vc * 8 + rc);
         }
         let code = this.lineScreen[slot * 40 + col];
@@ -726,6 +742,22 @@ class Vic {
     }
   }
 
+  _checkVsp(d011) {
+    // VSP / DMA-Delay: wird die Badline-Bedingung erst mitten in einer
+    // Idle-Zeile wahr (Zyklus 15..54), holt der VIC ab dort Zeichen, zählt VC
+    // aber nur für die restlichen g-Zugriffe hoch. Weil RC im Idle-Zustand 7
+    // ist, übernimmt VCBASE am Zeilenende diesen Stand — alle folgenden
+    // Zeichenzeilen erscheinen um so viele Zeichen versetzt (Mayhem in
+    // Monsterland, Fred's Back u. a. scrollen so grob).
+    const r = this.raster, c = this.lineCycles;
+    if (r < 0x30 || r > 0xF7 || !this._denFrame || this._displayState) return;
+    if ((r & 7) !== (d011 & 7) || this._vspLine === r || this._vcbaseRow >= 25) return;
+    if (c < 14 || c > 53) return;
+    this._vspLine = r;
+    this._vcOff = (this._vcOff + (54 - c)) & 0x3FF;
+    this.vspSeen = true;
+  }
+
   _startSpriteDisplayNow(i) {
     // Mid-Line-Y-Treffer (Y oder $D015 in genau der Zeile geschrieben, die
     // passt): Datenholen am Zeilenende, Anzeige ab der NÄCHSTEN Zeile.
@@ -748,6 +780,7 @@ class Vic {
       this.rasterCompare = (this.rasterCompare & 0xFF) | ((val & 0x80) << 1);
       this.regs[0x11] = val;
       if (!prevMatch && this.raster === this.rasterCompare) this._fireCompareEdge();
+      this._checkVsp(val);
       return;
     }
     if (off === 0x19) { this.irqStatus &= ~(val & 0x0F); return; }
@@ -844,7 +877,8 @@ class Vic {
     const bank = mem.vicBank();
     this.rowModeBank[slot] = bank;
     const vm = ((this.regs[0x18] >> 4) & 0x0F) * 0x400;
-    const vc = (row * 40) % 1024;
+    const vc = (row * 40 + this._vcOff) & 0x3FF;
+    this.rowVc[slot] = vc;
     const dst = slot * 40;
     for (let i = 0; i < 40; i++) {
       this.lineScreen[dst + i] = mem.readVic(vm + ((vc + i) & 0x3FF), true);
@@ -861,6 +895,7 @@ class Vic {
     }
     while (this.lineCycles >= Vic.CYCLES_PER_LINE) {
       if (this._baPend) { this.baDebt += this._baPend; this._baPend = 0; }
+      if (this.mem !== null) this._latchGfx(this.raster);
       this.lineCycles -= Vic.CYCLES_PER_LINE;
       this.raster = (this.raster + 1) % Vic.LINES_PER_FRAME;
       const r = this.raster;
@@ -875,7 +910,7 @@ class Vic {
       this.lineD023[r] = regs[0x23];
       this.lineD024[r] = regs[0x24];
       this.lineD01b[r] = regs[0x1B];
-      if (r === 0) { this._vcbaseRow = 0; this._rowSeen = 0; this._nextSlot = 25; }
+      if (r === 0) { this._vcbaseRow = 0; this._rowSeen = 0; this._nextSlot = 25; this._vcOff = 0; this._vspLine = -1; }
       if (r === 0x30) this._denFrame = !!(d011 & 0x10);
       const rsel = (d011 >> 3) & 1;
       if (r === (rsel ? 251 : 247)) this._vborder = true;
@@ -948,6 +983,13 @@ class Vic {
               continue;
             }
             this.lineSprRow[ras8 + i] = srow[i];
+            {
+              const da = this.lineSprPtr[ras8 + i] * 64 + srow[i] * 3;
+              const o = r * 24 + i * 3;
+              this.lineSprData[o] = mem.readVic(da);
+              this.lineSprData[o + 1] = mem.readVic(da + 1);
+              this.lineSprData[o + 2] = mem.readVic(da + 2);
+            }
             dmaN++;
             if ((d017 >> i) & 1) {
               if (sff[i]) srow[i] += 1;
@@ -986,6 +1028,36 @@ class Vic {
     }
   }
 
+  _latchGfx(r) {
+    // Grafikdaten der eben fertigen Zeile r so holen, wie der Renderer sie
+    // dekodiert (gleiche Modus-/Adresslogik, Lesen über vicRead).
+    if (r < 51 || r > 250) return;
+    const mem = this.mem, out = this.lineGfx, o = r * 40;
+    let bank = this.lineSprBank[r];
+    if (bank === 0xFF) bank = mem.vicBank();
+    if (this.lineIdle[r]) {
+      out[o] = vicRead(mem, bank, (this.lineD011[r] & 0x40) ? 0x39FF : 0x3FFF);
+      return;
+    }
+    const charRow = this.lineTextRow[r];
+    if (charRow >= Vic.ROW_SLOTS) return;
+    const cy = this.lineRc[r];
+    const d011 = this.lineD011[r], d018 = this.lineD018[r];
+    if ((d011 >> 5) & 1) {
+      const bmbase = ((d018 >> 3) & 1) * 0x2000 + cy, vcb = this.rowVc[charRow];
+      for (let col = 0; col < 40; col++) out[o + col] = vicRead(mem, bank, bmbase + ((vcb + col) & 0x3FF) * 8);
+    } else {
+      const charBase = ((d018 >> 1) & 7) * 0x800 + cy;
+      const ecm = (d011 & 0x40) !== 0;
+      const base = charRow * 40;
+      for (let col = 0; col < 40; col++) {
+        let code = this.lineScreen[base + col];
+        if (ecm) code &= 0x3F;
+        out[o + col] = vicRead(mem, bank, charBase + code * 8);
+      }
+    }
+  }
+
   _bookkeeping(r, d011) {
     const slot = this._dispSlot;
     this.lineIdle[r] = 0;
@@ -1014,16 +1086,8 @@ class Vic {
     const ras8 = r * 8;
     const row = this.lineSprRow[ras8 + i];
     if (row === 0xFF) return -1;
-    const mem = this.mem;
-    const bank = this.lineSprBank[r];
-    const da = this.lineSprPtr[ras8 + i] * 64 + row * 3;
-    const shadow = (bank === 0 || bank === 2);
-    const rdv = (a) => {
-      a &= 0x3FFF;
-      if (shadow && a >= 0x1000 && a < 0x2000) return mem.rom[0xD000 + (a & 0x0FFF)];
-      return mem.ram[bank * 0x4000 + a];
-    };
-    const d0 = rdv(da), d1 = rdv(da + 1), d2 = rdv(da + 2);
+    const o = r * 24 + i * 3;
+    const d0 = this.lineSprData[o], d1 = this.lineSprData[o + 1], d2 = this.lineSprData[o + 2];
     if (!(d0 | d1 | d2)) return -1;
     const mc = (this.lineD01c[r] >> i) & 1;
     const xex = (this.lineD01d[r] >> i) & 1;
@@ -1095,9 +1159,9 @@ class Vic {
     };
     if (bmm) {
       const bmbase = ((d018 >> 3) & 1) * 0x2000;
-      const rowOff = bmbase + this.rowLogical[charRow] * 320 + cy;
+      const vcb = this.rowVc[charRow];
       for (let col = c0; col < col1; col++) {
-        const byte = rdv(rowOff + col * 8);
+        const byte = rdv(bmbase + ((vcb + col) & 0x3FF) * 8 + cy);
         if (!byte) continue;
         const vx0 = 24 + col * 8 + xs;
         if (mcm) {
@@ -3759,6 +3823,21 @@ Object.assign(System.prototype, {
       }
       return;
     }
+    // USER-Sprünge U3–U8 (= UC–UH) starten Laufwerkscode ab $0500/$0503/…;
+    // die 1541 rechnet (Zeichen − '1') & 15. Auch B-E und "&" (Utility-
+    // Loader) führen Code im Laufwerk aus — alles das braucht die echte 1541.
+    if (cmd.length >= 2 && cmd[0] === 0x55) {
+      const u = (cmd[1] - 0x31) & 0x0F;
+      if (u >= 2 && u <= 7) {
+        this.needsRealDrive = { addr: 0x0500 + (u - 2) * 3, how: "U" + String.fromCharCode(cmd[1] & 0x7F) };
+        return;
+      }
+    }
+    if (cmd.length >= 1 && cmd[0] === 0x26) { this.needsRealDrive = { addr: 0x0500, how: "&" }; return; }
+    if (cmd.length >= 3 && cmd[0] === 0x42 && cmd[1] === 0x2D && cmd[2] === 0x45) {
+      this.needsRealDrive = { addr: 0x0300, how: "B-E" };
+      return;
+    }
     let end = cmd.length;
     while (end > 0 && cmd[end - 1] === 0x0D) end--;
     const s = String.fromCharCode(...cmd.subarray(0, end)).trim();
@@ -5831,7 +5910,7 @@ function renderScene(s, px) {
     // --- Hintergrundgrafik der Zeile ---
     if (vic.lineIdle[r]) {
       const ecm = (vic.lineD011[r] & 0x40) !== 0;
-      const byte = mem.readVic(ecm ? 0x39FF : 0x3FFF);
+      const byte = vic.lineGfx[r * 40];
       for (let cx = 0; cx < 320; cx++) {
         const bit = (byte >> (7 - ((cx - xs + 320) & 7))) & 1;
         const on = cx >= xs && bit;
@@ -5851,7 +5930,7 @@ function renderScene(s, px) {
         const bmbase = ((d018 >> 3) & 1) * 0x2000;
         const lineBase = bmbase + vic.rowLogical[charRow] * 320 + cy;
         for (let col = 0; col < 40; col++) {
-          const bits = vicRead(mem, bank, lineBase + col * 8);
+          const bits = vic.lineGfx[r * 40 + col];
           const scr = vic.lineScreen[base + col];
           let o = o0 + col * 8 + xs;
           if (o - rowOff >= SCR_W - 8 && col === 39 && xs) { /* Überhang rechts kappen */ }
@@ -5891,7 +5970,7 @@ function renderScene(s, px) {
                               vic.lineD023[r], vic.lineD024[r]][code >> 6] & 15];
             code &= 0x3F;
           }
-          const bits = vicRead(mem, bank, charBase + code * 8 + cy);
+          const bits = vic.lineGfx[r * 40 + col];
           let o = o0 + col * 8 + xs;
           if (!ecm && mcm && (colNib & 8)) {
             const cols = [bgCol, PALETTE[vic.lineD022[r] & 15],
@@ -5939,8 +6018,8 @@ function renderScene(s, px) {
       for (let s = 7; s >= 0; s--) {
         const srowV = vic.lineSprRow[ras8 + s];
         if (srowV === 0xFF) continue;
-        const da = vic.lineSprPtr[ras8 + s] * 64 + srowV * 3;
-        const d0 = vicRead(mem, bank, da), d1 = vicRead(mem, bank, da + 1), d2 = vicRead(mem, bank, da + 2);
+        const so = r * 24 + s * 3;
+        const d0 = vic.lineSprData[so], d1 = vic.lineSprData[so + 1], d2 = vic.lineSprData[so + 2];
         if (!(d0 | d1 | d2)) continue;
         const mc = (vic.lineD01c[r] >> s) & 1;
         const xex = (vic.lineD01d[r] >> s) & 1;
@@ -6201,7 +6280,9 @@ function cycleJoyPort() {
   $("btnJoy").textContent = "Joy: " + ["Port 1", "Port 2", "beide"][joyPort];
   rebuildMatrix();
 }
+let vspAutoDone = false;          // VSP-Umschaltung auf den Cycle-Kern nur einmal je Reset
 function doReset() {
+  vspAutoDone = false;
   sys.reset();
   afterCoreReset();
   setMsg("Reset");
@@ -6296,6 +6377,16 @@ function mountEntry(idx, mode) {
 }
 // Einmal pro Bildschirm-Tick: Tipp-Warteschlange, Autostart, Wachhund.
 function serviceAutoload() {
+  if (sys.vic.vspSeen && !sys.cycleAccurate && !vspAutoDone) {
+    // VSP hängt am exakten Schreibzyklus — der Batch-Kern trifft ihn nur
+    // auf ±2 Takte, das Bild würde zeichenweise zittern.
+    vspAutoDone = true;
+    sys.vic.vspSeen = false;
+    setCycleMode(true);
+    setMsg("VSP-Scrolling erkannt — zyklusgenauer Kern eingeschaltet");
+    clearTimeout(setMsg._t);
+    setMsg._t = setTimeout(() => { $("stMsg").textContent = ""; }, 8000);
+  }
   if (sys.needsRealDrive) {
     const me = sys.needsRealDrive;
     sys.needsRealDrive = null;
@@ -6307,7 +6398,7 @@ function serviceAutoload() {
         autoLoadDisk();
         autoloadDeadline = 300;
         autoloadHardStart = true;
-        setMsg("Programm startet eigenen Laufwerkscode (M-E $" +
+        setMsg("Programm startet eigenen Laufwerkscode (" + (me.how || "M-E") + " $" +
                me.addr.toString(16).toUpperCase().padStart(4, "0") +
                ") — echte 1541 eingeschaltet, Neustart …");
         clearTimeout(setMsg._t);               // Hinweis länger stehen lassen
