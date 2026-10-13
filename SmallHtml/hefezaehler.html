@@ -107,7 +107,11 @@ details p,details li{max-width:78ch}
     </details>
     <div class="check"><input type="checkbox" id="manualSize"><label for="manualSize" style="margin:0">Zellgröße manuell in Pixeln angeben</label></div>
     <label for="manualPx">Zelldurchmesser im Originalbild (px)</label>
-    <input type="number" id="manualPx" value="20" min="2" max="400" step="1" disabled>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="manualPx" value="20" min="2" max="400" step="1" disabled>
+      <button id="btnEst" type="button" disabled>aus dem Bild schätzen</button>
+    </div>
+    <p class="hint" id="estInfo">Ohne erkannten Sehfeldkreis schätzt die Seite die Zellgröße aus dem Bild.</p>
   </fieldset>
 
   <fieldset>
@@ -117,6 +121,9 @@ details p,details li{max-width:78ch}
     <p class="hint">Höher findet schwächere Zellen, aber auch mehr Schmutz.</p>
     <label for="minDist">Mindestabstand zwischen Zellen <span class="val" id="minDistVal">0,75 × Ø</span></label>
     <input type="range" id="minDist" min="0.4" max="1.3" step="0.05" value="0.75">
+    <label for="roundTol">Toleranz der Rundheitsprüfung <span class="val" id="roundTolVal">0,50</span></label>
+    <input type="range" id="roundTol" min="0.3" max="1.2" step="0.05" value="0.5">
+    <p class="hint">Kleiner: nur klar runde Zellen. Größer: auch blasse oder angeschnittene Zellen, aber eher Fehltreffer in Lücken zwischen dicht liegenden Zellen. Für Phasenkontrastbilder mit hellem Hof 0,6 bis 0,8 versuchen.</p>
     <label for="polarity">Zellen erscheinen im Bild</label>
     <select id="polarity">
       <option value="auto">automatisch bestimmen</option>
@@ -223,6 +230,7 @@ details p,details li{max-width:78ch}
   <details>
     <summary>Wie gezählt wird und wo die Grenzen liegen</summary>
     <p>Aus dem Durchmesser des erkannten Sehfeldkreises und dem eingestellten Sehfeld in µm berechnet die Seite, wie viele Pixel ein Mikrometer im Foto hat, und daraus die erwartete Zellgröße. Dann wird das Bild mit einem Differenz-von-Gauß-Filter genau auf diese Größe abgestimmt: Runde Objekte in Zellgröße heben sich hervor, großflächige Helligkeitsverläufe und feines Rauschen verschwinden. Jedes lokale Maximum oberhalb der Schwelle zählt als Zelle; zu dicht beieinander liegende Treffer werden zu einer Zelle zusammengefasst.</p>
+    <p>Fehlt der runde Sehfeldrand, etwa bei einem ausgeschnittenen Bild, gibt es keinen Maßstab. Dann schätzt die Seite die Zellgröße aus dem Bild selbst: Sie probiert den Filter mit vielen Durchmessern aus und nimmt den, bei dem die kräftigsten Treffer am rundesten aussehen. Dabei ergibt sich auch, ob die Zellen heller oder dunkler als der Hintergrund erscheinen. Fläche und Zellen pro mm² bleiben ohne Maßstab leer.</p>
     <p>Für die Sprossung wird zusätzlich der Umriss jeder Zelle bestimmt. Ragt aus einem Umriss eine kleinere Ausbuchtung auf einer Seite heraus, gilt sie als Knospe. Hängen mehrere erkannte Zellen in einem Umriss zusammen, werden die kleineren als Knospen ihrer größten Nachbarzelle zugeordnet; ab drei Zellen zählt das als Sprossverband. In der Brauerpraxis gilt eine Knospe erst ab etwa halber Größe der Mutterzelle als eigene Zelle, das ist als Zählregel einstellbar. Zuverlässig klappt das ab etwa 12 Pixel Zelldurchmesser und bei gut verdünnten Proben, in denen die Zellen nicht dicht an dicht liegen.</p>
     <p> Luftblasen in Zellgröße und Schmutzpartikel können mitgezählt werden, dichte Klumpen werden unterzählt. Das Ergebnis ist ein Schätzwert, der mit ein paar Korrekturklicks sehr brauchbar wird.</p>
   </details>
@@ -234,6 +242,7 @@ details p,details li{max-width:78ch}
 const $ = id => document.getElementById(id);
 const view = $('view');
 const MAXDIM = 2400;
+let manualByUser = false;   // true, sobald die Zellgröße von Hand eingetragen wurde
 const S = { work:null, W:0, H:0, rgba:null, gray:null, scale:1, detected:null, roi:null,
             autoCells:[], cells:[], edits:[], r:0, pxPerUm:null, name:'hefe', polUsed:'hell' };
 
@@ -339,13 +348,88 @@ function detectFov(){
   return {cx:cx/s, cy:cy/s, r:r/s};
 }
 
+/* Zellgröße schätzen, wenn kein Sehfeldkreis den Maßstab liefert.
+   Der DoG-Filter wird über eine Reihe von Durchmessern geschoben. Für jeden Durchmesser
+   werden die kräftigsten Treffer auf Rundheit geprüft (dieselbe Ringprüfung wie bei der Zählung).
+   Bei der richtigen Größe sehen die Treffer rundherum gleich aus, bei zu kleinen Filtern
+   sitzen sie auf Randstücken und Halos, bei zu großen auf Zellhaufen. Damit das auch bei
+   großen Fotos schnell bleibt, wird das Bild vorher so verkleinert, dass eine Zelle etwa 12 px hat. */
+function downsample(src,W,H,f){
+  if(f<=1) return {g:src,w:W,h:H};
+  const w=Math.max(1,Math.floor(W/f)), h=Math.max(1,Math.floor(H/f)), g=new Float32Array(w*h), inv=1/(f*f);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    let s=0;
+    for(let dy=0;dy<f;dy++){ const b=(y*f+dy)*W+x*f; for(let dx=0;dx<f;dx++) s+=src[b+dx]; }
+    g[y*w+x]=s*inv;
+  }
+  return {g,w,h};
+}
+function probeScale(D,fMin,cache){
+  const f=Math.max(fMin,Math.floor(D/12));
+  if(!cache.has(f)) cache.set(f,downsample(S.gray,S.W,S.H,f));
+  const {g,w,h}=cache.get(f), r=D/2/f;
+  const s1=Math.max(0.6,r*0.5), s2=Math.max(s1*2,r*1.6);
+  const g1=gaussBlur(g,w,h,s1), g2=gaussBlur(g,w,h,s2), Dg=new Float32Array(w*h);
+  for(let i=0;i<Dg.length;i++) Dg[i]=g1[i]-g2[i];
+  const b=Math.ceil(r)+1, md2=(1.5*r)**2, ro=Math.max(1.5,r*0.85), NR=12, res={};
+  for(const sign of [1,-1]){
+    const cand=[];
+    for(let y=b;y<h-b;y++) for(let x=b;x<w-b;x++){
+      const i=y*w+x, v=sign*Dg[i]; if(v<=0) continue;
+      if(sign*Dg[i-1]>v||sign*Dg[i+1]>v||sign*Dg[i-w]>v||sign*Dg[i+w]>v||
+         sign*Dg[i-w-1]>v||sign*Dg[i-w+1]>v||sign*Dg[i+w-1]>v||sign*Dg[i+w+1]>v) continue;
+      cand.push({x,y,v});
+    }
+    cand.sort((a,c)=>c.v-a.v);
+    const acc=[];
+    for(const c of cand){
+      if(acc.every(o=>(o.x-c.x)**2+(o.y-c.y)**2>=md2)) acc.push(c);
+      if(acc.length>=40) break;
+    }
+    let score=0;
+    const as=acc.map(c=>{
+      let m=0; const s=[];
+      for(let k=0;k<NR;k++){
+        const a=k*2*Math.PI/NR, X=Math.min(w-1,Math.max(0,Math.round(c.x+ro*Math.cos(a)))), Y=Math.min(h-1,Math.max(0,Math.round(c.y+ro*Math.sin(a))));
+        const v=g1[Y*w+X]; s.push(v); m+=v;
+      }
+      m/=NR; let sd=0; for(const v of s) sd+=(v-m)*(v-m);
+      const asym=Math.sqrt(sd/NR)/Math.max(2,Math.abs(g1[c.y*w+c.x]-m));
+      // runde und kräftige Treffer zählen, Randstücke und Rauschen kaum
+      score+=c.v*Math.max(0,1-asym/0.5);
+      return asym;
+    }).sort((a,c)=>a-c);
+    res[sign>0?'hell':'dunkel']={n:acc.length, asym:as.length?as[as.length>>1]:9, score};
+  }
+  return res;
+}
+function estimateCellSize(){
+  const maxD=Math.min(S.W,S.H)/8;            // mindestens etwa 8 Zellen über die kurze Bildseite
+  const F=Math.max(1,Math.floor(Math.max(S.W,S.H)/800)), cache=new Map();
+  let best=null;
+  const scan=(d0,d1,fMin)=>{
+    for(let D=d0; D<=d1; D*=1.12){
+      const p=probeScale(D,fMin,cache);
+      for(const pol of ['hell','dunkel']){
+        const q=p[pol];
+        if(q.n<12) continue;                   // zu wenige Treffer, um Rundheit zu beurteilen
+        if(!best || q.score>best.score) best={d:D, pol, asym:q.asym, score:q.score};
+      }
+    }
+  };
+  // grob auf einem höchstens etwa 800 px großen Abbild, fein nur, wenn die Zellen sehr klein sind
+  scan(6*F,maxD,F);
+  if(F>1 && (!best || best.d<12*F)) scan(6,12*F*1.12,1);
+  return best;                                 // d in Pixeln des Arbeitsbilds
+}
+
 function readParams(){
   return {
     fovUm:+$('fovUm').value||450, cellUm:+$('cellUm').value||7,
     autoFov:$('autoFov').checked, margin:+$('margin').value/100,
     fovR:+$('fovR').value/100, fovX:+$('fovX').value/100, fovY:+$('fovY').value/100,
     manualSize:$('manualSize').checked, manualPx:+$('manualPx').value||20,
-    sens:+$('sens').value, minDist:+$('minDist').value, polarity:$('polarity').value,
+    sens:+$('sens').value, minDist:+$('minDist').value, roundTol:+$('roundTol').value, polarity:$('polarity').value,
     vital:$('vital').checked, vitalThr:+$('vitalThr').value,
     bud:$('bud').checked, budFrac:+$('budFrac').value, maskK:+$('maskK').value, budRule:$('budRule').checked,
     chamber:$('chamber').checked, depth:+$('depth').value||0.1, dilution:+$('dilution').value||1
@@ -360,7 +444,9 @@ function analyze(){
   const fovOk = P.autoFov && S.detected;
   S.fov = fovOk ? {cx:S.detected.cx+P.fovX*S.detected.r*2, cy:S.detected.cy+P.fovY*S.detected.r*2, r:S.detected.r*(1+P.fovR)} : null;
   S.roi = fovOk ? {cx:S.fov.cx, cy:S.fov.cy, r:S.fov.r*(1-P.margin)} : null;
-  if(P.autoFov && !S.detected) warn.push('Kein runder Sehfeldrand gefunden. Ausgewertet wird das ganze Bild; bitte die Zellgröße manuell in Pixeln angeben.');
+  if(P.autoFov && !S.detected) warn.push(S.est && !manualByUser
+    ? 'Kein runder Sehfeldrand gefunden. Ausgewertet wird das ganze Bild, die Zellgröße ist aus dem Bild geschätzt. Fläche und Zellen pro mm² brauchen den Maßstab des Sehfelds.'
+    : 'Kein runder Sehfeldrand gefunden. Ausgewertet wird das ganze Bild; bitte die Zellgröße manuell in Pixeln angeben oder schätzen lassen.');
   S.pxPerUm = fovOk ? 2*S.fov.r/P.fovUm : null;
   let r;
   if(P.manualSize || !S.pxPerUm) r=P.manualPx*S.scale/2;
@@ -445,13 +531,17 @@ function analyze(){
   }
   const medAsym=l=>{ const a=l.slice(0,80).map(c=>c.asym).sort((x,y)=>x-y); return a.length?a[a.length>>1]:9; };
   let pol=P.polarity, acc;
-  if(pol==='auto'){
+  if(pol==='auto' && S.est && P.manualSize && !manualByUser){
+    // Die Größenschätzung hat die Polarität schon mitbestimmt
+    pol=S.est.pol; acc=detect(pol==='hell'?1:-1);
+  } else if(pol==='auto'){
     const aH=detect(1), aD=detect(-1);
     if(medAsym(aH)<=medAsym(aD)){pol='hell';acc=aH;} else {pol='dunkel';acc=aD;}
   } else acc=detect(pol==='hell'?1:-1);
   S.polUsed=pol;
   // streng nur, wenn die Zellen groß genug abgebildet sind, um den Ring sauber abzutasten
-  const asymMax = r>=5 ? 0.4 : r>=3.5 ? 0.6 : 0.9;
+  // bei klein abgebildeten Zellen ist der abgetastete Ring ungenau, deshalb dort großzügiger
+  const asymMax = P.roundTol + (r>=5 ? 0 : r>=3.5 ? 0.2 : 0.5);
   acc=acc.filter(c=>c.asym<asymMax);
   // ---- Umrisse für die Sprosserkennung ----
   S.lab=null; S.comps=null; S.outline=null;
@@ -619,6 +709,9 @@ function finish(warn){
     if(S.r<4) warn.push('Für die Sprosserkennung sind die Zellen zu klein abgebildet (etwa '+fmt(2*S.r,0)+' px im Arbeitsbild). Zuverlässig wird sie ab etwa 12 px Zelldurchmesser.');
     if(S.budStats.dense>0.4*S.cells.length) warn.push('Viele Zellen liegen so dicht, dass Knospen nicht getrennt erkannt werden können. Für die Sprossung die Probe stärker verdünnen.');
   }
+  $('estInfo').textContent = S.est && !manualByUser && P.manualSize
+    ? 'Geschätzt: etwa '+fmt(S.est.d/S.scale)+' px Zelldurchmesser, Zellen '+(S.est.pol==='hell'?'heller':'dunkler')+' als der Hintergrund.'
+    : 'Ohne erkannten Sehfeldkreis schätzt die Seite die Zellgröße aus dem Bild.';
   const fi=$('fovInfo');
   if(S.detected && P.autoFov)
     fi.textContent='Sehfeld: Durchmesser '+fmt(2*S.fov.r/S.scale)+' px im Foto, also '+fmt(S.pxPerUm/S.scale,2)+' px pro µm.';
@@ -727,12 +820,19 @@ function setImage(img,name){
                    name:(name||'hefe').replace(/\.[^.]+$/,'')});
   S.detected=detectFov();
   for(const k of ['fovR','fovX','fovY']) $(k).value=0; syncLabels();
-  if(!S.detected && !$('manualSize').checked){
+  S.est=null;
+  if(!S.detected && !manualByUser){
+    // Ohne Sehfeldkreis gibt es keinen Maßstab: Zellgröße aus dem Bild selbst schätzen.
+    S.est=estimateCellSize();
     $('manualSize').checked=true; $('manualPx').disabled=false;
-    $('manualPx').value=Math.max(4,Math.round(Math.max(img.naturalWidth,img.naturalHeight)/120));
+    $('manualPx').value = S.est ? Math.max(3,Math.round(S.est.d/s))
+                                : Math.max(4,Math.round(Math.max(img.naturalWidth,img.naturalHeight)/120));
+  } else if(S.detected && !manualByUser && $('manualSize').checked){
+    // automatisch gesetzte Pixelgröße vom vorigen Bild nicht auf ein Foto mit Sehfeld übertragen
+    $('manualSize').checked=false; $('manualPx').disabled=true;
   }
   $('drop').hidden=true; view.hidden=false; view.width=W; view.height=H;
-  for(const id of ['zoom','btnReset','btnPng','btnCsv']) $(id).disabled=false;
+  for(const id of ['zoom','btnReset','btnPng','btnCsv','btnEst']) $(id).disabled=false;
   applyZoom(); analyze();
 }
 function applyZoom(){
@@ -748,6 +848,7 @@ function syncLabels(){
   for(const k of ['fovR','fovX','fovY']){ const v=+$(k).value; $(k+'Val').textContent=(v>0?'+':v<0?'−':'±')+fmt(Math.abs(v),v%1?1:0)+' %'; }
   $('sensVal').textContent=fmt(+$('sens').value,+$('sens').value%1?1:0);
   $('minDistVal').textContent=fmt(+$('minDist').value,2)+' × Ø';
+  $('roundTolVal').textContent=fmt(+$('roundTol').value,2);
   $('vitalVal').textContent=fmt(+$('vitalThr').value,2);
   $('budFracVal').textContent=fmt(+$('budFrac').value,2)+' × Zelle';
   $('maskKVal').textContent=fmt(+$('maskK').value,2);
@@ -766,9 +867,20 @@ $('fovUm').addEventListener('input',()=>{
   document.querySelector('input[name=mag][value="'+(m||'custom')+'"]').checked=true;
 });
 $('manualSize').addEventListener('change',()=>{
+  manualByUser=$('manualSize').checked;
   if($('manualSize').checked && S.work) $('manualPx').value=Math.max(2,Math.round(2*S.r/S.scale));
 });
-for(const id of ['fovUm','cellUm','autoFov','margin','fovR','fovX','fovY','manualSize','manualPx','sens','minDist','polarity','vital','vitalThr','bud','budFrac','maskK','budRule','chamber','depth','dilution']){
+$('manualPx').addEventListener('input',()=>{ manualByUser=true; });
+$('btnEst').addEventListener('click',()=>{
+  if(!S.work) return;
+  manualByUser=false;
+  S.est=estimateCellSize();
+  if(S.est){
+    $('manualSize').checked=true; $('manualPx').value=Math.max(3,Math.round(S.est.d/S.scale));
+  } else showError('Aus diesem Bild ließ sich keine Zellgröße schätzen. Bitte den Durchmesser einer Zelle in Pixeln eintragen.');
+  syncLabels(); analyze();
+});
+for(const id of ['fovUm','cellUm','autoFov','margin','fovR','fovX','fovY','manualSize','manualPx','sens','minDist','roundTol','polarity','vital','vitalThr','bud','budFrac','maskK','budRule','chamber','depth','dilution']){
   $(id).addEventListener('input',()=>{syncLabels();schedule();});
   $(id).addEventListener('change',()=>{syncLabels();schedule();});
 }
