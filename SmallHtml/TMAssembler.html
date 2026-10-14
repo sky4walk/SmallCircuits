@@ -97,6 +97,9 @@
   .reg-cell.changed { border-color:var(--yellow); background:#2d2208; }
   .reg-name { font-size:10px; color:var(--muted); }
   .reg-val  { font-size:14px; font-weight:700; color:var(--text); }
+  .reg-addr { font-size:9px; color:var(--syn-comment); }
+  .reg-cell.ptr { border-color:var(--syn-macro-kw); }
+  .reg-ptr  { font-size:10px; color:var(--syn-label-ref); }
 
   #log-pane { height:160px; border-top:1px solid var(--border); display:flex; flex-direction:column; overflow:hidden; }
   #log { flex:1; overflow-y:auto; padding:6px 10px; font-size:11px; line-height:1.7; color:var(--muted); }
@@ -145,6 +148,19 @@
   #addr-mapping .c { color:var(--muted); font-style:italic; }
   #modal-footer { padding:12px 16px; border-top:1px solid var(--border);
                   display:flex; gap:8px; justify-content:flex-end; }
+
+  #site-footer { flex-shrink:0; padding:3px 12px; font-size:10px; color:var(--muted);
+                 background:var(--panel); border-top:1px solid var(--border); }
+  #site-footer a { color:var(--muted); text-decoration:none; }
+  #site-footer a:hover { color:var(--accent); }
+
+  /* Schmale Bildschirme: Bereiche untereinander, Seite scrollt */
+  @media (max-width: 700px) {
+    body { height:auto; min-height:100vh; overflow:auto; }
+    #main { grid-template-columns:minmax(0,1fr); grid-template-rows:65vh auto auto; overflow:visible; }
+    #editor-pane { grid-row:auto; border-right:none; border-bottom:1px solid var(--border); }
+    #debug-pane { max-height:40vh; }
+  }
 </style>
 </head>
 <body>
@@ -163,6 +179,7 @@
     <option value="hello">Zähler / Hello</option>
     <option value="tmcompile">↳ TM-Compile Demo</option>
     <option value="wordsize">3-Bit Wortbreite</option>
+    <option value="zeiger">Zeiger / Array (selbstmod. Code)</option>
     <option value="utm">TMonRAM – UTM</option>
   </select>
   <button class="btn primary" id="btn-run"  disabled>▶ Run</button>
@@ -193,7 +210,9 @@
   </div>
 
   <div id="debug-pane">
-    <div class="pane-header"><span>Register / Speicher</span></div>
+    <div class="pane-header"><span>Register / Speicher</span>
+      <label style="margin-left:auto;cursor:pointer" title="Makrolokale Hilfsvariablen (_mN_…) anzeigen">
+        <input type="checkbox" id="show-helpers" style="vertical-align:middle"> Hilfsvariablen zeigen</label></div>
     <div id="registers-wrap"><span style="color:var(--muted);padding:8px">Noch kein Programm geladen.</span></div>
   </div>
 
@@ -201,6 +220,10 @@
     <div class="pane-header"><span>Ausführungslog</span></div>
     <div id="log"><div class="log-info">Bereit.</div></div>
   </div>
+</div>
+
+<div id="site-footer">
+  <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">Interessengemeinschaft Informationstechnik Zwieseltal</a>
 </div>
 
 <!-- ── Cross-Compile-Dialog ── -->
@@ -395,6 +418,76 @@ Start:DIV(A,B,t1)
       MUL(B,t1,t2)
       SUB(A,t2,C)
 END
+
+# ── Zeiger / indirekter Zugriff (selbstmodifizierender Code) ──
+# Ein Parameter-Label  INC(P:a)  benennt die Operandenzelle dieser
+# Instruktion: P enthält die Adresse, auf die sie zugreift. Wer P
+# ändert, lenkt die Instruktion auf eine andere Zelle um.
+
+MAKRO:ADR(A,B)
+# B = Adresse der Zelle A (Operand einer nie ausgeführten Instruktion lesen)
+      JMP(Start)
+Dummy:INC(Op:A)
+Start:CPY(Op,B)
+END
+
+MAKRO:Adr2Var(A,B)
+      ADR(A,B)
+END
+
+MAKRO:LD(A,B,C)
+# C = Speicher[Adresse(A) + B]   (A[B] lesen)
+# Zelle wird gezählt (n), wiederhergestellt und dabei nach m kopiert;
+# erst zum Schluss C = m – so darf C auch A[B] selbst oder B sein.
+      JMP(Start)
+p:    0
+t:    0
+n:    0
+z:    0
+Start:ADR(A,p)
+      ADD(p,B,t)
+      CPY(t,R1)
+      CPY(t,R2)
+      CPY(t,R3)
+      CLR(n)
+m:    0
+L1:   BNZ(R1:z,D1)
+      JMP(L2)
+D1:   DEC(R2:z)
+      INC(n)
+      JMP(L1)
+L2:   CLR(m)
+      BZ(n,L4)
+L3:   INC(R3:z)
+      INC(m)
+      DEC(n)
+      BNZ(n,L3)
+L4:   CPY(m,C)
+END
+
+MAKRO:ST(A,B,C)
+# Speicher[Adresse(A) + B] = C   (A[B] schreiben)
+# Zieladresse und Wert werden vorher gesichert – C oder B dürfen A[B] sein.
+      JMP(Start)
+p:    0
+t:    0
+n:    0
+z:    0
+Start:ADR(A,p)
+      ADD(p,B,t)
+      CPY(t,R1)
+      CPY(t,R2)
+      CPY(t,R3)
+      CPY(C,n)
+L1:   BNZ(R1:z,D1)
+      JMP(L2)
+D1:   DEC(R2:z)
+      JMP(L1)
+L2:   BZ(n,End)
+L3:   INC(R3:z)
+      DEC(n)
+      BNZ(n,L3)
+END
 `;
 
 // ══════════════════════════════════════════════════════════════════
@@ -416,7 +509,7 @@ End:`,
 
 fib: `# Fibonacci: fib(n)
 # F(0)=0, F(1)=1, F(2)=1, F(3)=2, F(4)=3, F(5)=5 ...
-# Ergebnis in: b
+# Ergebnis in: a  (= F(n), bei n=7 also 13; b enthält F(n+1))
 n:   7
 a:   0
 b:   1
@@ -502,11 +595,12 @@ wordsize: `# Wortbreiten-Demo: DEC durch INC simuliert
 #   2^N - 1 mal INC == 1 mal DEC
 # Bei 3 Bit:  7 INCs = 1 DEC
 #
-# HINWEIS: Die anderen Beispiele (Fakultät, Fibonacci, GGT, MUL, DIV)
-# nutzen WORDSIZE NICHT. Grund: Die Makros in der STDLIB (SUB, EQU, GT,
-# MODULO) verlassen sich darauf dass SUB(A,B,C) bei B>A zu 0 klemmt
-# (Semantik natürlicher Zahlen). Bei endlicher Wortbreite wrapt das
-# stattdessen um und die Vergleichs-Makros funktionieren nicht mehr.
+# HINWEIS: WORDSIZE wirkt nur auf INC (und die Anfangswerte). DEC bleibt
+# auch mit WORDSIZE bei 0 stehen, deshalb funktionieren SUB, EQU, GT usw.
+# weiter – solange kein Wert über 2^N - 1 hinauswächst.
+# Beim TM-Export stehen die Datenzellen mit N Bit auf dem Band, die
+# Programmzellen (Adressen) so breit wie nötig; INC läuft dort ebenfalls
+# bei 2^N über.
 #
 # WORDSIZE ist also primär nützlich für:
 #   1. Hardware-nahe Simulation (wie Andres TM mit 3-Bit-Worten)
@@ -539,218 +633,29 @@ End:
 # Erwartet: x=0, counter=3 (drei DECs ueber 7-INC-Trick)`,
 
 utm: `# TMonRAM – Universelle Turingmaschine auf dem RAM-Simulator
-# (C) 2003 by www.andrebetz.de
+# (C) 2003 by www.andrebetz.de, überarbeitet 2026
 # ─────────────────────────────────────────────────────────
 # Dieses Programm simuliert eine Turingmaschine auf dem RAM.
-# Die TM ist als flaches Array kodiert:
-#   TMDef[]: State, ReadSymbol, NewState, WriteSymbol, Direction, ...
-#   Direction: 0 = rechts, 1 = links
+# Die TM ist als flaches Array kodiert (5 Zahlen pro Regel):
+#   TMDef[]: Zustand, Lesesymbol, Folgezustand, Schreibsymbol, Richtung
+#   Richtung: 0 = rechts, 1 = links
+# Band und Regeln werden mit LD/ST (STDLIB) indirekt gelesen und
+# geschrieben – die arbeiten mit selbstmodifizierendem Code.
 #
-# Enthaltene Beispiel-TM: erhöht eine Binärzahl um 1
-#   Band (TMBand): initial alle 0
-#   TM-Definition (TMDef): 0,0,1,0,0, 0,1,1,1,0, 1,0,1,0,1, 1,1,0,1,1
-#   Bedeutung: State0+Read0 → State1,Write0,R
-#              State0+Read1 → State1,Write1,R
-#              State1+Read0 → State1,Write0,L  (Halt nicht explizit nötig)
-#              State1+Read1 → State0,Write1,L
-# ─────────────────────────────────────────────────────────
-# ACHTUNG: Dieses Programm enthält alle Makros selbst –
-# die SubRoutine-Bibliothek ist hier direkt eingebettet.
+# Enthaltene Beispiel-TM: Binärzahl um 1 erhöhen
+#   Band: 1 0 1 1 2   (2 = Endmarke), Kopf auf Feld 0, Zustand 0
+#   (0,0)→(0,0,R)  (0,1)→(0,1,R)  (0,2)→(1,2,L)
+#   (1,1)→(1,0,L)  (1,0)→(2,1,R)
+#   Zustand 2 hat keine Regel → die UTM hält.
+#
+# Erwartet am Ende (11 + 1 = 12):
+#   TMBand = 1 1 0 0 2 0 0 0,  State = 2,  BandPos = 2
 # ─────────────────────────────────────────────────────────
 
-MAKRO:JMP(A)
-   BNZ(t1,A)
-t1: 1
-END
-
-MAKRO:CLR(A)
-Start:BNZ(A,t1)
-      JMP(End)
-t1:   DEC(A)
-      JMP(Start)
-END
-
-MAKRO:BZ(A,B)
-      BNZ(A,End)
-      JMP(B)
-END
-
-MAKRO:CPY(A,B)
-      JMP(Start)
-t1:   0
-Start:CLR(B)
-      BZ(A,End)
-S1:   DEC(A)
-      INC(t1)
-      INC(B)
-      BNZ(A,S1)
-S2:   DEC(t1)
-      INC(A)
-      BNZ(t1,S2)
-END
-
-MAKRO:ADD(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-Start:CPY(A,C)
-      CPY(B,t2)
-      BZ(t2,End)
-S1:   INC(C)
-      DEC(t2)
-      BNZ(t2,S1)
-END
-
-MAKRO:SUB(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-Start:CPY(A,C)
-      CPY(B,t2)
-      BZ(t2,End)
-S1:   DEC(C)
-      DEC(t2)
-      BNZ(t2,S1)
-END
-
-MAKRO:EQU(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-t3:   0
-Start:SUB(A,B,t1)
-      SUB(B,A,t2)
-      ADD(t1,t2,t3)
-      BZ(t3,C)
-END
-
-MAKRO:NEQ(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-t3:   0
-Start:SUB(A,B,t1)
-      SUB(B,A,t2)
-      ADD(t1,t2,t3)
-      BNZ(t3,C)
-END
-
-MAKRO:GT(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-Start:EQU(A,B,End)
-      CPY(A,t1)
-      CPY(B,t2)
-S1:   BZ(t1,End)
-      BZ(t2,C)
-      DEC(t1)
-      DEC(t2)
-      JMP(S1)
-END
-
-MAKRO:GTE(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-Start:EQU(A,B,C)
-      CPY(A,t1)
-      CPY(B,t2)
-S1:   BZ(t1,End)
-      BZ(t2,C)
-      DEC(t1)
-      DEC(t2)
-      JMP(S1)
-END
-
-MAKRO:MUL(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-t3:   0
-Start:CLR(C)
-      CLR(t2)
-      BZ(A,End)
-      BZ(B,End)
-      CPY(B,t1)
-S1:   ADD(A,t2,t3)
-      CPY(t3,t2)
-      DEC(t1)
-      BNZ(t1,S1)
-      CPY(t2,C)
-END
-
-MAKRO:DIV(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   0
-t3:   0
-Start:CLR(C)
-      CLR(t3)
-      BZ(A,End)
-      BZ(B,End)
-      GT(B,A,End)
-      CPY(A,t1)
-S1:   SUB(t1,B,t2)
-      CPY(t2,t1)
-      INC(C)
-      GT(B,t1,End)
-      JMP(S1)
-END
-
-MAKRO:NAND(A,B,C)
-      JMP(Start)
-t1:   0
-t2:   1
-Start:CLR(C)
-      ADD(A,B,t1)
-      GT(t1,t2,End)
-      INC(C)
-END
-
-MAKRO:Var2Adr(A,B)
-      INC(R1:A)
-      DEC(A)
-      CPY(B,R1)
-END
-
-MAKRO:Adr2Var(A,B)
-      INC(R1:A)
-      DEC(A)
-      CPY(R1,B)
-END
-
-MAKRO:LD(A,B,C)
-      JMP(Start)
-t1:   0
-r0:   0
-Start:Adr2Var(A,r0)
-      ADD(r0,B,t1)
-      Var2Adr(A,t1)
-      CPY(A,C)
-      Var2Adr(A,r0)
-END
-
-MAKRO:ST(A,B,C)
-      JMP(Start)
-t1:   0
-r0:   0
-Start:Adr2Var(A,r0)
-      ADD(r0,B,t1)
-      Var2Adr(A,t1)
-      CPY(C,A)
-      Var2Adr(A,r0)
-END
-
-# ══════════════════════════════════════════════════════
-# UTM – Universelle Turingmaschinen-Simulation
-# ══════════════════════════════════════════════════════
-
-MAKRO:UTM()
                JMP(Start)
-TMBand[40]:    0,0,0,0,0,0,0,0,0,0
-TMDef[20]:     0,0,1,0,0,0,1,1,1,0,1,0,1,0,1,1,1,0,1,1
-Length:        20
+TMBand[8]:     1,0,1,1,2,0,0,0
+TMDef[25]:     0,0,0,0,0, 0,1,0,1,0, 0,2,1,2,1, 1,1,1,0,1, 1,0,2,1,0
+Length:        25
 BandPos:       0
 State:         0
 Read:          0
@@ -789,12 +694,47 @@ S3:            LD(TMDef,looptmp1,State)
                JMP(Start)
 BL:            DEC(BandPos)
                JMP(Start)
-END
+End:`,
 
-# ══════════════════════════════════════════════════════
-# Hauptprogramm: UTM starten
-# ══════════════════════════════════════════════════════
-UTM()`,
+zeiger: `# Zeiger/Array mit selbstmodifizierendem Code
+# ===========================================
+# Eine Instruktion kann ihre OPERANDENZELLE benennen:   INC(P:a)
+#  - P ist dann eine normale Speicherzelle. Ihr Inhalt ist die Adresse,
+#    auf die diese Instruktion zugreift (anfangs die Adresse von a).
+#  - Wer P ändert (INC(P), DEC(P), CPY(x,P) ...), lenkt die Instruktion
+#    auf eine andere Zelle um. Ein Sprung auf P ist nicht erlaubt.
+#  - Geht auch bei DEC(P:a) und BNZ(P:a,Ziel). In Makros sind solche
+#    Labels makrolokal, sonst global und müssen eindeutig sein.
+#  - Arrays liegen zusammenhängend: a[i] hat die Adresse von a plus i.
+#    ADR(a,x) liefert die Adresse von a, LD/ST lesen und schreiben a[i].
+
+a[4]:   3,1,4,1
+k:      4
+
+# Teil 1 – direkt: jedes Feld von a um 1 erhöhen
+L1:     INC(P:a)        # erhöht die Zelle, deren Adresse in P steht
+        INC(P)          # Zeiger eine Zelle weiter
+        DEC(k)
+        BNZ(k,L1)
+# jetzt: a = 4,2,5,2  und P = Adresse von a + 4
+
+# Teil 2 – mit LD/ST: Summe bilden und jedes Feld nochmal erhöhen
+i:      0
+n:      4
+x:      0
+sum:    0
+tmp:    0
+L2:     BZ(n,Fertig)
+        LD(a,i,x)       # x = a[i]
+        ADD(sum,x,tmp)
+        CPY(tmp,sum)
+        INC(x)
+        ST(a,i,x)       # a[i] = x
+        INC(i)
+        DEC(n)
+        JMP(L2)
+Fertig:
+# Erwartet: sum = 13 (4+2+5+2), a = 5,3,6,3`,
 };
 
 // ══════════════════════════════════════════════════════════════════
@@ -803,7 +743,7 @@ UTM()`,
 let knownMacroNames = new Set([
   'JMP','CLR','BZ','CPY','ADD','SUB','MUL','DIV',
   'EQU','NEQ','GT','GTE','NAND','MODULO','SIZEOF','B_NAND',
-  'VAR2ADR','ADR2VAR','LD','ST','NOT','POP','PSH','JSR','RTS','OUT',
+  'ADR','ADR2VAR','LD','ST','NOT','POP','PSH','JSR','RTS','OUT',
 ]);
 const BUILTINS = /^(INC|CLR|BNZ|DEC)$/i;
 
@@ -930,15 +870,20 @@ const btnReset   = document.getElementById('btn-reset');
 const fileInput  = document.getElementById('file-input');
 const exSel      = document.getElementById('example-select');
 const sourceName = document.getElementById('source-name');
+const showHelpersEl = document.getElementById('show-helpers');
 
 // ══════════════════════════════════════════════════════════════════
 // SIM STATE
 // ══════════════════════════════════════════════════════════════════
-let program=[], memory={}, pc=0, steps=0;
-let running=false, runTimer=null, prevMem={};
-let activeHL=-1, instToLine=[], instToTop=[], instToStack=[], macros={};
+// Flaches Speichermodell: mem[] enthält Daten UND Programm (siehe LINKER)
+let program=[], mem=[], image=null, pc=0, steps=0;
+let running=false, runTimer=null, prevMem=[];
+let activeHL=-1, instToStack=[], macros={};
+let lastIdx=-1, finished=false;             // zuletzt ausgeführte Instruktion / Programm angehalten
+let warnedAddr=new Set(), warnedPc=new Set();   // Hinweise nur einmal pro Adresse
 let viewLevel = 0;  // aktuelle Tiefe im Aufruf-Stack die der User betrachtet
 let wordMask  = 0;  // 0 = unbegrenzt. Sonst 2^N - 1 für N-Bit-Worte
+let compiled  = false;  // false = Editor geändert / Reset → vor Run/Step neu übersetzen
 
 // ══════════════════════════════════════════════════════════════════
 // LOGGING
@@ -984,15 +929,28 @@ function updateUI(newActive){
 }
 function updateStepCount(){ stepCountEl.textContent=`Schritte: ${steps}`; }
 function updateRegisters(){
-  regsWrap.innerHTML='';
-  const entries=Object.entries(memory);
-  if(!entries.length){ regsWrap.innerHTML='<span style="color:var(--muted);padding:8px">Keine Variablen.</span>'; return; }
-  for(const [k,v] of entries){
-    const cell=document.createElement('div');
-    cell.className='reg-cell'+(prevMem[k]!==v?' changed':'');
-    cell.innerHTML=`<div class="reg-name">${esc(k)}</div><div class="reg-val">${v}</div>`;
-    regsWrap.appendChild(cell);
+  if(!image){ regsWrap.innerHTML='<span style="color:var(--muted);padding:8px">Keine Variablen.</span>'; return; }
+  const cell = (name, addr, kind) => {
+    const v = mem[addr];
+    const changed = prevMem[addr] !== v ? ' changed' : '';
+    const extra = kind === 'ptr'
+      ? `<div class="reg-ptr">→ ${esc(describeAddr(image, v))}</div>` : '';
+    return `<div class="reg-cell${changed}${kind === 'ptr' ? ' ptr' : ''}" title="Zelle ${addr}">` +
+           `<div class="reg-name">${esc(name)} <span class="reg-addr">@${addr}</span></div>` +
+           `<div class="reg-val">${v}</div>${extra}</div>`;
+  };
+  let html = '';
+  const showHelpers = showHelpersEl.checked;
+  const visible = name => showHelpers || !/^_m\d+_/.test(name);
+  image.data.forEach((d, i) => { if(!d.hidden && visible(d.display)) html += cell(d.display, i, 'var'); });
+  // Parameter-Labels = Operandenzellen im Programm (Zeiger)
+  for(const [pl, ins] of Object.entries(image.plInfo)) if(visible(pl)) html += cell(pl, ins.addr + 1, 'ptr');
+  // Programmzellen, die als Daten verändert wurden (ohne Parameter-Label)
+  for(let a = image.progStart; a < mem.length; a++){
+    if(mem[a] !== image.mem[a] && !image.ptrCells.has(a))
+      html += cell(`⚠ ${describeAddr(image, a)}`, a, 'prog');
   }
+  regsWrap.innerHTML = html || '<span style="color:var(--muted);padding:8px">Keine Variablen.</span>';
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1023,6 +981,7 @@ function extractMacros(lines){
 }
 
 let globalMacroId = 0;
+let usedMacroNames = new Set();   // alle bei der letzten Expansion benutzten Makros (auch verschachtelt)
 
 function expandMacros(lines, macs){
   const out = [];
@@ -1046,6 +1005,7 @@ function expandMacros(lines, macs){
     if(cM && macs[cM[1].toUpperCase()]){
       const mn  = cM[1].toUpperCase();
       const mac = macs[mn];
+      usedMacroNames.add(mn);
       const uid = `_m${globalMacroId++}_`;
 
       const args = cM[2].split(',').map(a=>a.trim()).filter((a,i,arr)=>arr.length>1||a!='');
@@ -1056,6 +1016,8 @@ function expandMacros(lines, macs){
       for(const {text: bl} of mac.body){
         const lm = bl.trim().match(/^([A-Za-z_]\w*)\s*:/);
         if(lm) localLabels.add(lm[1]);
+        // Parameter-Labels  INC(P:a) / BNZ(P:a,L)  sind ebenfalls makrolokal
+        for(const pm of bl.matchAll(/\(\s*([A-Za-z_]\w*)\s*:/g)) localLabels.add(pm[1]);
       }
       for(const p of Object.keys(subst)) localLabels.delete(p);
 
@@ -1089,175 +1051,365 @@ function expandMacros(lines, macs){
   return out;
 }
 
-function assemble(expLines){
-  const labelMap={}, vars={}, stripped=[];
-  for(const {text,origIdx,callStack} of expLines){
-    const t=text.trim(); if(!t){ stripped.push({label:null,rest:'',origIdx,callStack}); continue; }
-    const lm=t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/); let label=null,rest=t;
-    if(lm){label=lm[1];rest=lm[2].trim();}
-    if(label && /^-?\d/.test(rest)){
-      const arrM=label.match(/(\w+)\[(\d+)\]/);
-      if(arrM){ const base=arrM[1],size=parseInt(arrM[2]),vals=rest.split(',').map(v=>parseInt(v.trim())||0); for(let i=0;i<size;i++) vars[`${base}__${i}`]=vals[i]||0; vars[base]=vals[0]||0; }
-      else vars[label]=parseInt(rest)||0;
-      stripped.push({label:null,rest:'',origIdx,callStack,varDecl:true}); continue;
-    }
-    stripped.push({label,rest,origIdx,callStack});
-  }
-  let pos=0; const tmp=[];
-  for(const {label,rest,origIdx,callStack,varDecl} of stripped){
-    if(varDecl||(!rest&&!label)) continue;
-    if(label&&!rest){ labelMap[label]=pos; continue; }
-    if(label) labelMap[label]=pos;
-    tmp.push({rest,origIdx,callStack}); pos++;
-  }
-  const prog=[], i2l=[], i2t=[], i2s=[];
-  for(const {rest,origIdx,callStack} of tmp){
-    prog.push(parseInstr(rest));
-    i2l.push(origIdx);
-    const cs = callStack || [origIdx];
-    i2t.push(cs[0]);  // erste Ebene = Hauptprogramm
-    i2s.push(cs);     // ganzer Stack
-  }
-  return {program:prog,memory:{...vars},labelMap,instrToLine:i2l,instrToTop:i2t,instrToStack:i2s};
+// ══════════════════════════════════════════════════════════════════
+// LINKER – ein Speicherabbild für Simulator UND TM-Export
+// ══════════════════════════════════════════════════════════════════
+// Maschinenbefehle (von-Neumann, Befehle und Daten im selben Speicher):
+//   BNZ(p,j)  3 Zellen [0, p, j]  Speicher[p] ≠ 0 → PC = j, sonst PC += 3
+//   INC(p)    2 Zellen [1, p]     Speicher[p] += 1 (TM: modulo 2^N)
+//   DEC(p)    2 Zellen [2, p]     Speicher[p] -= 1, bei 0 bleibt 0
+// Opcode-Dekodierung wie in RAMonTM: 0 = BNZ, ungerade = INC, sonst DEC.
+// Layout: zuerst alle Daten (Variablen, Arrays zusammenhängend), dahinter
+// das Programm, am Ende die Halt-Instruktion BNZ(__EINS, haltAddr).
+// haltAddr = erste Adresse ohne Zelle; der PC startet bei progStart.
+//
+// Parameter-Label  INC(P:a) / DEC(P:a) / BNZ(P:a,L)
+//   P benennt die OPERANDENZELLE dieser Instruktion. P ist damit eine
+//   normale Speicherzelle mit der Adresse, auf die die Instruktion
+//   zugreift (anfangs die von a). Wer P ändert, lenkt die Instruktion um.
+//   Sprung auf P ist verboten. In Makros sind Parameter-Labels makrolokal.
+function opName(v){ return v === 0 ? 'BNZ' : (v % 2 === 1 ? 'INC' : 'DEC'); }
+
+function parseOperand(s){
+  const m = s.match(/^(?:([A-Za-z_]\w*)\s*:\s*)?(\w+)$/);
+  if(!m) return {error: `Ungültiger Operand '${s}'`};
+  return {paramLabel: m[1] || null, reg: m[2]};
 }
 
-function parseInstr(rest){
-  let m;
-  m=rest.match(/^INC\s*\(([^)]+)\)/i); if(m) return{type:'INC',reg:m[1].trim()};
-  m=rest.match(/^CLR\s*\(([^)]+)\)/i); if(m) return{type:'CLR',reg:m[1].trim()};
-  m=rest.match(/^BNZ\s*\(([^,)]+),([^)]+)\)/i); if(m) return{type:'BNZ',reg:m[1].trim(),lbl:m[2].trim()};
-  m=rest.match(/^DEC\s*\(([^)]+)\)/i); if(m) return{type:'DEC',reg:m[1].trim()};
-  return{type:'UNKNOWN',raw:rest};
+function parsePrimitive(rest){
+  let m = rest.match(/^(INC|DEC)\s*\(\s*([^()]*?)\s*\)$/i);
+  if(m){
+    const op = parseOperand(m[2]);
+    return op.error ? op : {type: m[1].toUpperCase(), ...op};
+  }
+  m = rest.match(/^BNZ\s*\(\s*([^(),]*?)\s*,\s*([^(),]*?)\s*\)$/i);
+  if(m){
+    const op = parseOperand(m[1]);
+    if(op.error) return op;
+    if(!/^\w+$/.test(m[2])) return {error: `Ungültiges Sprungziel '${m[2]}'`};
+    return {type: 'BNZ', ...op, lbl: m[2]};
+  }
+  if(/^CLR\s*\(/i.test(rest)) return {error: 'CLR ist kein Maschinenbefehl – bitte das STDLIB-Makro CLR verwenden.'};
+  return {error: `Unbekannte Instruktion: ${rest}`};
+}
+
+function linkProgram(expLines){
+  const err = (msg, idx) => ({error: (idx !== undefined && idx >= 0) ? `Zeile ${idx + 1}: ${msg}` : msg});
+  const data = [];          // {name, init, display, line, hidden?}
+  const dataIdx = {};       // Name -> Adresse
+  const instrs = [];
+  const labels = {};        // Sprung-Label -> Instruktions-Index
+  const labelLine = {};
+  let pending = [];         // Labels, die auf die nächste Instruktion zeigen
+  const warnings = [];
+
+  for(const {text, origIdx, callStack} of expLines){
+    const t = text.trim(); if(!t) continue;
+    const lm = t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)$/);
+    let label = null, rest = t;
+    if(lm){ label = lm[1]; rest = lm[2].trim(); }
+
+    // Datenzelle(n): "name: zahl" oder "name[n]: z0,z1,..."
+    if(label && /^-?\d/.test(rest)){
+      const vals = rest.split(',').map(v => Math.max(0, parseInt(v.trim()) || 0));
+      const arrM = label.match(/^(\w+)\[(\d+)\]$/);
+      const base = arrM ? arrM[1] : label;
+      const size = arrM ? Math.max(1, parseInt(arrM[2])) : 1;
+      if(dataIdx[base] !== undefined || labels[base] !== undefined || pending.includes(base))
+        return err(`'${base}' ist doppelt definiert.`, origIdx);
+      for(let i = 0; i < size; i++){
+        const name = i === 0 ? base : `${base}[${i}]`;
+        dataIdx[name] = data.length;
+        data.push({name, init: vals[i] || 0, display: arrM ? `${base}[${i}]` : base, line: origIdx});
+      }
+      continue;
+    }
+
+    if(label){
+      if(labels[label] !== undefined || pending.includes(label) || dataIdx[label] !== undefined)
+        return err(`Label '${label}' ist doppelt definiert.`, origIdx);
+      pending.push(label); labelLine[label] = origIdx;
+    }
+    if(!rest) continue;
+
+    const ins = parsePrimitive(rest);
+    if(ins.error) return err(ins.error, origIdx);
+    for(const l of pending) labels[l] = instrs.length;
+    pending = [];
+    ins.origIdx = origIdx;
+    ins.callStack = callStack || [origIdx];
+    instrs.push(ins);
+  }
+
+  // Parameter-Labels: eindeutig, keine Kollision mit Variablen/Sprung-Labels
+  const plInfo = {};
+  for(const ins of instrs){
+    const pl = ins.paramLabel; if(!pl) continue;
+    if(plInfo[pl]) return err(`Parameter-Label '${pl}' ist mehrfach definiert (zuerst in Zeile ${plInfo[pl].origIdx + 1}).`, ins.origIdx);
+    if(dataIdx[pl] !== undefined) return err(`Parameter-Label '${pl}' hat denselben Namen wie eine Variable.`, ins.origIdx);
+    if(labels[pl] !== undefined || pending.includes(pl)) return err(`Parameter-Label '${pl}' hat denselben Namen wie ein Sprung-Label.`, ins.origIdx);
+    plInfo[pl] = ins;
+  }
+
+  // Nicht deklarierte Operanden wie bisher automatisch mit 0 anlegen
+  for(const ins of instrs){
+    const r = ins.reg;
+    if(dataIdx[r] !== undefined || plInfo[r]) continue;
+    if(labels[r] !== undefined || pending.includes(r))
+      return err(`'${r}' ist ein Sprung-Label und keine Speicherzelle.`, ins.origIdx);
+    dataIdx[r] = data.length;
+    data.push({name: r, init: 0, display: r, line: ins.origIdx});
+    warnings.push(`Variable '${r}' nicht deklariert – mit 0 angelegt (Zeile ${ins.origIdx + 1}).`);
+  }
+
+  // Halt-Instruktion; Labels am Programmende zeigen auf sie
+  let oneName = '__EINS';
+  while(dataIdx[oneName] !== undefined || plInfo[oneName]) oneName += '_';
+  dataIdx[oneName] = data.length;
+  data.push({name: oneName, init: 1, display: oneName, hidden: true, line: -1});
+  instrs.push({type: 'BNZ', reg: oneName, paramLabel: null, lbl: null, isHalt: true, origIdx: -1, callStack: []});
+  for(const l of pending) labels[l] = instrs.length - 1;
+
+  // Adressen vergeben
+  const progStart = data.length;
+  let a = progStart;
+  for(const ins of instrs){ ins.addr = a; a += ins.type === 'BNZ' ? 3 : 2; }
+  const memSize = a, haltAddr = memSize;
+
+  const nameAddr = {...dataIdx};
+  const ptrCells = new Map();               // Operandenzelle -> Parameter-Label
+  for(const [pl, ins] of Object.entries(plInfo)){
+    nameAddr[pl] = ins.addr + 1;
+    ptrCells.set(ins.addr + 1, pl);
+  }
+
+  // Sprungziele
+  for(const ins of instrs){
+    if(ins.type !== 'BNZ') continue;
+    if(ins.isHalt){ ins.target = haltAddr; continue; }
+    if(labels[ins.lbl] !== undefined){ ins.target = instrs[labels[ins.lbl]].addr; continue; }
+    if(plInfo[ins.lbl]) return err(`Sprung auf das Parameter-Label '${ins.lbl}' ist nicht erlaubt (das ist eine Datenzelle).`, ins.origIdx);
+    if(dataIdx[ins.lbl] !== undefined) return err(`Sprungziel '${ins.lbl}' ist eine Variable, kein Label.`, ins.origIdx);
+    return err(`Label '${ins.lbl}' nicht gefunden.`, ins.origIdx);
+  }
+
+  // Speicher füllen
+  const mem = new Array(memSize).fill(0);
+  data.forEach((d, i) => { mem[i] = d.init; });
+  const addrToInstr = new Map();
+  instrs.forEach((ins, k) => {
+    addrToInstr.set(ins.addr, k);
+    mem[ins.addr]     = ins.type === 'BNZ' ? 0 : ins.type === 'INC' ? 1 : 2;
+    mem[ins.addr + 1] = nameAddr[ins.reg];
+    if(ins.type === 'BNZ') mem[ins.addr + 2] = ins.target;
+  });
+
+  return {mem, data, instrs, addrToInstr, nameAddr, plInfo, ptrCells, labels,
+          progStart, memSize, haltAddr, oneName, warnings};
+}
+
+// Name einer Adresse für Anzeige/Meldungen
+function describeAddr(img, a){
+  if(!img) return '';
+  if(!(a >= 0 && a < img.memSize)) return a === img.haltAddr ? 'Programmende' : 'außerhalb des Speichers';
+  if(a < img.progStart) return img.data[a].display;
+  if(img.ptrCells.has(a)) return `Operand ${img.ptrCells.get(a)}`;
+  // Instruktion suchen, zu der die Zelle gehört
+  for(let s = a; s >= img.progStart && s > a - 3; s--){
+    const k = img.addrToInstr.get(s);
+    if(k !== undefined){
+      const ins = img.instrs[k];
+      const part = s === a ? 'Opcode' : (a - s === 1 ? 'Operand' : 'Sprungziel');
+      return `${part} von ${ins.isHalt ? 'Halt-Instruktion' : ins.type + (ins.origIdx >= 0 ? ' (Zeile ' + (ins.origIdx + 1) + ')' : '')}`;
+    }
+  }
+  return `Programmzelle ${a}`;
+}
+
+const WORDSIZE_RX = /^[ \t]*WORDSIZE\s*:\s*(\d+)\s*(?:#.*)?$/im;
+
+// Quelltext → Speicherabbild (WORDSIZE, Makros, Linker)
+function buildImage(src){
+  globalMacroId = 0;
+  usedMacroNames = new Set();
+  const warnings = [];
+  let wordBits = 0;
+  const ws = src.match(WORDSIZE_RX);
+  if(ws){
+    const bits = parseInt(ws[1]);
+    if(bits >= 1 && bits <= 30) wordBits = bits;
+    else warnings.push(`WORDSIZE muss 1-30 sein (war ${bits}) – ignoriert.`);
+    src = src.replace(WORDSIZE_RX, '');   // sonst wäre WORDSIZE eine Variable
+  }
+  const {macs, code} = extractMacros(stripComments(src));
+  let expanded;
+  try { expanded = expandMacros(code, macs); }
+  catch(e){ return {error: 'Makro-Fehler: ' + e.message}; }
+  const img = linkProgram(expanded);
+  if(img.error) return img;
+  img.warnings = warnings.concat(img.warnings);
+  img.wordBits = wordBits;
+  img.macs = macs;
+  // Initialwerte der Daten auf die Wortbreite kürzen (wie bisher)
+  if(wordBits){
+    const m = (1 << wordBits) - 1;
+    for(let i = 0; i < img.progStart; i++) img.mem[i] &= m;
+  }
+  // Breiten auf dem TM-Band: Programmzellen (Opcode, Operand = Adresse,
+  // Sprungziel) brauchen N Bit für alle Adressen bis zur Halt-Adresse.
+  // Datenzellen sind bei WORDSIZE genau W Bit breit – INC läuft auf der TM
+  // dann wie im Simulator bei 2^W über (RAMonTM rechnet in der Feldbreite).
+  let maxValue = Math.max(img.haltAddr, 2);
+  for(let a = img.progStart; a < img.memSize; a++) if(img.mem[a] > maxValue) maxValue = img.mem[a];
+  if(!wordBits) for(let a = 0; a < img.progStart; a++) if(img.mem[a] > maxValue) maxValue = img.mem[a];
+  let N = 1;
+  while((1 << N) <= maxValue) N++;
+  img.N = N;
+  img.dataBits = wordBits || N;
+  img.progMask = wordBits ? (1 << N) - 1 : 0;   // ohne WORDSIZE rechnet der Simulator unbegrenzt
+  // Datenzellen, die Adressen halten (ADR/LD/ST), müssen Adressen fassen können
+  const addrMacros = ['ADR','ADR2VAR','LD','ST'].filter(m => usedMacroNames.has(m));
+  if(wordBits && addrMacros.length && img.haltAddr >= (1 << wordBits)){
+    img.warnings.push(`WORDSIZE: ${wordBits} – Datenzellen fassen nur Werte bis ${(1 << wordBits) - 1}, ` +
+      `der Speicher reicht aber bis Adresse ${img.memSize - 1}. ${addrMacros.join('/')} speichern Adressen ` +
+      `in Datenzellen und rechnen dann falsch (im Simulator wie auf der TM).`);
+  }
+  return img;
 }
 
 // ══════════════════════════════════════════════════════════════════
 // COMPILE  –  Editor-Inhalt ist der komplette Source (Stdlib sichtbar)
 // ══════════════════════════════════════════════════════════════════
 function compile(src){
-  globalMacroId = 0;
+  compiled = false;
   clearLog(); log('Kompiliere...','log-info');
-
-  // WORDSIZE-Direktive erkennen: "WORDSIZE: N" auf eigener Zeile setzt N-Bit-Worte
-  // Wirkt auf INC (mod 2^N), DEC (mod 2^N), Variablen-Initialwerte
-  wordMask = 0;
-  const wsMatch = src.match(/^[ \t]*WORDSIZE\s*:\s*(\d+)\s*(?:#.*)?$/im);
-  if(wsMatch){
-    const bits = parseInt(wsMatch[1]);
-    if(bits >= 1 && bits <= 30){
-      wordMask = (1 << bits) - 1;
-      log(`Wortbreite: ${bits} Bit (mod ${wordMask+1})`,'log-info');
-    } else {
-      log(`WORDSIZE muss 1-30 sein (war ${bits}) – ignoriert`,'log-warn');
-    }
+  const img = buildImage(src);
+  if(img.error){
+    log(img.error,'log-error');
+    image = null; mem = []; program = []; instToStack = []; prevMem = [];
+    updateRegisters(); updateUI(-1); updateStepCount();
+    setStatus('FEHLER');
+    return false;
   }
+  image = img; macros = img.macs;
+  wordMask = img.wordBits ? (1 << img.wordBits) - 1 : 0;
+  if(img.wordBits) log(`Wortbreite: ${img.wordBits} Bit (INC modulo ${wordMask + 1}, DEC bleibt bei 0 stehen)`,'log-info');
+  log(`Makros: ${Object.keys(img.macs).join(', ') || '(keine)'}`, 'log-info');
+  for(const w of img.warnings) log(w, 'log-warn');
 
-  // WORDSIZE-Zeile entfernen damit sie nicht als Variablendeklaration interpretiert wird
-  const cleanSrc = src.replace(/^[ \t]*WORDSIZE\s*:\s*\d+\s*(?:#.*)?$/im, '');
-  const allLines = stripComments(cleanSrc);
-  const {macs, code} = extractMacros(allLines);
-  macros = macs;
-  log(`Makros: ${Object.keys(macs).join(', ')||'(keine)'}`, 'log-info');
+  program     = img.instrs;
+  instToStack = program.map(i => i.callStack);
+  mem         = img.mem.slice();
+  prevMem     = mem.slice();
+  pc = img.progStart; steps = 0; viewLevel = 0; lastIdx = -1; finished = false;
+  warnedAddr = new Set(); warnedPc = new Set();
 
-  let expanded;
-  try { expanded = expandMacros(code, macs); }
-  catch(e){ log('Makro-Fehler: '+e.message,'log-error'); setStatus('FEHLER'); return false; }
-
-  let assembled;
-  try { assembled = assemble(expanded); }
-  catch(e){ log('Assembler-Fehler: '+e.message,'log-error'); setStatus('FEHLER'); return false; }
-
-  program    = assembled.program;
-  memory     = assembled.memory;
-  // Initialwerte auf Wortbreite maskieren
-  if(wordMask > 0){
-    for(const k in memory) memory[k] = memory[k] & wordMask;
-  }
-  instToLine = assembled.instrToLine;
-  instToTop  = assembled.instrToTop;
-  instToStack= assembled.instrToStack;
-  viewLevel  = 0;
-  pc=0; steps=0; prevMem={};
-
-  const lm=assembled.labelMap;
-  for(const instr of program){
-    if(instr.type==='BNZ'){
-      instr.target=lm[instr.lbl]!==undefined?lm[instr.lbl]:program.length;
-      if(lm[instr.lbl]===undefined) log(`Warnung: Label '${instr.lbl}' nicht gefunden`,'log-warn');
-    }
-  }
-
-  log(`OK: ${program.length} Instruktionen, ${Object.keys(memory).length} Variablen`,'log-ok');
-  if(!program.length) log('Keine Instruktionen.','log-warn');
+  const nPtr = Object.keys(img.plInfo).length;
+  log(`OK: ${program.length - 1} Instruktionen (+ Halt), Daten 0…${img.progStart - 1}, ` +
+      `Programm ${img.progStart}…${img.memSize - 1}` + (nPtr ? `, ${nPtr} Parameter-Label(s)` : ''),'log-ok');
   updateRegisters(); updateUI(-1); updateStepCount();
+  compiled = true;
+  return true;
+}
+
+// Programm bei Bedarf (neu) übersetzen: nach Änderungen im Editor, nach
+// Reset oder wenn das Programm angehalten hat.
+function ensureCompiled(){
+  if(!compiled || finished || !image){
+    if(!compile(editorEl.value)) return false;
+  }
   return true;
 }
 
 // ══════════════════════════════════════════════════════════════════
-// EXECUTION
+// EXECUTION  (liest Opcode und Operanden zur Laufzeit aus dem Speicher)
 // ══════════════════════════════════════════════════════════════════
-function getReg(n){ if(memory[n]===undefined) memory[n]=0; return memory[n]; }
-function setReg(n,v){
-  if(wordMask>0) memory[n] = v & wordMask;
-  else memory[n] = Math.max(0,v);
+const MAX_STEPS = 50_000_000;
+
+function curIdx(){
+  const k = image ? image.addrToInstr.get(pc) : undefined;
+  return k === undefined ? -1 : k;
 }
 
-// Einen einzelnen Grundbefehl ausführen, gibt true zurück wenn Programm noch läuft
+function haltAtPc(){
+  if(image && pc === image.haltAddr) halt('HALT (Programmende)');
+  else halt(`HALT: PC = ${pc} zeigt auf keine vorhandene Zelle – Programm beendet (RAMonTM hält dort ebenfalls).`);
+  return false;
+}
+
+function fault(msg){
+  log(msg,'log-error');
+  halt('Programm angehalten.');
+  setStatus('FEHLER');
+  return false;
+}
+
+// Einen Maschinenbefehl ausführen; false = Programm hat angehalten
 function execOneInstruction(){
-  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
-  const instr=program[pc]; prevMem={...memory};
-  let nextPc=pc+1;
-  switch(instr.type){
-    case 'INC':
-      if(wordMask>0) setReg(instr.reg,(getReg(instr.reg)+1) & wordMask);
-      else setReg(instr.reg,getReg(instr.reg)+1);
-      break;
-    case 'CLR': setReg(instr.reg,0); break;
-    case 'DEC':
-      if(wordMask>0) setReg(instr.reg,(getReg(instr.reg)-1) & wordMask);
-      else setReg(instr.reg,Math.max(0,getReg(instr.reg)-1));
-      break;
-    case 'BNZ':
-      if(getReg(instr.reg)!==0){
-        if(instr.target===undefined){ log(`Label '${instr.lbl}' fehlt`,'log-error'); halt('FEHLER'); return false; }
-        nextPc=instr.target;
-      }
-      break;
-    case 'UNKNOWN': log(`Unbekannt: ${instr.raw}`,'log-warn'); break;
+  const M = mem.length;
+  if(!(pc >= 0 && pc < M)) return haltAtPc();
+  const k = image.addrToInstr.get(pc);
+  if(k !== undefined) lastIdx = k;
+  else if(!warnedPc.has(pc)){
+    warnedPc.add(pc);
+    log(`Hinweis: PC = ${pc} ist kein Befehlsanfang (${describeAddr(image, pc)}) – Zelleninhalt wird als Befehl ausgeführt.`,'log-warn');
   }
-  steps++; pc=nextPc;
-  if(steps>2_000_000){ halt('STOP (2M Schritte)'); log('Mögliche Endlosschleife.','log-warn'); return false; }
+  const op = mem[pc];
+  const isBnz = op === 0;
+  if(pc + (isBnz ? 2 : 1) >= M) return fault(`Befehl bei Zelle ${pc} reicht über das Speicherende hinaus.`);
+  const a = mem[pc + 1];
+  if(!(a >= 0 && a < M))
+    return fault(`Zugriff auf nicht vorhandene Zelle ${a} (${opName(op)} bei Zelle ${pc}). RAMonTM bliebe hier ebenfalls stehen.`);
+  if(a >= image.progStart && !image.ptrCells.has(a) && !warnedAddr.has(a)){
+    warnedAddr.add(a);
+    log(`Hinweis: ${opName(op)} bei Zelle ${pc} greift auf Programmzelle ${a} zu (${describeAddr(image, a)}).`,'log-warn');
+  }
+  if(isBnz){
+    pc = mem[a] !== 0 ? mem[pc + 2] : pc + 3;
+  } else if(op % 2 === 1){
+    // Datenzellen: modulo 2^W (WORDSIZE), Programmzellen: modulo 2^N wie auf
+    // der TM (nur bei WORDSIZE; sonst unbegrenzt wie bisher)
+    const mask = a < image.progStart ? wordMask : image.progMask;
+    mem[a] = mask ? (mem[a] + 1) & mask : mem[a] + 1;
+    pc += 2;
+  } else {
+    if(mem[a] > 0) mem[a]--;
+    pc += 2;
+  }
+  steps++;
+  if(steps > MAX_STEPS){
+    halt(`STOP (${MAX_STEPS / 1e6} Mio. Schritte)`); log('Mögliche Endlosschleife.','log-warn');
+    return false;
+  }
   return true;
 }
 
 // Aktive Zeile abhängig vom viewLevel ermitteln
 // callStack[viewLevel] = die Zeile auf der Ebene die User aktuell betrachtet
-function lineAtViewLevel(pcIdx){
-  const stack = instToStack[pcIdx] || [];
+function lineAtViewLevel(idx){
+  const stack = instToStack[idx] || [];
   if(stack.length === 0) return -1;
   // Wenn viewLevel tiefer als der Stack ist, zeige die tiefste verfügbare Zeile
   return stack[Math.min(viewLevel, stack.length - 1)];
 }
 
-// Step Over: führe Instruktionen aus bis sich die Zeile auf viewLevel ändert
-function execStep(){
-  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
-  const startStack = instToStack[pc] || [];
+// Step Over ohne UI-Aktualisierung: führe Instruktionen aus, bis sich die
+// Zeile auf viewLevel ändert. Liefert false, wenn das Programm angehalten hat.
+function stepOverCore(){
+  if(!image || !(pc >= 0 && pc < mem.length)) return haltAtPc();
+  const startStack = instToStack[curIdx()] || [];
   const startLine  = startStack[Math.min(viewLevel, startStack.length - 1)];
   const startLevel = viewLevel;
   const maxSteps   = 500000;
   let count = 0;
-  while(pc < program.length && count < maxSteps){
-    if(!execOneInstruction()){
-      updateRegisters(); updateUI(lineAtViewLevel(pc-1)); updateStepCount();
-      return false;
-    }
+  while(count < maxSteps){
+    if(!execOneInstruction()) return false;
     count++;
-    if(pc >= program.length) break;
-    const currentStack = instToStack[pc] || [];
+    if(!(pc >= 0 && pc < mem.length)) return haltAtPc();
+    const currentStack = instToStack[curIdx()] || [];
     // Wenn aktuelle Stack-Tiefe kleiner als startLevel ist, wurde Makro verlassen
     if(currentStack.length <= startLevel){
-      // viewLevel auf gültige Tiefe absenken
-      viewLevel = Math.min(viewLevel, currentStack.length - 1);
+      viewLevel = Math.max(0, Math.min(viewLevel, currentStack.length - 1));
       break;
     }
     // Wenn die Zeile auf startLevel sich geändert hat: Step Over fertig
@@ -1265,19 +1417,34 @@ function execStep(){
     if(currentLine !== startLine) break;
   }
   if(count >= maxSteps) log(`Step Over: ${maxSteps} Sub-Schritte`,'log-warn');
-  updateRegisters(); updateUI(lineAtViewLevel(pc)); updateStepCount();
-  return pc < program.length;
+  return true;
+}
+
+// Register, Editor-Markierung und Schrittzähler einmal neu zeichnen
+function refreshView(){
+  updateRegisters();
+  const k = curIdx();
+  updateUI(lineAtViewLevel(k >= 0 ? k : lastIdx));
+  updateStepCount();
+}
+
+// Step Over (Button / F10)
+function execStep(){
+  prevMem = mem.slice();
+  const alive = stepOverCore();
+  refreshView();
+  return alive;
 }
 
 // Step Into: erhöhe viewLevel um 1 wenn aktuell ein Makro-Aufruf vorliegt
 function execStepIn(){
-  if(pc>=program.length){ halt('HALT (Programmende)'); return false; }
-  const stack = instToStack[pc] || [];
+  if(!image || !(pc >= 0 && pc < mem.length)) return haltAtPc();
+  const stack = instToStack[curIdx()] || [];
   // Wenn der Stack tiefer geht als unser aktueller View, einfach Level erhöhen
   // (keine Instruktion ausführen — nur in das bereits expandierte Makro reinzoomen)
   if(stack.length > viewLevel + 1){
     viewLevel++;
-    updateUI(lineAtViewLevel(pc));
+    updateUI(lineAtViewLevel(curIdx()));
     return true;
   }
   // Sonst: einfach einen Schritt auf der aktuellen Ebene
@@ -1288,7 +1455,7 @@ function execStepIn(){
 function execStepOut(){
   if(viewLevel > 0){
     viewLevel--;
-    updateUI(lineAtViewLevel(pc));
+    updateUI(lineAtViewLevel(curIdx()));
     return true;
   }
   return execStep();
@@ -1299,7 +1466,11 @@ function execStepOut(){
 // CROSS-COMPILE zu RAMonTM Band-Format
 // ══════════════════════════════════════════════════════════════════
 
-// RAMonTM-Transitionen, eingebettet aus RAMonTM.tm
+// RAMonTM-Transitionen, eingebettet aus RAMonTM.tm (korrigierte Fassung 2026:
+// Tippfehler S03/C09/IS24…, Übertrag beim Inkrementieren, Fehlvergleich-Pfade
+// in IS/IP/AS, Sprungadresse wird LSB-zuerst nach PC kopiert, Halt wenn PC
+// auf eine nicht vorhandene Zelle zeigt; neu: DEC-Befehl = Opcode 2, bleibt
+// bei 0 stehen; Opcode-Dekodierung 0 = BNZ, ungerade = INC, gerade = DEC).
 // Wortlängenunabhängig: gleicher Code läuft mit beliebiger Wortbreite N.
 const RAMONTM_TRANSITIONS = `# Transitionen
 #    0               1               *             H
@@ -1308,37 +1479,37 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 #0
 (S01,0,S01,0,R) (S01,1,S01,1,R) (S01,*,S02,*,R) (S01,H,---,H,R)
 (S02,0,S02,0,R) (S02,1,S02,1,R) (S02,*,S03,*,R) (S02,H,---,H,R)
-(S03,0,S07,H,L) (S02,1,S23,1,R) (S03,*,---,*,R) (S03,H,---,H,R)
+(S03,0,S07,H,L) (S03,1,S23,1,R) (S03,*,---,*,R) (S03,H,---,H,R)
 #1
 (S04,0,S04,0,R) (S04,1,S04,1,R) (S04,*,S05,*,R) (S04,H,---,H,R)
 (S05,0,S05,0,R) (S05,1,S05,1,R) (S05,*,S06,*,R) (S05,H,---,H,R)
 (S06,0,S26,0,R) (S06,1,S09,H,L) (S06,*,---,*,R) (S06,H,---,H,R)
 # 00 rueck
 (S07,0,S07,0,L) (S07,1,S07,1,L) (S07,*,S07,*,L) (S07,H,S08,0,R)
-(S08,0,S15,H,R) (S08,1,S17,H,R) (S08,*,S15,H,R) (S07,H,---,H,R)
+(S08,0,S15,H,R) (S08,1,S17,H,R) (S08,*,S15,H,R) (S08,H,---,H,R)
 # 01 rueck
 (S09,0,S09,0,L) (S09,1,S09,1,L) (S09,*,S09,*,L) (S09,H,S10,1,R)
 (S10,0,S19,H,R) (S10,1,S21,H,R) (S10,*,S21,H,R) (S10,H,---,H,R)
 # 10 rueck
 (S11,0,S11,0,L) (S11,1,S11,1,L) (S11,*,S11,*,L) (S11,H,S12,0,R)
-(S12,0,---,H,R) (S12,1,---,H,R) (S12,*,---,H,R) (S11,H,---,H,R)
+(S12,0,---,H,R) (S12,1,---,H,R) (S12,*,---,H,R) (S12,H,---,H,R)
 # 11 rueck
 (S13,0,S13,0,L) (S13,1,S13,1,L) (S13,*,S13,*,L) (S13,H,S14,1,R)
-(S14,0,S19,H,R) (S14,1,S21,H,R) (S14,*,S21,H,R) (S13,H,---,H,R)
+(S14,0,S19,H,R) (S14,1,S21,H,R) (S14,*,S21,H,R) (S14,H,---,H,R)
 # 00 vor
 (S15,0,S15,0,R) (S15,1,S15,1,R) (S15,*,S15,*,R) (S15,H,S16,0,R)
-(S16,0,S07,H,L) (S16,1,S23,1,R) (S16,*,C00,H,R) (S15,H,---,H,R)
+(S16,0,S07,H,L) (S16,1,S23,1,R) (S16,*,C00,H,R) (S16,H,---,H,R)
 # 01 vor
 (S17,0,S17,0,R) (S17,1,S17,1,R) (S17,*,S17,*,R) (S17,H,S18,0,R)
-(S18,0,S26,0,R) (S18,1,S13,H,L) (S18,*,C00,*,R) (S17,H,---,H,R)
+(S18,0,S26,0,R) (S18,1,S13,H,L) (S18,*,C00,*,R) (S18,H,---,H,R)
 # 10 vor
 (S19,0,S19,0,R) (S19,1,S19,1,R) (S19,*,S19,*,R) (S19,H,S20,1,R)
-(S20,0,S07,H,L) (S20,1,S23,1,R) (S20,*,C00,*,R) (S19,H,---,H,R)
+(S20,0,S07,H,L) (S20,1,S23,1,R) (S20,*,C00,*,R) (S20,H,---,H,R)
 # 11 vor
 (S21,0,S21,0,R) (S21,1,S21,1,R) (S21,*,S21,*,R) (S21,H,S22,1,R)
-(S22,0,S26,0,R) (S22,1,S13,H,L) (S22,*,C00,H,R) (S21,H,---,H,R)
+(S22,0,S26,0,R) (S22,1,S13,H,L) (S22,*,C00,H,R) (S22,H,---,H,R)
 # nicht gefunden 0
-(S23,0,S23,0,R) (S23,1,S23,1,R) (S23,*,S24,*,R) (S24,H,---,H,R)
+(S23,0,S23,0,R) (S23,1,S23,1,R) (S23,*,S24,*,R) (S23,H,---,H,R)
 (S24,0,S24,0,R) (S24,1,S24,1,R) (S24,*,S25,H,L) (S24,H,HLT,H,L)
 (S25,0,S25,0,L) (S25,1,S25,1,L) (S25,*,S25,*,L) (S25,H,S29,0,L)
 # nicht gefunden 1
@@ -1355,13 +1526,15 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 #1
 (S33,0,S33,0,R) (S33,1,S33,1,R) (S33,*,S33,*,R) (S33,H,S34,*,R)
 (S34,0,S26,0,R) (S34,1,S09,H,L) (S34,*,---,*,R) (S34,H,---,H,R)
+# Feld mit Adresse PC nicht vorhanden → Programmende
+(S03,_,HLT,_,L) (S06,_,HLT,_,L) (S32,_,HLT,_,L) (S34,_,HLT,_,L)
 
 #Kopiere Adresse in das Adress-Feld: kopiere([PC+1],AD)
 #gehe zum naechsten Feld
 (C00,0,C00,0,R) (C00,1,C00,1,R) (C00,*,C01,*,R) (C00,H,---,H,R)
 (C01,0,C01,0,R) (C01,1,C01,1,R) (C01,*,C02,*,R) (C01,H,---,H,R)
 #nimm erstes Zeichen
-(C02,0,C03,H,L) (C02,1,C08,H,L) (C02,*,END,*,R) (C02,H,---,H,R)
+(C02,0,C03,H,L) (C02,1,C09,H,L) (C02,*,END,*,R) (C02,H,---,H,R)
 #merke 0 und gehe nach links zum H
 (C03,0,C03,0,L) (C03,1,C03,1,L) (C03,*,C03,*,L) (C03,H,C04,H,L)
 (C04,0,C04,0,L) (C04,1,C04,1,L) (C04,*,C04,*,L) (C04,H,C05,*,R)
@@ -1394,11 +1567,16 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (C24,0,C24,0,L) (C24,1,C24,1,L) (C24,*,C24,*,L) (C24,H,B00,*,R)
 
 #Befehl aussuchen: if befehl(PC+1) == 0 then
-(B00,0,B00,0,R) (B00,1,B03,1,L) (B00,*,B01,*,L) (B00,H,---,H,R)
+(B00,0,B00,0,R) (B00,1,B05,1,R) (B00,*,B01,*,L) (B00,H,---,H,R)
 (B01,0,B01,0,L) (B01,1,B01,1,L) (B01,*,B01,*,L) (B01,H,B02,H,L)
 (B02,0,B02,0,L) (B02,1,B02,1,L) (B02,*,IS00,*,R) (B02,H,---,H,R)
 (B03,0,B03,0,L) (B03,1,B03,1,L) (B03,*,B03,*,L) (B03,H,B04,H,L)
 (B04,0,B04,0,L) (B04,1,B04,1,L) (B04,*,AS00,*,R) (B04,H,---,H,R)
+# Opcode != 0: das letzte Bit entscheidet (ungerade = INC, gerade = DEC)
+(B05,0,B05,0,R) (B05,1,B05,1,R) (B05,*,B06,*,L) (B05,H,---,H,R)
+(B06,0,B07,0,L) (B06,1,B03,1,L) (B06,*,---,*,R) (B06,H,---,H,R)
+(B07,0,B07,0,L) (B07,1,B07,1,L) (B07,*,B07,*,L) (B07,H,B08,H,L)
+(B08,0,B08,0,L) (B08,1,B08,1,L) (B08,*,DS00,*,R) (B08,H,---,H,R)
 
 #BNZ-Befehl
 #Finde Feld mit dieser Adresse in AD: sucheFeld(AD)
@@ -1410,7 +1588,7 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #1 gemerkt
 (IS03,0,IS03,0,R) (IS03,1,IS03,1,R) (IS03,*,IS03,*,R) (IS03,H,IS04,*,R)
-(IS04,0,IS27,0,L) (IS04,1,IS07,H,L) (IS04,*,---,*,R) (IS04,H,---,H,R)
+(IS04,0,IS28,0,R) (IS04,1,IS07,H,L) (IS04,*,---,*,R) (IS04,H,---,H,R)
 
 #00 gemerkt rueck
 (IS05,0,IS05,0,L) (IS05,1,IS05,1,L) (IS05,*,IS05,*,L) (IS05,H,IS06,0,R)
@@ -1434,15 +1612,15 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #01 gemerkt vor
 (IS15,0,IS15,0,R) (IS15,1,IS15,1,R) (IS15,*,IS15,*,R) (IS15,H,IS16,1,R)
-(IS16,0,IS05,H,L) (IS16,1,IS24,1,L) (IS16,*,----,*,R) (IS16,H,----,0,R)
+(IS16,0,IS05,H,L) (IS16,1,IS24,1,R) (IS16,*,----,*,R) (IS16,H,----,0,R)
 
 #10 gemerkt vor
 (IS17,0,IS17,0,R) (IS17,1,IS17,1,R) (IS17,*,IS17,*,R) (IS17,H,IS18,0,R)
-(IS18,0,IS28,0,L) (IS18,1,IS11,H,L) (IS18,*,----,*,R) (IS18,H,----,H,R)
+(IS18,0,IS28,0,R) (IS18,1,IS11,H,L) (IS18,*,----,*,R) (IS18,H,----,H,R)
 
 #11 gemerkt vor
 (IS19,0,IS19,0,R) (IS19,1,IS19,1,R) (IS19,*,IS19,*,R) (IS19,H,IS20,1,R)
-(IS20,0,IS28,0,L) (IS20,1,IS11,H,L) (IS20,*,----,*,R) (IS20,H,----,0,R)
+(IS20,0,IS28,0,R) (IS20,1,IS11,H,L) (IS20,*,----,*,R) (IS20,H,----,0,R)
 
 #0 gemerkt Ende
 (IS21,0,IS21,0,R) (IS21,1,IS21,1,R) (IS21,*,IS21,*,R) (IS21,H,IT00,0,R)
@@ -1453,33 +1631,33 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (IT01,0,IT01,0,R) (IT01,1,IC00,1,L) (IT01,*,IN00,*,L) (IT01,H,---,H,R)
 
 #0 gemerkt falsch
-(IS24,0,IS24,0,R) (IS24,1,IS24,1,R) (IS24,*,IS25,*,R) (IT24,H,---,H,R)
-(IS25,0,IS25,0,R) (IS25,1,IS25,1,R) (IS25,*,IS26,H,L) (IT25,H,---,H,R)
+(IS24,0,IS24,0,R) (IS24,1,IS24,1,R) (IS24,*,IS25,*,R) (IS24,H,---,H,R)
+(IS25,0,IS25,0,R) (IS25,1,IS25,1,R) (IS25,*,IS26,H,L) (IS25,H,---,H,R)
 (IS26,0,IS26,0,L) (IS26,1,IS26,1,L) (IS26,*,IS26,*,L) (IS26,H,IS27,0,L)
-(IS27,0,IS27,0,L) (IS27,1,IS27,1,L) (IS27,*,IS00,*,R) (IT27,H,---,H,R)
+(IS27,0,IS27,0,L) (IS27,1,IS27,1,L) (IS27,*,IS00,*,R) (IS27,H,---,H,R)
 
 #1 gemerkt falsch
-(IS28,0,IS28,0,R) (IS28,1,IS28,1,R) (IS28,*,IS29,*,R) (IT28,H,---,H,R)
-(IS29,0,IS29,0,R) (IS29,1,IS29,1,R) (IS29,*,IS30,H,L) (IT29,H,---,H,R)
+(IS28,0,IS28,0,R) (IS28,1,IS28,1,R) (IS28,*,IS29,*,R) (IS28,H,---,H,R)
+(IS29,0,IS29,0,R) (IS29,1,IS29,1,R) (IS29,*,IS30,H,L) (IS29,H,---,H,R)
 (IS30,0,IS30,0,L) (IS30,1,IS30,1,L) (IS30,*,IS30,*,L) (IS30,H,IS31,1,L)
-(IS31,0,IS31,0,L) (IS31,1,IS31,1,L) (IS31,*,IS00,*,R) (IT31,H,---,H,R)
+(IS31,0,IS31,0,L) (IS31,1,IS31,1,L) (IS31,*,IS00,*,R) (IS31,H,---,H,R)
 
 #Adresse im ersten Feld (PC) um 3 erhöhen: PC = (PC + 3) mod N
 (IN00,0,IN00,0,L) (IN00,1,IN00,1,L) (IN00,*,IN00,*,L) (IN00,H,IN01,*,L) 
 (IN01,0,IN01,0,L) (IN01,1,IN01,1,L) (IN01,*,IN02,*,L) (IN01,H,---,H,R)
 #um 3 erhöhen
 (IN02,0,IN04,1,L) (IN02,1,IN03,0,L) (IN02,*,---,H,R)  (IN02,H,---,H,R)
-(IN03,0,IN04,1,L) (IN03,1,IN03,1,L) (IN03,*,IN05,*,R) (IN03,H,---,H,R)
+(IN03,0,IN04,1,L) (IN03,1,IN03,0,L) (IN03,*,IN05,*,R) (IN03,H,---,H,R)
 (IN04,0,IN04,0,L) (IN04,1,IN04,1,L) (IN04,*,IN05,*,R) (IN04,H,---,H,R)
 #und nochmal um eins erhöhen
 (IN05,0,IN05,0,R) (IN05,1,IN05,1,R) (IN05,*,IN06,*,L) (IN05,H,---,H,R)
 (IN06,0,IN08,1,L) (IN06,1,IN07,0,L) (IN06,*,---,*,R)  (IN06,H,---,H,R)
-(IN07,0,IN08,1,L) (IN07,1,IN07,1,L) (IN07,*,IN09,*,R) (IN07,H,---,H,R)
-(IN08,0,IN08,0,L) (IN08,1,IN08,1,L) (IN08,*,IN09,*,R) (IN07,H,---,H,R)
+(IN07,0,IN08,1,L) (IN07,1,IN07,0,L) (IN07,*,IN09,*,R) (IN07,H,---,H,R)
+(IN08,0,IN08,0,L) (IN08,1,IN08,1,L) (IN08,*,IN09,*,R) (IN08,H,---,H,R)
 # und das letzte Mal, dann haben wir 3
 (IN09,0,IN09,0,R) (IN09,1,IN09,1,R) (IN09,*,IN10,*,L) (IN09,H,---,H,R)
 (IN10,0,IN12,1,L) (IN10,1,IN11,0,L) (IN10,*,---,*,R)  (IN10,H,---,H,R)
-(IN11,0,IN12,1,L) (IN11,1,IN11,1,L) (IN11,*,S00,*,R)  (IN11,H,---,H,R)
+(IN11,0,IN12,1,L) (IN11,1,IN11,0,L) (IN11,*,S00,*,R)  (IN11,H,---,H,R)
 (IN12,0,IN12,0,L) (IN12,1,IN12,1,L) (IN12,*,S00,*,R)  (IN12,H,---,H,R)
 
 #an die Adresse springen auf die BNZ:
@@ -1497,7 +1675,7 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #1 gemerkt
 (IP03,0,IP03,0,R) (IP03,1,IP03,1,R) (IP03,*,IP03,*,R) (IP03,H,IP04,*,R)
-(IP04,0,IP27,0,L) (IP04,1,IP07,H,L) (IP04,*,---,*,R)  (IP04,H,---,H,R)
+(IP04,0,IP28,0,R) (IP04,1,IP07,H,L) (IP04,*,---,*,R)  (IP04,H,---,H,R)
 
 #00 gemerkt rueck
 (IP05,0,IP05,0,L) (IP05,1,IP05,1,L) (IP05,*,IP05,*,L) (IP05,H,IP06,0,R)
@@ -1521,15 +1699,15 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #01 gemerkt vor
 (IP15,0,IP15,0,R) (IP15,1,IP15,1,R) (IP15,*,IP15,*,R) (IP15,H,IP16,1,R)
-(IP16,0,IP05,H,L) (IP16,1,IP24,1,L) (IP16,*,----,*,R) (IP16,H,----,0,R)
+(IP16,0,IP05,H,L) (IP16,1,IP24,1,R) (IP16,*,----,*,R) (IP16,H,----,0,R)
 
 #10 gemerkt vor
 (IP17,0,IP17,0,R) (IP17,1,IP17,1,R) (IP17,*,IP17,*,R) (IP17,H,IP18,0,R)
-(IP18,0,IP28,0,L) (IP18,1,IP11,H,L) (IP18,*,----,*,R) (IP18,H,----,H,R)
+(IP18,0,IP28,0,R) (IP18,1,IP11,H,L) (IP18,*,----,*,R) (IP18,H,----,H,R)
 
 #11 gemerkt vor
 (IP19,0,IP19,0,R) (IP19,1,IP19,1,R) (IP19,*,IP19,*,R) (IP19,H,IP20,1,R)
-(IP20,0,IP28,0,L) (IP20,1,IP11,H,L) (IP20,*,----,*,R) (IP20,H,----,0,R)
+(IP20,0,IP28,0,R) (IP20,1,IP11,H,L) (IP20,*,----,*,R) (IP20,H,----,0,R)
 
 #0 gemerkt Ende
 (IP21,0,IP21,0,R) (IP21,1,IP21,1,R) (IP21,*,IP21,*,R) (IP21,H,IV0,0,R)
@@ -1553,7 +1731,9 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (IV1,0,IV1,0,R) (IV1,1,IV1,1,R) (IV1,*,IV2,*,R)  (IV1,H,---,H,R)
 (IV2,0,IV2,0,R) (IV2,1,IV2,1,R) (IV2,*,IV3,*,R)  (IV2,H,---,H,R)
 (IV3,0,IV3,0,R) (IV3,1,IV3,1,R) (IV3,*,IV4,*,R)  (IV3,H,---,H,R)
-(IV4,0,IV4,0,R) (IV4,1,IV4,1,R) (IV4,*,IK00,*,R) (IV4,H,---,H,R)
+(IV4,0,IV4,0,R) (IV4,1,IV4,1,R) (IV4,*,IV5,*,R)  (IV4,H,---,H,R)
+# ans Ende der Sprungadresse (LSB), kopiert wird von rechts nach links
+(IV5,0,IV5,0,R) (IV5,1,IV5,1,R) (IV5,*,IK00,*,L) (IV5,H,---,H,R)
 
 # kopiere dises feld nach PC: kopiere([PC+2],PC)
 (IK00,0,IK01,H,L) (IK00,1,IK04,H,L) (IK00,*,----,*,L) (IK00,H,---,H,R)
@@ -1563,12 +1743,12 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (IK03,0,IK07,H,R) (IK03,1,IK07,H,R) (IK03,*,IK14,H,R) (IK03,H,---,H,R)
 # 1 gemerkt first
 (IK04,0,IK04,0,L) (IK04,1,IK04,1,L) (IK04,*,IK04,*,L) (IK04,H,IK05,*,L)
-(IK05,0,IK05,0,L) (IK05,1,IK06,0,L) (IK05,*,----,*,R) (IK05,H,---,H,R)
+(IK05,0,IK06,1,L) (IK05,1,IK06,1,L) (IK05,*,----,*,R) (IK05,H,---,H,R)
 (IK06,0,IK08,H,R) (IK06,1,IK08,H,R) (IK06,*,IK15,H,R) (IK06,H,---,H,R)
 #0 zurück
-(IK07,0,IK07,0,R) (IK07,1,IK07,1,R) (IK07,*,IK07,*,R) (IK07,H,IK09,0,R)
+(IK07,0,IK07,0,R) (IK07,1,IK07,1,R) (IK07,*,IK07,*,R) (IK07,H,IK09,0,L)
 #1 zurück
-(IK08,0,IK08,0,R) (IK08,1,IK08,1,R) (IK08,*,IK08,*,R) (IK08,H,IK09,1,R)
+(IK08,0,IK08,0,R) (IK08,1,IK08,1,R) (IK08,*,IK08,*,R) (IK08,H,IK09,1,L)
 
 (IK09,0,IK10,H,L) (IK09,1,IK12,H,L) (IK09,*,----,*,L) (IK09,H,---,H,R)
 # 0 gemerkt
@@ -1576,7 +1756,7 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (IK11,0,IK07,H,R) (IK11,1,IK07,H,R) (IK11,*,IK14,H,R) (IK11,H,---,H,R)
 # 1 gemerkt
 (IK12,0,IK12,0,L) (IK12,1,IK12,1,L) (IK12,*,IK12,*,L) (IK12,H,IK13,1,L)
-(IK13,0,IK07,H,R) (IK13,1,IK07,H,R) (IK13,*,IK15,H,R) (IK13,H,---,H,R)
+(IK13,0,IK08,H,R) (IK13,1,IK08,H,R) (IK13,*,IK15,H,R) (IK13,H,---,H,R)
 # aufräumen 0
 (IK14,0,IK14,0,R) (IK14,1,IK14,1,R) (IK14,*,IK14,*,R) (IK14,H,IK16,0,R)
 # aufräumen 1
@@ -1593,7 +1773,7 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #1 gemerkt
 (AS03,0,AS03,0,R) (AS03,1,AS03,1,R) (AS03,*,AS03,*,R) (AS03,H,AS04,*,R)
-(AS04,0,AS27,0,L) (AS04,1,AS07,H,L) (AS04,*,---,*,R)  (AS04,H,---,H,R)
+(AS04,0,AS28,0,R) (AS04,1,AS07,H,L) (AS04,*,---,*,R)  (AS04,H,---,H,R)
 
 #00 gemerkt rueck
 (AS05,0,AS05,0,L) (AS05,1,AS05,1,L) (AS05,*,AS05,*,L) (AS05,H,AS06,0,R)
@@ -1617,15 +1797,15 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 
 #01 gemerkt vor
 (AS15,0,AS15,0,R) (AS15,1,AS15,1,R) (AS15,*,AS15,*,R) (AS15,H,AS16,1,R)
-(AS16,0,AS05,H,L) (AS16,1,AS24,1,L) (AS16,*,----,*,R) (AS16,H,----,0,R)
+(AS16,0,AS05,H,L) (AS16,1,AS24,1,R) (AS16,*,----,*,R) (AS16,H,----,0,R)
 
 #10 gemerkt vor
 (AS17,0,AS17,0,R) (AS17,1,AS17,1,R) (AS17,*,AS17,*,R) (AS17,H,AS18,0,R)
-(AS18,0,AS28,0,L) (AS18,1,AS11,H,L) (AS18,*,----,*,R) (AS18,H,----,H,R)
+(AS18,0,AS28,0,R) (AS18,1,AS11,H,L) (AS18,*,----,*,R) (AS18,H,----,H,R)
 
 #11 gemerkt vor
 (AS19,0,AS19,0,R) (AS19,1,AS19,1,R) (AS19,*,AS19,*,R) (AS19,H,AS20,1,R)
-(AS20,0,AS28,0,L) (AS20,1,AS11,H,L) (AS20,*,----,*,R) (AS20,H,----,0,R)
+(AS20,0,AS28,0,R) (AS20,1,AS11,H,L) (AS20,*,----,*,R) (AS20,H,----,0,R)
 
 #0 gemerkt Ende
 (AS21,0,AS21,0,R) (AS21,1,AS21,1,R) (AS21,*,AS21,*,R) (AS21,H,AI00,0,R)
@@ -1650,7 +1830,7 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (AI01,0,AI01,0,R) (AI01,1,AI01,1,R) (AI01,*,AI02,*,L) (AI01,H,---,H,R)
 #um 1 erhöhen
 (AI02,0,AI04,1,L) (AI02,1,AI03,0,L) (AI02,*,---,*,R)  (AI02,H,---,H,R)
-(AI03,0,AI04,1,L) (AI03,1,AI03,1,L) (AI03,*,AI05,*,R) (AI03,H,---,H,R)
+(AI03,0,AI04,1,L) (AI03,1,AI03,0,L) (AI03,*,AN00,*,R) (AI03,H,---,H,R)
 (AI04,0,AI04,0,L) (AI04,1,AI04,1,L) (AI04,*,AN00,*,R) (AI04,H,---,H,R)
 
 #Adresse im ersten Feld (PC) um 3 erhöhen: PC = (PC + 2) mod N
@@ -1658,40 +1838,82 @@ const RAMONTM_TRANSITIONS = `# Transitionen
 (AN01,0,AN01,0,L) (AN01,1,AN01,1,L) (AN01,*,AN02,*,L) (AN01,H,---,H,R)
 #um 3 erhöhen
 (AN02,0,AN04,1,L) (AN02,1,AN03,0,L) (AN02,*,---,*,R)  (AN02,H,---,H,R)
-(AN03,0,AN04,1,L) (AN03,1,AN03,1,L) (AN03,*,AN05,*,R) (AN03,H,---,H,R)
+(AN03,0,AN04,1,L) (AN03,1,AN03,0,L) (AN03,*,AN05,*,R) (AN03,H,---,H,R)
 (AN04,0,AN04,0,L) (AN04,1,AN04,1,L) (AN04,*,AN05,*,R) (AN04,H,---,H,R)
 #und nochmal um eANs erhöhen
 (AN05,0,AN05,0,R) (AN05,1,AN05,1,R) (AN05,*,AN06,*,L) (AN05,H,---,H,R)
 (AN06,0,AN08,1,L) (AN06,1,AN07,0,L) (AN06,*,---,*,R)  (AN06,H,---,H,R)
-(AN07,0,AN08,1,L) (AN07,1,AN07,1,L) (AN07,*,S00,*,R)  (AN07,H,---,H,R)
-(AN08,0,AN08,0,L) (AN08,1,AN08,1,L) (AN08,*,S00,*,R)  (AN07,H,---,H,R)
-`;
+(AN07,0,AN08,1,L) (AN07,1,AN07,0,L) (AN07,*,S00,*,R)  (AN07,H,---,H,R)
+(AN08,0,AN08,0,L) (AN08,1,AN08,1,L) (AN08,*,S00,*,R)  (AN08,H,---,H,R)
 
-// Andres DEC-Makro: nutzt RLen als modularen Counter.
-// Funktioniert ohne nativen DEC weil RLen via INC wrapt.
-// Schleife ist klein (konstant), egal wie groß N ist.
-//
-// Zusätzlich: CLR wird mit INC implementiert (statt mit DEC),
-// sonst gibt es eine Rekursion DEC→CLR→DEC. Andres ursprünglicher
-// Trick aus SubRoutine.asm. CLR-mit-INC funktioniert nur bei endlicher
-// Wortbreite, aber auf der TM ist die ja gegeben.
-const TM_DEC_MACRO = `
-MAKRO:CLR(A)
-Start:BNZ(A,t1)
-      JMP(End)
-t1:   INC(A)
-      JMP(Start)
-END
+# DEC Befehl (gleiche Suche wie INC, Zustände DS..)
+# Finde Feld mit dieser Adresse in AD: sucheFeld(AD)
+(DS00,0,DS01,H,R) (DS00,1,DS03,H,R) (DS00,*,---,*,R) (DS00,H,---,*,L)
+#0 gemerkt
+(DS01,0,DS01,0,R) (DS01,1,DS01,1,R) (DS01,*,DS01,*,R) (DS01,H,DS02,*,R)
+(DS02,0,DS05,H,L) (DS02,1,DS24,1,R) (DS02,*,---,*,R)  (DS02,H,---,H,R)
 
-MAKRO:DEC(A)
-      JMP(Start)
-RLen: 0
-Start:CLR(RLen)
-      INC(RLen)
-S1:   INC(A)
-      INC(RLen)
-      BNZ(RLen,S1)
-END
+#1 gemerkt
+(DS03,0,DS03,0,R) (DS03,1,DS03,1,R) (DS03,*,DS03,*,R) (DS03,H,DS04,*,R)
+(DS04,0,DS28,0,R) (DS04,1,DS07,H,L) (DS04,*,---,*,R)  (DS04,H,---,H,R)
+
+#00 gemerkt rueck
+(DS05,0,DS05,0,L) (DS05,1,DS05,1,L) (DS05,*,DS05,*,L) (DS05,H,DS06,0,R)
+(DS06,0,DS13,H,R) (DS06,1,DS17,H,R) (DS06,*,DS21,H,R) (DS06,H,----,0,R)
+
+#01 gemerkt rueck
+(DS07,0,DS07,0,L) (DS07,1,DS07,1,L) (DS07,*,DS07,*,L) (DS07,H,DS08,1,R)
+(DS08,0,DS15,H,R) (DS08,1,DS19,H,R) (DS08,*,DS22,H,R) (DS08,H,----,0,R)
+
+#10 gemerkt rueck
+(DS09,0,DS09,0,L) (DS09,1,DS09,1,L) (DS09,*,DS09,*,L) (DS09,H,DS10,0,R)
+(DS10,0,DS24,0,R) (DS10,1,DS24,1,R) (DS10,*,DS21,H,R) (DS10,H,----,0,R)
+
+#11 gemerkt rueck
+(DS11,0,DS11,0,L) (DS11,1,DS11,1,L) (DS11,*,DS11,*,L) (DS11,H,DS12,1,R)
+(DS12,0,DS15,H,R) (DS12,1,DS19,H,R) (DS12,*,DS22,H,R) (DS12,H,----,H,R)
+
+#00 gemerkt vor
+(DS13,0,DS13,0,R) (DS13,1,DS13,1,R) (DS13,*,DS13,*,R) (DS13,H,DS14,0,R)
+(DS14,0,DS05,H,L) (DS14,1,DS24,1,R) (DS14,*,----,*,R) (DS14,H,----,0,R)
+
+#01 gemerkt vor
+(DS15,0,DS15,0,R) (DS15,1,DS15,1,R) (DS15,*,DS15,*,R) (DS15,H,DS16,1,R)
+(DS16,0,DS05,H,L) (DS16,1,DS24,1,R) (DS16,*,----,*,R) (DS16,H,----,0,R)
+
+#10 gemerkt vor
+(DS17,0,DS17,0,R) (DS17,1,DS17,1,R) (DS17,*,DS17,*,R) (DS17,H,DS18,0,R)
+(DS18,0,DS28,0,R) (DS18,1,DS11,H,L) (DS18,*,----,*,R) (DS18,H,----,H,R)
+
+#11 gemerkt vor
+(DS19,0,DS19,0,R) (DS19,1,DS19,1,R) (DS19,*,DS19,*,R) (DS19,H,DS20,1,R)
+(DS20,0,DS28,0,R) (DS20,1,DS11,H,L) (DS20,*,----,*,R) (DS20,H,----,0,R)
+
+#0 gemerkt Ende
+(DS21,0,DS21,0,R) (DS21,1,DS21,1,R) (DS21,*,DS21,*,R) (DS21,H,DI00,0,R)
+#1 gemerkt Ende
+(DS22,0,DS22,0,R) (DS22,1,DS22,1,R) (DS22,*,DS22,*,R) (DS22,H,DI00,1,R)
+
+#0 gemerkt falsch
+(DS24,0,DS24,0,R) (DS24,1,DS24,1,R) (DS24,*,DS25,*,R) (DS24,H,---,H,R)
+(DS25,0,DS25,0,R) (DS25,1,DS25,1,R) (DS25,*,DS26,H,L) (DS25,H,---,H,R)
+(DS26,0,DS26,0,L) (DS26,1,DS26,1,L) (DS26,*,DS26,*,L) (DS26,H,DS27,0,L)
+(DS27,0,DS27,0,L) (DS27,1,DS27,1,L) (DS27,*,DS00,*,R) (DS27,H,---,H,R)
+
+#1 gemerkt falsch
+(DS28,0,DS28,0,R) (DS28,1,DS28,1,R) (DS28,*,DS29,*,R) (DS28,H,---,H,R)
+(DS29,0,DS29,0,R) (DS29,1,DS29,1,R) (DS29,*,DS30,H,L) (DS29,H,---,H,R)
+(DS30,0,DS30,0,L) (DS30,1,DS30,1,L) (DS30,*,DS30,*,L) (DS30,H,DS31,1,L)
+(DS31,0,DS31,0,L) (DS31,1,DS31,1,L) (DS31,*,DS00,*,R) (DS31,H,---,H,R)
+
+# [AD] = [AD] - 1, bei 0 bleibt 0
+(DI00,0,DI00,0,R) (DI00,1,DI00,1,R) (DI00,*,DI01,*,R) (DI00,H,---,H,R)
+# Wert pruefen: nur Nullen -> unveraendert lassen
+(DI01,0,DI01,0,R) (DI01,1,DI02,1,R) (DI01,*,AN00,*,L) (DI01,H,---,H,R)
+(DI02,0,DI02,0,R) (DI02,1,DI02,1,R) (DI02,*,DI03,*,L) (DI02,H,---,H,R)
+# um 1 vermindern (vom LSB aus, Borgen)
+(DI03,0,DI03,1,L) (DI03,1,DI04,0,L) (DI03,*,---,*,R) (DI03,H,---,H,R)
+(DI04,0,DI04,0,L) (DI04,1,DI04,1,L) (DI04,*,AN00,*,R) (DI04,H,---,H,R)
 `;
 
 // Binär-String mit N Bit MSB-first
@@ -1701,231 +1923,56 @@ function toBinN(value, n){
   return s;
 }
 
+// Export: dasselbe Speicherabbild wie im Simulator (buildImage), nur als
+// Band für RAMonTM. Format: *PC*AD*adr0*val0*adr1*val1*...*
 function crossCompileTM(src){
-  // 1. TM-spezifische Makros (DEC, CLR) am ENDE anhängen, damit sie
-  //    die STDLIB-Definitionen überschreiben (letzte Definition gewinnt).
-  //    Grund: STDLIB-CLR nutzt DEC → DEC-Makro nutzt CLR → Rekursion.
-  //    Mit Andres alternativer CLR-Implementierung (mit INC statt DEC)
-  //    ist der Zyklus aufgebrochen — funktioniert wegen modularer Arithmetik.
-  const srcWithDec = src + '\n' + TM_DEC_MACRO;
+  const img = buildImage(src);
+  if(img.error) return {error: img.error};
+  const warnings = img.warnings.slice();
 
-  // 2. Parse und expandiere
-  globalMacroId = 0;
-  const lines = stripComments(srcWithDec);
-  const {macs, code} = extractMacros(lines);
-  let expanded;
-  try { expanded = expandMacros(code, macs); }
-  catch(e){ return {error: 'Makro-Fehler: ' + e.message}; }
-
-  // 3. Variablen und Programm-Instruktionen sammeln
-  // Aus expanded extrahieren: Variablen mit Initialwerten, und reine Instruktionen
-  const vars = {};       // varName -> initialValue
-  const varOrder = [];   // Reihenfolge der Variablen-Deklarationen
-  const instrs  = [];    // Liste von {type, reg, lbl?, origIdx}
-  const labels  = {};    // labelName -> Instruktions-Index (vor Adresszuweisung)
-
-  // Erst Variablen sammeln (Zeilen "name: zahl")
-  for(const {text} of expanded){
-    const t = text.trim();
-    if(!t) continue;
-    const lm = t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/);
-    if(lm){
-      const label = lm[1], rest = lm[2].trim();
-      if(/^-?\d/.test(rest)){
-        // Array oder skalar
-        const arrM = label.match(/(\w+)\[(\d+)\]/);
-        if(arrM){
-          const base = arrM[1], size = parseInt(arrM[2]);
-          const vs = rest.split(',').map(v=>parseInt(v.trim())||0);
-          for(let i=0;i<size;i++){
-            const n = `${base}__${i}`;
-            if(vars[n] === undefined){ vars[n] = vs[i]||0; varOrder.push(n); }
-          }
-          if(vars[base] === undefined){ vars[base] = vs[0]||0; varOrder.push(base); }
-        } else {
-          if(vars[label] === undefined){ vars[label] = parseInt(rest)||0; varOrder.push(label); }
-        }
-      }
-    }
+  // Breiten wie im Simulator: Programmzellen N Bit, Datenzellen W Bit (WORDSIZE) bzw. N
+  const N = img.N, W = img.dataBits;
+  const width = a => a < img.progStart ? W : N;
+  const cells = img.mem.map((v, a) => v & ((1 << width(a)) - 1));
+  if(img.wordBits){
+    warnings.push(`WORDSIZE: ${W} – Datenzellen stehen mit ${W} Bit auf dem Band, Programmzellen mit ${N} Bit. ` +
+      `INC auf Daten läuft dadurch wie im Simulator bei 2^${W} über.`);
   }
 
-  // Zweite Runde: Instruktionen + Labels
-  let instrIdx = 0;
-  for(const {text, origIdx} of expanded){
-    const t = text.trim();
-    if(!t) continue;
-    const lm = t.match(/^(\w+(?:\[\d+\])?)\s*:(.*)/);
-    let label = null, rest = t;
-    if(lm){ label = lm[1]; rest = lm[2].trim(); }
-    // Variablen-Deklaration überspringen
-    if(label && /^-?\d/.test(rest)) continue;
-    // Bare Label → markiert nächste Instruktion
-    if(label && !rest){ labels[label] = instrIdx; continue; }
-    if(label) labels[label] = instrIdx;
-    if(!rest) continue;
+  let band = '*' + toBinN(img.progStart, N) + '*' + toBinN(0, N) + '*';
+  for(let i = 0; i < img.memSize; i++) band += toBinN(i, N) + '*' + toBinN(cells[i], width(i)) + '*';
 
-    let m;
-    if((m = rest.match(/^INC\s*\(([^)]+)\)/i))){
-      // Parameter kann "label:var" Notation haben → Parameter-Zelle bekommt das Label
-      let param = m[1].trim();
-      let paramLabel = null;
-      const colonM = param.match(/^(\w+)\s*:\s*(\w+)$/);
-      if(colonM){
-        paramLabel = colonM[1];
-        param = colonM[2];
-      }
-      instrs.push({type:'INC', reg: param, paramLabel, origIdx});
-      instrIdx++;
-    } else if((m = rest.match(/^BNZ\s*\(([^,)]+),([^)]+)\)/i))){
-      // Erstes Argument kann ebenfalls "label:var" Notation haben
-      let param = m[1].trim();
-      let paramLabel = null;
-      const colonM = param.match(/^(\w+)\s*:\s*(\w+)$/);
-      if(colonM){
-        paramLabel = colonM[1];
-        param = colonM[2];
-      }
-      instrs.push({type:'BNZ', reg: param, paramLabel, lbl: m[2].trim(), origIdx});
-      instrIdx++;
-    } else if((m = rest.match(/^CLR\s*\(([^)]+)\)/i))){
-      return {error: `CLR auf Hardware-Ebene nicht erlaubt. CLR ist ein STDLIB-Makro – wird automatisch ersetzt. (Zeile mit "${rest}")`};
-    } else if((m = rest.match(/^DEC\s*\(([^)]+)\)/i))){
-      return {error: `DEC sollte durch Makro ersetzt sein. (Zeile mit "${rest}")`};
-    } else {
-      return {error: `Unbekannte Instruktion: ${rest}`};
-    }
-  }
-
-  // 4. Layout: Programm-Zellen + Daten-Zellen
-  // Pro Instruktion eine Anzahl Zellen:
-  //   INC(p) → 2 Zellen: [Opcode=001, p_addr]
-  //   BNZ(p,j) → 3 Zellen: [Opcode=000, p_addr, j_addr]
-
-  // Erst: Instruktions-Index -> Zell-Adresse berechnen
-  const instrCellAddr = [];
-  let cellPos = 0;
-  for(const instr of instrs){
-    instrCellAddr.push(cellPos);
-    cellPos += (instr.type === 'BNZ') ? 3 : 2;
-  }
-  const programCellCount = cellPos;
-
-  // Variablen: nach dem Programm anhängen
-  const varAddr = {};
-  for(const v of varOrder){
-    varAddr[v] = cellPos++;
-  }
-  const totalCells = cellPos;
-
-  // Parameter-Labels (R1:A-Notation): zeigen auf die Parameter-Zelle (addr+1)
-  // Diese Labels haben Vorrang vor normalen Labels (überschreiben sie)
-  // Damit kann ein BNZ(x, R1) auf die Parameter-Zelle springen.
-  // Hinweis: das ist eine Speicheradresse, kein Programm-Index!
-  // Daher tragen wir sie als spezielle Labels ein, die direkt Zell-Adressen referenzieren.
-  const cellLabels = {};  // labelName -> direkte Zell-Adresse
-  for(let i = 0; i < instrs.length; i++){
-    if(instrs[i].paramLabel){
-      cellLabels[instrs[i].paramLabel] = instrCellAddr[i] + 1;
-    }
-  }
-
-  // 5. Wortbreite N berechnen
-  // Brauche genug Bits für: höchste Adresse + alle Werte
-  // Werte sind: 0 (BNZ), 1 (INC), Variablenadressen, Sprungziele, Variablen-Initialwerte
-  let maxValue = totalCells - 1;  // höchste Adresse die irgendwo vorkommt
-  for(const v of varOrder){
-    if(vars[v] > maxValue) maxValue = vars[v];
-  }
-  let N = 1;
-  while((1 << N) <= maxValue) N++;
-  // Mindestens so viele Bits damit alle Zellen adressierbar sind
-  while((1 << N) < totalCells) N++;
-
-  // 6. Resolve Labels zu Zell-Adressen
-  // Helper: löst Variablen-/Label-Namen zu Zell-Adresse auf
-  // Erst normale Variablen, dann Parameter-Labels (R1:A-Notation)
-  function resolveAddress(name){
-    if(varAddr[name] !== undefined) return varAddr[name];
-    if(cellLabels[name] !== undefined) return cellLabels[name];
-    return undefined;
-  }
-
-  for(const instr of instrs){
-    if(instr.type === 'BNZ'){
-      // Sprungziel: kann Label im Programm sein, oder Parameter-Label (Zell-Adresse direkt)
-      if(labels[instr.lbl] !== undefined){
-        instr.targetCell = instrCellAddr[labels[instr.lbl]];
-      } else if(cellLabels[instr.lbl] !== undefined){
-        instr.targetCell = cellLabels[instr.lbl];
-      } else {
-        return {error: `Label '${instr.lbl}' nicht gefunden`};
-      }
-    }
-  }
-
-  // 7. Zell-Inhalte berechnen
-  // cells[i] = numerischer Wert der Zelle i
-  const cells = new Array(totalCells).fill(0);
-  for(let i = 0; i < instrs.length; i++){
-    const instr = instrs[i];
-    const addr = instrCellAddr[i];
-    if(instr.type === 'INC'){
-      cells[addr]   = 1;  // INC-Opcode
-      const a = resolveAddress(instr.reg);
-      if(a === undefined){
-        return {error: `Variable '${instr.reg}' nicht deklariert (INC)`};
-      }
-      cells[addr+1] = a;
-    } else if(instr.type === 'BNZ'){
-      cells[addr]   = 0;  // BNZ-Opcode
-      const a = resolveAddress(instr.reg);
-      if(a === undefined){
-        return {error: `Variable '${instr.reg}' nicht deklariert (BNZ)`};
-      }
-      cells[addr+1] = a;
-      cells[addr+2] = instr.targetCell;
-    }
-  }
-  // Variablen-Initialwerte
-  for(const v of varOrder){
-    cells[varAddr[v]] = vars[v] & ((1<<N) - 1);
-  }
-
-  // 8. Bandstring generieren
-  // Format: *PC*AD*adr0*val0*adr1*val1*...*
-  let band = '*' + toBinN(0, N) + '*' + toBinN(0, N) + '*';
-  for(let i = 0; i < totalCells; i++){
-    band += toBinN(i, N) + '*' + toBinN(cells[i], N) + '*';
-  }
-
-  // 9. Mapping für Anzeige
+  // Mapping für Anzeige (in Adressreihenfolge)
   const mapping = [];
-  for(let i = 0; i < instrs.length; i++){
-    const instr = instrs[i];
-    const addr = instrCellAddr[i];
-    const labelHint = instr.paramLabel ? ` [Label: ${instr.paramLabel}]` : '';
-    if(instr.type === 'INC'){
-      mapping.push({addr, val: '001', comment: `INC – Opcode`});
-      const a = resolveAddress(instr.reg);
-      mapping.push({addr: addr+1, val: toBinN(a, N), comment: `→ ${instr.reg} (Zelle ${a})${labelHint}`});
-    } else if(instr.type === 'BNZ'){
-      mapping.push({addr, val: '000', comment: `BNZ – Opcode`});
-      const a = resolveAddress(instr.reg);
-      mapping.push({addr: addr+1, val: toBinN(a, N), comment: `→ ${instr.reg} (Zelle ${a})${labelHint}`});
-      mapping.push({addr: addr+2, val: toBinN(instr.targetCell, N), comment: `→ Sprung zu Zelle ${instr.targetCell}`});
+  img.data.forEach((d, i) => {
+    mapping.push({addr: i, val: toBinN(cells[i], W),
+      comment: d.name === img.oneName ? 'Konstante 1 für HALT' : `Variable ${d.display} = ${d.init}`});
+  });
+  for(const ins of img.instrs){
+    const where = ins.origIdx >= 0 ? ` (Zeile ${ins.origIdx + 1})` : '';
+    mapping.push({addr: ins.addr, val: toBinN(cells[ins.addr], N),
+      comment: ins.isHalt ? 'BNZ – Opcode (Programmende = HALT)' : `${ins.type} – Opcode${where}`});
+    const a = cells[ins.addr + 1];
+    const pl = ins.paramLabel ? ` [Parameter-Label ${ins.paramLabel}]` : '';
+    mapping.push({addr: ins.addr + 1, val: toBinN(a, N), comment: `→ ${ins.reg} (Zelle ${a})${pl}`});
+    if(ins.type === 'BNZ'){
+      mapping.push({addr: ins.addr + 2, val: toBinN(ins.target, N),
+        comment: ins.isHalt ? `→ Zelle ${ins.target} existiert nicht → RAMonTM hält (HLT)`
+                            : `→ Sprung zu Zelle ${ins.target}`});
     }
-  }
-  for(const v of varOrder){
-    mapping.push({addr: varAddr[v], val: toBinN(vars[v] & ((1<<N)-1), N), comment: `Variable ${v} = ${vars[v]}`});
   }
 
   return {
     band,
     N,
-    totalCells,
-    programCellCount,
-    varCount: varOrder.length,
-    instrCount: instrs.length,
+    dataBits: W,
+    totalCells: img.memSize,
+    programCellCount: img.memSize - img.progStart,
+    varCount: img.progStart,
+    instrCount: img.instrs.length,
+    progStart: img.progStart,
+    haltAddr: img.haltAddr,
+    warnings,
     mapping,
     cells
   };
@@ -1951,13 +1998,17 @@ function showTMExport(){
   document.getElementById('btn-download-tm').disabled = false;
 
   stats.innerHTML = `
-    <div class="k">Wortbreite N:</div><div class="v">${result.N} Bit (max ${(1<<result.N)-1})</div>
+    <div class="k">Wortbreite N:</div><div class="v">${result.N} Bit (max ${(1<<result.N)-1})${result.dataBits !== result.N ? `, Daten ${result.dataBits} Bit` : ''}</div>
     <div class="k">Zellen gesamt:</div><div class="v">${result.totalCells}</div>
     <div class="k">– Programm:</div><div class="v">${result.programCellCount}</div>
     <div class="k">– Daten:</div><div class="v">${result.varCount}</div>
     <div class="k">Instruktionen:</div><div class="v">${result.instrCount}</div>
     <div class="k">Bandlänge:</div><div class="v">${result.band.length} Zeichen</div>
-  `;
+    <div class="k">Programmstart:</div><div class="v">Zelle ${result.progStart} (davor die Daten)</div>
+    <div class="k">Programmende:</div><div class="v">Sprung auf Zelle ${result.haltAddr} (nicht vorhanden) → Zustand HLT</div>
+  ` + result.warnings.map(w =>
+    `<div class="k" style="color:var(--yellow)">Hinweis:</div><div class="v" style="color:var(--yellow);font-weight:400;white-space:pre-wrap;line-height:1.5">${esc(w)}</div>`
+  ).join('');
 
   bandOut.textContent = result.band;
 
@@ -1975,16 +2026,22 @@ function showTMExport(){
 function buildTmFileContent(result){
   return `# RAM-Programm kompiliert für RAMonTM
 # ====================================
-# Wortbreite (N):       ${result.N} Bit  (max Wert: ${(1<<result.N)-1})
+# Wortbreite (N):       ${result.N} Bit  (max Wert: ${(1<<result.N)-1})${result.dataBits !== result.N ? `, Datenzellen ${result.dataBits} Bit` : ''}
 # Zellen gesamt:        ${result.totalCells}
 #   – Programm:         ${result.programCellCount}
 #   – Daten:            ${result.varCount}
-# Instruktionen:        ${result.instrCount}
+# Instruktionen:        ${result.instrCount} (inkl. Halt-Instruktion am Ende)
+# Programmstart (PC):   ${result.progStart}  (davor liegen die Daten)
 #
 # Eigenständige .tm-Datei: enthält Initialisierung + Band + alle
 # RAMonTM-Transitionen. Direkt in einem TM-Simulator ausführbar.
 # Die Transitionen sind wortlängenunabhängig – funktionieren für
 # jede Wortbreite N.
+# Programmende: Sprung auf die nicht vorhandene Zelle ${result.haltAddr};
+# RAMonTM findet sie nicht und hält im Zustand HLT.
+# Befehle: BNZ = 0, INC = ungerade (1), DEC = gerade (2).
+# INC rechnet modulo 2^(Feldbreite), DEC bleibt bei 0 stehen.
+${result.warnings.map(w => '#\n# HINWEIS: ' + w).join('\n')}
 
 # Initialisierung
 (S00,0)
@@ -1997,19 +2054,28 @@ ${RAMONTM_TRANSITIONS}`;
 
 
 function halt(msg){
-  running=false; if(runTimer){clearInterval(runTimer);runTimer=null;}
+  finished=true; running=false; if(runTimer){clearInterval(runTimer);runTimer=null;}
   log(msg,'log-ok'); setStatus('HALT');
   btnStop.disabled=true; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
 }
 
 function startRun(){
-  if(!program.length||pc===0){ if(!compile(editorEl.value)) return; }
-  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
+  if(!ensureCompiled()) return;
   running=true; setStatus('LÄUFT');
   btnStop.disabled=false; btnRun.disabled=true; btnStep.disabled=true; btnStepIn.disabled=true; btnStepOut.disabled=true;
   const spt=()=>{ const s=+speedSlider.value; return s<=10?1:s<=50?Math.round(s/2):s*5; };
   const ims=()=>{ const s=+speedSlider.value; return s<=10?600-s*50:50; };
-  runTimer=setInterval(()=>{ if(!running)return; const n=spt(); for(let i=0;i<n;i++) if(!execStep()) return; }, ims());
+  // Pro Tick: n Step-Overs ohne Zeichnen (mit Zeitbudget), danach einmal zeichnen
+  runTimer=setInterval(()=>{
+    if(!running) return;
+    prevMem = mem.slice();
+    const n = spt(), t0 = Date.now();
+    for(let i=0; i<n; i++){
+      if(!stepOverCore()) break;
+      if(Date.now() - t0 > 40) break;
+    }
+    refreshView();
+  }, ims());
 }
 
 function stopRun(){
@@ -2018,7 +2084,7 @@ function stopRun(){
 }
 
 function resetSim(){
-  stopRun(); program=[]; memory={}; prevMem={}; pc=0; steps=0;
+  stopRun(); program=[]; mem=[]; image=null; prevMem=[]; pc=0; steps=0; compiled=false; finished=false; instToStack=[];
   updateStepCount(); updateRegisters(); updateUI(-1); setStatus('BEREIT');
   btnRun.disabled=true; btnStep.disabled=true; btnStepIn.disabled=true; btnStepOut.disabled=true;
   clearLog(); log('Reset.','log-info');
@@ -2040,30 +2106,23 @@ function loadCode(userSrc){
 // ══════════════════════════════════════════════════════════════════
 // EVENTS
 // ══════════════════════════════════════════════════════════════════
-btnRun.addEventListener('click',()=>{
-  if(!program.length||pc===0){ if(!compile(editorEl.value)) return; }
-  startRun();
-});
-btnStep.addEventListener('click',()=>{
-  if(!program.length){ if(!compile(editorEl.value)) return; }
-  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
-  setStatus('BEREIT'); execStep();
+btnRun.addEventListener('click', startRun);
+function stepButton(fn){
+  if(!ensureCompiled()) return;
+  setStatus('BEREIT'); fn();
   btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
-});
-btnStepIn.addEventListener('click',()=>{
-  if(!program.length){ if(!compile(editorEl.value)) return; }
-  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
-  setStatus('BEREIT'); execStepIn();
-  btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
-});
-btnStepOut.addEventListener('click',()=>{
-  if(!program.length){ if(!compile(editorEl.value)) return; }
-  if(pc>=program.length){ compile(editorEl.value); if(!program.length) return; }
-  setStatus('BEREIT'); execStepOut();
-  btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false; btnStop.disabled=true;
-});
+}
+btnStep.addEventListener('click',   ()=>stepButton(execStep));
+btnStepIn.addEventListener('click', ()=>stepButton(execStepIn));
+btnStepOut.addEventListener('click',()=>stepButton(execStepOut));
 btnStop.addEventListener('click', stopRun);
-btnReset.addEventListener('click', resetSim);
+showHelpersEl.addEventListener('change', updateRegisters);
+btnReset.addEventListener('click', ()=>{
+  resetSim();
+  // Nach Reset wieder startbar – ensureCompiled() übersetzt den Editor neu
+  const ok = !!editorEl.value.trim();
+  btnRun.disabled=!ok; btnStep.disabled=!ok; btnStepIn.disabled=!ok; btnStepOut.disabled=!ok;
+});
 
 // ── TM-Export Button + Modal ──
 document.getElementById('btn-tm-export').addEventListener('click', showTMExport);
@@ -2095,7 +2154,7 @@ document.getElementById('btn-download-tm').addEventListener('click', ()=>{
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);  // erst freigeben, wenn der Download läuft
   log(`Heruntergeladen: ${filename}`,'log-ok');
 });
 
@@ -2139,7 +2198,7 @@ exSel.addEventListener('change',()=>{
 });
 
 editorEl.addEventListener('input',()=>{
-  program=[]; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
+  program=[]; compiled=false; btnRun.disabled=false; btnStep.disabled=false; btnStepIn.disabled=false; btnStepOut.disabled=false;
   sourceName.textContent=''; updateUI(-1);
 });
 editorEl.addEventListener('scroll',()=>{

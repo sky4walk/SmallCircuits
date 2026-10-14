@@ -139,6 +139,12 @@ input[type="file"] { display: none; }
 .info-grid dt { color: var(--dim); }
 .info-grid dd { font-family: var(--mono); }
 
+.msg-box { margin: 6px 0; padding: 6px 10px; border: 1px solid var(--accent); border-radius: 4px; color: var(--accent); font-size: 0.9em; background: rgba(233,69,96,0.08); }
+.site-footer { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--border); font-size: 0.8em; color: var(--dim); }
+.site-footer a { color: var(--dim); }
+.site-footer a:hover { color: var(--ok); }
+.site-footer code { font-family: var(--mono); }
+
 select {
   font-family: var(--sans);
   font-size: 0.9em;
@@ -165,6 +171,8 @@ select {
   </select>
   <button id="btnExport" class="green" disabled>⬇ .bts Export</button>
 </div>
+
+<div id="msgBox" class="msg-box" style="display:none"></div>
 
 <div id="pnlInfo" class="panel" style="display:none">
   <div class="panel-title">Konvertierung</div>
@@ -202,11 +210,19 @@ select {
       <div id="simStatus" class="status"></div>
       <h2>Datenwort</h2>
       <div id="dataword" class="dataword"></div>
+      <h2>Band (dekodiert, zwischen ◀ und ▶, ohne Rand-Blanks)</h2>
+      <div id="decodedTape" class="dataword"></div>
       <h2>Log</h2>
       <div id="logArea" class="log-area"></div>
     </div>
   </div>
 </div>
+
+<footer class="site-footer">
+  Kette: <code>tm_clockwise.html</code> (.ctm-Export) → diese Seite (.bts).
+  Zellteilung wie im CTM-Simulator von tm_clockwise: Kopf steht danach auf der zweiten Zelle.
+  · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════════════
@@ -247,6 +263,7 @@ class BiTagSystem {
 function parseCTMFile(text) {
   const lines = text.split('\n');
   let name = '';
+  let blankMeta = null;
   let config = null;
   let tapeStr = null;
   const transitions = [];
@@ -257,6 +274,9 @@ function parseCTMFile(text) {
     line = line.trim();
     if (!line) continue;
     if (line.startsWith('#')) {
+      // Metazeile "# blank: x" (Blank-Symbol der Quell-TM; ältere Parser ignorieren sie als Kommentar)
+      const bm = line.match(/^#\s*blank\s*:\s*(\S+)\s*$/i);
+      if (bm) { if ([...bm[1]].length === 1) blankMeta = bm[1]; continue; }
       if (!name) name = line.slice(1).trim();
       continue;
     }
@@ -276,6 +296,8 @@ function parseCTMFile(text) {
           nextState: parts[3],
           stay: parts[4].toUpperCase() === 'S'
         };
+        const mv = parts[4].toUpperCase();
+        if (mv !== 'C' && mv !== 'S') throw new Error('(' + parts.join(',') + '): Bewegung muss C oder S sein');
         transitions.push(t);
         states.add(t.state);
         states.add(t.nextState);
@@ -288,9 +310,24 @@ function parseCTMFile(text) {
   if (!config) throw new Error('Keine Konfiguration (Startzustand, Kopfposition) gefunden');
   if (transitions.length === 0) throw new Error('Keine Übergänge gefunden');
 
+  // Band und Kopfposition prüfen
+  const tapeCells = [...(tapeStr || '')];
+  if (tapeCells.length === 0) throw new Error('Leeres Band — das Datenwort braucht mindestens ein Bandsymbol');
+  if (!Number.isInteger(config.headPos) || config.headPos < 0 || config.headPos >= tapeCells.length) {
+    throw new Error('Ungültige Kopfposition ' + config.headPos + ' (erlaubt: 0…' + (tapeCells.length - 1) + ')');
+  }
+  // Symbole, die nur auf dem Band stehen (von keiner Regel gelesen), und der
+  // Startzustand gehören ebenfalls zu Σ bzw. Q — sonst fehlen a_σ / e_q.
+  for (const ch of tapeCells) alphabet.add(ch);
+  states.add(config.startState);
+
   // Build transition map: (state, read) → transition
   const transMap = {};
   for (const t of transitions) {
+    if (/\s/.test(t.state) || /\s/.test(t.nextState)) throw new Error('Zustandsnamen dürfen keine Leerzeichen enthalten: ' + t.state + ' / ' + t.nextState);
+    if ([...t.read].length !== 1) throw new Error('Lesesymbol muss genau ein Zeichen sein: ' + t.read);
+    const wl = [...t.writeVal].length;
+    if (wl < 1 || wl > 2) throw new Error('Schreibwert muss 1 oder 2 Zeichen haben: ' + t.writeVal);
     transMap[t.state + ',' + t.read] = t;
   }
 
@@ -302,7 +339,8 @@ function parseCTMFile(text) {
     transitions,
     states: [...states].sort(),
     alphabet: [...alphabet].sort(),
-    transMap
+    transMap,
+    blank: blankMeta || '□'   // Fallback □ (Blank von tm_clockwise)
   };
 }
 
@@ -321,7 +359,23 @@ function parseCTMFile(text) {
    Produktionen:
      P(a_σ) = a_σ                    (Identität, rotiert Symbol)
      P(e_qx, a_σi) = a_σj e_qy      falls (qx, σi, σj, qy) ∈ f
-     P(e_qx, a_σi) = a_σj a_σk e_qy falls (qx, σi, σjσk, qy) ∈ f
+     P(e_qx, a_σi) = a_σj e_qy a_σk falls (qx, σi, σjσk, qy) ∈ f
+
+   Zellteilung: Semantik wie im CTM-Simulator von tm_clockwise.html —
+   nach σi → σjσk steht der Kopf auf σk (nicht dahinter). Darum steht
+   e_qy VOR a_σk; die Paper-Form (a_σj a_σk e_qy) überspränge σk, und von
+   tm_clockwise exportierte .ctm-Dateien liefen dann falsch.
+
+   Stay (S): Kopf bleibt auf der geschriebenen Zelle. Das ist im Bi-Tag-System
+   nicht direkt darstellbar, wird aber statisch aufgelöst: Stay-Ketten werden
+   so lange weiterverfolgt (Zustand + Zellinhalt sind bekannt), bis ein
+   C-Übergang oder ein Halt folgt. Stay mit Zellteilung fügt die zweite Zelle
+   hinter dem Kopf ein. Wiederholt sich eine Stay-Kette, divergiert die CTM:
+   dann wird das Schleifensymbol l_LOOP erzeugt (P(l_LOOP,a) = a l_LOOP).
+
+   Halt: alle Zustände ohne ausgehende Übergänge werden auf das eine
+   Haltsymbol e_h abgebildet; fehlt ein Übergang (q,σ), lautet die
+   Produktion a_σ e_h (Band bleibt erhalten, e_h erreicht später die Front).
 
    Datenwort: Die Bandsymbole ab Kopfposition im Uhrzeigersinn,
               mit e_q an der Kopfposition.
@@ -350,27 +404,20 @@ function convertCTMtoBTS(ctm) {
     bts.symbolNames[aName] = sym;
   }
 
-  // Haltsymbol bestimmen
-  let haltSymbol;
-  if (haltStates.length > 0) {
-    // Erster Haltzustand wird eh
-    haltSymbol = 'e_' + haltStates[0];
-    bts.eh = haltSymbol;
-    for (const hs of haltStates) {
-      const eName = 'e_' + hs;
-      if (!bts.E.includes(eName)) bts.E.push(eName);
-      bts.symbolNames[eName] = hs;
-    }
-  } else {
-    // Kein expliziter Haltzustand → synthetischen erzeugen
-    haltSymbol = 'e_HALT';
-    bts.eh = haltSymbol;
-    bts.E.push(haltSymbol);
-    bts.symbolNames[haltSymbol] = 'HALT';
-  }
+  // Haltsymbol: EIN gemeinsames e_h für alle Haltzustände (Definition des
+  // Bi-Tag-Systems kennt nur ein eh). Eigener Präfix "h_", damit es nicht mit
+  // einem Benutzerzustand namens "HALT" kollidiert.
+  const haltSymbol = 'h_HALT';
+  bts.eh = haltSymbol;
+  bts.E.push(haltSymbol);
+  bts.symbolNames[haltSymbol] = haltStates.length > 0 ? 'HALT(' + haltStates.join('|') + ')' : 'HALT';
+  const haltSet = new Set(haltStates);
+  /** E-Symbol eines Zustands; Haltzustände → e_h */
+  const eOf = q => haltSet.has(q) ? haltSymbol : 'e_' + q;
 
   // Nicht-Halt-Zustände
   for (const st of ctm.states) {
+    if (haltSet.has(st)) continue;
     const eName = 'e_' + st;
     if (!bts.E.includes(eName)) bts.E.push(eName);
     bts.symbolNames[eName] = st;
@@ -381,32 +428,50 @@ function convertCTMtoBTS(ctm) {
     bts.prodA[a] = a;
   }
 
-  // Produktionen P(e, a) aus CTM-Übergängen
+  // Produktionen P(e, a) aus CTM-Übergängen (Stay-Ketten statisch aufgelöst)
+  const loopSymbol = 'l_LOOP';
+  let usesLoop = false;
+  /** Ergebnis von Zustand st auf Zelle sym als Wort (Leerzeichen-getrennt). */
+  function production(st, sym) {
+    let cur = st;
+    let V = [sym];              // Zellen ab Kopf, die schon feststehen
+    const seen = new Set();
+    for (;;) {
+      const t = haltSet.has(cur) ? undefined : ctm.transMap[cur + ',' + V[0]];
+      if (!t) {
+        // Halt: Zellen erhalten, danach e_h
+        return [...V.map(c => 'a_' + c), haltSymbol].join(' ');
+      }
+      const w = [...t.writeVal];
+      if (!t.stay) {
+        // C-Übergang: σj geschrieben, Kopf auf nächster Zelle (σk bei Zellteilung)
+        V.shift();
+        if (w.length === 2) V.unshift(w[1]);
+        return ['a_' + w[0], eOf(t.nextState), ...V.map(c => 'a_' + c)].join(' ');
+      }
+      // Stay: Kopf bleibt auf w[0], bei Zellteilung folgt w[1]
+      V.shift();
+      V.unshift(...w);
+      cur = t.nextState;
+      const key = cur + '\x00' + V.join('\x01');
+      if (seen.has(key) || V.length > 64) {
+        usesLoop = true;
+        return [loopSymbol, ...V.map(c => 'a_' + c)].join(' ');
+      }
+      seen.add(key);
+    }
+  }
   for (const st of ctm.states) {
-    if (haltStates.includes(st)) continue;  // Haltzustand: keine Produktionen
-
+    if (haltSet.has(st)) continue;  // Haltzustand: keine Produktionen
     const eName = 'e_' + st;
     for (const sym of ctm.alphabet) {
-      const aName = 'a_' + sym;
-      const key = eName + ',' + aName;
-      const tKey = st + ',' + sym;
-      const t = ctm.transMap[tKey];
-
-      if (t) {
-        // Übergang vorhanden
-        if (t.writeVal.length === 1) {
-          // (qx, σi, σj, qy) → P(ex, ai) = aj ey
-          bts.prodEA[key] = 'a_' + t.writeVal + ' e_' + t.nextState;
-        } else {
-          // (qx, σi, σjσk, qy) → P(ex, ai) = aj ak ey
-          bts.prodEA[key] = 'a_' + t.writeVal[0] + ' a_' + t.writeVal[1] + ' e_' + t.nextState;
-        }
-      } else {
-        // Kein Übergang → Halt-Produktion
-        // P(ex, ai) = ai eh  (beliebiges A-Symbol + Haltsymbol)
-        bts.prodEA[key] = aName + ' ' + haltSymbol;
-      }
+      bts.prodEA[eName + ',a_' + sym] = production(st, sym);
     }
+  }
+  if (usesLoop) {
+    bts.E.push(loopSymbol);
+    bts.symbolNames[loopSymbol] = 'LOOP';
+    for (const sym of ctm.alphabet) bts.prodEA[loopSymbol + ',a_' + sym] = 'a_' + sym + ' ' + loopSymbol;
   }
 
   // Datenwort aus dem CTM-Band konstruieren
@@ -417,7 +482,7 @@ function convertCTMtoBTS(ctm) {
 
   // Datenwort: e_startState a_tape[head] a_tape[head+1] ... a_tape[head-1]
   const dataword = [];
-  dataword.push('e_' + ctm.startState);
+  dataword.push(eOf(ctm.startState));
   for (let i = 0; i < n; i++) {
     const idx = (headPos + i) % n;
     dataword.push('a_' + tape[idx]);
@@ -561,12 +626,13 @@ const EXAMPLES = {
 (◀AB▶)
 (q1,A,X,q1,C) (q1,B,Y,q1,C) (q1,◀,◀,q1,C) (q1,▶,X▶,q2,C)
 `,
-  incr: `# CTM: Binär-Inkrement
-# Inkrementiert 011 → 100
+  incr: `# CTM: Binär-Inkrement (LSB zuerst)
+# Band nach ◀ enthält die Zahl mit dem niederwertigsten Bit zuerst:
+# 110 = 3  →  001 = 4. Überlauf (111) hängt per Zellteilung eine 1 vor ▶ an.
 (q1,1)
-(◀011▶)
+(◀110▶)
 (q1,0,0,q1,C) (q1,1,1,q1,C) (q1,◀,◀,q1,C) (q1,▶,▶,q2,C)
-(q2,1,0,q2,C) (q2,0,1,q3,C) (q2,◀,◀,q2,C) (q2,▶,▶,q2,C)
+(q2,1,0,q2,C) (q2,0,1,q3,C) (q2,◀,◀,q2,C) (q2,▶,1▶,q3,C)
 (q3,0,0,q3,C) (q3,1,1,q3,C) (q3,◀,◀,q3,C) (q3,▶,▶,q4,C)
 `
 };
@@ -588,8 +654,16 @@ function showPanels(show) {
   document.getElementById('btnExport').disabled = !show;
 }
 
+/** Inline-Meldung (statt alert); leerer Text blendet sie aus. */
+function showMsg(text) {
+  const box = document.getElementById('msgBox');
+  box.textContent = text ? '✗ ' + text : '';
+  box.style.display = text ? '' : 'none';
+}
+
 function loadCTM(text) {
   stopAnim();
+  showMsg('');
   try {
     currentCTM = parseCTMFile(text);
     const result = convertCTMtoBTS(currentCTM);
@@ -603,11 +677,10 @@ function loadCTM(text) {
       <dt>Alphabet</dt><dd>${currentCTM.alphabet.length}: ${esc(currentCTM.alphabet.join(' '))}</dd>
       <dt>Übergänge</dt><dd>${currentCTM.transitions.length}</dd>
       <dt>Band</dt><dd>${esc(currentCTM.tape)}</dd>
+      <dt>Blank</dt><dd>${esc(currentCTM.blank)}</dd>
       <dt>Kopf</dt><dd>${currentCTM.headPos}</dd>
       <dt>Haltzust.</dt><dd>${result.haltStates.length > 0 ? esc(result.haltStates.join(', ')) : '(implizit)'}</dd>
-      ${result.hasStay ? `<dt style="color:var(--warn)">⚠ Stay</dt><dd style="color:var(--warn)">${result.stayCount} Stay-Übergänge (S) gefunden.<br>
-        Das Paper (Neary/Woods, Lemma 2.1) definiert CTMs nur mit Clockwise-Bewegung.<br>
-        Stay-Transitionen werden als Clockwise behandelt — BTS-Simulation weicht ggf. ab.</dd>` : ''}
+      ${result.hasStay ? `<dt>Stay</dt><dd>${result.stayCount} Stay-Übergänge (S) — statisch zu C-Übergängen aufgelöst</dd>` : ''}
     `;
 
     const bi = document.getElementById('btsInfo');
@@ -653,8 +726,7 @@ function loadCTM(text) {
     document.getElementById('logArea').textContent = '';
 
   } catch (e) {
-    alert('Fehler: ' + e.message);
-    console.error(e);
+    showMsg('Fehler: ' + e.message);
   }
 }
 
@@ -687,6 +759,27 @@ function updateSimDisplay() {
   } else {
     st.innerHTML = `<span class="running">Schritt ${currentSim.step}</span> | Datenwort: ${currentSim.dataword.length} Symbole`;
   }
+  document.getElementById('decodedTape').textContent = decodeTape(currentSim);
+}
+
+/** Dekodiert das CTM-Band aus dem Datenwort: A-Symbole in Reihenfolge,
+ *  zirkulär ab ◀ bis ▶ gelesen (falls vorhanden), sonst ab Wortanfang. */
+function decodeTape(sim) {
+  const cells = sim.dataword.filter(s => sim.isA(s)).map(s => sim.bts.symbolNames[s]);
+  const li = cells.indexOf('◀');
+  if (li === -1) return cells.join('') || 'ε';
+  const out = [];
+  for (let i = 1; i < cells.length; i++) {
+    const c = cells[(li + i) % cells.length];
+    if (c === '▶') break;
+    if (c !== '◆') out.push(c);
+  }
+  // Rand-Blanks wie in tm_clockwise abschneiden (Blank aus "# blank:", sonst □)
+  const blank = (currentCTM && currentCTM.blank) || '□';
+  let s = out.join('');
+  while (s.startsWith(blank)) s = s.slice(blank.length);
+  while (s.endsWith(blank)) s = s.slice(0, -blank.length);
+  return s || 'ε';
 }
 
 function appendLog(text, cls) {

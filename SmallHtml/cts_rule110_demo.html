@@ -59,7 +59,8 @@
 
   /* ── Layout ── */
   .cols { display: grid; grid-template-columns: 340px 1fr; gap: 24px; align-items: start; }
-  @media (max-width: 820px) { .cols { grid-template-columns: 1fr; } }
+  .cols > * { min-width: 0; }
+  @media (max-width: 820px) { .cols { grid-template-columns: minmax(0, 1fr); } }
 
   .panel {
     background: var(--panel); border: 1px solid var(--line);
@@ -144,6 +145,17 @@
   footer code { color: var(--accent); }
   a { color: var(--live); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  .ctrl-sel {
+    font: inherit; font-size: 11px; padding: 6px 8px; cursor: pointer;
+    background: var(--ink); color: var(--text);
+    border: 1px solid var(--line); border-radius: 2px;
+  }
+  .sim-note { margin-top: 10px; font-size: 11px; color: var(--dim); line-height: 1.6; }
+  .trace {
+    font: inherit; font-size: 11px; line-height: 1.55; color: var(--text);
+    background: var(--ink); border: 1px solid var(--line); border-radius: 2px;
+    padding: 10px 12px; white-space: pre; overflow-x: auto; max-height: 340px;
+  }
 </style>
 </head>
 <body>
@@ -152,11 +164,14 @@
   <h1>Cyclic Tag System <span class="arrow">→</span> Regel&nbsp;110</h1>
   <p class="lede">
     Die letzte Stufe der Kette <strong>TM → 2-Tag → Cyclic Tag → Regel 110</strong>.
-    Ein cyclic tag system wird als Anfangsband des Zellularautomaten Regel 110
-    kodiert — die simpelste bekannte universelle Berechnung. Die Beispiele unten
-    sind <strong>echte ts2cts-Ausgaben</strong>: kleine Tag-Systeme, durch den
-    ts2cts-Konverter geschickt. Jede Produktion wird zu einem Muster aus Gleitern
-    (gliders), deren Kollisionen die Tag-Schritte ausführen.
+    Ein cyclic tag system wird nach Cook/Wolfram als Anfangszeile des Zellularautomaten
+    Regel 110 kodiert: <strong>… b1 b1 · b2 · b3 b3 …</strong> — links unendlich viele
+    Taktpulse (b1), in der Mitte einmal das Startband (b2), rechts unendlich oft der
+    Regelzyklus (b3). Die Konstruktion verlangt <strong>Regellängen 0 oder Vielfache
+    von 6</strong>; andere CTS werden automatisch <strong>äquivalent gestreckt</strong>
+    (Faktor f: jedes Bit b → b0…0, hinter jede Regel f−1 leere Regeln; 1 Originalschritt
+    = f Schritte). Zwei Beispiele sind die Prüfbeispiele aus NKS, eines ist eine echte
+    ts2cts-Ausgabe.
   </p>
   <div class="pipeline">
     <span class="stage done">TM</span>
@@ -176,10 +191,24 @@
     <div class="presets" id="presets"></div>
     <div class="src-line" id="srcLine"></div>
     <textarea id="cts" spellcheck="false"></textarea>
-    <div class="hint">Echtes <code style="color:var(--accent)">ts2cts</code>-Ausgabeformat: <code style="color:var(--accent)">(startband)</code>, dann je Zeile <code style="color:var(--accent)">(index, trigger, bits…)</code>. Leere Zeilen sind Dummy-Produktionen.</div>
+    <div class="hint">Format wie <code style="color:var(--accent)">ts2cts</code>: <code style="color:var(--accent)">(startband)</code>, dann je Zeile <code style="color:var(--accent)">(index, trigger, bits…)</code>. Trigger 0/1/H, Bits nur 0/1, beliebige Regellängen (wird bei Bedarf gestreckt). H-Slots werden als leere Regel kodiert – ein Halt ist in Regel 110 nicht abbildbar.</div>
     <button class="run" id="run">In Regel 110 kodieren</button>
     <div class="status" id="status"></div>
     <div class="stats" id="stats"></div>
+    <div class="panel-label" style="margin-top:22px">CTS-Referenz</div>
+    <div class="hint" style="margin-bottom:8px">Was das CTS selbst tut (erstes Bit lesen und löschen, bei 1 die Regel P<sub>k</sub> anhängen). Ein automatischer Abgleich mit dem Automaten findet nicht statt.</div>
+    <pre class="trace" id="trace">—</pre>
+    <div class="panel-label" style="margin-top:22px">CTS-Zustand aus dem Automaten</div>
+    <div class="hint" style="margin-bottom:8px">Gleiter-Tracking auf der unendlichen Zeile: stationäre Gruppen aus 4 C-Gleitern sind Bandsymbole (Abstände 45·45·37 = 1, 45·29·37 = 0); rechts wird gelesen, links angehängt. Abgleich mit der CTS-Referenz je Symbol. Rechenzeit einige Sekunden je 100 000 Generationen.</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+      <select class="ctrl-sel" id="rbGens">
+        <option value="100000">bis Gen. 100 000</option>
+        <option value="200000" selected>bis Gen. 200 000</option>
+        <option value="400000">bis Gen. 400 000</option>
+      </select>
+      <button class="ctrl-btn" id="rbBtn" disabled>Zurücklesen</button>
+    </div>
+    <pre class="trace" id="rbOut">— erst kodieren —</pre>
   </div>
 
   <!-- CA-Visualisierung -->
@@ -196,76 +225,73 @@
       <button class="ctrl-btn primary" id="playBtn">▶ Start</button>
       <button class="ctrl-btn" id="stepBtn">Schritt</button>
       <button class="ctrl-btn" id="resetBtn">Zurücksetzen</button>
+      <select class="ctrl-sel" id="focus" title="Worauf das Fenster zentriert ist">
+        <option value="data">Fokus: Datenblock (b2)</option>
+        <option value="b1b2">Fokus: Naht b1 | b2</option>
+        <option value="b2b3">Fokus: Naht b2 | b3</option>
+      </select>
+      <select class="ctrl-sel" id="budget" title="Bis zu dieser Generation ist das Fenster exakt">
+        <option value="2000">bis Gen. 2 000</option>
+        <option value="5000" selected>bis Gen. 5 000</option>
+        <option value="10000">bis Gen. 10 000</option>
+        <option value="20000">bis Gen. 20 000</option>
+      </select>
+      <select class="ctrl-sel" id="speed" title="Generationen pro Bild">
+        <option value="1">1 Gen/Bild</option>
+        <option value="4" selected>4 Gen/Bild</option>
+        <option value="16">16 Gen/Bild</option>
+        <option value="64">64 Gen/Bild</option>
+      </select>
+      <label class="slider-group" style="margin-left:0;cursor:pointer"><input type="checkbox" id="gview"> Gleiter-Ansicht</label>
       <div class="slider-group">
         <span>Fenster</span>
         <input type="range" id="zoom" min="200" max="1600" value="700" step="100">
       </div>
     </div>
+    <div class="sim-note" id="legend" style="display:none"></div>
+    <div class="sim-note" id="simNote"></div>
   </div>
 </div>
 
 <footer>
-  Die Kodierung folgt Matthew Cooks Konstruktion (2004), wie in Wolframs
-  <em>A New Kind of Science</em> notiert. Ein einzelner CTS-Schritt entspricht
-  vielen tausend CA-Generationen — schon kleine Eingaben erzeugen
-  Konfigurationen mit <code>10⁴–10⁵</code> Zellen. Die vorgelagerten Stufen
-  (<code>tm2ts</code>, <code>ts2cts</code>) liefern für echte Turingmaschinen
-  weit größere CTS, deren Regel-110-Kodierung den praktisch berechenbaren
-  Rahmen sprengt — daher demonstriert dieses Werkzeug die Endstufe mit
-  kompakten, von Hand gesetzten CTS.
+  Die Kodierung folgt Matthew Cooks Konstruktion (2004) in der Fassung von Wolframs
+  <em>A New Kind of Science</em> (S. 1116, CTToR110); die Blocklängen der NKS-Prüfbeispiele
+  werden exakt reproduziert. <strong>Was sichtbar ist:</strong> ein Fenster von höchstens
+  1600 Zellen um den gewählten Fokus, exakt so, wie es sich auf der unendlichen Zeile
+  … b1 b1 · b2 · b3 b3 … entwickelt — gerechnet wird dafür nur der Lichtkegel des Fensters,
+  bis zur gewählten Generationsgrenze. <strong>Was nicht sichtbar ist:</strong> ein
+  vollständiger CTS-Schritt erstreckt sich über viele tausend Generationen und weit mehr
+  Zellen als das Fenster. Das CTS-Band lässt sich dennoch aus dem Automaten zurücklesen,
+  per Gleiter-Tracking auf einem eigenen, großen Bereich (Panel links): Bandsymbole sind stationäre Gruppen aus
+  4 C-Gleitern, gelesen wird rechts, angehängte Symbole werden links ossifiziert. Erkannt
+  wird die Band-Historie, solange Symbole als solche Gruppen erscheinen; Symbole, die
+  noch als bewegte E-Pakete unterwegs sind, sind nicht dekodierbar. Bei Systemen mit
+  leeren Regeln bricht die Erkennung teils früh ab (dann erscheinen Nullen als einzelne C).
+  Die Gleiter-Ansicht färbt Defekte nach Bewegung: C stationär, A +2/3, E −8/30, sonst Kollision.
+  Ausgaben von <code>ts2cts</code> und
+  <code>ts2cts_saware</code> werden gestreckt, wenn ihre Regellängen die Bedingung nicht erfüllen.
+  <br>Mehr dazu auf <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>.
 </footer>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════
-   CORE: CTS → Regel 110 (Cook/Wolfram-Konstruktion) + CA-Simulator
-   Verifizierte Logik aus der SmallCircuits-Kette.
+   CORE: CTS → Regel 110 (Cook/Wolfram-Konstruktion) + CTS-Referenz
+   Identisch mit CTS2Rule110.html.
    ═══════════════════════════════════════════════════════════════ */
-const BGI = [1,0,0,1,1,0,1,1,1,1,1,0,0,0];
-const C_VAL0 = 246005560154658471735510051750569922628065067661n;
-const C_VAL1 = 1043746165489466852897089830441756550889834709645n;
-const C_INIT0 = cIntegerDigits(216n * (C_VAL0 + 432n * 1049n), 2, 0);
-const C_INIT1 = cIntegerDigits(216n * (C_VAL1 + 432n * 1049n), 2, 0);
-let C_S = null;
-const C_SDEF = {
-  1:[3,0,1,10,4,8,2], 2:[3,0,1,1,619,15,2], 3:[3,0,1,10,4956,18,2],
-  4:[0,0,9,10,4,8,1], 5:[5,0,9,14,1,1,1],
-};
-
-const C_C = {
-  1:[22,11,3,39,3,1,63,12,2,48,5,4,29,26,4,43,26,4,23,3,4,47,4,4],
-  2:[22,11,3,39,3,1,87,6,2,32,2,4,13,23,4,27,16,4],
-  3:[17,22,4,23,24,4,31,29,4,17,22,4,39,27,4,47,4,4],
-  4:[17,22,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
-  5:[41,16,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
-};
-function cEv(st) {
-  const [x, y] = st.d, pl = st.pl, pr = st.pr, b = st.b;
-  const joined = cbg(pl - 2, 2).concat(b, cbg(pr, 2));
-  const conv = cListConvolve([1,2,4], joined);
-  const r = conv.map(v => { const ba = (1 << v) & 110; return ba > 0 ? 1 : (ba < 0 ? -1 : 0); });
-  const lr = r.length;
-  const bgPl3 = cbg(pl + 3, lr);
-  let pl1 = lr;
-  for (let i = 0; i < lr; i++) { const d = r[i] - bgPl3[i]; if (d === 1 || d === -1) { pl1 = i + 1; break; } }
-  const bgPr5 = cbg(pr + 5 - lr, lr);
-  let pr1 = 1;
-  for (let i = lr - 1; i >= 0; i--) { const d = r[i] - bgPr5[i]; if (d === 1 || d === -1) { pr1 = i + 1; break; } }
-  if (pr1 < pl1) pr1 = pl1;
-  return { d:[x+pl1-2, y+1], pl: pl1+((pl+2)%14), pr: 1+((pr+4)%14)+pr1-lr, b: r.slice(pl1-1, pr1) };
+// ═══════════════════════════════════════════════════════════
+//  CTToR110 — Wolfram ANKOS (NKS S. 1116), Cook-Konstruktion
+//  Ausgabe: drei Blöcke {b1, b2, b3}. Gemeint ist die Anfangszeile
+//  … b1 b1 b1 · b2 · b3 b3 b3 …  (b1 links unendlich oft = Taktpulse,
+//  b2 einmal = Startband des CTS, b3 rechts unendlich oft = Regelzyklus).
+//  Einschränkung der Konstruktion: jede Regellänge ist 0 oder ein
+//  Vielfaches von 6.
+// ═══════════════════════════════════════════════════════════
+const BGI = [1,0,0,1,1,0,1,1,1,1,1,0,0,0];          // Äther, Periode 14 (räumlich) / 7 (zeitlich)
+function cbg(s, n) {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(BGI[(((s - 1 + i) % 14) + 14) % 14]);
+  return out;
 }
-
-function cInitStructs() { C_S = {}; for (let n = 1; n <= 5; n++) C_S[n] = cMakeStruct(n); }
-function cSadd(acc, item) {
-  const [x, y] = acc.d, b = acc.b, [dx, dy] = item.d, st = item.st;
-  let x1 = dx - x, y1 = dy - y;
-  while (y1 > 0) { if (st.length === 30) { x1 += 8; y1 -= 30; } else { x1 -= 2; y1 -= 3; } }
-  const targetY = -y1;
-  let b2 = null, x2 = 0;
-  for (const e of st) { if (e.d[1] === targetY) { const ex = e.d[0]; b2 = cbg(e.pl - x1 - ex, x1 + ex).concat(e.b); x2 = ex + e.b.length; break; } }
-  if (b2 === null) throw new Error(`sadd: kein Match für y=${targetY}`);
-  return { d:[x2, targetY], b: b.concat(b2) };
-}
-
 function cIntegerDigits(num, base, length) {
   let out = [], n = typeof num === 'bigint' ? num : BigInt(num);
   const b = BigInt(base);
@@ -273,86 +299,85 @@ function cIntegerDigits(num, base, length) {
   while (out.length < length) out.unshift(0);
   return out;
 }
-
+const C_VAL0 = 246005560154658471735510051750569922628065067661n;
+const C_VAL1 = 1043746165489466852897089830441756550889834709645n;
+// NKS: IntegerDigits[216 (# + 432 10^49), 2] — die Hochzahl 49 gehört zu 10.
+// Ergibt je 180 Zellen pro CTS-Bit, Anfang und Ende in Ätherphase.
+const C_INIT0 = cIntegerDigits(216n * (C_VAL0 + 432n * 10n ** 49n), 2, 0);
+const C_INIT1 = cIntegerDigits(216n * (C_VAL1 + 432n * 10n ** 49n), 2, 0);
+const C_C = {
+  1:[22,11,3,39,3,1,63,12,2,48,5,4,29,26,4,43,26,4,23,3,4,47,4,4],
+  2:[22,11,3,39,3,1,87,6,2,32,2,4,13,23,4,27,16,4],
+  3:[17,22,4,23,24,4,31,29,4,17,22,4,39,27,4,47,4,4],
+  4:[17,22,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
+  5:[41,16,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
+};
+// Strukturen: 1–4 = E-Gleiter (−8 Zellen / 30 Gen.), 5 = A-Gleiter (+2 / 3)
+const C_SDEF = {
+  1:[3,0,1,10,4,8,2], 2:[3,0,1,1,619,15,2], 3:[3,0,1,10,4956,18,2],
+  4:[0,0,9,10,4,8,1], 5:[5,0,9,14,1,1,1],
+};
 function cListConvolve(kernel, lst) {
   const k = [...kernel].reverse(), kn = k.length, n = lst.length, out = [];
   for (let i = 0; i <= n - kn; i++) { let s = 0; for (let j = 0; j < kn; j++) s += k[j] * lst[i + j]; out.push(s); }
   return out;
 }
-
+function cEv(st) {
+  const [x, y] = st.d, pl = st.pl, pr = st.pr, b = st.b;
+  const joined = cbg(pl - 2, 2).concat(b, cbg(pr, 2));
+  const conv = cListConvolve([1,2,4], joined);
+  const r = conv.map(v => ((1 << v) & 110) ? 1 : 0);
+  const lr = r.length;
+  const bgPl3 = cbg(pl + 3, lr);
+  let pl1 = lr;
+  for (let i = 0; i < lr; i++) { if (r[i] !== bgPl3[i]) { pl1 = i + 1; break; } }
+  const bgPr5 = cbg(pr + 5 - lr, lr);
+  let pr1 = 1;
+  for (let i = lr - 1; i >= 0; i--) { if (r[i] !== bgPr5[i]) { pr1 = i + 1; break; } }
+  if (pr1 < pl1) pr1 = pl1;
+  return { d:[x+pl1-2, y+1], pl: pl1+((pl+2)%14), pr: 1+((pr+4)%14)+pr1-lr, b: r.slice(pl1-1, pr1) };
+}
 function cMakeStruct(n) {
   const [x, y, pl, pr, bInt, bl, p] = C_SDEF[n];
   const gr = { d:[x,y], pl, pr, b: cIntegerDigits(bInt, 2, bl) };
   let result = [gr], p2 = p + 1;
   const restEq = (a) => a.pl === gr.pl && a.pr === gr.pr && a.b.length === gr.b.length && a.b.every((v,i)=>v===gr.b[i]);
   const test = (lst) => { if (restEq(lst[lst.length-1])) p2--; return p2 > 0; };
-  while (test(result)) result = result.concat([cEv(result[result.length-1])]);
+  while (test(result)) result.push(cEv(result[result.length-1]));
   return result.slice(0, -1);
 }
-
+let C_S = null;
+function cInitStructs() { C_S = {}; for (let n = 1; n <= 5; n++) C_S[n] = cMakeStruct(n); }
+// Hängt eine Struktur an acc an (mutiert acc.b, vermeidet quadratisches concat)
 function cSadd(acc, item) {
-  const [x, y] = acc.d, b = acc.b, [dx, dy] = item.d, st = item.st;
+  const [x, y] = acc.d, [dx, dy] = item.d, st = item.st;
   let x1 = dx - x, y1 = dy - y;
   while (y1 > 0) { if (st.length === 30) { x1 += 8; y1 -= 30; } else { x1 -= 2; y1 -= 3; } }
   const targetY = -y1;
-  let b2 = null, x2 = 0;
-  for (const e of st) { if (e.d[1] === targetY) { const ex = e.d[0]; b2 = cbg(e.pl - x1 - ex, x1 + ex).concat(e.b); x2 = ex + e.b.length; break; } }
-  if (b2 === null) throw new Error(`sadd: kein Match für y=${targetY}`);
-  return { d:[x2, targetY], b: b.concat(b2) };
-}
-
-function cbg(s, n) {
-  const out = [];
-  for (let i = 0; i < n; i++) out.push(BGI[(((s - 1 + i) % 14) + 14) % 14]);
-  return out;
-}
-
-function buildLUT(ruleN) {
-  const lut = new Uint8Array(8);
-  for (let i = 0; i < 8; i++) lut[i] = (ruleN >> i) & 1;
-  return lut;
-}
-
-function nextGen(current, lut, width) {
-  const next = new Uint8Array(width);
-  for (let i = 0; i < width; i++) {
-    const l = i > 0         ? current[i-1] : 0;
-    const c = current[i];
-    const r = i < width - 1 ? current[i+1] : 0;
-    next[i] = lut[l*4 + c*2 + r];
+  for (const e of st) {
+    if (e.d[1] === targetY) {
+      const ex = e.d[0];
+      for (const v of cbg(e.pl - x1 - ex, x1 + ex)) acc.b.push(v);
+      for (const v of e.b) acc.b.push(v);
+      acc.d = [ex + e.b.length, targetY];
+      return acc;
+    }
   }
-  return next;
+  throw new Error(`sadd: kein Match für y=${targetY}`);
 }
-
-function simulateBatch(initCells, numGens, lut, padding) {
-  const padded = new Uint8Array([...new Array(padding).fill(0), ...initCells, ...new Array(padding).fill(0)]);
-  const width = padded.length;
-  const grid = [padded];
-  let cur = padded;
-  for (let g = 1; g < numGens; g++) {
-    const nx = nextGen(cur, lut, width);
-    grid.push(nx);
-    cur = nx;
-  }
-  return { grid, width };
+// Prüft die Eingabe gegen die Einschränkungen der Konstruktion
+function cValidateCTS(rules, init) {
+  if (!Array.isArray(rules) || rules.length === 0) throw new Error('Keine Produktionen – das CTS braucht mindestens eine Regel.');
+  if (!init || init.length === 0) throw new Error('Startband ist leer – das CTS hält sofort, es gibt nichts zu kodieren.');
+  const isBit = v => v === 0 || v === 1;
+  if (!init.every(isBit)) throw new Error('Startband: nur 0/1 erlaubt.');
+  rules.forEach((r, i) => { if (!r.every(isBit)) throw new Error(`Produktion ${i}: nur 0/1 erlaubt.`); });
+  const bad = rules.map((r, i) => [i, r.length]).filter(([, l]) => l % 6 !== 0);
+  if (bad.length) throw new Error('Regellänge muss 0 oder ein Vielfaches von 6 sein (Einschränkung der Cook/Wolfram-Konstruktion, NKS S. 1116). Verletzt: ' +
+    bad.map(([i, l]) => `P${i} hat Länge ${l}`).join(', ') + '.');
 }
-
-function parseCTSForR110(src) {
-  const lines = src.split('\n').map(l => l.replace(/;.*$/,'').trim()).filter(Boolean);
-  let startBits = null;
-  const prods = [];
-  for (const line of lines) {
-    if (!line.startsWith('(') || !line.endsWith(')')) continue;
-    const parts = line.slice(1, -1).split(',').map(s => s.trim());
-    if (startBits === null) { startBits = parts.filter(x => x !== '').map(Number); continue; }
-    prods.push(parts);
-  }
-  if (!startBits) throw new Error('Kein Startband gefunden');
-  const rules = prods.map(p => p.slice(2).filter(x => x !== '').map(Number));
-  return { rules, init: startBits, numProds: prods.length };
-}
-
 function ctToR110(rules, init) {
+  cValidateCTS(rules, init);
   if (!C_S) cInitStructs();
   let g1 = [];
   for (const rule of rules) {
@@ -363,86 +388,438 @@ function ctToR110(rules, init) {
     const walk = (x) => { if (typeof x === 'number') return expandInt(x); let out = []; for (const it of x) out = out.concat(walk(it)); return out; };
     g1 = g1.concat(walk(block));
   }
-  const s3 = C_S[3], n = g1.length;
-  let g2 = [];
-  for (let i = 0; i < n; i++) {
-    const cur = g1[i], rot = g1[((i-6)%n+n)%n];
-    const special = cur.d[0]===22 && cur.d[1]===11 && cur.st===s3 && rot.d[0]===22 && rot.d[1]===11 && rot.st===s3;
-    g2.push(special ? { d:[20,8], st:s3 } : cur);
-  }
-  g1 = g2.slice();
+  // Hinweis: Das NKS-Original enthält hier eine MapThread-Ersetzung
+  // {d[22,11],s3} → {d[20,8],s3}. Dort ist s3 ein undefiniertes Symbol (≠ s[3]),
+  // die Ersetzung greift also nie. Sie wird deshalb bewusst NICHT ausgeführt.
+  let g2 = g1.slice();
   let nr = 0;
   const sumY = (arr) => arr.reduce((a,it) => a + it.d[1], 0);
-  while (sumY(g2) % 30 !== 0) { nr++; g2 = g2.concat(g1); if (nr > 1000) throw new Error('g2-Schleife divergiert'); }
+  while (sumY(g2) % 30 !== 0) { nr++; g2 = g2.concat(g1); }
+  if (nr === 0) throw new Error('Für dieses CTS ist die Konstruktion nicht definiert: Σy der Gleiterliste ≡ 0 (mod 30) ⇒ nr = 0, ' +
+    'der Taktabstand sp wäre unendlich (auch im NKS-Original eine Division durch 0). Andere Regelwahl versuchen.');
   let y1 = g2[0].d[1] - 11; if (y1 < 0) y1 += 30;
   const lastStruct = g2[g2.length-1].st;
   let x1 = 0;
   for (const e of lastStruct) if (e.d[1] === y1) x1 = e.d[0] + e.b.length;
-  let g3 = { d:[x1, y1], b:[] };
-  for (const item of g2) g3 = cSadd(g3, item);
+  const g3 = { d:[x1, y1], b:[] };
+  for (const item of g2) cSadd(g3, item);
   const sp = Math.ceil(5 * g3.b.length / (28 * nr) + 2);
-  const foldList = [];
+  const g4 = { d:[17,1], b:[] };
   for (let i = 0; i < 3; i++) {
-    foldList.push({ d:[sp*28+6,1], st:C_S[5] });
-    foldList.push({ d:[398,1], st:C_S[5] });
-    foldList.push({ d:[342,1], st:C_S[5] });
-    foldList.push({ d:[370,1], st:C_S[5] });
+    cSadd(g4, { d:[sp*28+6,1], st:C_S[5] });
+    cSadd(g4, { d:[398,1], st:C_S[5] });
+    cSadd(g4, { d:[342,1], st:C_S[5] });
+    cSadd(g4, { d:[370,1], st:C_S[5] });
   }
-  let g4 = { d:[17,1], b:[] };
-  for (const item of foldList) g4 = cSadd(g4, item);
   const b1 = g4.b.concat(cbg(4, 11));
-  let b2 = [];
   const rep = sp*2 + 1 + 24*init.length;
-  for (let i = 0; i < rep; i++) b2 = b2.concat(BGI);
-  for (const bit of init) b2 = b2.concat(bit === 0 ? C_INIT0 : C_INIT1);
-  b2 = b2.concat(cbg(1, 9));
+  if (!Number.isFinite(rep) || rep > 1e6) throw new Error('Konstruktion zu groß (Äther-Vorlauf ' + rep + ' Perioden).');
+  const b2 = [];
+  for (let i = 0; i < rep; i++) for (const v of BGI) b2.push(v);
+  const dataOffset = b2.length;                       // Beginn des Datenblocks in b2
+  // Der Automat liest das Band von rechts (vorderstes Symbol rechts, Anhängen links).
+  // Damit init[0] zuerst gelesen wird, steht das Startband gespiegelt im Datenblock.
+  // (NKS-Original setzt init in Leserichtung links→rechts; per Gleiter-Tracking geprüft:
+  //  sonst rechnet der Automat das CTS mit umgekehrtem Startband.)
+  for (let k = init.length - 1; k >= 0; k--) for (const v of (init[k] === 0 ? C_INIT0 : C_INIT1)) b2.push(v);
+  const dataLen = b2.length - dataOffset;
+  for (const v of cbg(1, 9)) b2.push(v);
   let bgnr = 60 - g2[0].d[0] + g3.d[0];
   if (g2[0].d[1] < g3.d[1]) bgnr += 8;
-  b2 = b2.concat(cbg(6, bgnr));
+  for (const v of cbg(6, bgnr)) b2.push(v);
   const b3 = g3.b;
-  return { blocks: [b1, b2, b3], nr, sp, full: b1.concat(b2, b3) };
+  return { blocks: [b1, b2, b3], nr, sp, dataOffset, dataLen, full: b1.concat(b2, b3) };
+}
+// Lädt das .cts-Format von ts2cts.html / ts2cts_saware.html:
+//   erste Klammer (startband), dann je Zeile (index, trigger, bits…), trigger ∈ {0, 1, H}
+//   ;-Kommentare, Metazeile ";@ p=… vec=…" wird gelesen und angezeigt.
+// Semantik wie in ts2cts.html: angehängt wird nur bei Trigger 1. Trigger 0 hängt nie an
+// (wirkt als leere Regel). H-Slots (Halt-Symbol) werden für Regel 110 als normale leere
+// Regel behandelt — ein Halt ist im Automaten nicht abbildbar.
+function parseCTSForR110(src) {
+  const meta = /^\s*;@\s*p=(\d+)\s+vec=(\d+)/m.exec(src);
+  const lines = src.split('\n').map(l => l.replace(/;.*$/,'').trim()).filter(Boolean);
+  let startBits = null;
+  const prods = [];
+  let hSlots = 0, zeroTrigWithBits = 0;
+  const toBits = (arr, what) => arr.map(x => {
+    if (x !== '0' && x !== '1') throw new Error(`${what}: ungültiges Symbol „${x}“ (nur 0/1 erlaubt).`);
+    return +x;
+  });
+  lines.forEach((line, ln) => {
+    if (!line.startsWith('(') || !line.endsWith(')')) throw new Error(`Zeile ${ln+1}: erwartet „(…)“, gefunden „${line.slice(0, 30)}“.`);
+    const parts = line.slice(1, -1).split(',').map(s => s.trim());
+    if (startBits === null) { startBits = toBits(parts.filter(x => x !== ''), 'Startband'); return; }
+    if (parts.length < 2) throw new Error(`Zeile ${ln+1}: Produktion braucht das Format (index, trigger, bits…).`);
+    const trig = parts[1].toUpperCase();
+    if (!['0', '1', 'H'].includes(trig)) throw new Error(`Zeile ${ln+1}: ungültiger Trigger „${parts[1]}“ (erlaubt: 0, 1, H).`);
+    const bits = toBits(parts.slice(2).filter(x => x !== ''), `Produktion ${prods.length}`);
+    if (trig === 'H') { hSlots++; prods.push([]); }
+    else if (trig === '0') { if (bits.length) zeroTrigWithBits++; prods.push([]); }
+    else prods.push(bits);
+  });
+  if (startBits === null) throw new Error('Kein Startband gefunden – erste Zeile muss (bits…) sein.');
+  if (!prods.length) throw new Error('Keine Produktionen – das CTS braucht mindestens eine Regel.');
+  if (!startBits.length) throw new Error('Startband ist leer – das CTS hält sofort, es gibt nichts zu kodieren.');
+  return { rules: prods, init: startBits, numProds: prods.length, hSlots, zeroTrigWithBits,
+    meta: meta ? { p: +meta[1], vec: +meta[2] } : null };
 }
 
+// ── Äquivalente Streckung auf Regellängen ≡ 0 (mod 6) ──────────────────────
+//  Faktor f: Datenbit b → b 0^(f−1); Regel w_i → S(w_i) gefolgt von f−1 leeren Regeln.
+//  Invariante: nach f·t Schritten des gestreckten Systems ist dessen Band S(Band_t)
+//  und der Regelzeiger steht auf f·(t mod p). Beweis: Schritt 1 eines Blocks liest das
+//  Originalbit b mit Regel S(w_k) (hängt bei b=1 S(w_k) an), die folgenden f−1 Schritte
+//  lesen die Füll-Nullen mit leeren Regeln und löschen sie nur. Leeres Band (Halt)
+//  tritt daher genau zu denselben Originalschritten auf.
+//  1 Schritt des Originals = f Schritte des gestreckten CTS.
+const cGcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; };
+function ctsStretchFactor(rules) {
+  const g = rules.reduce((acc, r) => cGcd(acc, r.length), 0);   // 0, wenn alle leer
+  return 6 / cGcd(6, g);                                         // gcd(6,0) = 6 → f = 1
+}
+function ctsStretch(rules, init, f) {
+  if (f === 1) return { rules: rules.map(r => r.slice()), init: init.slice() };
+  const S = bits => { const o = []; for (const b of bits) { o.push(b); for (let k = 1; k < f; k++) o.push(0); } return o; };
+  const R = [];
+  for (const r of rules) { R.push(S(r)); for (let k = 1; k < f; k++) R.push([]); }
+  return { rules: R, init: S(init) };
+}
+// Rückabbildung S⁻¹ (null, wenn das Band nicht die Form S(x) hat)
+function ctsUnstretch(tape, f) {
+  if (tape.length % f) return null;
+  const o = [];
+  for (let i = 0; i < tape.length; i += f) {
+    for (let k = 1; k < f; k++) if (tape[i + k]) return null;
+    o.push(tape[i]);
+  }
+  return o;
+}
+// Bereitet ein beliebiges CTS vor: strecken (nur falls nötig), kodieren.
+// Ist die Konstruktion für den kleinsten Faktor nicht definiert (nr = 0),
+// wird das nächste Vielfache versucht (die Äquivalenz gilt für jedes f).
+const MAX_EST_CELLS = 2e7;
+function prepareCTSForR110(rules, init) {
+  const f0 = ctsStretchFactor(rules);
+  let lastErr = null;
+  for (let m = 1; m <= 4; m++) {
+    const f = f0 * m;
+    const s = ctsStretch(rules, init, f);
+    const est = 600 * (s.rules.reduce((a, r) => a + r.length, 0) + s.rules.length) * 30;
+    if (est > MAX_EST_CELLS * 10) throw new Error(`CTS zu groß für die Regel-110-Kodierung (geschätzt bis ${Math.round(est / 1e6)} Mio. Zellen, Streckfaktor ${f}).`);
+    try {
+      const result = ctToR110(s.rules, s.init);
+      if (result.full.length > MAX_EST_CELLS) throw new Error(`Kodierung zu groß (${result.full.length.toLocaleString('de')} Zellen).`);
+      return { result, f, f0, rules: s.rules, init: s.init };
+    } catch (e) {
+      if (!/nr = 0/.test(e.message)) throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+// CTS-Referenzsimulator (Wolfram-Konvention): erstes Bit lesen und löschen;
+// war es 1, wird die aktuelle Regel angehängt; Regelzeiger rückt immer weiter.
+function ctsTrace(rules, init, maxSteps = 24, maxLen = 4000) {
+  let tape = init.slice(), k = 0;
+  const steps = [{ t: 0, k: null, head: null, tape: tape.slice() }];
+  let halted = tape.length === 0, cut = false;
+  for (let t = 1; t <= maxSteps && !halted; t++) {
+    const head = tape.shift();
+    if (head === 1) for (const v of rules[k]) tape.push(v);
+    steps.push({ t, k, head, tape: tape.slice() });
+    k = (k + 1) % rules.length;
+    if (tape.length === 0) halted = true;
+    if (tape.length > maxLen) { cut = true; break; }
+  }
+  return { steps, halted, cut };
+}
+function formatCtsTrace(tr, width = 44) {
+  const lines = tr.steps.map(s => {
+    const tape = s.tape.join('') || '∅';
+    const shown = tape.length > width ? tape.slice(0, width) + '…(' + s.tape.length + ')' : tape;
+    const what = s.k === null ? 'Start   ' : `P${s.k} ${s.head ? '1:+' : '0:-'} `;
+    return String(s.t).padStart(3) + '  ' + what.padEnd(8) + shown;
+  });
+  if (tr.halted) lines.push('     → Band leer: CTS hält.');
+  else if (tr.cut) lines.push('     → Band wächst, Anzeige abgebrochen.');
+  else lines.push('     … (weitere Schritte nicht gezeigt)');
+  return lines.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RÜCKLESEN — CTS-Zustand per Gleiter-Tracking aus dem Automaten
+//  1. Äther-Segmentierung: Zelle ist Defekt, wenn kein 14er-Fenster sie überdeckt,
+//     das einer der 14 Äther-Rotationen gleicht (lokale Phase, Periode 7 / Versatz 14).
+//  2. Stationäre C-Gleiter: Bits über 21 Gen. 7-periodisch (±3 Zellen), Defekte über
+//     eine volle Periode (7 Gen.) vereinigt → jeder C ist dann genau 6 Zellen breit.
+//  3. Symbol = 4 stationäre C mit Startabständen 45, 45, 37 („1“) bzw. 45, 29, 37 („0“);
+//     jede E-Kreuzung schiebt ein C um +7, daher Abstände + 7·k (k = 0..2) zulässig.
+//     Isolierte Dreiergruppen (frisch ossifiziert, ein C gerade gekreuzt) werden mitgezählt.
+//  4. Leserichtung der Konstruktion: vorderstes Symbol rechts, Anhängen links (ossifiziert).
+//     Band-Historie = Startband (rechts→links) + angehängte Symbole in Erscheinungsreihenfolge;
+//     gelesen = zusammenhängend verschwundenes Präfix dieser Warteschlange.
+// ═══════════════════════════════════════════════════════════
+const RB_ETHER14 = (() => {
+  const t = new Uint8Array(1 << 14);
+  for (let s = 0; s < 14; s++) { let v = 0; for (let k = 0; k < 14; k++) v = (v << 1) | BGI[(s + k) % 14]; t[v] = 1; }
+  return t;
+})();
+function rbDefectMask(row) {
+  const n = row.length, ok = new Uint8Array(n), d = new Uint8Array(n);
+  let v = 0;
+  for (let i = 0; i < n; i++) { v = ((v << 1) | row[i]) & 0x3fff; if (i >= 13 && RB_ETHER14[v]) ok[i - 13] = 1; }
+  let last = -100;
+  for (let j = 0; j < n; j++) { if (ok[j]) last = j; d[j] = (j - last <= 13) ? 0 : 1; }
+  return d;
+}
+function rbClusters(d) {
+  const out = []; let s = -1;
+  for (let i = 0; i <= d.length; i++) {
+    if (i < d.length && d[i]) { if (s < 0) s = i; }
+    else if (s >= 0) { out.push([s, i - 1]); s = -1; }
+  }
+  return out;
+}
+// Bitparallele Regel-110-Simulation eines Bereichs (nur gültiger Lichtkegel wird gerechnet)
+class RbSim {
+  constructor(at, lo, hi) {
+    this.lo = lo; this.N = hi - lo; this.W = Math.ceil(this.N / 32);
+    this.cur = new Uint32Array(this.W); this.nxt = new Uint32Array(this.W); this.t = 0;
+    for (let i = 0; i < this.N; i++) if (at(lo + i)) this.cur[i >> 5] |= 1 << (i & 31);
+  }
+  step(k) {
+    const W = this.W;
+    for (let r = 0; r < k; r++) {
+      const c0 = this.cur, n0 = this.nxt;
+      const w0 = Math.max(0, (this.t >> 5) - 1), w1 = Math.min(W, ((this.N - this.t) >> 5) + 2);
+      for (let w = w0; w < w1; w++) {
+        const c = c0[w];
+        const L = (c << 1) | (w ? c0[w - 1] >>> 31 : 0);
+        const R = (c >>> 1) | (w < W - 1 ? c0[w + 1] << 31 : 0);
+        n0[w] = (c | R) & ~(L & c & R);                  // Regel 110 = (C ∨ R) ∧ ¬(L ∧ C ∧ R)
+      }
+      this.cur = n0; this.nxt = c0; this.t++;
+    }
+  }
+  row(a, b) {
+    const o = new Uint8Array(b - a);
+    for (let i = a; i < b; i++) { const j = i - this.lo; o[i - a] = (this.cur[j >> 5] >>> (j & 31)) & 1; }
+    return o;
+  }
+}
+function rbStationary(sim, wl, wr) {
+  const R = 3, rows = [];
+  for (let k = 0; k < 28; k++) { rows.push(sim.row(wl, wr)); if (k < 27) sim.step(1); }
+  const n = rows[0].length, chg = new Uint8Array(n), uni = new Uint8Array(n);
+  for (let k = 0; k < 7; k++) { const d = rbDefectMask(rows[k]); for (let i = 0; i < n; i++) uni[i] |= d[i]; }
+  for (let k = 0; k < 21; k++) { const a = rows[k], b = rows[k + 7]; for (let i = 0; i < n; i++) if (a[i] !== b[i]) chg[i] = 1; }
+  const st = new Uint8Array(n), nextChg = new Int32Array(n);
+  let nc = 1e9; for (let i = n - 1; i >= 0; i--) { if (chg[i]) nc = i; nextChg[i] = nc; }
+  let lastChg = -1e9;
+  for (let i = 0; i < n; i++) { if (chg[i]) lastChg = i; if (uni[i] && i - lastChg > R && nextChg[i] - i > R) st[i] = 1; }
+  return st;
+}
+const rbIn7 = (d, base) => d >= base && d <= base + 14 && (d - base) % 7 === 0;
+function rbSymbols(st, off) {
+  const c = rbClusters(st).filter(([a, e]) => e - a + 1 === 6).map(([a]) => off + a), out = [];
+  const usedC = new Uint8Array(c.length);
+  for (let i = c.length - 4; i >= 0; ) {
+    const d1 = c[i+1]-c[i], d2 = c[i+2]-c[i+1], d3 = c[i+3]-c[i+2];
+    const bit = (rbIn7(d1, 45) && rbIn7(d3, 37)) ? (rbIn7(d2, 45) ? 1 : rbIn7(d2, 29) ? 0 : -1) : -1;
+    if (bit >= 0) { out.push({ p: c[i], bit }); usedC.fill(1, i, i + 4); i -= 4; } else i--;
+  }
+  for (let j = 0; j + 2 < c.length; j++) {
+    if (usedC[j] || usedC[j+1] || usedC[j+2]) continue;
+    if (!(j === 0 || c[j] - c[j-1] > 300) || !(j + 3 >= c.length || c[j+3] - c[j+2] > 300)) continue;
+    const da = c[j+1]-c[j], db = c[j+2]-c[j+1];
+    let bit = -1, p = c[j];
+    if (rbIn7(da, 45) && rbIn7(db, 45)) bit = 1;
+    else if (rbIn7(da, 45) && rbIn7(db, 29)) bit = 0;
+    else if (rbIn7(da, 45) && rbIn7(db, 37)) { bit = 1; p -= 45; }
+    else if (rbIn7(da, 29) && rbIn7(db, 37)) { bit = 0; p -= 45; }
+    if (bit >= 0) { out.push({ p, bit }); j += 2; }
+  }
+  return out.sort((x, y) => x.p - y.p);
+}
+// Inkrementeller Rückleser. res = ctToR110-Ergebnis, T = Generationen.
+function createReadback(res, T, every = 350) {
+  const [b1, b2, b3] = res.blocks, L1 = b1.length, L2 = b2.length, L3 = b3.length;
+  const at = i => i < 0 ? b1[((i % L1) + L1) % L1] : i < L2 ? b2[i] : b3[(i - L2) % L3];
+  const D = res.dataOffset, wl0 = -Math.round(0.3 * T) - 3000, wr0 = 2000;
+  const wl = D + wl0, wr = D + wr0;
+  const sim = new RbSim(at, wl - T - 600, wr + T + 600);
+  const objs = []; let initBits = null, done = false;
+  function sample() {
+    const tt = sim.t, sy = rbSymbols(rbStationary(sim, wl, wr), wl0);
+    if (initBits === null) {
+      const inData = sy.filter(s => s.p >= -20 && s.p < res.dataLen + 20).sort((a, b) => b.p - a.p);
+      initBits = inData.map(s => s.bit);
+      for (const s of inData) objs.push({ bit: s.bit, p: s.p, first: 0, last: 0, seen: 3, initial: true });
+    } else {
+      const used = new Set(), alive = objs.filter(o => tt - o.last <= 15000);
+      const leftmost = alive.length ? Math.min(...alive.map(o => o.p)) : Infinity;
+      for (const s of sy.slice().sort((x, y) => y.p - x.p)) {
+        let best = null;
+        for (const o of alive) {
+          if (used.has(o) || o.bit !== s.bit) continue;
+          if (s.p >= o.p - 3 && s.p <= o.p + 12 + 0.025 * (tt - o.last) && (!best || o.last > best.last)) best = o;
+        }
+        if (!best && s.p >= leftmost - 1000)
+          for (const o of alive) if (!used.has(o) && o.bit === s.bit && o.p <= s.p + 3 && (!best || o.p > best.p)) best = o;
+        if (best) { used.add(best); best.p = s.p; best.last = tt; best.seen++; }
+        else if (s.p < leftmost - 1000) objs.push({ bit: s.bit, p: s.p, first: tt, last: tt, seen: 1, initial: false });
+      }
+    }
+    sim.step(every - 27);
+  }
+  return {
+    get t() { return sim.t; }, T, get done() { return done; },
+    // rechnet bis zum Zeitbudget (ms); Rückgabe: Fortschritt 0..1
+    run(budgetMs) {
+      const t0 = performance.now();
+      while (!done && performance.now() - t0 < budgetMs) { if (sim.t > T) { done = true; break; } sample(); }
+      return Math.min(1, sim.t / T);
+    },
+    result() {
+      const real = objs.filter(o => o.initial || o.seen >= 2);
+      const appended = real.filter(o => !o.initial).sort((a, b) => a.first - b.first);
+      const queue = [...real.filter(o => o.initial).sort((a, b) => b.p - a.p), ...appended];
+      // Hinweis: Startobjekte nach Anfangsposition (rechts zuerst); p der Startobjekte driftet
+      // nur nach rechts und überholt nicht, die Reihenfolge bleibt daher erhalten.
+      const tEnd = Math.min(sim.t, T), gone = o => o.last < tEnd - 15000;
+      let readCount = 0; while (readCount < queue.length && gone(queue[readCount])) readCount++;
+      let m = 0; const readTimes = queue.slice(0, readCount).map(o => (m = Math.max(m, o.last)));
+      return { initBits: initBits || [], queue: queue.map(o => o.bit), readCount, readTimes,
+        appTimes: appended.map(o => o.first), tEnd };
+    },
+  };
+}
+// Referenz für den Abgleich: virtuelle Warteschlange (Startband + alle Anhänge) und Kopfbits
+function ctsQueueRef(rules, init, maxSteps = 5000) {
+  let tape = init.slice(), k = 0; const heads = [], app = [];
+  for (let s = 0; s < maxSteps && tape.length; s++) {
+    const h = tape.shift(); heads.push(h);
+    if (h) for (const b of rules[k]) { tape.push(b); app.push(b); }
+    k = (k + 1) % rules.length;
+  }
+  return { queue: [...init, ...app], heads, halted: tape.length === 0, initLen: init.length };
+}
+// Textausgabe: Band-Historie mit Abgleich gegen die Referenz (✓/✗ je Symbol / CTS-Schritt)
+function formatReadback(r, ref, f, ms) {
+  const fmt = n => n.toLocaleString('de');
+  const L = [];
+  L.push(`Gerechnet bis Generation ${fmt(r.tEnd)}` + (ms != null ? ` (${(ms / 1000).toFixed(1)} s)` : ''));
+  if (f > 1) L.push(`Gestrecktes CTS (×${f}): Symbol-Nr. k gehört zu Originalschritt ⌊k/${f}⌋.`);
+  L.push('');
+  L.push(' Nr. Bit Ref  Status');
+  let allOk = true;
+  r.queue.forEach((b, i) => {
+    const rb = ref.queue[i], ok = b === rb; if (!ok) allOk = false;
+    const what = i < r.initBits.length ? 'Startband' : 'angehängt';
+    const st = i < r.readCount ? `gelesen ≤ Gen. ${fmt(r.readTimes[i])}`
+      : (i < r.initBits.length ? 'liegt im Datenblock, ungelesen' : `ossifiziert Gen. ${fmt(r.appTimes[i - r.initBits.length])}, ungelesen`);
+    L.push(`${String(i).padStart(4)}  ${b}   ${rb === undefined ? '–' : rb} ${ok ? '✓' : '✗'}  ${what}, ${st}`);
+  });
+  if (!r.queue.length) L.push('   (keine Symbolgruppe erkannt)');
+  L.push('');
+  const headsOk = r.queue.slice(0, r.readCount).every((b, i) => b === ref.heads[i]);
+  L.push(`Startband: ${r.initBits.join('') || '–'} ${r.initBits.join('') === ref.queue.slice(0, r.initBits.length).join('') && r.initBits.length === ref.initLen ? '✓' : '✗'}`);
+  L.push(`Gelesen: ${r.readCount} CTS-Schritt(e), Kopfbits ${r.queue.slice(0, r.readCount).join('') || '–'} ${headsOk ? '✓' : '✗'}` +
+    (ref.halted && r.readCount === ref.heads.length ? ' – Referenz hält hier (Band leer).' : ''));
+  L.push(allOk && headsOk ? '✓ Alle erkannten Symbole stimmen mit der CTS-Referenz überein.' : '✗ Abweichung zur Referenz!');
+  L.push('Nicht sichtbar: Symbole, die als bewegte E-Pakete noch unterwegs sind (werden erst links ossifiziert).');
+  return L.join('\n');
+}
+
+// Gleiter-Ansicht: Klassifikation je Defektzelle aus der Historie (Zeilen t−3, t−7, t−14, t−30)
+//  1 = C (stationär, Periode 7) · 2 = A (+2/3) · 3 = E (−8/30) · 4 = sonstige / Kollision
+function classifyRow(H, y, W) {
+  const r = H[y], d = rbDefectMask(r), cls = new Uint8Array(W);
+  if (y < 30) { for (let i = 0; i < W; i++) cls[i] = d[i] ? 4 : 0; return cls; }
+  const r3 = H[y-3], r7 = H[y-7], r14 = H[y-14], r30 = H[y-30];
+  for (let i = 0; i < W; i++) {
+    if (!d[i]) continue;
+    let st = true, a = true, e = true;
+    for (let j = i - 3; j <= i + 3; j++) {
+      if (j < 0 || j >= W) continue;
+      const v = r[j];
+      if (st && (v !== r7[j] || v !== r14[j])) st = false;
+      if (a && (j - 2 < 0 || v !== r3[j - 2])) a = false;
+      if (e && (j + 8 >= W || v !== r30[j + 8])) e = false;
+    }
+    cls[i] = st ? 1 : a ? 2 : e ? 3 : 4;
+  }
+  return cls;
+}
+function classCounts(cls) {   // Cluster je Klasse (Mehrheit der Zellen)
+  const n = [0, 0, 0, 0, 0]; let i = 0;
+  while (i < cls.length) {
+    if (!cls[i]) { i++; continue; }
+    const h = [0, 0, 0, 0, 0]; while (i < cls.length && cls[i]) h[cls[i++]]++;
+    let best = 1; for (let k = 2; k <= 4; k++) if (h[k] > h[best]) best = k; n[best]++;
+  }
+  return n;
+}
+
+function buildLUT(ruleN) {
+  const lut = new Uint8Array(8);
+  for (let i = 0; i < 8; i++) lut[i] = (ruleN >> i) & 1;
+  return lut;
+}
+// Schreibt die Folgegeneration nach nxt (feste 0 außerhalb — der Rand liegt
+// außerhalb des Lichtkegels und erreicht das Fenster vor der Budget-Grenze nicht).
+function nextGenInto(cur, nxt, lut, width) {
+  for (let i = 0; i < width; i++) {
+    const l = i > 0         ? cur[i-1] : 0;
+    const r = i < width - 1 ? cur[i+1] : 0;
+    nxt[i] = lut[l*4 + cur[i]*2 + r];
+  }
+}
 </script>
 
 <script>
 /* ═══════════════════════════════════════════════════════════════
    UI + Visualisierung
    ═══════════════════════════════════════════════════════════════ */
-// Echte ts2cts-Ausgaben (Wolfram-CTS-Kodierung). Jedes Beispiel entsteht,
-// indem das angegebene Tag-System durch ts2cts.html läuft — das .cts unten
-// ist dessen wörtlicher Output. Die leeren Zeilen (idx,1,) sind die
-// Dummy-Produktionen, die ts2cts zwischen die aktiven Regeln setzt.
 const PRESETS = [
   {
-    name: 'a → a',
-    src: 'Tag-System: a → a,  Start: a',
-    cts: '(0,1)\n(0,1,)\n(1,1,0,1)'
+    name: 'NKS: ∅',
+    src: 'Regeln {∅}, Startband 1 — NKS-Prüfbeispiel (Blöcke 7204 · 1873 · 7088)',
+    cts: '(1)\n(0,1,)'
   },
   {
-    name: 'a⇄b',
-    src: 'Tag-System: a → b,  b → a,  Start: a',
-    cts: '(0,1,0,0)\n(0,1,)\n(1,1,0,0,0,1)\n(2,1,)\n(3,1,0,1,0,0)'
+    name: 'NKS: 0⁶ / 1⁶',
+    src: 'Regeln {000000, ∅, 111111, ∅}, Startband 1 — NKS-Prüfbeispiel (105736 · 34717 · 95404)',
+    cts: '(1)\n(0,1,0,0,0,0,0,0)\n(1,1,)\n(2,1,1,1,1,1,1,1)\n(3,1,)'
   },
   {
-    name: 'a → ab',
-    src: 'Tag-System: a → ab,  b → a,  Start: a',
-    cts: '(0,1,0,0)\n(0,1,)\n(1,1,0,1,0,0,0,0,0,1)\n(2,1,)\n(3,1,0,1,0,0)'
+    name: '110100 / ∅',
+    src: 'Regeln {110100, ∅}, Startband 101 — Band wächst',
+    cts: '(1,0,1)\n(0,1,1,1,0,1,0,0)\n(1,1,)'
   },
   {
-    name: 'a→b→c→a',
-    src: 'Tag-System: a → b,  b → c,  c → a,  Start: a',
-    cts: '(0,1,0,0,0,0)\n(0,1,)\n(1,1,0,0,0,1,0,0)\n(2,1,)\n(3,1,0,0,0,0,0,1)\n(4,1,)\n(5,1,0,1,0,0,0,0)'
+    name: 'ts2cts: a ⇄ b',
+    src: 'ts2cts-Ausgabe für das Tag-System a → b, b → a (Start a) — Regellängen 4, wird ×3 gestreckt',
+    cts: '; Cyclic Tag System - Wolfram ANKOS Konstruktion\n;@ p=1 vec=4\n(0,1,0,0)\n(0,0,)\n(1,1,0,0,0,1)\n(2,0,)\n(3,1,0,1,0,0)'
+  },
+  {
+    name: 'drei Regeln',
+    src: 'Regeln {100101, ∅, 001100}, Startband 110',
+    cts: '(1,1,0)\n(0,1,1,0,0,1,0,1)\n(1,1,)\n(2,1,0,0,1,1,0,0)'
   },
 ];
 
 const $ = id => document.getElementById(id);
-const ctsEl = $('cts'), statusEl = $('status'), statsEl = $('stats');
+const ctsEl = $('cts'), statusEl = $('status'), statsEl = $('stats'), traceEl = $('trace');
 const canvas = $('ca'), ctx = canvas.getContext('2d');
-const emptyEl = $('empty'), controlsEl = $('controls'), genCountEl = $('genCount');
+const emptyEl = $('empty'), controlsEl = $('controls'), genCountEl = $('genCount'), noteEl = $('simNote');
 
-let selectedPreset = 1;
-let sim = null;          // { cells, lut, gen, history, width }
+const WMAX = 1600;       // maximale Fensterbreite (Zellen)
+const MAX_ROWS = 380;    // sichtbare Generationen
+let selectedPreset = 0;
+let sim = null;          // { at, focus, info, lut, B, N, vs, cur, nxt, gen, history }
 let playing = false, rafId = null;
 
 // Presets rendern
@@ -453,6 +830,7 @@ function applyPreset(i) {
   ctsEl.value = PRESETS[i].cts;
   srcEl.textContent = PRESETS[i].src;
   document.querySelectorAll('.preset').forEach((el, j) => el.classList.toggle('sel', j === i));
+  showTrace();
 }
 PRESETS.forEach((p, i) => {
   const b = document.createElement('button');
@@ -461,13 +839,23 @@ PRESETS.forEach((p, i) => {
   b.onclick = () => applyPreset(i);
   presetsEl.appendChild(b);
 });
-applyPreset(selectedPreset);
 
 function setStatus(msg, cls) { statusEl.className = 'status ' + cls; statusEl.textContent = msg; }
 
 function stat(k, v) {
   return `<div class="stat-row"><span class="k">${k}</span><span class="v">${v}</span></div>`;
 }
+
+function showTrace(fActual) {
+  try {
+    const p = parseCTSForR110(ctsEl.value.trim());
+    const f = fActual || ctsStretchFactor(p.rules);
+    traceEl.textContent = formatCtsTrace(ctsTrace(p.rules, p.init, 20), 34) +
+      (f > 1 ? `\n\nOriginal-Schritte. Kodiert wird die ×${f}-Streckung:\n1 Schritt hier = ${f} Schritte dort.` : '') +
+      (p.hSlots ? `\n${p.hSlots} H-Slot(s): hier als leere Regel.` : '');
+  } catch (e) { traceEl.textContent = '—'; }
+}
+applyPreset(selectedPreset);
 
 $('run').onclick = () => {
   const raw = ctsEl.value.trim();
@@ -479,21 +867,34 @@ $('run').onclick = () => {
     try {
       const parsed = parseCTSForR110(raw);
       const t0 = performance.now();
-      const result = ctToR110(parsed.rules, parsed.init);
+      const prep = prepareCTSForR110(parsed.rules, parsed.init);
+      const result = prep.result;
+      showTrace(prep.f);
       const dt = (performance.now() - t0).toFixed(0);
+      const [b1, b2, b3] = result.blocks, L1 = b1.length, L2 = b2.length, L3 = b3.length;
 
-      const lut = buildLUT(110);
-      const cells = result.full.map(b => b > 0 ? 1 : 0);
-      sim = { cells0: cells.slice(), cells: cells.slice(), lut, gen: 0, history: [cells.slice()], width: cells.length };
+      stopPlay();
+      sim = {
+        lut: buildLUT(110),
+        // Zelle 0 = Beginn von b2; links b1 periodisch, rechts b3 periodisch
+        at: i => i < 0 ? b1[((i % L1) + L1) % L1] : i < L2 ? b2[i] : b3[(i - L2) % L3],
+        focus: { data: Math.round(result.dataOffset + result.dataLen / 2), b1b2: 0, b2b3: L2 },
+        info: result,
+        prep,
+      };
+      $('rbBtn').disabled = false; cancelReadback(); $('rbOut').textContent = '— bereit —';
 
       statsEl.innerHTML =
         stat('CTS-Startband', parsed.init.length + ' Bits') +
         stat('CTS-Zyklus', parsed.numProds + ' Produktionen') +
-        stat('Regel-110-Zellen', result.full.length.toLocaleString('de')) +
-        stat('Kodier-Blöcke', result.blocks.map(b => b.length).join(' · ')) +
+        stat('Blöcke b1 · b2 · b3', [L1, L2, L3].map(n => n.toLocaleString('de')).join(' · ')) +
+        stat('Datenblock in b2', `Zelle ${result.dataOffset}…${result.dataOffset + result.dataLen - 1}`) +
+        stat('Streckung', prep.f === 1 ? 'keine' : `×${prep.f} (1 Schritt = ${prep.f} Schritte)`) +
+        (parsed.hSlots ? stat('H-Slots', parsed.hSlots + ' als leere Regel') : '') +
+        stat('nr · sp', result.nr + ' · ' + result.sp) +
         stat('Kodierzeit', dt + ' ms');
 
-      setStatus('✓ Kodiert. ' + result.full.length.toLocaleString('de') + ' Zellen bereit.', 'ok');
+      setStatus('✓ Kodiert. Simuliert wird … b1 b1 · b2 · b3 b3 … im Lichtkegel des Fensters.', 'ok');
       startVisualization();
     } catch (e) {
       setStatus('✗ ' + e.message, 'err');
@@ -511,73 +912,117 @@ function startVisualization() {
   resetSim();
 }
 
+// Lichtkegel: Bereich = Fenster (WMAX) + B Zellen links und rechts.
+// Bis Generation B ist das Fenster damit exakt wie auf der unendlichen Zeile.
 function resetSim() {
   stopPlay();
-  sim.cells = sim.cells0.slice();
+  const B = +$('budget').value;
+  const center = sim.focus[$('focus').value];
+  sim.B = B;
+  sim.N = WMAX + 2 * B;
+  sim.vs = center - WMAX / 2;
+  sim.cur = new Uint8Array(sim.N);
+  sim.nxt = new Uint8Array(sim.N);
+  for (let i = 0; i < sim.N; i++) sim.cur[i] = sim.at(sim.vs - B + i);
   sim.gen = 0;
-  sim.history = [sim.cells0.slice()];
+  sim.history = [sim.cur.slice(B, B + WMAX)];
+  sim.cls = [null];
   render();
-}
-
-// Fenster: zentraler Ausschnitt um die aktive Region
-function activeWindow(cells, w) {
-  let lo = cells.findIndex(c => c), hi = cells.length - 1 - [...cells].reverse().findIndex(c => c);
-  if (lo < 0) { lo = 0; hi = cells.length - 1; }
-  const center = (lo + hi) >> 1;
-  const half = w >> 1;
-  let s = center - half;
-  if (s < 0) s = 0;
-  if (s + w > cells.length) s = Math.max(0, cells.length - w);
-  return s;
 }
 
 function render() {
   const w = +$('zoom').value;
-  const rows = sim.history.length;
-  const maxRows = 380;
-  const shown = sim.history.slice(Math.max(0, rows - maxRows));
-  const start = activeWindow(sim.cells, w);
+  const c0 = (WMAX - w) >> 1;
+  const shown = sim.history;
 
   canvas.width = w;
   canvas.height = Math.max(shown.length, 1);
 
   const img = ctx.createImageData(w, canvas.height);
   const onR = 0x7f, onG = 0xd4, onB = 0xc1;
+  const gv = $('gview').checked;
   for (let y = 0; y < shown.length; y++) {
     const row = shown[y];
+    let cls = null;
+    if (gv) { if (!sim.cls[y]) sim.cls[y] = classifyRow(shown, y, WMAX); cls = sim.cls[y]; }
     for (let x = 0; x < w; x++) {
-      const cell = row[start + x] || 0;
-      const idx = (y * w + x) * 4;
-      if (cell) { img.data[idx] = onR; img.data[idx+1] = onG; img.data[idx+2] = onB; img.data[idx+3] = 255; }
-      else { img.data[idx] = 0x0a; img.data[idx+1] = 0x0e; img.data[idx+2] = 0x12; img.data[idx+3] = 255; }
+      const idx = (y * w + x) * 4, v = row[c0 + x];
+      let col;
+      if (cls && cls[c0 + x]) col = GV_COL[cls[c0 + x]];
+      else if (cls) col = v ? GV_ETHER : GV_BG;
+      else col = v ? [onR, onG, onB] : GV_BG;
+      img.data[idx] = col[0]; img.data[idx+1] = col[1]; img.data[idx+2] = col[2]; img.data[idx+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
-  genCountEl.textContent = 'Generation ' + sim.gen.toLocaleString('de');
+  const lg = $('legend');
+  if (gv && shown.length) {
+    const n = classCounts(sim.cls[shown.length - 1].subarray(c0, c0 + w));
+    const sw = (c, t) => `<span style="display:inline-block;width:9px;height:9px;background:rgb(${c.join(',')});margin:0 4px 0 10px"></span>${t}`;
+    lg.innerHTML = 'Gleiter in der letzten Zeile:' + sw(GV_COL[1], `C stationär ${n[1]}`) + sw(GV_COL[2], `A (+2/3) ${n[2]}`) +
+      sw(GV_COL[3], `E (−8/30) ${n[3]}`) + sw(GV_COL[4], `sonstige / Kollision ${n[4]}`);
+    lg.style.display = 'block';
+  } else lg.style.display = 'none';
+  genCountEl.textContent = 'Generation ' + sim.gen.toLocaleString('de') + ' / ' + sim.B.toLocaleString('de');
+  const a = sim.vs + c0, r = sim.info;
+  noteEl.textContent = `Fenster: Zellen ${a}…${a + w - 1} (Zelle 0 = Beginn b2; Datenblock ${r.dataOffset}…${r.dataOffset + r.dataLen - 1}) · ` +
+    `gezeigt die letzten ${shown.length} Generationen · exakt bis Generation ${sim.B.toLocaleString('de')}`;
 }
 
 function stepSim(n = 1) {
   for (let i = 0; i < n; i++) {
-    sim.cells = nextGen(sim.cells, sim.lut, sim.width);
+    if (sim.gen >= sim.B) {
+      stopPlay();
+      setStatus(`Lichtkegel-Grenze erreicht (Generation ${sim.B.toLocaleString('de')}). Größere Grenze wählen – das setzt die Simulation zurück.`, 'err');
+      break;
+    }
+    nextGenInto(sim.cur, sim.nxt, sim.lut, sim.N);
+    const t = sim.cur; sim.cur = sim.nxt; sim.nxt = t;
     sim.gen++;
-    sim.history.push(sim.cells.slice());
-    if (sim.history.length > 400) sim.history.shift();
+    sim.history.push(sim.cur.slice(sim.B, sim.B + WMAX));
+    sim.cls.push(null);
+    if (sim.history.length > MAX_ROWS) { sim.history.shift(); sim.cls.shift(); }
   }
   render();
 }
 
 function loop() {
   if (!playing) return;
-  stepSim(2);
-  rafId = requestAnimationFrame(loop);
+  stepSim(+$('speed').value);
+  if (playing) rafId = requestAnimationFrame(loop);
 }
-function startPlay() { playing = true; $('playBtn').textContent = '⏸ Pause'; loop(); }
-function stopPlay() { playing = false; $('playBtn').textContent = '▶ Start'; if (rafId) cancelAnimationFrame(rafId); }
+function startPlay() { if (sim.gen >= sim.B) return; playing = true; $('playBtn').textContent = '⏸ Pause'; loop(); }
+function stopPlay() { playing = false; $('playBtn').textContent = '▶ Start'; if (rafId) cancelAnimationFrame(rafId); rafId = null; }
 
 $('playBtn').onclick = () => playing ? stopPlay() : startPlay();
 $('stepBtn').onclick = () => { stopPlay(); stepSim(1); };
 $('resetBtn').onclick = () => resetSim();
-$('zoom').oninput = () => { if (sim) render(); };
+$('focus').onchange = () => { if (sim) resetSim(); };
+$('budget').onchange = () => { if (sim) resetSim(); };
+$('zoom').oninput = () => { if (sim && sim.history) render(); };
+$('gview').onchange = () => { if (sim && sim.history) render(); };
+// Farben der Gleiter-Ansicht
+const GV_BG = [0x0a, 0x0e, 0x12], GV_ETHER = [0x1e, 0x2a, 0x33];
+const GV_COL = [null, [0xe8, 0xa9, 0x4b], [0x6a, 0xb0, 0xff], [0x7f, 0xd4, 0xc1], [0xf2, 0xf2, 0xf2]];
+
+// ── Rücklesen (Gleiter-Tracking), in Zeitscheiben, abbrechbar
+let rbJob = null;
+function cancelReadback() { rbJob = null; $('rbBtn').textContent = 'Zurücklesen'; }
+$('rbBtn').onclick = () => {
+  if (!sim || !sim.prep) return;
+  const prep = sim.prep, ref = ctsQueueRef(prep.rules, prep.init);
+  if (rbJob) { const job = rbJob; cancelReadback(); $('rbOut').textContent = 'Abgebrochen.\n' + formatReadback(job.result(), ref, prep.f, null); return; }
+  const T = +$('rbGens').value, t0 = performance.now(), job = createReadback(prep.result, T);
+  rbJob = job; $('rbBtn').textContent = 'Abbrechen'; $('rbOut').textContent = 'Rechne…';
+  const tick = () => {
+    if (rbJob !== job) return;
+    const p = job.run(40);
+    if (!job.done) { $('rbOut').textContent = `Rechne… ${Math.round(p * 100)} % (Generation ${job.t.toLocaleString('de')} von ${T.toLocaleString('de')})`; setTimeout(tick, 0); return; }
+    cancelReadback();
+    $('rbOut').textContent = formatReadback(job.result(), ref, prep.f, performance.now() - t0);
+  };
+  setTimeout(tick, 0);
+};
 </script>
 </body>
 </html>

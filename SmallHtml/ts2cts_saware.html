@@ -115,7 +115,13 @@
   <code>TM → clockwise TM → 2-tag → [diese Stufe] → Rule 110</code>. Die Symbol-Kodierung
   ist ein <code>|Φ|</code>-Bit-Einheitsvektor, jeder Appendant ein Vielfaches von <code>|Φ|</code>
   (und <code>|Φ|</code> ein Vielfaches von 6), damit die Appendant-Längen für die Rule-110-Gleiter
-  passen. Basis: M. Cook, „A Concrete View of Rule 110 Computation" (2009), §1.3.
+  passen. Basis: M. Cook, „A Concrete View of Rule 110 Computation" (2009), §1.3.<br>
+  <b>Halt:</b> Ein Symbol ohne Produktionszeile ist ein Halt-Symbol (z.B. <code>A_H_0</code> aus
+  <code>tm2ts.html</code>); <code>(sym)</code> ohne rechte Seite ist dagegen eine leere Produktion.
+  Ein CTS kann nicht anhalten — Halt-Symbole bekommen deshalb einen markierten Halt-Slot
+  (Export: Trigger <code>H</code>). Trifft die Simulation dort eine 1, oder hat das Band zu
+  Zyklusbeginn weniger als s Symbole, wird der Halt gemeldet; verglichen wird nur bis dahin.<br>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--text);text-decoration:none">itzwieseltal.wordpress.com</a>
 </footer>
 
 <script>
@@ -126,19 +132,23 @@ function parseTS(src){
   for(const line of lines){
     if(!line.startsWith('(')||!line.endsWith(')'))continue;
     const parts=line.slice(1,-1).split(',').map(x=>x.trim());
-    if(parts.length===1&&/^\d+$/.test(parts[0])){ s=parseInt(parts[0]); continue; }
+    // (s) nur einmal als erste Klammer; danach sind einzelne Zahlen Symbole
+    if(s===null&&parts.length===1&&/^\d+$/.test(parts[0])){ s=parseInt(parts[0],10); continue; }
     if(startTape===null&&s!==null){ startTape=parts.filter(Boolean); continue; }
-    if(parts.length>=1){ const sym=parts[0]; const rhs=parts.slice(1).filter(Boolean);
+    if(parts.length>=1&&parts[0]!==''){ const sym=parts[0]; const rhs=parts.slice(1).filter(Boolean);
       if(rules[sym]===undefined){ rules[sym]=rhs; order.push(sym); } }
   }
   if(s===null) throw new Error('Keine Löschzahl (z.B. "(2)") gefunden');
+  if(s<1) throw new Error('Löschzahl s muss ≥ 1 sein');
   if(!startTape||!startTape.length) throw new Error('Kein Startband gefunden');
   if(!order.length) throw new Error('Keine Produktionen gefunden');
-  // Symbole aus RHS und Startband, die keine eigene Regel haben → leere Produktion
-  const ensure=sym=>{ if(rules[sym]===undefined){ rules[sym]=[]; order.push(sym); } };
+  // Halt-Konvention der Kette: Symbol OHNE Produktionszeile = Halt, wenn es an
+  // den Kopf kommt. (sym) ohne rechte Seite = leere Produktion (löschen, nichts anhängen).
+  const halt=new Set();
+  const ensure=sym=>{ if(rules[sym]===undefined&&!halt.has(sym)){ halt.add(sym); order.push(sym); } };
   for(const sym of startTape) ensure(sym);
-  for(const sym of [...order]) for(const r of rules[sym]) ensure(r);
-  return {s,startTape,rules,order};
+  for(const sym of [...order]) if(rules[sym]) for(const r of rules[sym]) ensure(r);
+  return {s,startTape,rules,order,halt};
 }
 
 function ts2cts_sAware(ts){
@@ -147,8 +157,9 @@ function ts2cts_sAware(ts){
   while(phi.length%6!==0) phi.push('__pad'+phi.length);
   const Phi=phi.length, idx={}; phi.forEach((x,i)=>idx[x]=i);
   const enc=i=>{const v=new Array(Phi).fill(0);v[i]=1;return v;};
-  const appendants=[];
+  const appendants=[], haltSlots=new Set();
   for(let i=0;i<Phi;i++){
+    if(ts.halt.has(phi[i])){ haltSlots.add(i); appendants.push([]); continue; }
     const rhs=ts.rules[phi[i]]||[]; const b=[];
     for(const r of rhs){ b.push(...enc(idx[r])); }
     appendants.push(b);
@@ -157,17 +168,26 @@ function ts2cts_sAware(ts){
   for(let k=0;k<(s-1)*Phi;k++) cyclicList.push([]);
   const initBits=[];
   for(const sym of ts.startTape) initBits.push(...enc(idx[sym]));
-  return {initBits,cyclicList,Phi,s,order:phi,realCount:ts.order.length};
+  return {initBits,cyclicList,haltSlots,Phi,s,order:phi,realCount:ts.order.length,haltCount:ts.halt.size};
 }
 
+// CTS-Simulation (Cook). Ein CTS kann nicht anhalten; erkannt werden aber
+//  · eine 1 auf einem Halt-Slot  → Halt-Symbol steht im Tag-System am Kopf
+//  · Zyklusbeginn mit < s·|Φ| Bits → Tag-Band kürzer als s
+// snaps[n] = Band zu Beginn von Zyklus n; halt = {n, reason} oder null
 function simCTScook(cts,maxCyc,maxLen){
-  let dw=[...cts.initBits]; const L=cts.cyclicList.length; let m=0,c=0; const snaps=[];
-  while(dw.length>0&&c<=maxCyc){
-    if(m===0){ snaps.push(dw.slice()); c++; }
-    const b=dw[0]; if(b===1) dw=dw.concat(cts.cyclicList[m]); dw=dw.slice(1); m=(m+1)%L;
+  let dw=[...cts.initBits]; const L=cts.cyclicList.length; let m=0,c=0; const snaps=[]; let halt=null;
+  while(c<=maxCyc){
+    if(m===0){
+      snaps.push(dw.slice()); c++;
+      if(dw.length<cts.s*cts.Phi){ halt={n:snaps.length-1,reason:'Band kürzer als s'}; break; }
+    }
+    const b=dw[0];
+    if(b===1&&cts.haltSlots.has(m)){ halt={n:snaps.length-1,reason:'Halt-Symbol '+cts.order[m]}; break; }
+    if(b===1) dw=dw.concat(cts.cyclicList[m]); dw=dw.slice(1); m=(m+1)%L;
     if(dw.length>maxLen) break;
   }
-  return snaps;
+  return {snaps,halt};
 }
 function decodeCook(bits,cts){
   const out=[];
@@ -179,11 +199,20 @@ function decodeCook(bits,cts){
   }
   return out;
 }
+// Referenz-Tag-System: hält bei < s Symbolen oder Halt-Symbol (ohne Produktion) am Kopf
 function simTagRef(ts,n){
-  let tape=[...ts.startTape]; const h=[tape.slice()];
-  for(let i=0;i<n;i++){ if(tape.length<ts.s)break; const rhs=ts.rules[tape[0]]||[]; tape=tape.slice(ts.s).concat(rhs); h.push(tape.slice()); }
-  return h;
+  let tape=[...ts.startTape]; const h=[tape.slice()]; let halt=null;
+  for(let i=0;i<n;i++){
+    if(tape.length<ts.s){ halt={n:h.length-1,reason:'Band kürzer als s'}; break; }
+    const rhs=ts.rules[tape[0]];
+    if(rhs===undefined){ halt={n:h.length-1,reason:'Halt-Symbol '+tape[0]}; break; }
+    tape=tape.slice(ts.s).concat(rhs); h.push(tape.slice());
+  }
+  if(!halt&&tape.length<ts.s) halt={n:h.length-1,reason:'Band kürzer als s'};
+  if(!halt&&tape.length&&ts.rules[tape[0]]===undefined) halt={n:h.length-1,reason:'Halt-Symbol '+tape[0]};
+  return {h,halt};
 }
+const escH=x=>String(x).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 
 // ═══ UI ═══
 const PRESETS=[
@@ -210,15 +239,24 @@ $('run').onclick=()=>{
     lastCTS=cts;
     // Verifikation
     const N=12;
-    const ref=simTagRef(ts,N);
-    const snaps=simCTScook(cts,N+2,500000);
+    const {h:ref,halt:refHalt}=simTagRef(ts,N);
+    const sim=simCTScook(cts,N+2,500000);
+    const snaps=sim.snaps, ctsHalt=(sim.halt&&sim.halt.n<=N)?sim.halt:null; // nur im verglichenen Bereich
     let rows='', match=0,total=0;
+    const sh=x=>x.length>34?x.slice(0,31)+'…':x;
+    // Verglichen wird nur bis zum Halt (danach gibt es keine Tag-Konfiguration mehr)
     for(let n=0;n<=N&&n<snaps.length&&n<ref.length;n++){
       const dec=decodeCook(snaps[n],cts).join(' ');
       const rf=ref[n].join(' ');
       const ok=dec===rf; total++; if(ok)match++;
-      const sh=x=>x.length>34?x.slice(0,31)+'…':x;
-      rows+=`<div class="verify-row"><div>${n}</div><div class="col tag" title="${rf}">${sh(rf)||'ε'}</div><div class="col cts" title="${dec}">${sh(dec)||'ε'}</div></div>`;
+      rows+=`<div class="verify-row"><div>${n}</div><div class="col tag" title="${escH(rf)}">${escH(sh(rf)||'ε')}</div><div class="col cts" title="${escH(dec)}">${escH(sh(dec)||'ε')}</div></div>`;
+    }
+    // Halt-Vergleich: gleicher Zyklus, gleicher Grund
+    if(refHalt||ctsHalt){
+      const hs=x=>x?`HALT @${x.n}: ${x.reason}`:'— kein Halt —';
+      const ok=!!refHalt&&!!ctsHalt&&refHalt.n===ctsHalt.n&&refHalt.reason===ctsHalt.reason;
+      total++; if(ok)match++;
+      rows+=`<div class="verify-row"><div>⊥</div><div class="col tag" style="color:#e88" title="${escH(hs(refHalt))}">${escH(sh(hs(refHalt)))}</div><div class="col cts" style="color:#e88" title="${escH(hs(ctsHalt))}">${escH(sh(hs(ctsHalt)))}</div></div>`;
     }
     $('verifyRows').innerHTML=rows;
     const bad=$('matchBadge');
@@ -228,6 +266,7 @@ $('run').onclick=()=>{
     $('stats').innerHTML=
       `<div class="stat"><span class="k">Löschzahl s</span><span class="v">${ts.s}</span></div>`+
       `<div class="stat"><span class="k">|Φ| (Alphabet)</span><span class="v">${cts.Phi} (${cts.realCount} echt + ${cts.Phi-cts.realCount} pad)</span></div>`+
+      `<div class="stat"><span class="k">Halt-Symbole / -Slots</span><span class="v">${cts.haltCount}</span></div>`+
       `<div class="stat"><span class="k">Zyklische Liste</span><span class="v">${cts.cyclicList.length} = ${ts.s}×${cts.Phi}</span></div>`+
       `<div class="stat"><span class="k">Leere Appendants</span><span class="v">${(ts.s-1)*cts.Phi}</span></div>`+
       `<div class="stat"><span class="k">Init-Band</span><span class="v">${cts.initBits.length} Bits</span></div>`;
@@ -237,8 +276,10 @@ $('run').onclick=()=>{
     let ap='';
     for(let i=0;i<Math.min(3,cts.cyclicList.length);i++){
       const a=cts.cyclicList[i];
-      ap+=`<div style="margin-bottom:4px"><span style="color:var(--dim)">[${i}] ${cts.order[i]}:</span> ${a.length?bitsHTML(a.slice(0,120)):'<span style="color:var(--dim)">(leer)</span>'}${a.length>120?' …':''}</div>`;
+      const body=cts.haltSlots.has(i)?'<span style="color:#e88">HALT-Slot</span>':(a.length?bitsHTML(a.slice(0,120)):'<span style="color:var(--dim)">(leer)</span>');
+      ap+=`<div style="margin-bottom:4px"><span style="color:var(--dim)">[${i}] ${escH(cts.order[i])}:</span> ${body}${a.length>120?' …':''}</div>`;
     }
+    if(cts.haltSlots.size) ap+=`<div style="color:var(--dim);margin-top:4px">Halt-Slots: ${[...cts.haltSlots].map(i=>`[${i}] ${escH(cts.order[i])}`).join(', ')}</div>`;
     ap+=`<div style="color:var(--dim);margin-top:4px">… + ${(ts.s-1)*cts.Phi} leere Appendants (die s-aware-Erweiterung)</div>`;
     $('appOut').innerHTML=ap;
 
@@ -253,8 +294,10 @@ $('export').onclick=()=>{
   if(!lastCTS)return;
   let out='; Cyclic Tag System (s-aware, Cook §1.3)\n';
   out+='; |Phi|='+lastCTS.Phi+', s='+lastCTS.s+', Zyklus='+lastCTS.cyclicList.length+'\n';
+  out+='; Trigger H = Halt-Slot (Symbol ohne Produktion), von ts2cts.html als Halt erkannt\n';
+  out+=';@ p='+lastCTS.s+' vec='+lastCTS.Phi+'\n';
   out+='('+lastCTS.initBits.join(',')+')\n';
-  lastCTS.cyclicList.forEach((a,i)=>{ out+='('+i+',1,'+a.join(',')+')\n'; });
+  lastCTS.cyclicList.forEach((a,i)=>{ out+='('+i+','+(lastCTS.haltSlots.has(i)?'H':'1')+','+a.join(',')+')\n'; });
   const blob=new Blob([out],{type:'text/plain'});
   const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='saware.cts';a.click();
 };

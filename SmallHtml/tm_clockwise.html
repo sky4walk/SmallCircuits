@@ -291,6 +291,21 @@ button:disabled { opacity: 0.4; cursor: default; }
 .file-label input { display: none; }
 .tm-name { color: var(--white); font-weight: 600; font-size: 14px; }
 
+.msg-box {
+  margin: 0; padding: 8px 24px; font-size: 12px; line-height: 1.6;
+  border-bottom: 1px solid var(--border); white-space: pre-line;
+}
+.msg-box.warn { color: var(--marker); background: rgba(245,158,11,0.07); }
+.msg-box.err  { color: var(--head);   background: var(--head-bg); }
+.msg-box.info { color: var(--text2);  background: var(--panel); }
+.log-area > div { white-space: nowrap; }
+.site-footer {
+  padding: 10px 24px; border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text2);
+}
+.site-footer a { color: var(--text2); }
+.site-footer a:hover { color: var(--accent-ct); }
+
 @media (max-width: 800px) {
   .main { grid-template-columns: 1fr; }
   .main > .col:first-child { border-right: none; border-bottom: 1px solid var(--border); }
@@ -314,6 +329,7 @@ button:disabled { opacity: 0.4; cursor: default; }
       <option value="triple_left">Demo: 3× Links</option>
       <option value="busy2">Busy Beaver 2</option>
       <option value="busy3">Busy Beaver 3</option>
+      <option value="stay">Demo: Stay (S) + Blank schreiben</option>
     </select>
   </div>
   <span class="tm-name" id="tmName"></span>
@@ -332,6 +348,8 @@ button:disabled { opacity: 0.4; cursor: default; }
   <button class="green" id="btnHaltBoth" disabled title="Beide bis Halt laufen (schnell)">⏩ Bis Halt</button>
   <button id="btnResetBoth" disabled>Reset ⟲</button>
 </div>
+
+<div class="msg-box" id="msgBox" style="display:none"></div>
 
 <div class="main">
   <!-- ════════ STANDARD TM ════════ -->
@@ -377,6 +395,12 @@ button:disabled { opacity: 0.4; cursor: default; }
   <div id="cmpContent"></div>
 </div>
 
+<footer class="site-footer">
+  Konstruktion nach Neary &amp; Woods (2009), Lemma 2.1. Zellteilung: Kopf steht danach auf der zweiten Zelle
+  (dieselbe Semantik nutzen <code>ctm_bitag.html</code> und der .ctm-Import von <code>ctm2ts_poly.html</code>).
+  · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
+
 <!-- ═══════════════════════════════════════════════════════════════════════
      JAVASCRIPT
      ═══════════════════════════════════════════════════════════════════════ -->
@@ -398,7 +422,7 @@ class TMTransition {
     this.read = read;         // Gelesenes Symbol
     this.nextState = nextState; // Folgezustand
     this.write = write;       // Geschriebenes Symbol
-    this.dir = dir;           // 'L' oder 'R'
+    this.dir = dir;           // 'L', 'R' oder 'S' (bleiben)
   }
   toString() {
     return `δ(${this.state},${this.read})=(${this.write},${this.dir},${this.nextState})`;
@@ -481,7 +505,13 @@ function parseTMFile(text) {
         tapeStr = parts[0];
       } else if (parts.length === 5) {
         // Transition: (Zustand, Lesen, NächsterZustand, Schreiben, Richtung)
-        const t = new TMTransition(parts[0], parts[1], parts[2], parts[3], parts[4]);
+        const where = '(' + parts.join(',') + ')';
+        const dir = parts[4].toUpperCase();
+        // S/N = Kopf bleibt stehen (wird bei der Konvertierung in ein R/L-Paar übersetzt)
+        if (dir !== 'L' && dir !== 'R' && dir !== 'S' && dir !== 'N') throw new Error(where + ': Richtung muss L, R oder S/N sein');
+        checkState(parts[0], where); checkState(parts[2], where);
+        checkSymbol(parts[1], where); checkSymbol(parts[3], where);
+        const t = new TMTransition(parts[0], parts[1], parts[2], parts[3], dir === 'N' ? 'S' : dir);
         transitions.push(t);
         states.add(t.state);
         states.add(t.nextState);
@@ -492,6 +522,15 @@ function parseTMFile(text) {
   }
 
   if (!config) throw new Error('Keine Konfiguration (Startzustand, Kopfposition) gefunden');
+  checkState(config.startState, 'Startzustand');
+  if (!Number.isInteger(config.headPos)) throw new Error('Kopfposition ist keine ganze Zahl');
+  const seenKeys = new Set();
+  for (const t of transitions) {
+    const k = t.state + '\x00' + t.read;
+    if (seenKeys.has(k)) throw new Error('Doppelter Übergang für (' + t.state + ',' + t.read + ')');
+    seenKeys.add(k);
+  }
+  for (const ch of (tapeStr || '')) checkSymbol(ch, 'Band');
 
   return {
     name: name || 'Unbenannt',
@@ -517,6 +556,23 @@ const SYM_MARKER = '◆';    // σₘ - Markiert Position bei Linksbewegung
 const SYM_RIGHT  = '▶';    // σᵣ - Rechtes Ende des Bandes
 const SYM_LEFT   = '◀';    // σₗ - Linkes Ende des Bandes
 
+/** Reservierter Trenner für abgeleitete CTM-Zustände (qy‖σ, qy‖⟳w, qy‖✖, qz‖➤).
+ *  TM-Zustände dürfen ihn nicht enthalten → abgeleitete Namen sind eindeutig. */
+const SEP = '‖';
+const RESERVED_SYMS = new Set([SYM_MARKER, SYM_RIGHT, SYM_LEFT, SEP, '⟳', '✖', '➤', '⇄']);
+
+/** Prüft ein Bandsymbol: genau ein Zeichen, kein Trenn-/Spezialzeichen. */
+function checkSymbol(s, where) {
+  if ([...s].length !== 1) throw new Error(where + ': Symbol "' + s + '" muss genau ein Zeichen sein');
+  if (RESERVED_SYMS.has(s)) throw new Error(where + ': Symbol "' + s + '" ist reserviert (◆ ▶ ◀ ‖ ⟳ ✖ ➤ ⇄)');
+  if (/[\s,()#]/.test(s)) throw new Error(where + ': Symbol "' + s + '" ist nicht erlaubt (Leerraum , ( ) #)');
+}
+/** Prüft einen TM-Zustandsnamen. */
+function checkState(q, where) {
+  if (!q) throw new Error(where + ': leerer Zustandsname');
+  if (/[\s,()]/.test(q) || q.includes(SEP)) throw new Error(where + ': Zustandsname "' + q + '" darf weder Leerraum , ( ) noch ' + SEP + ' enthalten');
+}
+
 /**
  * Konvertiert eine Standard-TM in eine Clockwise TM.
  *
@@ -536,7 +592,13 @@ const SYM_LEFT   = '◀';    // σₗ - Linkes Ende des Bandes
  * @param {string} blank - Blank-Symbol
  * @returns {Object} Clockwise TM
  */
-function convertToClockwise(tm, blank) {
+function convertToClockwise(tm, blank, contentCells) {
+  // contentCells: Bandinhalt zwischen ◀ und ▶ (ohne Rand-Blanks, siehe buildCTTape).
+  if (!contentCells) contentCells = buildCTTape(tm.tape, tm.headPos, blank).content;
+  // Stay-Übergänge (S) auf TM-Ebene in ein R/L-Paar übersetzen:
+  //   (q,a,q',w,S)  →  (q,a,q'‖⇄,w,R)  und  (q'‖⇄,x,q',x,L) für jedes Symbol x.
+  // Damit enthält die erzeugte CTM nie einen Stay-Übergang.
+  tm = expandStay(tm, blank, contentCells);
   const ctmStates = new Set(tm.states);
   const ctmAlphabet = new Set();
   const ctmTransitions = [];
@@ -545,14 +607,20 @@ function convertToClockwise(tm, blank) {
   for (const s of tm.alphabet) {
     if (s !== blank) ctmAlphabet.add(s);
   }
-  for (const ch of tm.tape) {
+  for (const ch of contentCells) {
     ctmAlphabet.add(ch);
   }
   ctmAlphabet.add(SYM_MARKER);
   ctmAlphabet.add(SYM_RIGHT);
   ctmAlphabet.add(SYM_LEFT);
 
-  const blankAsData = tm.transitions.some(t => t.write === blank && t.read !== blank);
+  // Blank als Datensymbol, sobald die TM Blank liest oder schreibt oder das
+  // Startband innere Blanks hat. Dann gilt: ◀/▶ stehen für die (unendliche)
+  // Blank-Region; beschreibt die TM die Randzelle — auch mit Blank —, wird
+  // sie zur echten Datenzelle (□ vor ▶ bzw. nach ◀). So geht die Tiefe in
+  // der Blank-Region nie verloren (früher: Kollaps + Warnung).
+  const blankAsData = tm.transitions.some(t => t.write === blank || t.read === blank) ||
+    contentCells.includes(blank);
   if (blankAsData) ctmAlphabet.add(blank);
 
   // Duplikat-Prüfung für Transitionen
@@ -582,20 +650,6 @@ function convertToClockwise(tm, blank) {
   // Warnungen für nicht darstellbare Konstrukte
   const warnings = [];
 
-  // Statische Prüfung: (q,_,·,_,·) — Blank lesen UND Blank schreiben.
-  // Die CTM kollabiert Blank-Regionen auf eine Zelle (◀/▶). Läuft die TM
-  // 2+ Zellen tief in eine Blank-Region und schreibt dort später ein
-  // Symbol, entsteht ein Band mit innerem Blank-Loch, das die CTM nicht
-  // darstellen kann (Paper-Restriktion ii verbietet Blank-Schreiben).
-  for (const t of tm.transitions) {
-    if (t.read === blank && t.write === blank) {
-      warnings.push('(' + t.state + ',' + blank + ',' + t.nextState + ',' + blank +
-        ',' + t.dir + '): Blank-Lesen mit Blank-Schreiben — Blank-Regionen ' +
-        'werden kollabiert. Läuft die TM mehr als eine Zelle in eine ' +
-        'Blank-Region, kann die CTM-Simulation abweichen.');
-    }
-  }
-
   // Zustände die einen Skip-Zustand (qz_➤) brauchen
   const needsSkip = new Set();
 
@@ -608,15 +662,19 @@ function convertToClockwise(tm, blank) {
 
   function convertRightMove(t) {
     if (t.read === blank) {
+      // Am ▶: Randzelle wird Datenzelle w (auch w = Blank), ▶ rückt weiter.
+      addTransition(new CTMTransition(t.state, SYM_RIGHT, t.write + SYM_RIGHT, t.nextState));
       if (t.write === blank) {
-        addTransition(new CTMTransition(t.state, SYM_RIGHT, SYM_RIGHT, t.nextState));
-      } else {
-        addTransition(new CTMTransition(t.state, SYM_RIGHT, t.write + SYM_RIGHT, t.nextState));
-      }
-      if (t.write === blank) {
+        // Am ◀ Blank schreiben und nach rechts: Zelle bleibt Teil der linken
+        // Blank-Region, Kopf landet auf content[0]. ✓
         addTransition(new CTMTransition(t.state, SYM_LEFT, SYM_LEFT, t.nextState));
       } else {
-        addTransition(new CTMTransition(t.state, SYM_LEFT, SYM_LEFT + t.write, t.nextState));
+        // ◀ → ◀w: Kopf landet nach der Zellteilung auf w, die TM steht aber
+        // rechts davon (content[0]) → Skip-Zustand wie in dispatchRight.
+        const skip = t.nextState + SEP + '➤';
+        ctmStates.add(skip);
+        needsSkip.add(t.nextState);
+        addTransition(new CTMTransition(t.state, SYM_LEFT, SYM_LEFT + t.write, skip));
       }
       if (blankAsData) {
         addTransition(new CTMTransition(t.state, blank, t.write === blank ? blank : t.write, t.nextState));
@@ -645,12 +703,9 @@ function convertToClockwise(tm, blank) {
       // sorgt das dafür, dass die Rotation zuerst w über ▶ schreibt und
       // das ▶ korrekt eine Zelle weiter re-insertiert — sonst strandet w
       // außerhalb der ◀…▶-Region.
-      if (t.write === blank) {
-        const carryR = qy + '_' + SYM_RIGHT;
-        ctmStates.add(carryR);
-        addTransition(new CTMTransition(qx, SYM_RIGHT, SYM_MARKER, carryR));
-      } else {
-        const carryW = qy + '_' + t.write;
+      {
+        // auch für w = Blank: die Randzelle wird Datenzelle (blankAsData)
+        const carryW = qy + SEP + t.write;
         ctmStates.add(carryW);
         addTransition(new CTMTransition(qx, SYM_RIGHT, SYM_MARKER + SYM_RIGHT, carryW));
       }
@@ -661,16 +716,10 @@ function convertToClockwise(tm, blank) {
       // erkennt die Seite korrekt. Da der Kopf nach dem Split auf ◆ landet,
       // braucht es einen Hop-Zustand, der über ◆ hinweggeht, bevor die
       // Rotation (mit dem Schreibsymbol im Carry) beginnt.
-      if (t.write === blank) {
-        // (qx,_,_,L) am linken Rand: Kopf ginge 2+ tief in die Blank-Region.
-        // Nicht darstellbar (Paper-Restriktion ii verbietet Blank-Schreiben).
-        warnings.push('(' + qx + ',' + blank + ',' + t.nextState + ',' + blank +
-          ',L): Blank-Schreiben bei Blank-Lesen mit Linksbewegung ist am linken ' +
-          'Rand nicht darstellbar — CTM hält dort, TM liefe ggf. weiter.');
-        // Keine Regel für (qx, ◀) → CTM hält an dieser Stelle.
-      } else {
-        const hop = qy + '_⟳' + t.write;
-        const carryW = qy + '_' + t.write;
+      {
+        // auch für w = Blank: ◀ □ … — die Zelle wird Datenzelle, Kopf geht in ◀
+        const hop = qy + SEP + '⟳' + t.write;
+        const carryW = qy + SEP + t.write;
         ctmStates.add(hop);
         ctmStates.add(carryW);
         addTransition(new CTMTransition(qx, SYM_LEFT, SYM_LEFT + SYM_MARKER, hop));
@@ -679,13 +728,13 @@ function convertToClockwise(tm, blank) {
 
       if (blankAsData) {
         const writeSymData = t.write;
-        const carryData = qy + '_' + writeSymData;
+        const carryData = qy + SEP + writeSymData;
         ctmStates.add(carryData);
         addTransition(new CTMTransition(qx, blank, SYM_MARKER, carryData));
       }
     } else {
       const writeSym = (t.write === blank && !blankAsData) ? SYM_RIGHT : t.write;
-      const carryInit = qy + '_' + writeSym;
+      const carryInit = qy + SEP + writeSym;
       ctmStates.add(carryInit);
       addTransition(new CTMTransition(qx, t.read, SYM_MARKER, carryInit));
     }
@@ -721,7 +770,7 @@ function convertToClockwise(tm, blank) {
         processed.add(qy);
 
         for (const sigma of allSymbols) {
-          const carryState = qy + '_' + sigma;
+          const carryState = qy + SEP + sigma;
           ctmStates.add(carryState);
 
           let tmReadSym;
@@ -739,7 +788,7 @@ function convertToClockwise(tm, blank) {
             // der Kopf steht nach dem Dispatch eine Zelle weiter, und wenn
             // dort ein Symbol liegt für das qy eine Regel hat, würde die
             // CTM fälschlich weiterlaufen.
-            const haltState = qy + '_✖';
+            const haltState = qy + SEP + '✖';
             ctmStates.add(haltState);
             addTransition(new CTMTransition(carryState, SYM_MARKER, sigma, haltState));
             continue;
@@ -763,12 +812,8 @@ function convertToClockwise(tm, blank) {
   function dispatchRight(carryState, sigma, nextT) {
     if (sigma === SYM_RIGHT) {
       // Mit dem Paper-◀-Schema ist sigma=▶ am Dispatch nicht mehr erreichbar
-      // (Boundary-Flip beseitigt). Defensive Regeln, falls doch:
-      if (nextT.write === blank) {
-        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_RIGHT, nextT.nextState));
-      } else {
-        addTransition(new CTMTransition(carryState, SYM_MARKER, nextT.write + SYM_RIGHT, nextT.nextState));
-      }
+      // (Boundary-Flip beseitigt). Defensive Regel, falls doch (w auch Blank):
+      addTransition(new CTMTransition(carryState, SYM_MARKER, nextT.write + SYM_RIGHT, nextT.nextState));
     } else if (sigma === SYM_LEFT) {
       // Kopf in der linken Blank-Region, TM liest Blank, Rechtsbewegung.
       if (nextT.write === blank) {
@@ -778,7 +823,7 @@ function convertToClockwise(tm, blank) {
         // TM schreibt w am linken Rand, Kopf geht rechts auf altes content[0].
         // ◆ → ◀w (Split): Kopf landet auf w — eine Zelle zu früh.
         // Skip-Zustand geht unverändert eine Zelle weiter auf content[0].
-        const skip = nextT.nextState + '_➤';
+        const skip = nextT.nextState + SEP + '➤';
         ctmStates.add(skip);
         needsSkip.add(nextT.nextState);
         addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_LEFT + nextT.write, skip));
@@ -797,41 +842,31 @@ function convertToClockwise(tm, blank) {
     const qz = nextT.nextState;
 
     if (sigma === SYM_RIGHT) {
-      // Defensiv (sigma=▶ nicht mehr erreichbar, s.o.)
-      if (nextT.write === blank) {
-        const newCarry = qz + '_' + SYM_RIGHT;
-        ctmStates.add(newCarry);
-        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
-      } else {
-        const newCarry = qz + '_' + nextT.write;
-        ctmStates.add(newCarry);
-        addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER + SYM_RIGHT, newCarry));
-      }
+      // Defensiv (sigma=▶ nicht mehr erreichbar, s.o.; w auch Blank)
+      const newCarry = qz + SEP + nextT.write;
+      ctmStates.add(newCarry);
+      addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER + SYM_RIGHT, newCarry));
     } else if (sigma === SYM_LEFT) {
       // Kopf in der linken Blank-Region, TM liest Blank, Linksbewegung.
       // PAPER-SCHEMA (wie Marking am ◀): ◆ → ◀◆, Hop über ◆, Rotation mit w.
       // Das re-deponierte ◀ garantiert, dass die nächste Rotation wieder
       // mit ◀ im Carry endet.
-      if (nextT.write === blank) {
-        warnings.push('(' + nextT.state + ',' + blank + ',' + qz + ',' + blank +
-          ',L): Blank-Schreiben bei Blank-Lesen mit Linksbewegung ist in der ' +
-          'linken Blank-Region nicht darstellbar — CTM hält dort.');
-        // Keine Regel → CTM hält.
-      } else {
-        const hop = qz + '_⟳' + nextT.write;
-        const carryW = qz + '_' + nextT.write;
+      {
+        // auch für w = Blank (Zelle wird Datenzelle, blankAsData)
+        const hop = qz + SEP + '⟳' + nextT.write;
+        const carryW = qz + SEP + nextT.write;
         ctmStates.add(hop);
         ctmStates.add(carryW);
         addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_LEFT + SYM_MARKER, hop));
         addTransition(new CTMTransition(hop, SYM_MARKER, SYM_MARKER, carryW));
       }
     } else if (sigma === blank && blankAsData) {
-      const newCarry = qz + '_' + nextT.write;
+      const newCarry = qz + SEP + nextT.write;
       ctmStates.add(newCarry);
       addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
     } else {
       const writeSym = (nextT.write === blank && !blankAsData) ? SYM_RIGHT : nextT.write;
-      const newCarry = qz + '_' + writeSym;
+      const newCarry = qz + SEP + writeSym;
       ctmStates.add(newCarry);
       addTransition(new CTMTransition(carryState, SYM_MARKER, SYM_MARKER, newCarry));
     }
@@ -848,11 +883,11 @@ function convertToClockwise(tm, blank) {
 
     for (const qy of needsCarryRotation) {
       for (const sigma of allSymbols) {
-        const carryState = qy + '_' + sigma;
+        const carryState = qy + SEP + sigma;
         ctmStates.add(carryState);
 
         for (const sigmaRead of allSymbols) {
-          const nextCarry = qy + '_' + sigmaRead;
+          const nextCarry = qy + SEP + sigmaRead;
           ctmStates.add(nextCarry);
           addTransition(new CTMTransition(carryState, sigmaRead, sigma, nextCarry));
         }
@@ -866,7 +901,7 @@ function convertToClockwise(tm, blank) {
   // unverändert weitergehen (nach ◀w-Dispatch am linken Rand).
   // ═══════════════════════════════════════════════════════════
   for (const qz of needsSkip) {
-    const skip = qz + '_➤';
+    const skip = qz + SEP + '➤';
     ctmStates.add(skip);
     for (const s of ctmAlphabet) {
       if (s === SYM_MARKER) continue;
@@ -882,6 +917,55 @@ function convertToClockwise(tm, blank) {
     transitionMap: buildTransMap(ctmTransitions),
     warnings: [...new Set(warnings)]
   };
+}
+
+/** Übersetzt Stay-Übergänge einer TM in R/L-Paare (Hilfszustand q'‖⇄). */
+function expandStay(tm, blank, contentCells) {
+  if (!tm.transitions.some(t => t.dir === 'S')) return tm;
+  const syms = new Set([...tm.alphabet, ...contentCells, blank]);
+  const out = [], states = new Set(tm.states), helpers = new Set();
+  for (const t of tm.transitions) {
+    if (t.dir !== 'S') { out.push(t); continue; }
+    const h = t.nextState + SEP + '⇄';
+    out.push(new TMTransition(t.state, t.read, h, t.write, 'R'));
+    if (!helpers.has(h)) {
+      helpers.add(h); states.add(h);
+      for (const x of syms) out.push(new TMTransition(h, x, t.nextState, x, 'L'));
+    }
+  }
+  const alphabet = new Set(tm.alphabet); alphabet.add(blank);
+  return Object.assign({}, tm, { transitions: out, states: [...states].sort(), alphabet: [...alphabet].sort() });
+}
+
+/**
+ * Baut das zirkuläre CTM-Startband aus dem TM-Band.
+ * Blank-Regionen links/rechts werden auf ◀ bzw. ▶ kollabiert (Rand-Blanks
+ * abgeschnitten). Steht der Kopf direkt neben dem Inhalt, landet er auf ◀/▶;
+ * steht er weiter draußen, werden die Blanks bis zum Kopf als Datenzellen
+ * übernommen (blankAsData). Innere Blanks bleiben Datenzellen.
+ * @returns {{content:string[], tape:string[], head:number, note:string}}
+ */
+function buildCTTape(tapeStr, headPos, blank) {
+  const cells = [...(tapeStr || '')];
+  let lo = 0, hi = cells.length;
+  while (lo < hi && cells[lo] === blank) lo++;
+  while (hi > lo && cells[hi - 1] === blank) hi--;
+  if (lo === hi) {
+    return { content: [], tape: [SYM_LEFT, SYM_RIGHT], head: 1, note: '' };
+  }
+  let note = '';
+  if (headPos < lo - 1 || headPos > hi) {
+    note = 'Kopf steht ' + (headPos < lo ? lo - headPos : headPos - hi + 1) +
+      ' Zellen in der Blank-Region — die Blanks bis zum Kopf werden als Datenzellen übernommen.';
+    if (headPos < lo) lo = headPos; else hi = headPos + 1;
+  }
+  const content = [];
+  for (let i = lo; i < hi; i++) content.push(i >= 0 && i < cells.length ? cells[i] : blank);
+  let head;
+  if (headPos === lo - 1) head = 0;                    // auf ◀
+  else if (headPos === hi) head = content.length + 1;  // auf ▶
+  else head = headPos - lo + 1;
+  return { content, tape: [SYM_LEFT, ...content, SYM_RIGHT], head, note };
 }
 
 /** Baut eine Lookup-Map: (state, read) → CTMTransition */
@@ -954,7 +1038,7 @@ class TMSim {
 
     // Transition ausführen
     this.tape[this.head] = t.write;
-    this.head += (t.dir === 'R') ? 1 : -1;
+    this.head += (t.dir === 'R') ? 1 : (t.dir === 'L') ? -1 : 0;   // S: bleibt
     this.state = t.nextState;
     this.steps++;
     this.lastTransition = t;
@@ -976,7 +1060,7 @@ class TMSim {
     let s = this.tape.join('');
     while (s.startsWith(this.blank)) s = s.slice(1);
     while (s.endsWith(this.blank)) s = s.slice(0, -1);
-    return s || this.blank;
+    return s || 'ε';   // wie CTMSim: leeres Band = ε
   }
 }
 
@@ -1097,23 +1181,29 @@ const EXAMPLES = {
 (qR,0,qR,0,R) (qR,1,qR,1,R) (qR,□,qI,□,L)
 (qI,0,qH,1,L) (qI,1,qI,0,L) (qI,□,qH,1,R)`,
 
-  busy2: `# Busy Beaver 2 Zustände
+  busy2: `# Busy Beaver 2 Zustände (leeres Band, Blank □)
 (A,0)
-(0)
-(A,0,B,1,R) (A,1,B,1,L)
-(B,0,A,1,L) (B,1,H,1,R)`,
+(□)
+(A,□,B,1,R) (A,1,B,1,L)
+(B,□,A,1,L) (B,1,H,1,R)`,
 
   triple_left: `# Demo: 3× Linksbewegung
 (q0,3)
 (abcd)
 (q0,d,q1,D,L) (q1,c,q2,C,L) (q2,b,q3,B,L)`,
 
-  busy3: `# Busy Beaver 3 Zustände (5 Einsen)
+  stay: `# Demo: Stay (S) und Blank-Schreiben
+(q0,0)
+(ab)
+(q0,a,q1,x,S) (q1,x,q2,y,S) (q2,y,q3,z,R)
+(q3,b,q4,□,R) (q4,□,q5,c,L) (q5,□,q6,d,S)`,
+
+  busy3: `# Busy Beaver 3 Zustände (6 Einsen, leeres Band, Blank □)
 (A,0)
-(0)
-(A,0,B,1,R) (A,1,C,1,L)
-(B,0,A,1,L) (B,1,B,1,R)
-(C,0,B,1,L) (C,1,H,1,R)`,
+(□)
+(A,□,B,1,R) (A,1,C,1,L)
+(B,□,A,1,L) (B,1,B,1,R)
+(C,□,B,1,L) (C,1,H,1,R)`,
 };
 
 
@@ -1147,6 +1237,7 @@ let runTimerCT = null;    // Interval-ID für Auto-Run CTM
 function parseCTMFile(text) {
   const lines = text.split('\n');
   let name = '';
+  let blankMeta = null;
   let config = null;
   let tapeStr = null;
   const transitions = [];
@@ -1157,6 +1248,9 @@ function parseCTMFile(text) {
     line = line.trim();
     if (!line) continue;
     if (line.startsWith('#')) {
+      // Metazeile "# blank: x" (Blank-Symbol der Quell-TM; ältere Parser ignorieren sie als Kommentar)
+      const bm = line.match(/^#\s*blank\s*:\s*(\S+)\s*$/i);
+      if (bm) { if ([...bm[1]].length === 1) blankMeta = bm[1]; continue; }
       if (!name) name = line.slice(1).trim();
       continue;
     }
@@ -1170,7 +1264,12 @@ function parseCTMFile(text) {
         tapeStr = parts[0];
       } else if (parts.length === 5) {
         // (Zustand, Lesen, Schreiben, Folgezustand, C|S)
-        const stay = parts[4].toUpperCase() === 'S';
+        const mv = parts[4].toUpperCase();
+        if (mv !== 'C' && mv !== 'S') throw new Error('(' + parts.join(',') + '): Bewegung muss C oder S sein');
+        if ([...parts[1]].length !== 1) throw new Error('(' + parts.join(',') + '): Lesesymbol muss ein Zeichen sein');
+        const wl = [...parts[2]].length;
+        if (wl < 1 || wl > 2) throw new Error('(' + parts.join(',') + '): Schreibwert muss 1 oder 2 Zeichen haben');
+        const stay = mv === 'S';
         const t = new CTMTransition(parts[0], parts[1], parts[2], parts[3], stay);
         transitions.push(t);
         states.add(t.state);
@@ -1183,6 +1282,13 @@ function parseCTMFile(text) {
 
   if (!config) throw new Error('Keine Konfiguration (Startzustand, Kopfposition) gefunden');
   if (transitions.length === 0) throw new Error('Keine Übergänge gefunden');
+  const cells = [...(tapeStr || '')];
+  if (cells.length === 0) throw new Error('Leeres Band');
+  if (!Number.isInteger(config.headPos) || config.headPos < 0 || config.headPos >= cells.length) {
+    throw new Error('Ungültige Kopfposition ' + config.headPos + ' (erlaubt: 0…' + (cells.length - 1) + ')');
+  }
+  for (const ch of cells) alphabet.add(ch);
+  states.add(config.startState);
 
   return {
     name: name || 'Unbenannt',
@@ -1192,7 +1298,8 @@ function parseCTMFile(text) {
     transitions,
     states: [...states].sort(),
     alphabet: [...alphabet].sort(),
-    transitionMap: buildTransMap(transitions)
+    transitionMap: buildTransMap(transitions),
+    blank: blankMeta          // null = nicht angegeben (Fallback: Eingabefeld bzw. □)
   };
 }
 
@@ -1204,7 +1311,9 @@ function parseCTMFile(text) {
 function detectFormat(text, filename) {
   if (filename && filename.toLowerCase().endsWith('.ctm')) return 'ctm';
   if (filename && filename.toLowerCase().endsWith('.tm')) return 'tm';
-  // Inhaltsbasiert: erstes 5-Tupel prüfen (ohne Kommentarzeilen!)
+  // Inhaltsbasiert: alle 5-Tupel prüfen (ohne Kommentarzeilen!).
+  // L/R/N → TM, C → CTM; S allein ist mehrdeutig (TM-Stay oder CTM-Stay).
+  let sawC = false, sawTM = false, sawS = false;
   for (let line of text.split('\n')) {
     line = line.trim();
     if (!line || line.startsWith('#')) continue;
@@ -1214,12 +1323,25 @@ function detectFormat(text, filename) {
       const parts = match[1].split(',').map(s => s.trim());
       if (parts.length === 5) {
         const dir = parts[4].toUpperCase();
-        if (dir === 'C' || dir === 'S') return 'ctm';
-        if (dir === 'L' || dir === 'R') return 'tm';
+        if (dir === 'C') sawC = true;
+        else if (dir === 'L' || dir === 'R' || dir === 'N') sawTM = true;
+        else if (dir === 'S') sawS = true;
       }
     }
   }
-  return 'tm'; // Fallback
+  if (sawC && !sawTM) return 'ctm';
+  if (sawTM) return 'tm';
+  return sawS ? 'ctm' : 'tm'; // Fallback
+}
+
+/** Zeigt Meldungen inline statt per alert(). kind: 'warn' | 'err' | 'info' */
+function showMsg(kind, lines) {
+  const box = document.getElementById('msgBox');
+  const list = (Array.isArray(lines) ? lines : [lines]).filter(Boolean);
+  if (list.length === 0) { box.style.display = 'none'; box.textContent = ''; return; }
+  box.className = 'msg-box ' + kind;
+  box.textContent = (kind === 'err' ? '✗ ' : kind === 'warn' ? '⚠ ' : '') + list.join('\n');
+  box.style.display = '';
 }
 
 /** Lädt eine Datei und wählt automatisch den richtigen Parser */
@@ -1239,31 +1361,22 @@ function loadFile(text, filename) {
 function loadCTM(text) {
   try {
     const ctm = parseCTMFile(text);
+    stopAll();
     currentTM = null;
-    currentCTM = ctm;
     simTM = null;
     simCT = null;
-    stopAll();
-
-    // Band-Inhalt: zwischen ◀ und ▶ extrahieren (zirkulär, falls rotiert)
-    const tapeArr = [...ctm.tape];
-    let inner = '';
-    const li = tapeArr.indexOf(SYM_LEFT);
-    if (li !== -1) {
-      let p = (li + 1) % tapeArr.length;
-      for (let i = 0; i < tapeArr.length; i++) {
-        if (tapeArr[p] === SYM_RIGHT) break;
-        inner += tapeArr[p];
-        p = (p + 1) % tapeArr.length;
-      }
-    } else {
-      inner = ctm.tape;
-    }
+    // Importierte CTM wird exakt so simuliert, wie sie gespeichert ist
+    // (Band ggf. rotiert oder ohne ◀/▶) — kein Neuaufbau aus dem Eingabefeld.
+    ctm.src = { imported: true, tape: [...ctm.tape], head: ctm.headPos };
+    if (ctm.blank) document.getElementById('blankInput').value = ctm.blank;
+    ctm.warnings = [];
+    currentCTM = ctm;
 
     // UI aktualisieren
     document.getElementById('tmName').textContent = ctm.name + ' [CTM direkt]';
-    document.getElementById('tapeInput').value = inner;
-    document.getElementById('headInput').value = Math.max(0, ctm.headPos - 1);
+    setInputsLocked(true);
+    document.getElementById('tapeInput').value = ctm.tape;
+    document.getElementById('headInput').value = ctm.headPos;
 
     // TM-Seite: Hinweis anzeigen
     document.getElementById('tmInfo').innerHTML =
@@ -1279,10 +1392,16 @@ function loadCTM(text) {
     renderCTInfo();
     document.getElementById('convertInfo').textContent =
       ctm.states.length + ' Zustände, ' + ctm.transitions.length + ' Übergänge (importiert)';
+    const notes = [];
+    if (!ctm.tape.includes(SYM_LEFT) || !ctm.tape.includes(SYM_RIGHT)) {
+      notes.push('Band ohne ' + SYM_LEFT + '/' + SYM_RIGHT + ' — Ergebnis wird als ganzes zirkuläres Band angezeigt.');
+    }
+    if (ctm.transitions.some(t => t.stay)) notes.push('Datei enthält Stay-Übergänge (S).');
+    showMsg('info', notes);
 
-    const blank = document.getElementById('blankInput').value || '□';
-    const ctTape = [SYM_LEFT, ...inner, SYM_RIGHT];
-    simCT = new CTMSim(ctm.transitionMap, ctm.startState, ctTape, Math.max(0, ctm.headPos - 1) + 1, blank);
+    const blank = ctm.blank || document.getElementById('blankInput').value || '□';
+    ctm.src.blank = blank;
+    simCT = new CTMSim(ctm.transitionMap, ctm.startState, ctm.src.tape, ctm.src.head, blank);
     renderTapeUI('tapeCT', simCT.tape, simCT.head, true);
     updateStatus('statusCT', simCT);
     document.getElementById('logCT').innerHTML = '';
@@ -1295,18 +1414,30 @@ function loadCTM(text) {
     document.getElementById('btnConvert').disabled = true;
     document.getElementById('btnExportCTM').disabled = false;
   } catch (e) {
-    alert('Fehler beim Parsen der .ctm Datei: ' + e.message);
+    showMsg('err', 'Fehler beim Parsen der .ctm-Datei: ' + e.message);
   }
+}
+
+/** Sperrt/entsperrt Band-, Kopf- und Blank-Eingabe (gesperrt bei direkt geladener CTM). */
+function setInputsLocked(locked) {
+  for (const id of ['tapeInput', 'headInput', 'blankInput']) document.getElementById(id).disabled = locked;
 }
 
 /** Lädt und parst eine TM-Datei */
 function loadTM(text) {
   try {
-    currentTM = parseTMFile(text);
+    const tm = parseTMFile(text);
+    stopAll();
+    currentTM = tm;
     currentCTM = null;
     simTM = null;
     simCT = null;
-    stopAll();
+    setInputsLocked(false);
+    showMsg('info', []);
+    document.getElementById('tapeTM').innerHTML = '';
+    document.getElementById('logTM').innerHTML = '';
+    document.getElementById('statusTM').textContent = '—';
+    document.getElementById('comparison').classList.remove('show');
 
     // UI aktualisieren
     document.getElementById('tmName').textContent = currentTM.name;
@@ -1316,8 +1447,9 @@ function loadTM(text) {
     renderTMInfo();
     clearCTInfo();
     enableButtons();
+    enableSimButtons();
   } catch (e) {
-    alert('Fehler beim Parsen: ' + e.message);
+    showMsg('err', 'Fehler beim Parsen: ' + e.message);
   }
 }
 
@@ -1325,9 +1457,9 @@ function loadTM(text) {
 function renderTMInfo() {
   const el = document.getElementById('tmInfo');
   const tm = currentTM;
-  let html = `<div><span class="label">Zustände:</span> <span class="val">${tm.states.length} — ${tm.states.join(', ')}</span></div>`;
-  html += `<div><span class="label">Alphabet:</span> <span class="val">${tm.alphabet.join(', ')}</span></div>`;
-  html += `<div><span class="label">Start:</span> <span class="val">${tm.startState}</span> &nbsp; <span class="label">Kopf:</span> <span class="val">${tm.headPos}</span></div>`;
+  let html = `<div><span class="label">Zustände:</span> <span class="val">${tm.states.length} — ${esc(tm.states.join(', '))}</span></div>`;
+  html += `<div><span class="label">Alphabet:</span> <span class="val">${esc(tm.alphabet.join(', '))}</span></div>`;
+  html += `<div><span class="label">Start:</span> <span class="val">${esc(tm.startState)}</span> &nbsp; <span class="label">Kopf:</span> <span class="val">${tm.headPos}</span></div>`;
   html += `<div><span class="label">Übergänge:</span> <span class="val">${tm.transitions.length}</span></div>`;
   html += `<div class="transition-list">`;
   for (const t of tm.transitions) {
@@ -1342,7 +1474,7 @@ function renderCTInfo() {
   const el = document.getElementById('ctInfo');
   const ct = currentCTM;
   let html = `<div><span class="label">Zustände:</span> <span class="val">${ct.states.length}</span></div>`;
-  html += `<div><span class="label">Alphabet:</span> <span class="val">${ct.alphabet.join(', ')}</span></div>`;
+  html += `<div><span class="label">Alphabet:</span> <span class="val">${esc(ct.alphabet.join(', '))}</span></div>`;
   html += `<div><span class="label">Übergänge:</span> <span class="val">${ct.transitions.length}</span></div>`;
   if (ct.transitions.length <= 100) {
     html += `<div class="transition-list">`;
@@ -1376,11 +1508,25 @@ function doConvert() {
 
   const blank = document.getElementById('blankInput').value || '□';
   const tape = document.getElementById('tapeInput').value;
-  const headPos = parseInt(document.getElementById('headInput').value, 10) || 0;
+  const headRaw = document.getElementById('headInput').value;
+  const headPos = parseInt(headRaw, 10);
+  try {
+    if ([...blank].length !== 1) throw new Error('Blank muss genau ein Zeichen sein');
+    if (RESERVED_SYMS.has(blank)) throw new Error('Blank "' + blank + '" ist reserviert');
+    if (!Number.isInteger(headPos)) throw new Error('Kopfposition "' + headRaw + '" ist keine ganze Zahl');
+    for (const ch of tape) checkSymbol(ch, 'Band');
+  } catch (e) {
+    showMsg('err', e.message);
+    return;
+  }
+
+  // Startband der CTM (Rand-Blanks kollabiert, innere Blanks als Daten)
+  const ct = buildCTTape(tape, headPos, blank);
 
   // Konvertieren
   const t0 = performance.now();
-  currentCTM = convertToClockwise(currentTM, blank);
+  currentCTM = convertToClockwise(currentTM, blank, ct.content);
+  currentCTM.src = { imported: false, tapeStr: tape, headPos, blank, tape: ct.tape, head: ct.head };
   const dt = (performance.now() - t0).toFixed(1);
 
   renderCTInfo();
@@ -1388,18 +1534,37 @@ function doConvert() {
   const info = document.getElementById('convertInfo');
   info.textContent = `${currentCTM.states.length} Zustände, ${currentCTM.transitions.length} Übergänge (${dt}ms)`;
 
-  // Warnungen anzeigen (nicht darstellbare Konstrukte)
-  if (currentCTM.warnings && currentCTM.warnings.length > 0) {
-    info.textContent += ` — ⚠ ${currentCTM.warnings.length} Warnung(en)`;
-    for (const w of currentCTM.warnings) console.warn('CTM-Konvertierung: ' + w);
-    alert('⚠ Konvertierungs-Warnung(en):\n\n' + currentCTM.warnings.join('\n\n'));
+  // Warnungen/Hinweise inline anzeigen (kein alert)
+  const msgs = [...currentCTM.warnings];
+  if (ct.note) msgs.push(ct.note);
+  if (msgs.length > 0) {
+    info.textContent += ` — ⚠ ${msgs.length} Hinweis(e)`;
+    showMsg('warn', msgs);
+  } else {
+    showMsg('info', []);
   }
 
   // Export-Button aktivieren
   document.getElementById('btnExportCTM').disabled = false;
 
   // Simulatoren initialisieren
-  initSimulators(tape, headPos, blank);
+  initSimulators();
+}
+
+/** Eingaben geändert → Konvertierung passt nicht mehr zum Band. */
+function invalidateConversion() {
+  if (!currentTM || !currentCTM) return;
+  stopAll();
+  currentCTM = null;
+  simTM = null;
+  simCT = null;
+  clearCTInfo();
+  document.getElementById('tapeTM').innerHTML = '';
+  document.getElementById('statusTM').textContent = '—';
+  document.getElementById('logTM').innerHTML = '';
+  document.getElementById('comparison').classList.remove('show');
+  enableSimButtons();
+  showMsg('info', 'Band/Kopf/Blank geändert — bitte neu konvertieren.');
 }
 
 
@@ -1421,9 +1586,7 @@ function doConvert() {
 function exportCTM() {
   if (!currentCTM) return;
 
-  const tape = document.getElementById('tapeInput').value;
-  const headPos = parseInt(document.getElementById('headInput').value, 10) || 0;
-
+  const src = currentCTM.src;
   const srcName = currentTM ? currentTM.name : (currentCTM.name || 'Importierte CTM');
 
   const lines = [];
@@ -1436,12 +1599,14 @@ function exportCTM() {
   lines.push('#   Bewegung: C = clockwise, S = stay (Kopf bleibt stehen)');
   lines.push('#   Schreiben mit 2 Zeichen = Zellteilung');
   lines.push('# Spezialsymbole: ' + SYM_MARKER + ' = Marker, ' + SYM_RIGHT + ' = rechtes Ende, ' + SYM_LEFT + ' = linkes Ende');
+  // Metazeile mit dem Blank (abwärtskompatibel: für ältere Parser ein Kommentar)
+  lines.push('# blank: ' + (src.blank || document.getElementById('blankInput').value || '□'));
 
-  // Konfiguration: Startzustand + Kopfposition (+1 wegen ◀)
-  lines.push('(' + currentCTM.startState + ',' + (headPos + 1) + ')');
+  // Konfiguration: Startzustand + Kopfposition (Index im zirkulären Band)
+  lines.push('(' + currentCTM.startState + ',' + src.head + ')');
 
-  // Band: ◀ + Inhalt + ▶
-  lines.push('(' + SYM_LEFT + tape + SYM_RIGHT + ')');
+  // Band: genau das Startband der CTM (◀ Inhalt ▶, Rand-Blanks kollabiert)
+  lines.push('(' + src.tape.join('') + ')');
 
   // Übergänge: gruppiert nach Zustand, mehrere pro Zeile
   const byState = new Map();
@@ -1479,19 +1644,17 @@ function exportCTM() {
    SIMULATOREN INITIALISIEREN
    ═══════════════════════════════════════════════════════════════════════ */
 
-function initSimulators(tapeStr, headPos, blank) {
+function initSimulators() {
   stopAll();
+  const src = currentCTM.src;
 
   // Standard-TM Simulator
   const tmTransMap = buildTMTransMap(currentTM.transitions);
-  const tmTape = tapeStr ? [...tapeStr] : [blank];
-  simTM = new TMSim(tmTransMap, currentTM.startState, tmTape, headPos, blank);
+  const tmTape = src.tapeStr ? [...src.tapeStr] : [src.blank];
+  simTM = new TMSim(tmTransMap, currentTM.startState, tmTape, src.headPos, src.blank);
 
-  // Clockwise-TM Simulator
-  // Band aufbauen: [◀, tape..., ▶]
-  const ctTape = [SYM_LEFT, ...(tapeStr ? [...tapeStr] : []), SYM_RIGHT];
-  const ctHead = headPos + 1; // +1 wegen ◀ am Anfang
-  simCT = new CTMSim(currentCTM.transitionMap, currentCTM.startState, ctTape, ctHead, blank);
+  // Clockwise-TM Simulator: Startband aus buildCTTape
+  simCT = new CTMSim(currentCTM.transitionMap, currentCTM.startState, src.tape, src.head, src.blank);
 
   // UI aktualisieren
   renderTapeUI('tapeTM', simTM.tape, simTM.head);
@@ -1549,17 +1712,27 @@ function updateStatus(elId, sim) {
   }
 }
 
-function addLog(elId, sim, prefix) {
-  const el = document.getElementById(elId);
-  let entry = `<span class="log-step">${prefix}${sim.steps}:</span> `;
-  if (sim.lastTransition) {
-    entry += `<span class="log-trans">${esc(sim.lastTransition.toString())}</span>`;
+const LOG_MAX = 1000;   // ältere Logzeilen werden verworfen
+
+/** Hängt eine Logzeile aus [klasse, text]-Teilen an (DOM statt innerHTML +=). */
+function appendLogLine(el, parts) {
+  const line = document.createElement('div');
+  for (const [cls, text] of parts) {
+    const span = document.createElement('span');
+    if (cls) span.className = cls;
+    span.textContent = text;
+    line.appendChild(span);
   }
-  if (sim.halted) {
-    entry += ` <span class="log-halt">→ HALT</span>`;
-  }
-  el.innerHTML += entry + '\n';
+  el.appendChild(line);
+  while (el.childElementCount > LOG_MAX) el.removeChild(el.firstChild);
   el.scrollTop = el.scrollHeight;
+}
+
+function addLog(elId, sim, prefix) {
+  const parts = [['log-step', `${prefix}${sim.steps}: `]];
+  if (sim.lastTransition) parts.push(['log-trans', sim.lastTransition.toString()]);
+  if (sim.halted) parts.push(['log-halt', ' → HALT']);
+  appendLogLine(document.getElementById(elId), parts);
 }
 
 
@@ -1568,7 +1741,7 @@ function addLog(elId, sim, prefix) {
    ═══════════════════════════════════════════════════════════════════════ */
 
 function stepTM() {
-  if (!simTM || simTM.halted) return;
+  if (!simTM || simTM.halted || haltJob) return;
   simTM.step();
   renderTapeUI('tapeTM', simTM.tape, simTM.head);
   updateStatus('statusTM', simTM);
@@ -1578,7 +1751,7 @@ function stepTM() {
 }
 
 function stepCT() {
-  if (!simCT || simCT.halted) return;
+  if (!simCT || simCT.halted || haltJob) return;
   simCT.step();
   renderTapeUI('tapeCT', simCT.tape, simCT.head, true);
   updateStatus('statusCT', simCT);
@@ -1633,17 +1806,20 @@ function stopCT() {
   document.getElementById('btnRunCT').textContent = 'Start ▶▶';
 }
 
-function stopAll() { stopTM(); stopCT(); if (runTimerBoth) { clearInterval(runTimerBoth); runTimerBoth = null; } }
+function stopAll() {
+  stopTM(); stopCT();
+  if (runTimerBoth) { clearInterval(runTimerBoth); runTimerBoth = null; }
+  document.getElementById('btnRunBoth').textContent = 'Beide ▶▶';
+  if (haltJob) haltJob.cancel = true;
+}
 
 function resetTM() {
   stopTM();
-  if (!currentTM || !currentCTM) return;
-  const blank = document.getElementById('blankInput').value || '□';
-  const tape = document.getElementById('tapeInput').value;
-  const headPos = parseInt(document.getElementById('headInput').value, 10) || 0;
+  if (!currentTM || !currentCTM || haltJob) return;
+  const src = currentCTM.src;
   const tmTransMap = buildTMTransMap(currentTM.transitions);
-  const tmTape = tape ? [...tape] : [blank];
-  simTM = new TMSim(tmTransMap, currentTM.startState, tmTape, headPos, blank);
+  const tmTape = src.tapeStr ? [...src.tapeStr] : [src.blank];
+  simTM = new TMSim(tmTransMap, currentTM.startState, tmTape, src.headPos, src.blank);
   renderTapeUI('tapeTM', simTM.tape, simTM.head);
   updateStatus('statusTM', simTM);
   document.getElementById('logTM').innerHTML = '';
@@ -1654,12 +1830,10 @@ function resetTM() {
 
 function resetCT() {
   stopCT();
-  if (!currentCTM) return;
-  const blank = document.getElementById('blankInput').value || '□';
-  const tape = document.getElementById('tapeInput').value;
-  const headPos = parseInt(document.getElementById('headInput').value, 10) || 0;
-  const ctTape = [SYM_LEFT, ...(tape ? [...tape] : []), SYM_RIGHT];
-  simCT = new CTMSim(currentCTM.transitionMap, currentCTM.startState, ctTape, headPos + 1, blank);
+  if (!currentCTM || haltJob) return;
+  const src = currentCTM.src;
+  const blank = src.blank || document.getElementById('blankInput').value || '□';
+  simCT = new CTMSim(currentCTM.transitionMap, currentCTM.startState, src.tape, src.head, blank);
   renderTapeUI('tapeCT', simCT.tape, simCT.head, true);
   updateStatus('statusCT', simCT);
   document.getElementById('logCT').innerHTML = '';
@@ -1674,6 +1848,7 @@ function resetCT() {
    ═══════════════════════════════════════════════════════════════════════ */
 
 function stepBoth() {
+  if (haltJob) return;
   stepTM();
   stepCT();
 }
@@ -1682,7 +1857,7 @@ let runTimerBoth = null;
 
 function runBoth() {
   if (runTimerBoth) { stopBoth(); return; }
-  if (!simTM || !simCT) return;
+  if (!simTM || !simCT || haltJob) return;
   stopTM(); stopCT(); // Einzelne Timer stoppen
   document.getElementById('btnRunBoth').textContent = 'Stopp ■';
   const tick = () => {
@@ -1705,60 +1880,72 @@ function resetBoth() {
 }
 
 /**
- * Schnelldurchlauf: Beide Simulatoren ohne UI-Updates bis Halt laufen.
+ * Schnelldurchlauf: Beide Simulatoren ohne UI-Updates bis Halt laufen —
+ * in Häppchen (≈25 ms je setTimeout-Runde), damit die Seite bedienbar bleibt.
+ * Ein zweiter Klick auf den Knopf bricht ab.
  * Sicherheitslimit: 10M Schritte für TM, 50M für CTM.
  */
+let haltJob = null;
+
 function runToHalt() {
+  if (haltJob) { haltJob.cancel = true; return; }   // Abbrechen
   if (!simTM || !simCT) return;
   stopAll();
-  if (runTimerBoth) { clearInterval(runTimerBoth); runTimerBoth = null; }
 
   const MAX_TM = 10_000_000;
   const MAX_CT = 50_000_000;
+  const sT = simTM, sC = simCT;
+  const job = { cancel: false };
+  haltJob = job;
 
-  document.getElementById('btnHaltBoth').textContent = '⏳ Läuft...';
-  document.getElementById('btnHaltBoth').disabled = true;
+  const btn = document.getElementById('btnHaltBoth');
+  btn.textContent = '■ Abbrechen';
+  const t0 = performance.now();
 
-  // Asynchron ausführen damit UI aktualisiert wird
-  setTimeout(() => {
-    const t0 = performance.now();
-
-    // Standard-TM bis Halt
-    while (!simTM.halted && simTM.steps < MAX_TM) {
-      simTM.step();
-    }
-
-    // Clockwise-TM bis Halt
-    while (!simCT.halted && simCT.steps < MAX_CT) {
-      simCT.step();
-    }
-
+  const finish = (aborted) => {
+    haltJob = null;
+    btn.textContent = '⏩ Bis Halt';
+    if (simTM !== sT || simCT !== sC) return;   // inzwischen neu geladen
     const dt = ((performance.now() - t0) / 1000).toFixed(2);
+    renderTapeUI('tapeTM', sT.tape, sT.head);
+    renderTapeUI('tapeCT', sC.tape, sC.head, true);
+    updateStatus('statusTM', sT);
+    updateStatus('statusCT', sC);
+    document.getElementById('tapeLenTM').textContent = `${sT.tape.length} Zellen`;
+    document.getElementById('tapeLenCT').textContent = `${sC.tape.length} Zellen`;
 
-    // UI aktualisieren
-    renderTapeUI('tapeTM', simTM.tape, simTM.head);
-    renderTapeUI('tapeCT', simCT.tape, simCT.head, true);
-    updateStatus('statusTM', simTM);
-    updateStatus('statusCT', simCT);
-    document.getElementById('tapeLenTM').textContent = `${simTM.tape.length} Zellen`;
-    document.getElementById('tapeLenCT').textContent = `${simCT.tape.length} Zellen`;
-
-    // Log-Zusammenfassung
     const logTM = document.getElementById('logTM');
     const logCT = document.getElementById('logCT');
-    logTM.innerHTML = `<span class="log-step">Schnelldurchlauf: ${simTM.steps.toLocaleString()} Schritte</span>\n`;
-    if (!simTM.halted) logTM.innerHTML += `<span class="log-halt">Limit erreicht (${MAX_TM.toLocaleString()})</span>\n`;
-    else logTM.innerHTML += `<span class="log-halt">→ HALT in Zustand ${esc(simTM.state)}</span>\n`;
-
-    logCT.innerHTML = `<span class="log-step">Schnelldurchlauf: ${simCT.steps.toLocaleString()} Schritte (${dt}s)</span>\n`;
-    if (!simCT.halted) logCT.innerHTML += `<span class="log-halt">Limit erreicht (${MAX_CT.toLocaleString()})</span>\n`;
-    else logCT.innerHTML += `<span class="log-halt">→ HALT in Zustand ${esc(simCT.state)}</span>\n`;
-
+    logTM.innerHTML = '';
+    logCT.innerHTML = '';
+    appendLogLine(logTM, [['log-step', `Schnelldurchlauf: ${sT.steps.toLocaleString('de-DE')} Schritte`]]);
+    appendLogLine(logTM, [['log-halt', sT.halted ? `→ HALT in Zustand ${sT.state}` :
+      (aborted ? 'Abgebrochen' : `Limit erreicht (${MAX_TM.toLocaleString('de-DE')})`)]]);
+    appendLogLine(logCT, [['log-step', `Schnelldurchlauf: ${sC.steps.toLocaleString('de-DE')} Schritte (${dt}s)`]]);
+    appendLogLine(logCT, [['log-halt', sC.halted ? `→ HALT in Zustand ${sC.state}` :
+      (aborted ? 'Abgebrochen' : `Limit erreicht (${MAX_CT.toLocaleString('de-DE')})`)]]);
     checkComparison();
+  };
 
-    document.getElementById('btnHaltBoth').textContent = '⏩ Bis Halt';
-    document.getElementById('btnHaltBoth').disabled = false;
-  }, 50);
+  const chunk = () => {
+    if (job.cancel || simTM !== sT || simCT !== sC) { finish(true); return; }
+    const until = performance.now() + 25;
+    let active = true;
+    while (active && performance.now() < until) {
+      for (let i = 0; i < 2000; i++) {
+        const aT = !sT.halted && sT.steps < MAX_TM;
+        const aC = !sC.halted && sC.steps < MAX_CT;
+        if (!aT && !aC) { active = false; break; }
+        if (aT) sT.step();
+        if (aC) sC.step();
+      }
+    }
+    if (!active) { finish(false); return; }
+    updateStatus('statusTM', sT);
+    updateStatus('statusCT', sC);
+    setTimeout(chunk, 0);
+  };
+  setTimeout(chunk, 0);
 }
 
 
@@ -1819,13 +2006,13 @@ function enableSimButtons() {
   const hasBoth = hasTM && hasCT;
   document.getElementById('btnStepBoth').disabled = !hasBoth;
   document.getElementById('btnRunBoth').disabled = !hasBoth;
-  document.getElementById('btnHaltBoth').disabled = !hasBoth;
+  document.getElementById('btnHaltBoth').disabled = !hasBoth && !haltJob;
   document.getElementById('btnResetBoth').disabled = !hasBoth;
 }
 
 /** HTML-Escaping */
 function esc(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 
@@ -1853,6 +2040,9 @@ document.getElementById('exampleSelect').addEventListener('change', (e) => {
 
 // Konvertieren
 document.getElementById('btnConvert').addEventListener('click', doConvert);
+for (const id of ['tapeInput', 'headInput', 'blankInput']) {
+  document.getElementById(id).addEventListener('input', invalidateConversion);
+}
 
 // CTM exportieren
 document.getElementById('btnExportCTM').addEventListener('click', exportCTM);

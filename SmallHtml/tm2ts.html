@@ -386,10 +386,29 @@
   }
   .help-text code { color: var(--text2); }
 
+  /* ── Footer ── */
+  .site-foot {
+    border-top: 1px solid var(--border);
+    padding: 8px 32px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+  }
+  .site-foot a { color: var(--text2); text-decoration: none; }
+  .site-foot a:hover { color: var(--phosphor); }
+
   /* ── Scrollbars ── */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ── Schmale Bildschirme ── */
+  main > * { min-width: 0; }
+  @media (max-width: 760px) {
+    header { flex-wrap: wrap; padding: 14px 16px; }
+    main { grid-template-columns: minmax(0, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -399,6 +418,13 @@
   <h1>Turing Machine → Tag System &nbsp;·&nbsp; p = 2 &nbsp;·&nbsp; Cocke-Minsky 1964</h1>
   <div class="badge">2-SYMBOL · 1-TAPE</div>
 </header>
+
+<p style="margin:0;padding:8px 20px;font-family:var(--sans);font-size:12px;color:var(--text2);border-bottom:1px solid var(--border);background:var(--surface)">
+  Hinweis: Die Cocke-Minsky-Kodierung schreibt die Bandhälften unär (Länge ~2<sup>n</sup>) und wächst
+  damit <strong style="color:var(--amber)">exponentiell</strong> mit der Bandlänge. Für größere Bänder ist der
+  polynomielle Weg gedacht: <code>tm_clockwise.html</code> (TM → clockwise TM, .ctm-Export) →
+  <a href="ctm2ts_poly.html" style="color:var(--phosphor2)">ctm2ts_poly.html</a> (clockwise TM → 2-Tag, polynomiell).
+</p>
 
 <main>
   <!-- ── Left Panel: Input ── -->
@@ -438,7 +464,11 @@ HEAD: 2"></textarea>
       <div class="help-text">
         <code>StateN Read Write Move StateF</code><br>
         Symbole: <code>0</code> und <code>1</code> · Move: <code>L</code> oder <code>R</code><br>
-        TAPE: Bandinit (leerzeichen-getrennt) · HEAD: Index (0-basiert)
+        TAPE: Bandinit (leerzeichen-getrennt) · HEAD: Index (0-basiert)<br>
+        Halt: ein Folgezustand ohne eigene Transitionen (z.B. <code>H</code>) ist ein
+        Haltzustand. Im Tag-System hat <code>A_H_0</code>/<code>A_H_1</code> keine
+        Produktionszeile → das Tag-System hält, sobald es an den Kopf kommt.
+        <code>(sym)</code> ohne rechte Seite heißt dagegen „löschen, nichts anhängen“.
       </div>
     </div>
   </div>
@@ -492,6 +522,10 @@ HEAD: 2"></textarea>
   </div>
 </main>
 
+<footer class="site-foot">
+  TM → TS → CTS · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
+
 <script>
 // ═══════════════════════════════════════════════════════════
 //  PARSER: liest .tm Format
@@ -507,12 +541,16 @@ function parseTM(src) {
     if (!line) continue;
 
     if (line.startsWith('TAPE:')) {
-      tape = line.slice(5).trim().split(/\s+/).filter(s => s === '0' || s === '1');
+      tape = line.slice(5).trim().split(/\s+/).filter(Boolean);
+      const bad = tape.find(s => s !== '0' && s !== '1');
+      if (bad !== undefined) throw new Error(`TAPE: ungültiges Bandsymbol "${bad}" (erlaubt: 0 und 1)`);
       if (tape.length === 0) tape = ['0'];
       continue;
     }
     if (line.startsWith('HEAD:')) {
-      head = parseInt(line.slice(5).trim()) || 0;
+      const hs = line.slice(5).trim();
+      if (!/^\d+$/.test(hs)) throw new Error(`HEAD: "${hs}" ist kein gültiger Index (0-basiert, ≥ 0)`);
+      head = parseInt(hs, 10);
       continue;
     }
 
@@ -543,8 +581,10 @@ function parseTM(src) {
     if (!reads['1']) throw new Error(`Zustand ${sn} hat keine Transition für 1`);
   }
 
-  // Head bounds
-  head = Math.max(0, Math.min(head, tape.length - 1));
+  // Head muss auf dem angegebenen Band stehen (kein stilles Verschieben)
+  if (head > tape.length - 1) {
+    throw new Error(`HEAD: ${head} liegt außerhalb des Bandes (0 … ${tape.length - 1})`);
+  }
 
   return { transitions, stateMap, startState, tape, head };
 }
@@ -552,6 +592,8 @@ function parseTM(src) {
 // ═══════════════════════════════════════════════════════════
 //  KONVERTER: TM → Tag System (Cocke-Minsky p=2)
 // ═══════════════════════════════════════════════════════════
+const MAX_UNARY = 1 << 16; // max. M+N (Startband dann ≈ 131 000 Symbole)
+
 function convertTM2TS(tm) {
   const { stateMap, startState, tape, head } = tm;
 
@@ -583,34 +625,34 @@ function convertTM2TS(tm) {
   // Format: A_q  x_q  [al_q x_q]*M  B_q  x_q  [be_q x_q]*N
 
   function buildUnaryList(value, prefix) {
-    // Wert ist als Binärzahl: Σ bit_i * 2^i
-    // Unäre Darstellung: für jedes gesetzte Bit i füge 2^i Kopien von prefix ein
-    const result = [];
-    for (let i = 0; i < 32 && value > 0; i++) {
-      if (value & 1) {
-        const count = 1 << i;
-        for (let k = 0; k < count; k++) result.push(prefix);
-      }
-      value >>>= 1;
-    }
-    return result;
+    // Unäre Darstellung: value Kopien von prefix
+    return new Array(value).fill(prefix);
   }
 
   // Berechne M (links vom Kopf, von links nach rechts: höchste Stelle zuerst)
   // tape[0..head-1] ist links vom Kopf
   // laut Cocke-Minsky: M = Σ_{i=0}^{head-1} tape[head-1-i] * 2^i
-  let M = 0;
+  // BigInt, damit lange Bänder nicht überlaufen (1<<i kippt ab i=31).
+  let Mb = 0n;
   for (let i = 0; i < head; i++) {
-    const bit = parseInt(tape[head - 1 - i]) || 0;
-    if (bit) M += (1 << i);
+    if (tape[head - 1 - i] === '1') Mb += (1n << BigInt(i));
   }
 
   // N = Σ_{i=0}^{...} tape[head+1+i] * 2^i  (rechts vom Kopf)
-  let N = 0;
+  let Nb = 0n;
   for (let i = 0; head + 1 + i < tape.length; i++) {
-    const bit = parseInt(tape[head + 1 + i]) || 0;
-    if (bit) N += (1 << i);
+    if (tape[head + 1 + i] === '1') Nb += (1n << BigInt(i));
   }
+
+  // Die Kodierung ist unär in M und N → Bandlänge ≈ 2·(M+N)+4 Symbole.
+  // Harte Obergrenze, sonst friert der Browser ein bzw. das Array explodiert.
+  if (Mb + Nb > BigInt(MAX_UNARY)) {
+    throw new Error(
+      `Band zu groß für die unäre Cocke-Minsky-Kodierung: M=${Mb}, N=${Nb} ` +
+      `(M+N darf höchstens ${MAX_UNARY} sein, das Tag-Band hätte sonst ` +
+      `≈${(2n * (Mb + Nb) + 4n).toString()} Symbole). Bitte kürzeres Band / weniger Einsen weit weg vom Kopf.`);
+  }
+  const M = Number(Mb), N = Number(Nb);
 
   const startTape = [];
   startTape.push(`A_${transState}`, `x_${transState}`);
@@ -649,8 +691,18 @@ function convertTM2TS(tm) {
   //
   // WICHTIG (Paritäts-Fix): Die Regellängen müssen exakt stimmen, sonst
   // kippt die p=2-Ausrichtung und ein x-Separator landet am Kopf.
-  //   verdoppeln:  HEAD → C x (S=0) | C x c x (S=1);   hc → c x c x
-  //   halbieren:   OTHER → S;   oc → s
+  //   RECHTS (A verdoppelt, steht vorn):
+  //     A → C x (S=0) | C x c x (S=1);  al → c x c x;  B → S;  be → s
+  //     D0 → x A' x  (Ausrichtungs-Korrektur),  T0 → B' x
+  //   LINKS (B verdoppelt, steht HINTER der halbierenden A-Hälfte, deren
+  //   Länge 1+M wechselnde Parität hat → keine x-Trenner in der Ausgabe):
+  //     B → C C (S=0) | C C c c (S=1);  be → c c c c;  A → S;  al → s
+  //     D0 → B' x,  T0 → x A' x  (Korrektur sitzt hier auf der T-Seite)
+  //
+  // HALT-KONVENTION (gilt für die ganze Kette TM → TS → CTS):
+  //   Ein Zustand ohne Transitionen (z.B. H) erzeugt keine Produktionen.
+  //   Erreicht die TM ihn, steht A_H_<bit> am Kopf des Tag-Bandes; dafür
+  //   gibt es keine Produktionszeile → das Tag-System hält dort.
   // ═══════════════════════════════════════════════════════════════
   for (const st of noReadStates) {
     const { name, write, move, stateF0, stateF1 } = st;
@@ -668,9 +720,9 @@ function convertTM2TS(tm) {
       addProd(`be_${name}`, `s_${name}`);
     } else {
       // LINKS: B verdoppelt (erhält S), A halbiert
-      if (S === '0') addProd(`B_${name}`, `C_${name}`, `x_${name}`);
-      else           addProd(`B_${name}`, `C_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
-      addProd(`be_${name}`, `c_${name}`, `x_${name}`, `c_${name}`, `x_${name}`);
+      if (S === '0') addProd(`B_${name}`, `C_${name}`, `C_${name}`);
+      else           addProd(`B_${name}`, `C_${name}`, `C_${name}`, `c_${name}`, `c_${name}`);
+      addProd(`be_${name}`, `c_${name}`, `c_${name}`, `c_${name}`, `c_${name}`);
       addProd(`A_${name}`, `S_${name}`);
       addProd(`al_${name}`, `s_${name}`);
     }
@@ -698,11 +750,11 @@ function convertTM2TS(tm) {
       // LINKS: D (verdoppelt) → neue rechte B', T (halbiert) → neue linke A'
       addProd(`D1_${name}`, `B_${stateF1}`,  `x_${stateF1}`);
       addProd(`d1_${name}`, `be_${stateF1}`, `x_${stateF1}`);
-      addProd(`D0_${name}`, `x_${stateF0}`,  `B_${stateF0}`, `x_${stateF0}`);
+      addProd(`D0_${name}`, `B_${stateF0}`,  `x_${stateF0}`);
       addProd(`d0_${name}`, `be_${stateF0}`, `x_${stateF0}`);
       addProd(`T1_${name}`, `A_${stateF1}`,  `x_${stateF1}`);
       addProd(`t1_${name}`, `al_${stateF1}`, `x_${stateF1}`);
-      addProd(`T0_${name}`, `A_${stateF0}`,  `x_${stateF0}`);
+      addProd(`T0_${name}`, `x_${stateF0}`,  `A_${stateF0}`, `x_${stateF0}`);
       addProd(`t0_${name}`, `al_${stateF0}`, `x_${stateF0}`);
     }
   }
@@ -718,9 +770,11 @@ function serializeTS(result) {
   let out = '';
   out += `; Tag System (p=2) - Cocke-Minsky Konstruktion\n`;
   out += `; Startzustand: ${transState}  M=${M}  N=${N}\n`;
-  out += `; Hinweis: Die Kodierung ist gueltig, solange der TM-Kopf den\n`;
-  out += `; beschriebenen Bandbereich nicht verlaesst (beide Haelften M,N > 0).\n`;
-  out += `; Laeuft die TM in die Blank-Randregion, kann die Simulation abweichen.\n`;
+  out += `; Band links/rechts vom Kopf als Binaerzahlen M,N (unaer kodiert);\n`;
+  out += `; Blanks (0) jenseits des Bandes sind automatisch abgedeckt.\n`;
+  out += `; Halt-Konvention: Symbol ohne Produktionszeile = Halt, wenn es an den\n`;
+  out += `; Kopf kommt (z.B. A_H_0 fuer TM-Haltzustand H). Eine leere Zeile (b)\n`;
+  out += `; bedeutet dagegen: loeschen, nichts anhaengen.\n`;
   out += `\n(2)\n\n`;
   out += `(${startTape.join(',')})\n\n`;
   for (const [sym, rhs] of Object.entries(productions)) {
@@ -741,23 +795,27 @@ function parseTS(src) {
   for (const line of lines) {
     if (!line.startsWith('(') || !line.endsWith(')')) continue;
     const inner = line.slice(1, -1);
-    const parts = inner.split(',');
+    const parts = inner.split(',').map(s => s.trim());
 
-    if (parts.length === 1 && /^\d+$/.test(parts[0])) {
-      p = parseInt(parts[0]);
+    // (p) nur einmal und nur als erste Klammer — danach sind einzelne
+    // Zahlen normale Symbole (z.B. Startband "(1)" oder leere Produktion "(5)")
+    if (p === null && parts.length === 1 && /^\d+$/.test(parts[0])) {
+      p = parseInt(parts[0], 10);
       continue;
     }
 
     if (startTape === null && p !== null) {
       // erste nicht-p Klammer = Startband
-      startTape = parts.filter(s => s.trim() !== '');
+      startTape = parts.filter(Boolean);
       continue;
     }
 
-    if (parts.length >= 2) {
-      const sym = parts[0].trim();
-      const rhs = parts.slice(1).map(s => s.trim()).filter(Boolean);
-      productions[sym] = rhs;
+    // (sym) = leere Produktion (löschen, nichts anhängen)
+    // Symbol ganz ohne Zeile = Halt (siehe simStep)
+    if (parts.length >= 1 && parts[0] !== '') {
+      const sym = parts[0];
+      const rhs = parts.slice(1).filter(Boolean);
+      if (!(sym in productions)) productions[sym] = rhs;
     }
   }
 
@@ -800,7 +858,9 @@ function simStep() {
 
   if (!prod) {
     simState.halted = true;
-    simState.haltReason = `Kein Eintrag für "${head}" → Halt`;
+    const m = /^A_(.+)_([01])$/.exec(head);
+    simState.haltReason = `Kein Eintrag für "${head}" → Halt` +
+      (m ? ` (TM hält in Zustand ${m[1]}, liest ${m[2]})` : '');
     return { halted: true, reason: simState.haltReason, head };
   }
 
@@ -882,11 +942,12 @@ document.getElementById('btn-example').addEventListener('click', () => {
 ; q0: liest 1: schreib 1, L, q1
 ; q1: liest 0: schreib 1, L, q0
 ; q1: liest 1: schreib 1, R, HALT
-; (Halt wird als Zustand HALT simuliert — läuft bis kein Eintrag)
+; H hat keine Transitionen → Haltzustand; im Tag-System
+; hat A_H_* keine Produktion → das Tag-System hält dort.
 q0 0 1 R q1
 q0 1 1 L q1
 q1 0 1 L q0
-q1 1 1 R q0
+q1 1 1 R H
 
 TAPE: 0 0 0 0 0
 HEAD: 2`;
@@ -957,7 +1018,7 @@ function loadProductionsTable(prods) {
     tr.innerHTML = `
       <td class="prod-symbol">${esc(sym)}</td>
       <td class="prod-arrow">→</td>
-      <td class="prod-rhs">${rhs.map(esc).join(' &nbsp; ')}</td>`;
+      <td class="prod-rhs">${rhs.length ? rhs.map(esc).join(' &nbsp; ') : '<span style="color:var(--dim)">ε (leer)</span>'}</td>`;
     tbody.appendChild(tr);
   }
 }

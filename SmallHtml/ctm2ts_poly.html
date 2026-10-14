@@ -40,7 +40,8 @@
   button.run{font:inherit;font-size:13px;font-weight:600;width:100%;padding:11px;cursor:pointer;
     background:var(--accent);color:var(--bg);border:none;border-radius:2px;transition:background .15s}
   button.run:hover{background:var(--ok)}
-  .stat{display:flex;justify-content:space-between;font-size:12px;padding:7px 0;border-bottom:1px solid var(--line)}
+  .stat{display:flex;justify-content:space-between;gap:12px;font-size:12px;padding:7px 0;border-bottom:1px solid var(--line)}
+  .stat .v{text-align:right;overflow-wrap:anywhere}
   .stat:last-child{border-bottom:none}
   .stat .k{color:var(--dim)} .stat .v{color:var(--text)}
   .stats{margin-top:16px}
@@ -56,6 +57,12 @@
   .match-badge{font-size:12px;padding:2px 8px;border-radius:2px;margin-left:8px}
   .match-badge.ok{color:var(--ok);border:1px solid rgba(108,208,168,.3)}
   .match-badge.bad{color:var(--err);border:1px solid rgba(200,80,80,.3)}
+  .match-badge.warn{color:var(--tag);border:1px solid rgba(224,160,60,.35)}
+  .importrow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;font-size:11px;color:var(--dim)}
+  .importrow label{font-size:12px;padding:5px 10px;cursor:pointer;border:1px solid var(--line);border-radius:2px;color:var(--text)}
+  .importrow label:hover{border-color:var(--dim)}
+  .importrow input{display:none}
+  footer a{color:var(--dim)} footer a:hover{color:var(--accent)}
   .vrow{display:grid;grid-template-columns:44px 1fr 1fr 48px 26px;gap:8px;font-size:11.5px;padding:5px 0;border-bottom:1px solid var(--line);align-items:baseline}
   .vrow.head{color:var(--dim);text-transform:uppercase;letter-spacing:.1em;font-size:10px}
   .vrow .c{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -88,11 +95,14 @@
   <div class="panel">
     <div class="panel-label">Clockwise TM</div>
     <div class="presets" id="presets"></div>
+    <div class="importrow"><label>📂 .ctm importieren<input type="file" id="ctmFile" accept=".ctm"></label><span id="importInfo"></span></div>
     <textarea id="tmin" spellcheck="false"></textarea>
     <div class="hint">
       <code>start:</code> Zustand · <code>tape:</code> Band (A/B) · dann je Zeile<br>
       <code>zustand,gelesen: geschrieben,folgezustand</code><br>
-      optional <span class="g">Wachstum</span>: <code>…,folgezustand,<span class="g">grow</span>[,neue_zelle]</code>
+      optional <span class="g">Wachstum</span>: <code>…,folgezustand,<span class="g">grow</span>[,neue_zelle]</code><br>
+      Zustandsnamen nur Buchstaben/Ziffern · fehlender Übergang = Halt<br>
+      <code>.ctm</code> aus <code>tm_clockwise.html</code>: Symbole werden binär auf {A,B} kodiert
     </div>
     <button class="run" id="run">In 2-Tag-System konvertieren</button>
     <div class="status" id="status"></div>
@@ -111,11 +121,12 @@
       </div>
       <div class="vrow head"><div>Schritt</div><div class="c">Konstruktion</div><div class="c">Orakel</div><div class="c len">len</div><div></div></div>
       <div id="vrows"></div>
+      <div id="decodeOut"></div>
 
       <div class="subhead">Emittiertes 2-Tag-System (Auszug)</div>
       <div style="font-size:11px;color:var(--dim)">Startband:</div>
       <div class="rulebox" id="startOut" style="max-height:64px"></div>
-      <div style="font-size:11px;color:var(--dim);margin-top:10px">Beispiel-Produktionen (Löschzahl 2):</div>
+      <div style="font-size:11px;color:var(--dim);margin-top:10px">Beispiel-Produktionen (Löschzahl 2) und Halt-Symbole:</div>
       <div class="rulebox" id="ruleOut"></div>
     </div>
   </div>
@@ -124,9 +135,14 @@
 <footer>
   Das emittierte System hat Löschzahl 2 (echtes p=2) und geht in <code>ts2cts_saware</code> (§1.3).
   <span class="g">Growth</span> verdoppelt den Zähler, wenn das Band eine Zweierpotenz überschreitet —
-  die Flag-Logik (Zähler-Symbol U=gesetzt / V=zurückgesetzt) steckt bereits in den Isolations-Stages.
-  Verifiziert: 300 zufällige Growth-TMs, Wachstum über mehrere 2ᵏ-Grenzen, sowie 200 TMs
-  Rückwärtskompatibilität (ohne <code class="g">grow</code> = einfache Variante). Basis: M. Cook (2009), §3.
+  die Flag-Logik (Zähler-Symbol U=gesetzt / V=zurückgesetzt) steckt bereits in den Isolations-Stages.<br>
+  <b>Halt-Konvention der Kette:</b> Ein Symbol ohne eigene Produktionszeile hält das Tag-System;
+  eine Zeile ohne Appendant <code>(x)</code> löscht nur. Hält die TM, fehlt genau die Regel für das
+  P/Q-Lesesymbol ihres Haltzustands.<br>
+  Geprüft (Zufallstests): Konfigurationsfolge = Orakel für TMs mit und ohne Growth, auch mit
+  Halt-Übergängen (Haltzeitpunkt identisch); .ctm-Import rückdekodiert = direkte CTM-Simulation.
+  Die Seite selbst prüft je Lauf die ersten 8 Schritte. Basis: M. Cook (2009), §3.
+  · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
 </footer>
 
 <script>
@@ -172,14 +188,18 @@ function stepTM(tape,state,tm){ // Orakel: clockwise TM mit Growth
   return {tape:nt, state:t.next, grew:!!t.grow};
 }
 
-// Growth-fähiges buildTagSystem
+// Growth-fähiges buildTagSystem.
+// Halt-Konvention der Kette: Ein Symbol OHNE Produktion (kein Eintrag in rules,
+// im .ts keine Zeile) hält das Tag-System, sobald es vorne steht. Ein Eintrag
+// mit leerem Appendant ([] bzw. "(x)") löscht nur und hängt nichts an.
 function buildTagSystem(tm, startTape, startState){
   const rules={};
   const startSyms=encode(startTape,startState).map(x=>`${x.v}_${x.s}_${x.q}`);
-  const queue=[...startSyms], seen=new Set();
+  const queue=[...startSyms], seen=new Set(); let qi=0;
   const parse=k=>{const p=k.split('_');return {v:p[0],s:+p[1],q:p[2]};};
-  while(queue.length){
-    const key=queue.shift();
+  const haltSyms=[];
+  while(qi<queue.length){
+    const key=queue[qi++];
     if(seen.has(key))continue; seen.add(key);
     const f=parse(key);
     let app;
@@ -187,7 +207,7 @@ function buildTagSystem(tm, startTape, startState){
       if(f.v==='P'||f.v==='Q'){
         const readSym=f.v==='P'?'A':'B';
         const t=tm[f.q]&&tm[f.q][readSym];
-        if(!t){ rules[key]=[]; continue; }
+        if(!t){ haltSyms.push(key); continue; }   // TM hält hier → keine Produktion = Halt
         const w=t.write, nq=t.next, wp=w==='A'?['A','a']:['B','b'];
         const written=[{v:wp[0],s:6,q:f.q},{v:wp[1],s:6,q:f.q}];
         let extra=[];
@@ -217,15 +237,15 @@ function buildTagSystem(tm, startTape, startState){
     rules[key]=appKeys;
     for(const k of appKeys) if(!seen.has(k)) queue.push(k);
   }
-  return { rules, startTape:startSyms, alphabetSize:Object.keys(rules).length };
+  return { rules, startTape:startSyms, alphabetSize:seen.size, haltSyms };
 }
 
-function decodeGeneric(tapeKeys){
-  const parse=k=>{const p=k.split('_');return {v:p[0],s:+p[1],q:p[2]};};
-  const syms=tapeKeys.map(parse);
-  if(!syms.length||!(syms[0].v==='H'&&syms[0].s===3) || syms.some(x=>x.s!==3)) return null;
-  const state=syms[0].q; let i=0;
-  if(syms[i].v==='H')i++;
+// Liest eine TM-Konfiguration aus dem Tag-Wort ab Index h (alle Symbole Stufe 3, H vorne).
+function decodeAt(buf,h){
+  if(h>=buf.length||!buf[h].startsWith('H_3_')) return null;
+  for(let i=h;i<buf.length;i++) if(buf[i].split('_')[1]!=='3') return null;
+  const syms=[]; for(let i=h;i<buf.length;i++){const p=buf[i].split('_');syms.push({v:p[0],q:p[2]});}
+  const state=syms[0].q; let i=1;
   while(i<syms.length&&syms[i].v==='-')i++;
   const cnt=c=>['U','u','X','x','V','v','Y','y'].includes(c);
   while(i<syms.length&&cnt(syms[i].v))i++;
@@ -235,45 +255,58 @@ function decodeGeneric(tapeKeys){
     else if(v==='-'){i++;continue;} i+=2;}
   return {tape:out, state};
 }
+function decodeGeneric(tapeKeys){ return decodeAt(tapeKeys,0); }
+
+// Simuliert das emittierte System (Warteschlange mit Kopfindex statt slice → O(1) je Schritt).
 function runEmittedSteps(ts, maxTagSteps, maxConfigs){
-  let tape=[...ts.startTape]; const configs=[]; let sawStep=false;
-  for(let i=0;i<maxTagSteps && configs.length<maxConfigs;i++){
-    if(tape.length<2)break;
-    const front=tape[0]; const p=front.split('_');
-    if((p[0]==='P'||p[0]==='Q')&&p[1]==='6') sawStep=true;
+  let buf=ts.startTape.slice(), h=0, steps=0, saw=false, halted=false; const configs=[];
+  while(steps<maxTagSteps && configs.length<maxConfigs){
+    if(buf.length-h<2){ halted=true; break; }
+    const front=buf[h];
+    if(front.startsWith('P_6_')||front.startsWith('Q_6_')) saw=true;
     const app=ts.rules[front];
-    if(app===undefined)break;
-    tape=tape.slice(2).concat(app);
-    if(sawStep){ const cfg=decodeGeneric(tape); if(cfg){ configs.push(cfg); sawStep=false; } }
+    if(app===undefined){ halted=true; break; }
+    h+=2; for(const a of app) buf.push(a); steps++;
+    if(h>65536&&h*2>buf.length){ buf=buf.slice(h); h=0; }
+    if(saw){ const cfg=decodeAt(buf,h); if(cfg){ configs.push(cfg); saw=false; } }
   }
-  return configs;
+  return {configs, halted, steps, budgetHit:!halted&&configs.length<maxConfigs};
 }
 function serializeTS(ts){
   let out='; tm2ts_poly Ausgabe — clockwise TM → 2-tag (Cook §3, polynomiell, mit Growth)\n';
-  out+='; Alphabet: '+ts.alphabetSize+' Symbole. Löschzahl 2. Für ts2cts_saware (§1.3).\n';
+  out+='; Alphabet: '+ts.alphabetSize+' Symbole, davon '+ts.haltSyms.length+' Halt-Symbole. Löschzahl 2. Für ts2cts_saware (§1.3).\n';
+  out+='; Halt-Konvention: Symbol ohne Produktionszeile = Halt; "(x)" ohne Appendant = nur löschen.\n';
+  if(ts.haltSyms.length) out+='; Halt-Symbole: '+ts.haltSyms.join(' ')+'\n';
   out+='(2)\n(' + ts.startTape.join(',') + ')\n';
   for(const [sym,rhs] of Object.entries(ts.rules)) out += '(' + [sym,...rhs].join(',') + ')\n';
   return out;
 }
 
 /* ═══ TM-Parser mit Growth-Syntax ═══ */
+const NAME_RE=/^[A-Za-z0-9]+$/;
 function parseTM(src){
   const lines=src.split('\n').map(l=>l.replace(/;.*$/,'').trim()).filter(Boolean);
   let startState=null, startTape=null; const tm={}; let growCount=0;
+  const checkName=(q,line)=>{ if(!NAME_RE.test(q)) throw new Error('Zustandsname nur aus Buchstaben/Ziffern (kein _ , ; Leerzeichen): "'+q+'" in '+line); };
   for(const line of lines){
     let m;
-    if((m=line.match(/^start\s*:\s*(\S+)/i))){ startState=m[1]; continue; }
-    if((m=line.match(/^tape\s*:\s*(.+)/i))){ startTape=m[1].split(/[,\s]+/).filter(Boolean); continue; }
+    if((m=line.match(/^start\s*:\s*(\S+)/i))){ startState=m[1]; checkName(startState,line); continue; }
+    if((m=line.match(/^tape\s*:\s*(.+)/i))){ startTape=m[1].split(/[,\s]+/).filter(Boolean).map(x=>x.toUpperCase()); continue; }
     if((m=line.match(/^(\S+)\s*,\s*([AB])\s*:\s*(.+)$/i))){
       const q=m[1], r=m[2].toUpperCase();
+      checkName(q,line);
       const rhs=m[3].split(',').map(x=>x.trim());
       const [w,n,g,w2]=rhs;
       if(!/^[AB]$/i.test(w||'')) throw new Error('Schreibsymbol muss A/B sein: '+line);
       if(!n) throw new Error('Folgezustand fehlt: '+line);
+      checkName(n,line);
       const t={write:w.toUpperCase(), next:n};
-      if(g && /^grow$/i.test(g)){ t.grow=true; t.write2=(w2&&/^[AB]$/i.test(w2))?w2.toUpperCase():'A'; growCount++; }
+      if(g && /^grow$/i.test(g)){
+        if(w2!==undefined&&w2!==''&&!/^[AB]$/i.test(w2)) throw new Error('Wachstums-Zelle muss A/B sein: '+line);
+        t.grow=true; t.write2=(w2&&/^[AB]$/i.test(w2))?w2.toUpperCase():'A'; growCount++; }
       else if(g) throw new Error('Unbekanntes Feld "'+g+'" (erwartet: grow): '+line);
       if(!tm[q])tm[q]={};
+      if(tm[q][r]) throw new Error('Doppelter Übergang für ('+q+','+r+')');
       tm[q][r]=t;
       continue;
     }
@@ -282,62 +315,275 @@ function parseTM(src){
   if(!startState) throw new Error('Kein "start:" gefunden');
   if(!startTape||!startTape.length) throw new Error('Kein "tape:" gefunden');
   for(const s of startTape) if(s!=='A'&&s!=='B') throw new Error('Band nur A/B: '+s);
-  if(Object.keys(tm).length===0) throw new Error('Keine Transitionen gefunden');
+  // Keine Transitionen ist erlaubt: die TM hält sofort (z. B. .ctm, die im Startzustand hält).
   return {tm, startTape, startState, growCount};
+}
+
+/* ═══ .ctm-Import (Format von tm_clockwise.html) → binäre clockwise TM über {A,B} ═══
+   Jedes CTM-Symbol wird als Block aus b = ⌈log₂|Σ|⌉ Bits (A=0, B=1) kodiert.
+   Weil eine clockwise TM bei jedem Lesen sofort schreiben muss, das neue Symbol
+   aber erst nach b gelesenen Bits feststeht, läuft die Ausgabe um einen Block
+   verzögert: der Zustand trägt die noch nicht geschriebenen Bits ("pend").
+   Zellteilung σ→σjσk (Kopf danach auf σk, Semantik von CTMSim): σj wandert in
+   pend, σk wird sofort im Zustand weiterverarbeitet; mehr als ein Bit je Lesen
+   wird per grow geschrieben. Dekodierung: Band = pre + Bandbits + pend.
+   Ist der vollständige Zustandsgraph größer als maxStates, werden nur die
+   Übergänge des konkreten Laufs ab diesem Startband erzeugt (eingabespezifisch,
+   exakt sofern die CTM hält). Endlose Zellteilungsketten → Schleifenzustand.
+   Stay (S): Kopf bleibt auf der geschriebenen Zelle → die Zelle wird wie bei
+   der Zellteilung als "virtuelle" Kopfzelle sofort im Zustand weiterverarbeitet
+   (Liste virt; Stay mit Zellteilung legt beide Zellen vor den Kopf).
+   Vorab werden nur vom Start aus erreichbare Zustände/Symbole behalten
+   (kleineres Σ → weniger Bits je Symbol). */
+function parseCTMText(text){
+  let config=null, tapeStr=null, blank=null; const trans=new Map(); const alpha=new Set(); const states=new Set();
+  for(let line of text.split('\n')){
+    line=line.trim(); if(!line) continue;
+    if(line.startsWith('#')){ // Metazeile "# blank: x" (Blank-Symbol der Quell-TM; ältere Parser ignorieren sie als Kommentar)
+      const bm=line.match(/^#\s*blank\s*:\s*(\S+)\s*$/i); if(bm&&[...bm[1]].length===1) blank=bm[1]; continue; }
+    const re=/\(([^)]+)\)/g; let m;
+    while((m=re.exec(line))!==null){
+      const p=m[1].split(',').map(s=>s.trim());
+      if(p.length===2&&!config){ config={start:p[0],head:Number(p[1])}; }
+      else if(p.length===1&&tapeStr===null){ tapeStr=p[0]; }
+      else if(p.length===5){
+        const mv=p[4].toUpperCase();
+        if(mv!=='C'&&mv!=='S') throw new Error('Bewegung muss C oder S sein: ('+p.join(',')+')');
+        const r=[...p[1]], w=[...p[2]];
+        if(r.length!==1||w.length<1||w.length>2) throw new Error('Lesen: 1 Zeichen, Schreiben: 1–2 Zeichen: ('+p.join(',')+')');
+        const k=p[0]+'\x00'+r[0];
+        if(trans.has(k)) throw new Error('Doppelter Übergang: ('+p.join(',')+')');
+        trans.set(k,{w,next:p[3],stay:mv==='S',read:r[0],state:p[0]}); alpha.add(r[0]); w.forEach(c=>alpha.add(c)); states.add(p[0]); states.add(p[3]);
+      }
+    }
+  }
+  if(!config) throw new Error('.ctm: keine Konfiguration (Startzustand, Kopfposition)');
+  const tape=[...(tapeStr||'')];
+  if(tape.length<2) throw new Error('.ctm: Band braucht mindestens 2 Zellen');
+  if(!Number.isInteger(config.head)||config.head<0||config.head>=tape.length) throw new Error('.ctm: ungültige Kopfposition '+config.head);
+  tape.forEach(c=>alpha.add(c)); states.add(config.start);
+  // Nur Erreichbares behalten: Zustände ab start, Symbole aus Band + Schreibwerten
+  const rq=new Set([config.start]), rs=new Set(tape); let grew=true;
+  while(grew){ grew=false;
+    for(const tr of trans.values()) if(rq.has(tr.state)&&rs.has(tr.read)){
+      if(!rq.has(tr.next)){rq.add(tr.next);grew=true;}
+      for(const c of tr.w) if(!rs.has(c)){rs.add(c);grew=true;}
+    } }
+  const rtrans=new Map(); for(const [k,tr] of trans) if(rq.has(tr.state)&&rs.has(tr.read)) rtrans.set(k,tr);
+  return {start:config.start, head:config.head, tape, trans:rtrans, alphabet:[...rs].sort(), states:rq, blank:blank||'□',
+    pruned:{states:states.size-rq.size, symbols:alpha.size-rs.size, trans:trans.size-rtrans.size},
+    stayCount:[...rtrans.values()].filter(x=>x.stay).length};
+}
+function ctmToBinary(ctm, maxStates=20000, maxRunSteps=2000000){
+  const sig=ctm.alphabet, b=Math.max(1,Math.ceil(Math.log2(sig.length))), idx=new Map(sig.map((s,i)=>[s,i]));
+  const enc=s=>{const i=idx.get(s); let o=''; for(let k=b-1;k>=0;k--) o+=((i>>k)&1)?'B':'A'; return o;};
+  const dec=bits=>{let i=0; for(const c of bits) i=i*2+(c==='B'?1:0); return i<sig.length?sig[i]:null;};
+  const Q=[...ctm.tape.slice(ctm.head), ...ctm.tape.slice(0,ctm.head)];
+  const tapeBits=Q.slice(0,-1).map(enc).join('').split('');
+  let ctxs, ids;
+  const idOf=c=>{const k=c.loop?'\x01loop\x00'+c.q:c.q+'\x00'+c.pre+'\x00'+c.pend+'\x00'+(c.virt?c.virt.join('\x02'):'');
+    if(!ids.has(k)){ if(ctxs.length>=maxStates) throw new RangeError('Mehr als '+maxStates+' binäre Zustände');
+      ids.set(k,ctxs.length); ctxs.push(c); } return ids.get(k);};
+  // Nachfolger von Kontext i beim Lesen von bit: {out:'A'|'AB'…, nid} oder null (= Halt)
+  const succ=(i,bit)=>{
+    const c=ctxs[i];
+    if(c.loop) return {out:bit, nid:i};          // CTM divergiert: nie haltende Schleife
+    if(c.virt!==null) return null;                // Halt mit Zellteilungs-Rest
+    const pre=c.pre+bit, r=b-c.pre.length, e=c.pend.length>=r+1?2:1;
+    const out=c.pend.slice(0,e); let pend=c.pend.slice(e), next;
+    if(pre.length<b) next={q:c.q,pre,pend,virt:null};
+    else {
+      const sym=dec(pre); if(sym===null) return null;
+      if(!ctm.trans.get(c.q+'\x00'+sym)) return null;   // CTM hält → binäre TM hält
+      // V = bekannte Zellen ab Kopf (virtuell, noch nicht auf dem Band)
+      let cur=c.q; const V=[sym]; const chain=new Set();
+      while(V.length){
+        const ck=cur+'\x00'+V.join('\x02');
+        // Wiederholt sich (Zustand, virtuelle Zellen), liest die CTM nie wieder vom
+        // Band → Divergenz (z. B. TM läuft schreibend nach rechts, Stay-Schleife).
+        if(chain.has(ck)||V.length>64){ next={q:cur,pre:'',pend:'',virt:null,loop:true}; break; }
+        chain.add(ck);
+        const t=ctm.trans.get(cur+'\x00'+V[0]);
+        if(!t){ if(cur===c.q&&V.length===1&&V[0]===sym) return null; next={q:cur,pre:'',pend,virt:V.slice()}; break; }
+        V.shift();
+        if(t.stay) V.unshift(...t.w);                 // Kopf bleibt: w0 (w1) vor dem Kopf
+        else { pend+=enc(t.w[0]); if(t.w.length===2) V.unshift(t.w[1]); }
+        cur=t.next;
+      }
+      if(!next) next={q:cur,pre:'',pend,virt:null};
+    }
+    return {out, nid:idOf(next)};
+  };
+  const lineOf=(i,bit,s)=>`z${i},${bit}: ${s.out[0]},z${s.nid}`+(s.out.length===2?`,grow,${s.out[1]}`:'');
+  const reset=()=>{ ctxs=[]; ids=new Map(); return idOf({q:ctm.start, pre:'', pend:enc(Q[Q.length-1]), virt:null}); };
+  let lines=[], mode='voll';
+  // 1) Vollständiger Zustandsgraph (gilt für jeden Lauf ab diesem Startzustand)
+  try{
+    reset();
+    for(let i=0;i<ctxs.length;i++) for(const bit of ['A','B']){ const s=succ(i,bit); if(s) lines.push(lineOf(i,bit,s)); }
+  }catch(err){
+    if(!(err instanceof RangeError)) throw err;
+    // 2) Zu groß: nur die Übergänge, die der konkrete Lauf ab diesem Band benutzt.
+    //    Exakt für diese Eingabe, sofern die CTM innerhalb des Budgets hält.
+    mode='eingabespezifisch'; lines=[];
+    let st=reset(); const used=new Map(), buf=tapeBits.slice(); let h=0, n=0;
+    try{ for(;;n++){
+      if(n>=maxRunSteps) throw new Error('CTM zu groß für den vollständigen Import (> '+maxStates+' binäre Zustände) und hält nicht innerhalb von '+maxRunSteps.toLocaleString('de-DE')+' binären Schritten');
+      if(h>=buf.length) break;
+      const bit=buf[h], key=st*2+(bit==='B'?1:0);
+      let s=used.get(key);
+      if(s===undefined){ s=succ(st,bit); used.set(key,s); if(s) lines.push(lineOf(st,bit,s)); }
+      if(!s) break;
+      if(ctxs[s.nid].loop) throw new Error('CTM divergiert auf dieser Eingabe (endlose Zellteilungs-/Stay-Kette) — kein eingabespezifischer Import möglich');
+      h++; for(const o of s.out) buf.push(o); st=s.nid;
+      if(h>65536&&h*2>buf.length){ buf.splice(0,h); h=0; }
+    } }catch(e2){
+      if(e2 instanceof RangeError) throw new Error('CTM zu groß für den Import: auch der konkrete Lauf braucht mehr als '+maxStates+' binäre Zustände (Ausgabe wächst schneller, als gelesen wird)');
+      throw e2;
+    }
+  }
+  const growCount=lines.filter(l=>l.includes(',grow,')).length;
+  const decodeCfg=(tape,state)=>{
+    const c=ctxs[+state.slice(1)];
+    if(c.loop) return {q:c.q+' (divergiert)', cells:['…']};
+    const bits=c.pre+tape.join('')+c.pend, cells=[];
+    if(c.virt!==null) cells.push(...c.virt);
+    for(let k=0;k+b<=bits.length;k+=b) cells.push(dec(bits.slice(k,k+b)));
+    return {q:c.q, cells};
+  };
+  const text='; aus .ctm importiert: |Σ|='+sig.length+' → '+b+' Bit/Symbol ('+sig.map((s,i)=>s+'='+enc(s)).join(' ')+')\n'+
+    '; '+ctxs.length+' binäre Zustände ('+mode+'), '+growCount+' grow-Übergänge. Dekodierung: Band = pre + Bandbits + pend.\n'+
+    (mode==='voll'?'':'; Achtung: nur die Übergänge dieses Laufs — gilt nur für genau dieses Startband.\n')+
+    'start: z0\ntape: '+tapeBits.join(',')+'\n'+lines.join('\n')+'\n';
+  return {text, decodeCfg, b, nStates:ctxs.length, Q, mode, tapeLen:tapeBits.length};
+}
+// Direkte CTM-Simulation (Warteschlange ab Kopf, Zellteilung: Kopf auf zweiter Zelle)
+function runCTMDirect(ctm, maxSteps){
+  let Q=[...ctm.tape.slice(ctm.head), ...ctm.tape.slice(0,ctm.head)], q=ctm.start, n=0;
+  for(;n<maxSteps;n++){
+    const t=ctm.trans.get(q+'\x00'+Q[0]); if(!t) return {halted:true,q,cells:Q,steps:n};
+    Q.shift();
+    if(t.stay) Q.unshift(...t.w);                     // Kopf bleibt auf w0
+    else { Q.push(t.w[0]); if(t.w.length===2) Q.unshift(t.w[1]); }
+    q=t.next;
+  }
+  return {halted:false,q,cells:Q,steps:n};
 }
 
 /* ═══ UI ═══ */
 const PRESETS=[
   {name:'2-Zustand', grow:false, tm:'start: q0\ntape: A,B,A\nq0,A: B,q1\nq0,B: A,q1\nq1,A: A,q0\nq1,B: B,q0'},
   {name:'3-Zustand', grow:false, tm:'start: q0\ntape: A,B,A\nq0,A: B,q1\nq0,B: A,q2\nq1,A: A,q2\nq1,B: B,q0\nq2,A: B,q0\nq2,B: A,q1'},
+  {name:'Halt nach 3 Schritten', grow:false, tm:'start: q0\ntape: A,A,B\nq0,A: B,q1\nq1,A: B,q2\nq2,B: A,q3\n; q3 hat keine Übergänge → Halt'},
   {name:'Growth: wächst bei A', grow:true, tm:'start: q0\ntape: A,B,A,B\nq0,A: A,q1,grow,A\nq0,B: B,q1\nq1,A: B,q0\nq1,B: A,q0'},
   {name:'Growth: Dauerwachstum', grow:true, tm:'start: q0\ntape: A,B\nq0,A: A,q1,grow,B\nq0,B: B,q1,grow,A\nq1,A: A,q0\nq1,B: B,q0'},
 ];
+const N_CONFIGS=8, TAG_BUDGET=5000000, ORACLE_BUDGET=2000000;
 const $=id=>document.getElementById(id);
-let sel=0, lastTS=null;
+let sel=0, lastTS=null, importInfo=null;
 const presetsEl=$('presets');
 PRESETS.forEach((p,i)=>{const b=document.createElement('button');b.className='preset'+(p.grow?' g':'')+(i===sel?' sel':'');
-  b.textContent=p.name;b.onclick=()=>{sel=i;$('tmin').value=p.tm;document.querySelectorAll('.preset').forEach((e,j)=>e.classList.toggle('sel',j===i));};
+  b.textContent=p.name;b.onclick=()=>{sel=i;importInfo=null;$('importInfo').textContent='';$('tmin').value=p.tm;document.querySelectorAll('.preset').forEach((e,j)=>e.classList.toggle('sel',j===i));};
   presetsEl.appendChild(b);});
 $('tmin').value=PRESETS[sel].tm;
 
+// Größenschätzung für importierte CTMs: ≈73 Tag-Symbole je binärem Zustand
+// (gemessen, Cook §3), Startwort = 4 + 2·2^⌈log₂n⌉ + 2(n−1) Symbole bei n Bandzellen,
+// CTS: |Φ| = Tag-Alphabet auf Vielfaches von 6 gerundet, ein Bit je Symbol und Zelle.
+const fmtN=(x,d=0)=>Number(x).toLocaleString('de-DE',{maximumFractionDigits:d});
+function estimateSize(bin){
+  const tagSyms=73*bin.nStates, n=bin.tapeLen, k=Math.max(1,Math.ceil(Math.log2(n)));
+  const startLen=4+2*(1<<k)+2*(n-1), phi=Math.ceil(tagSyms/6)*6;
+  return {tagSyms, tsBytes:tagSyms*40, phi, ctsBits:phi*startLen};
+}
 function setStatus(m,c){$('status').className='status '+c;$('status').textContent=m;}
+const escH=s=>String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+$('ctmFile').addEventListener('change',e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const rd=new FileReader();
+  rd.onload=ev=>{
+    try{
+      const ctm=parseCTMText(ev.target.result);
+      const bin=ctmToBinary(ctm);
+      importInfo={ctm, bin, name:f.name};
+      $('tmin').value=bin.text;
+      document.querySelectorAll('.preset').forEach(x=>x.classList.remove('sel'));
+      const est=estimateSize(bin);
+      const pr=ctm.pruned, prTxt=(pr.states||pr.symbols||pr.trans)?` · unerreichbar entfernt: ${pr.states} Zustände, ${pr.symbols} Symbole, ${pr.trans} Übergänge`:'';
+      $('importInfo').textContent=`${f.name}: |Σ|=${ctm.alphabet.length}, ${ctm.states.size} CTM-Zustände${ctm.stayCount?', '+ctm.stayCount+' Stay':''}, Blank „${ctm.blank}“ → ${bin.b} Bit/Symbol, ${bin.nStates} binäre Zustände (${bin.mode}${bin.mode==='voll'?'':': nur für genau dieses Startband'})${prTxt}. `+
+        `Schätzung: ≈${fmtN(est.tagSyms)} Tag-Symbole, .ts ≈${fmtN(est.tsBytes/1e6,1)} MB; CTS: |Φ|≈${fmtN(est.phi)}, Startband ≈${fmtN(est.ctsBits)} Bit.`;
+      const big=est.tagSyms>300000;
+      setStatus(big?`⚠ .ctm importiert, aber groß (≈${fmtN(est.tagSyms)} Tag-Symbole) — Konvertieren kann einige Sekunden dauern; CTS/Rule 110 ist bei dieser Größe nicht mehr praktikabel.`
+                   :'✓ .ctm importiert und auf {A,B} kodiert. Jetzt konvertieren.', big?'err':'ok');
+    }catch(err){ importInfo=null; $('importInfo').textContent=''; setStatus('✗ .ctm-Import: '+err.message,'err'); }
+  };
+  rd.readAsText(f); e.target.value='';
+});
 
 $('run').onclick=()=>{
   try{
-    const {tm, startTape, startState, growCount}=parseTM($('tmin').value);
+    const src=$('tmin').value;
+    const imp=(importInfo&&importInfo.bin.text===src)?importInfo:null;
+    const {tm, startTape, startState, growCount}=parseTM(src);
     const ts=buildTagSystem(tm, startTape, startState);
     lastTS=ts;
 
-    const N=8;
-    const configs=runEmittedSteps(ts, 2000000, N);
-    let ot=startTape, os=startState; const oracle=[];
-    for(let j=0;j<configs.length;j++){
+    const run=runEmittedSteps(ts, TAG_BUDGET, N_CONFIGS);
+    const configs=run.configs;
+    // Orakel: bis N Schritte oder Halt
+    let ot=startTape, os=startState; const oracle=[]; let oracleHaltAt=-1;
+    for(let j=0;j<N_CONFIGS;j++){
       const r=stepTM(ot,os,tm);
-      if(r.halt){ oracle.push({halt:true}); break; }
+      if(r.halt){ oracleHaltAt=j; break; }
       oracle.push({tape:r.tape,state:r.state,grew:r.grew}); ot=r.tape; os=r.state;
     }
+    const fmt=(t,q)=>`[${t.join(',')}] ${q}`;
     let rows='', match=0, total=0;
-    for(let j=0;j<configs.length;j++){
+    const nRows=Math.max(configs.length, oracle.length);
+    for(let j=0;j<nRows;j++){
       const c=configs[j], o=oracle[j]; total++;
-      let ok, cs, osr, len;
-      if(o&&o.halt){ ok=false; cs=`[${c.tape.join(',')}] ${c.state}`; osr='(Halt)'; len=''; }
-      else if(!o){ ok=false; cs=`[${c.tape.join(',')}] ${c.state}`; osr='—'; len=''; }
-      else { cs=`[${c.tape.join(',')}] ${c.state}`; osr=`[${o.tape.join(',')}] ${o.state}`; ok=cs===osr; len=(o.tape.length)+(o.grew?'↑':''); }
+      const cs=c?fmt(c.tape,c.state):(run.budgetHit?'(Budget)':'—');
+      const osr=o?fmt(o.tape,o.state):(oracleHaltAt>=0?'(Halt)':'—');
+      const ok=!!(c&&o&&cs===osr);
+      const len=o?(o.tape.length)+(o.grew?'↑':''):'';
       if(ok)match++;
-      rows+=`<div class="vrow"><div>${j+1}</div><div class="c con" title="${cs}">${cs}</div><div class="c ora" title="${osr}">${osr}</div><div class="c len">${len}</div><div>${ok?'✓':'✗'}</div></div>`;
+      rows+=`<div class="vrow"><div>${j+1}</div><div class="c con" title="${escH(cs)}">${escH(cs)}</div><div class="c ora" title="${escH(osr)}">${escH(osr)}</div><div class="c len">${len}</div><div>${ok?'✓':(c||!run.budgetHit?'✗':'…')}</div></div>`;
+    }
+    // Halt-Zeile: hält die TM, muss auch das Tag-System halten (und umgekehrt)
+    if(oracleHaltAt>=0||run.halted){
+      total++;
+      const ok=oracleHaltAt>=0&&run.halted&&configs.length===oracleHaltAt;
+      if(ok)match++;
+      rows+=`<div class="vrow"><div>Halt</div><div class="c con">${run.halted?'hält nach '+run.steps.toLocaleString('de-DE')+' Tag-Schritten':'hält nicht'}</div><div class="c ora">${oracleHaltAt>=0?'hält nach '+oracleHaltAt+' Schritten':'hält nicht'}</div><div class="c len"></div><div>${ok?'✓':'✗'}</div></div>`;
     }
     $('vrows').innerHTML=rows||'<div style="color:var(--dim);font-size:12px;padding:8px 0">Keine Schritte (TM hält sofort?)</div>';
     const bad=$('matchBadge');
+    const mismatch=total-match - ((run.budgetHit)?(nRows-configs.length):0);
     if(total>0&&match===total){bad.className='match-badge ok';bad.textContent=`✓ ${match}/${total} — Konstruktion simuliert die TM`;}
-    else{bad.className='match-badge bad';bad.textContent=`${match}/${total}`;}
+    else if(run.budgetHit&&mismatch===0){bad.className='match-badge warn';bad.textContent=`⚠ ${match}/${total} geprüft — Budget von ${TAG_BUDGET.toLocaleString('de-DE')} Tag-Schritten erschöpft (kein Fehler gefunden)`;}
+    else{bad.className='match-badge bad';bad.textContent=`✗ ${match}/${total}`;}
+
+    // Rückdekodierung bei .ctm-Import: binäres Orakel bis Halt → CTM-Band, gegen direkte CTM-Simulation
+    let decHTML='';
+    if(imp){
+      let t=startTape, q=startState, n=0, h=false;
+      for(;n<ORACLE_BUDGET;n++){ const r=stepTM(t,q,tm); if(r.halt){h=true;break;} t=r.tape; q=r.state; }
+      const d=imp.bin.decodeCfg(t,q), direct=runCTMDirect(imp.ctm, ORACLE_BUDGET);
+      const same=h&&direct.halted&&d.q===direct.q&&d.cells.join('\u0001')===direct.cells.join('\u0001');
+      decHTML=`<div class="subhead">Rückdekodierung (.ctm) <span class="match-badge ${same?'ok':(h&&direct.halted?'bad':'warn')}">${same?'✓ identisch':(h&&direct.halted?'✗ verschieden':'⚠ Budget erschöpft')}</span></div>`+
+        `<div class="rulebox" style="max-height:none">binär → dekodiert (${n.toLocaleString('de-DE')} Schritte${h?', Halt':''}): <span class="sym">${escH(d.cells.join(''))}</span> · ${escH(d.q)}<br>`+
+        `CTM direkt (${direct.steps.toLocaleString('de-DE')} Schritte${direct.halted?', Halt':''}): <span class="sym">${escH(direct.cells.join(''))}</span> · ${escH(direct.q)}<br>`+
+        `<span class="arr">Band jeweils ab Kopfposition im Uhrzeigersinn.</span></div>`;
+    }
+    $('decodeOut').innerHTML=decHTML;
 
     const tsText=serializeTS(ts);
     $('stats').innerHTML=
       `<div class="stat"><span class="k">TM-Zustände</span><span class="v">${Object.keys(tm).length}</span></div>`+
       `<div class="stat"><span class="k">Growth-Transitionen</span><span class="v" style="color:${growCount>0?'var(--grow)':'var(--text)'}">${growCount}</span></div>`+
-      `<div class="stat"><span class="k">Startband</span><span class="v">${startTape.join(' ')} · ${startState}</span></div>`+
-      `<div class="stat"><span class="k">2-tag Alphabet</span><span class="v">${ts.alphabetSize} Symbole</span></div>`+
+      `<div class="stat"><span class="k">Startband</span><span class="v">${startTape.length>24?startTape.length+' Zellen':startTape.join(' ')} · ${escH(startState)}</span></div>`+
+      `<div class="stat"><span class="k">2-tag Alphabet</span><span class="v">${ts.alphabetSize} Symbole (${ts.haltSyms.length} Halt)</span></div>`+
       `<div class="stat"><span class="k">.ts Zeilen</span><span class="v">${tsText.split('\n').filter(Boolean).length}</span></div>`;
 
     $('startOut').textContent=ts.startTape.join('  ');
@@ -345,22 +591,24 @@ $('run').onclick=()=>{
     for(const [sym,rhs] of Object.entries(ts.rules)){
       if(cnt>=8)break;
       const isDouble = sym.startsWith('U_6') && rhs.length>=2 && rhs[0].startsWith('U') && rhs[1].startsWith('U');
-      ro+=`<div><span class="sym">${sym}</span> <span class="arr">→</span> ${rhs.length?rhs.join(' '):'<span style="color:var(--dim)">(leer)</span>'}${isDouble?' <span class="gm">⟵ Counter verdoppelt</span>':''}</div>`;
+      ro+=`<div><span class="sym">${escH(sym)}</span> <span class="arr">→</span> ${rhs.length?escH(rhs.join(' ')):'<span style="color:var(--dim)">(leer: nur löschen)</span>'}${isDouble?' <span class="gm">⟵ Counter verdoppelt</span>':''}</div>`;
       cnt++;
     }
+    for(const h of ts.haltSyms.slice(0,4)) ro+=`<div><span class="sym">${escH(h)}</span> <span class="arr">→</span> <span style="color:var(--err)">keine Produktion = Halt</span></div>`;
     $('ruleOut').innerHTML=ro;
 
     $('empty').style.display='none';
     $('result').style.display='block';
     $('export').style.display='inline-block';
-    setStatus(`✓ Konvertiert. ${ts.alphabetSize} Symbole${growCount>0?', '+growCount+' Growth-Transition(en)':''}. Bereit für ts2cts_saware.`,'ok');
+    setStatus(`✓ Konvertiert. ${ts.alphabetSize} Symbole${growCount>0?', '+growCount+' Growth-Transition(en)':''}${ts.haltSyms.length?', '+ts.haltSyms.length+' Halt-Symbol(e)':''}. Bereit für ts2cts_saware.`,'ok');
   }catch(e){ setStatus('✗ '+e.message,'err'); }
 };
 
 $('export').onclick=()=>{
   if(!lastTS)return;
   const blob=new Blob([serializeTS(lastTS)],{type:'text/plain'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='tm2ts_poly.ts';a.click();
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='tm2ts_poly.ts';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 };
 </script>
 </body>

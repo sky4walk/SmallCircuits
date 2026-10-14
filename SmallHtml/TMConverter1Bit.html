@@ -187,7 +187,7 @@
     flex: 1;
     position: relative;
     min-height: 360px;
-    overflow: auto;        /* single scroll container */
+    overflow: hidden;      /* gescrollt wird in der Textarea, das Highlight folgt per JS */
   }
   .editor-wrap pre,
   .editor-wrap textarea {
@@ -202,25 +202,27 @@
     word-wrap: normal;
     tab-size: 4;
   }
-  /* Highlighted backdrop */
-  .editor-hl {
+  /* Highlighted backdrop (Selektor spezifischer als .output-pre, damit overflow:hidden gilt) */
+  .editor-wrap .editor-hl {
     position: absolute;
     inset: 0;
-    overflow: hidden;      /* clipped — scrolling is on .editor-wrap */
+    min-height: 0;
+    overflow: hidden;      /* Scrollposition wird von der Textarea übernommen */
     pointer-events: none;
     color: var(--text);
     background: transparent;
   }
-  /* Invisible editable layer on top */
+  /* Invisible editable layer on top – eigentlicher Scroll-Container */
   .editor-ta {
     position: absolute;
     inset: 0;
-    overflow: hidden;
+    width: 100%;
+    height: 100%;
+    overflow: auto;
     resize: none;
     background: transparent;
     color: transparent;
     caret-color: var(--accent);
-    spellcheck: false;
   }
   .editor-ta::placeholder { color: var(--muted); }
 
@@ -322,6 +324,24 @@
   .sym-entry .orig { color: var(--amber); }
   .sym-entry .arr  { color: var(--muted); margin: 0 6px; }
   .sym-entry .bin  { color: var(--green); }
+
+  /* ── Footer ── */
+  .site-footer {
+    border-top: 1px solid var(--border);
+    padding: 10px 32px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+  .site-footer a { color: var(--muted); text-decoration: none; }
+  .site-footer a:hover { color: var(--accent); }
+
+  /* ── Schmale Bildschirme ── */
+  main > * { min-width: 0; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: minmax(0, 1fr); }
+    .action-bar { flex-wrap: wrap; }
+  }
 </style>
 </head>
 <body>
@@ -393,60 +413,76 @@
 
 </main>
 
+<footer class="site-footer">
+  <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">Interessengemeinschaft Informationstechnik Zwieseltal</a>
+</footer>
+
 <script>
 // ─────────────────────────────────────────────
 //  Parser
 // ─────────────────────────────────────────────
+// Gleiche Regeln wie turing_machine_simulator.html:
+//   Zeile "(zustand,position)"      → Start
+//   Zeile "(bandinhalt)"            → Band ('_' = leeres Feld)
+//   "(z,lies,z',schreib,L|R|N|S)"   → Transition
+const BLANK = '_';
+const MOVES = ['L', 'R', 'N', 'S'];
+
 function parseTM(src) {
   const lines = src.split(/\r?\n/);
   let startState = null, startPos = null;
-  let tape = [];
+  let tape = null;
   const transitions = [];
+  const seen = new Set();
+  const symLen = s => [...s].length;
 
-  for (const line of lines) {
+  lines.forEach((line, li) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
+    if (!trimmed || trimmed.startsWith('#')) return;
+    const where = `Zeile ${li + 1}`;
 
-    // Find all (...) groups on this line
-    const groups = [...trimmed.matchAll(/\(([^)]+)\)/g)].map(m => m[1]);
-
-    for (const g of groups) {
-      const parts = g.split(',').map(s => s.trim());
-
+    // Zeile besteht aus genau einer Klammergruppe → evtl. Start oder Band
+    const single = trimmed.match(/^\(([^()]*)\)$/);
+    if (single) {
+      const parts = single[1].split(',');
       if (parts.length === 2) {
-        // Could be start (state, pos) or tape (single string of symbols)
-        if (/^\d+$/.test(parts[1])) {
-          // (state, numericPos) → start definition
-          startState = parts[0];
-          startPos   = parseInt(parts[1], 10);
-        } else {
-          // (tape content) — treated as tape if first char is alphanumeric
-          tape = parts[0].split('').concat(parts[1].split(''));
-        }
-      } else if (parts.length === 1) {
-        // (tapestring) — single-part tape
-        tape = parts[0].split('');
-      } else if (parts.length === 5) {
-        transitions.push({
-          stateF : parts[0],
-          read   : parts[1],
-          stateN : parts[2],
-          write  : parts[3],
-          move   : parts[4].toUpperCase()
-        });
+        const st = parts[0].trim(), pos = parts[1].trim();
+        if (!/^-?\d+$/.test(pos))
+          throw new Error(`${where}: ${trimmed} ist weder Startdefinition (zustand,zahl) noch Band (Band ohne Kommas).`);
+        if (startState !== null) throw new Error(`${where}: Startdefinition doppelt (${trimmed}).`);
+        if (!st) throw new Error(`${where}: Startzustand fehlt.`);
+        startState = st;
+        startPos   = parseInt(pos, 10);
+        return;
+      }
+      if (parts.length === 1) {
+        if (tape !== null) throw new Error(`${where}: Band doppelt definiert (${trimmed}).`);
+        const content = single[1].trim();
+        if (/\s/.test(content)) throw new Error(`${where}: Band enthält Leerzeichen – für leere Felder '_' verwenden.`);
+        tape = [...content];
+        return;
       }
     }
-  }
 
-  // Fallback: collect tape from a bare (xxx) line if we found nothing yet
-  if (tape.length === 0) {
-    for (const line of lines) {
-      const m = line.trim().match(/^\(([^,)]+)\)$/);
-      if (m && m[1].length > 1) { tape = m[1].split(''); break; }
+    const groups = [...trimmed.matchAll(/\(([^()]*)\)/g)].map(m => m[1]);
+    if (!groups.length) throw new Error(`${where}: unbekannte Zeile (${trimmed}).`);
+    for (const g of groups) {
+      const parts = g.split(',').map(s => s.trim());
+      if (parts.length !== 5) throw new Error(`${where}: Gruppe (${g}) ist keine Transition mit 5 Feldern.`);
+      const [stateF, read, stateN, write, mv] = parts;
+      const move = mv.toUpperCase();
+      if (!stateF || !stateN) throw new Error(`${where}: Zustand fehlt in (${g}).`);
+      if (symLen(read) !== 1 || symLen(write) !== 1)
+        throw new Error(`${where}: Lese-/Schreibsymbol muss genau ein Zeichen sein (${g}).`);
+      if (!MOVES.includes(move)) throw new Error(`${where}: Richtung muss L, R, N oder S sein (${g}).`);
+      const key = stateF + '\u0000' + read;
+      if (seen.has(key)) throw new Error(`${where}: doppelte Transition für (${stateF},${read}).`);
+      seen.add(key);
+      transitions.push({ stateF, read, stateN, write, move });
     }
-  }
+  });
 
-  return { startState, startPos, tape, transitions };
+  return { startState, startPos, tape: tape || [], transitions };
 }
 
 // ─────────────────────────────────────────────
@@ -489,13 +525,15 @@ function generateBinNr(nodeNr, bitLen) {
 function convert(tm) {
   const { startState, startPos, tape, transitions } = tm;
 
-  // Collect alphabet (all symbols that appear in read positions)
-  const symbols = [];
+  // Alphabet: das Leerzeichen '_' bekommt immer Code 0…0, denn ein leeres
+  // Feld der 1-Bit-Maschine ('_' oder '0') muss als Leerzeichen gelesen werden.
+  const symbols = [BLANK];
   function addSym(s) { if (!symbols.includes(s)) symbols.push(s); }
   for (const t of transitions) { addSym(t.read); addSym(t.write); }
   for (const s of tape) addSym(s);
 
-  const bitLen = calcBitSize(symbols.length);
+  // Codes 0 … symbols.length-1 → so viele Bits wie der größte Code braucht
+  const bitLen = Math.max(1, calcBitSize(symbols.length - 1));
 
   function symCode(s) {
     const i = symbols.indexOf(s);
@@ -533,10 +571,25 @@ function convert(tm) {
     }
     trans += '\n';
 
+    // n Schritte nach links gehen (Bits unverändert lassen); der letzte
+    // Schritt führt in den Zustand 'target'. Liefert den neuen Präfix.
+    function walkLeft(prefix, n, target) {
+      for (let d = 0; d < n; d++) {
+        const next = d === n - 1 ? target : ss + prefix + 'Z';
+        trans += fmt(ss+prefix, '0', next, '0', 'L', false);
+        trans += fmt(ss+prefix, '1', next, '1', 'L', true);
+        prefix += 'Z';
+      }
+      return prefix;
+    }
+
+    const handled = new Set();
     for (const t of group) {
       let addSymbl = symCode(t.read);
+      handled.add(addSymbl);
 
-      // Read phase: walk back m_BitLen steps
+      // Lesephase beendet: Kopf steht bitLen Felder rechts vom Symbolanfang
+      // → zurück an den Symbolanfang
       for (let d = 0; d < bitLen; d++) {
         trans += fmt(ss+addSymbl, '0', ss+addSymbl+'Z', '0', 'L', false);
         trans += fmt(ss+addSymbl, '1', ss+addSymbl+'Z', '1', 'L', true);
@@ -547,6 +600,7 @@ function convert(tm) {
       const writeCode = symCode(t.write).split('');
 
       if (t.move === 'R') {
+        // schreiben, danach steht der Kopf auf dem Anfang des rechten Symbols
         for (let d = 0; d < writeCode.length - 1; d++) {
           trans += fmt(ss+addSymbl, '0', ss+addSymbl+'W', writeCode[d], 'R', false);
           trans += fmt(ss+addSymbl, '1', ss+addSymbl+'W', writeCode[d], 'R', true);
@@ -556,21 +610,30 @@ function convert(tm) {
         trans += fmt(ss+addSymbl, '0', t.stateN+'_', last, 'R', false);
         trans += fmt(ss+addSymbl, '1', t.stateN+'_', last, 'R', true);
       } else {
-        // Move L
+        // L, N, S: erst schreiben (Kopf wandert bitLen nach rechts) …
         for (let d = 0; d < writeCode.length; d++) {
           trans += fmt(ss+addSymbl, '0', ss+addSymbl+'W', writeCode[d], 'R', false);
           trans += fmt(ss+addSymbl, '1', ss+addSymbl+'W', writeCode[d], 'R', true);
           addSymbl += 'W';
         }
         trans += '\n';
-        for (let d = 0; d < writeCode.length * 2 - 1; d++) {
-          trans += fmt(ss+addSymbl, '0', ss+addSymbl+'Z', '0', 'L', false);
-          trans += fmt(ss+addSymbl, '1', ss+addSymbl+'Z', '1', 'L', true);
-          addSymbl += 'Z';
-        }
-        trans += fmt(ss+addSymbl, '0', t.stateN+'_', '0', 'L', false);
-        trans += fmt(ss+addSymbl, '1', t.stateN+'_', '1', 'L', true);
+        // … dann 2·bitLen (L) bzw. bitLen (N/S) Felder zurück
+        const back = t.move === 'L' ? 2 * bitLen : bitLen;
+        walkLeft(addSymbl, back, t.stateN + '_');
       }
+      trans += '\n';
+    }
+
+    // Kein Eintrag für (Zustand, Symbol): die Original-TM hält hier.
+    // Kopf zurück an den Symbolanfang und in den Halt-Zustand ohne Transitionen.
+    const missing = [];
+    for (let c = 0; c < (1 << bitLen); c++) {
+      const code = fillBin(dez2bin(c), bitLen);
+      if (!handled.has(code)) missing.push(code);
+    }
+    if (missing.length) {
+      trans += `# Halt: keine Transition für ${ss.slice(0, -1)} → ${sf}${HALT_SUFFIX}\n`;
+      for (const code of missing) walkLeft(code, bitLen, sf + HALT_SUFFIX);
       trans += '\n';
     }
     allTrans += trans;
@@ -578,7 +641,11 @@ function convert(tm) {
 
   const header =
     `# konvertierte Turing Maschine\n` +
-    `# Original-Alphabet: ${symbols.join(', ')} → ${bitLen} Bit pro Symbol\n\n` +
+    `# Original-Alphabet: ${symbols.join(', ')} → ${bitLen} Bit pro Symbol\n` +
+    `# Kodierung: ${symbols.map((s, i) => s + '=' + fillBin(dez2bin(i), bitLen)).join(' ')}\n` +
+    `# Leere Felder ('_') werden wie ${'0'.repeat(bitLen)} gelesen (= '${BLANK}').\n` +
+    `# Zustand q der Original-TM heißt hier q_ (Kopf am Symbolanfang).\n` +
+    `# Hält die Original-TM in q mangels Transition, endet diese TM in q${HALT_SUFFIX}.\n\n` +
     `# Initialisierung\n` +
     newStart + '\n' +
     `# Band\n` +
@@ -594,8 +661,16 @@ function convert(tm) {
   };
 }
 
+// Halt-Zustände heißen "<zustand>_HALT". Das kann nicht mit erzeugten
+// Namen kollidieren, die immer die Form "<zustand>_[01ZW]*" haben.
+const HALT_SUFFIX = '_HALT';
+
+// Eine 1-Bit-Transition. Wer '0' liest, liest auch ein leeres Feld '_'
+// (Band jenseits des Inhalts), deshalb wird dafür eine Zwillingstransition erzeugt.
 function fmt(fs, rd, ns, wt, mv, newline) {
-  return `(${fs},${rd},${ns},${wt},${mv})` + (newline ? '\n' : '\t');
+  let s = `(${fs},${rd},${ns},${wt},${mv})`;
+  if (rd === '0') s += `\t(${fs},${BLANK},${ns},${wt},${mv})`;
+  return s + (newline ? '\n' : '\t');
 }
 
 // ─────────────────────────────────────────────
@@ -657,6 +732,8 @@ function syncHighlight() {
     : inputArea.value;
   inputHl.innerHTML = highlight(text) || ' ';
   btnConvert.disabled = inputArea.value.trim().length === 0;
+  document.getElementById('pillIn').textContent = inputArea.value.trim()
+    ? inputArea.value.split('\n').length + ' Zeilen' : 'leer';
 }
 
 function syncScroll() {
@@ -757,10 +834,14 @@ btnSave.addEventListener('click', () => {
   if (!currentResult) return;
   const blob = new Blob([currentResult], { type: 'text/plain' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
+  a.href = url;
   a.download = currentFilename + '_1bit.tm';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(a.href);
+  document.body.removeChild(a);
+  // erst freigeben, wenn der Browser den Download übernommen hat
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 });
 
 btnClear.addEventListener('click', () => {

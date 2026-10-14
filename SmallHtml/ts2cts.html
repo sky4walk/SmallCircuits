@@ -472,9 +472,27 @@
   }
   .help-text code { color: var(--text2); }
 
+  .site-foot {
+    border-top: 1px solid var(--border);
+    padding: 8px 32px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 0.04em;
+  }
+  .site-foot a { color: var(--text2); text-decoration: none; }
+  .site-foot a:hover { color: var(--amber); }
+
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* ── Schmale Bildschirme ── */
+  main > * { min-width: 0; }
+  @media (max-width: 760px) {
+    header { flex-wrap: wrap; padding: 14px 16px; }
+    main { grid-template-columns: minmax(0, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -534,7 +552,8 @@
       <div class="help-text">
         Format von <code>tm2ts.html</code>:<br>
         <code>(p)</code> · <code>(sym1,sym2,...)</code> Startband<br>
-        <code>(sym,prod1,prod2,...)</code> Produktionen
+        <code>(sym,prod1,prod2,...)</code> Produktionen<br>
+        <code>(sym)</code> = leere Produktion · Symbol ganz ohne Zeile = Halt (Trigger <code>H</code> im CTS)
       </div>
     </div>
   </div>
@@ -618,12 +637,25 @@
           Jedes TS-Symbol bekommt einen Einheitsvektor der Länge k (Anzahl Produktionen).<br>
           Symbol an Position i → Bit i = <span style="color:var(--amber)">1</span>, alle anderen = <span style="color:var(--dim)">0</span>.<br><br>
           Das CTS-Band ist die Verkettung der Bitvektoren aller TS-Band-Symbole.<br>
-          Ein CTS-Schritt: lese Bit 0 → wenn <span style="color:var(--amber)">1</span>: hänge Produktion ans Ende, immer: lösche Bit 0.
+          Ein CTS-Schritt: lese Bit 0 → wenn <span style="color:var(--amber)">1</span>: hänge Produktion ans Ende, immer: lösche Bit 0.<br><br>
+          <b>Löschzahl p</b> (Cook §1.3): Auf die 2k Slots des gelesenen Symbols folgen
+          (p−1)·2k leere Slots, die die restlichen p−1 Symbole ungelesen löschen.
+          Ein Zyklus (p·2k CTS-Schritte) entspricht genau einem Tag-Schritt.<br><br>
+          <b>Halt</b>: Symbole ohne Produktionszeile (<span style="color:var(--red)">⊥</span>) bekommen
+          einen eigenen Vektor; ihr Aktiv-Slot hat Trigger <code>H</code>. Ein CTS selbst kann
+          nicht anhalten — trifft die Simulation aber eine 1 auf einem H-Slot, steht im Tag-System
+          ein Halt-Symbol am Kopf, und die Seite meldet den Halt. Ebenso, wenn zu Zyklusbeginn
+          weniger als p Symbole auf dem Band sind. <code>(sym)</code> mit leerer rechter Seite
+          ist dagegen eine normale leere Produktion.
         </div>
       </div>
     </div>
   </div>
 </main>
+
+<footer class="site-foot">
+  TM → TS → CTS · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
 
 <script>
 // ═══════════════════════════════════════════════════════════
@@ -644,30 +676,29 @@ function parseTS(src) {
     const inner = line.slice(1, -1);
     const parts = inner.split(',').map(s => s.trim());
 
-    if (parts.length === 1 && /^\d+$/.test(parts[0])) {
-      p = parseInt(parts[0]);
+    // (p) nur einmal als erste Klammer; danach sind einzelne Zahlen Symbole
+    if (p === null && parts.length === 1 && /^\d+$/.test(parts[0])) {
+      p = parseInt(parts[0], 10);
       continue;
     }
     if (startTape === null && p !== null) {
       startTape = parts.filter(Boolean);
       continue;
     }
-    if (parts.length >= 1) {
+    if (parts.length >= 1 && parts[0] !== '') {
       const sym = parts[0];
       const rhs = parts.slice(1).filter(Boolean);
-      if (!productions[sym]) {
-        productions[sym] = rhs;
+      if (productions[sym] === undefined) {
+        productions[sym] = rhs;          // (sym) ohne rechte Seite = leere Produktion
         productionOrder.push(sym);
       }
     }
   }
 
   if (p === null) throw new Error('Kein p-Wert gefunden (z.B. "(2)")');
+  if (p < 1) throw new Error('Löschzahl p muss ≥ 1 sein');
   if (!startTape || startTape.length === 0) throw new Error('Kein Startband gefunden');
   if (productionOrder.length === 0) throw new Error('Keine Produktionen gefunden');
-
-
-
 
   return { p, startTape, productions, productionOrder };
 }
@@ -676,45 +707,48 @@ function parseTS(src) {
 //  KONVERTER: TS → CTS (Wolfram / Cocke-Minsky)
 // ═══════════════════════════════════════════════════════════
 function convertTS2CTS(ts, rule110 = false) {
-  const { startTape, productions, productionOrder } = ts;
-  // Rule 110: addSym und kTotal werden nach Symbol-Erweiterung berechnet (siehe unten)
+  const { p, startTape, productions } = ts;
+  const productionOrder = [...ts.productionOrder];
 
-  // ── Symbol-Enkodierung: Index i → Einheitsvektor der Länge k
-  // Symbole mit eigener Produktion → Einheitsvektor (aktiver Slot im Zyklus)
-  // Padding-Symbole (x_* und andere ohne Produktion) → Nullvektor (kein Slot)
-  const paddingSyms = new Set(); // Symbole die als Nullvektor enkodiert werden
-
+  // ── Halt-Konvention der Kette TM → TS → CTS:
+  //   Symbol OHNE Produktionszeile = Halt, sobald es an den Kopf kommt.
+  //   (sym) mit leerer rechter Seite = löschen, nichts anhängen.
+  // Halt-Symbole bekommen einen eigenen Index wie alle anderen; ihr
+  // Aktiv-Slot wird als Halt-Slot (Trigger "H") markiert. Ein CTS kann
+  // nicht anhalten — die Simulation erkennt aber eine 1 im Halt-Slot
+  // und meldet den Halt des Tag-Systems.
+  const haltSyms = new Set();
   function autoRegister(sym) {
-    if (productions[sym] !== undefined) return; // hat echte Produktion
-    if (productionOrder.includes(sym)) return;   // schon registriert
-    // Kein Produktionseintrag → Padding (x_* etc.)
-    paddingSyms.add(sym);
+    if (productions[sym] !== undefined) return;  // hat Produktion (ggf. leer)
+    if (haltSyms.has(sym)) return;
+    haltSyms.add(sym);
+    productionOrder.push(sym);
   }
   for (const sym of startTape) autoRegister(sym);
-  for (const sym of [...productionOrder]) {
-    for (const rhs of (productions[sym] || [])) autoRegister(rhs);
+  for (const sym of ts.productionOrder) {
+    for (const rhs of productions[sym]) autoRegister(rhs);
   }
 
-  // k = nur echte Symbole mit Produktion (ohne Padding)
+  // k = alle Symbole (mit Produktion + Halt-Symbole)
   const kReal = productionOrder.length;
-  // Rule 110: Zykluslänge muss Vielfaches von 6 sein
+  // Rule 110: Vektorlänge 2·kTotal (und damit jede Appendant-Länge und die
+  // Zykluslänge p·2·kTotal) muss Vielfaches von 6 sein → kTotal ≡ 0 mod 3
   const addSym = rule110 ? (kReal % 3 === 0 ? 0 : 3 - (kReal % 3)) : 0;
   const kTotal = kReal + addSym;
 
-  // Zykluslänge = 2*kTotal (je Symbol: Slot 2i=Dummy, Slot 2i+1=Aktiv)
-  // Enkodierung: Symbol i → Bitvektor der Länge 2*kTotal
-  //   Bit 2i   = 0 (Dummy-Slot, trigger=0, wird nie ausgewertet)
-  //   Bit 2i+1 = 1 (Aktiv-Slot, trigger=1)
-  //   alle anderen Bits = 0
-  // Padding-Symbole → Nullvektor (kein Slot aktiv)
+  // Enkodierung: Symbol i → Bitvektor der Länge vecLen = 2*kTotal
+  //   Bit 2i   = 0 (Dummy-Slot, trigger=0)
+  //   Bit 2i+1 = 1 (Aktiv-Slot, trigger=1 bzw. H für Halt-Symbole)
+  // Zyklus (Cook §1.3, Löschzahl p): erst vecLen Slots für das gelesene
+  // Symbol, danach (p−1)·vecLen leere Slots, die die übrigen p−1
+  // Symbole ungelesen löschen → Zykluslänge p·vecLen.
 
   const symIndex = {};
   productionOrder.forEach((sym, i) => { symIndex[sym] = i; });
 
-  const vecLen = 2 * kTotal; // Länge eines Symbolv ektors
+  const vecLen = 2 * kTotal; // Länge eines Symbolvektors
 
   function encode(sym) {
-    if (paddingSyms.has(sym)) return new Array(vecLen).fill(0);
     if (!(sym in symIndex)) throw new Error(`Unbekanntes Symbol: "${sym}"`);
     const vec = new Array(vecLen).fill(0);
     vec[2 * symIndex[sym] + 1] = 1;
@@ -739,27 +773,28 @@ function convertTS2CTS(ts, rule110 = false) {
 
   for (let i = 0; i < kReal; i++) {
     const sym = productionOrder[i];
-    const rhs = productions[sym];
+    const isHalt = haltSyms.has(sym);
 
     // Dummy
     ctsProductions.push({ cycle: i, trigger: '0', bits: [], tsSym: sym, isDummy: true });
-    // Produktion
+    // Produktion (bzw. Halt-Slot)
     const rhsBits = [];
-    for (const s of rhs) {
-      rhsBits.push(...encode(s));
-    }
-    ctsProductions.push({ cycle: i, trigger: '1', bits: rhsBits, tsSym: sym, isDummy: false });
+    if (!isHalt) for (const s of productions[sym]) rhsBits.push(...encode(s));
+    ctsProductions.push({ cycle: i, trigger: isHalt ? 'H' : '1', bits: rhsBits, tsSym: sym, isDummy: false, isHalt });
   }
 
-  // Padding: kReal extra leere Paare (Java-Impl kompatibel)
-  // KEIN extra Padding — Wolfram verwendet nur 2k Slots
-  // Rule 110 Padding: addSym weitere leere Paare damit Zykluslänge % 6 === 0
+  // Rule 110 Padding: addSym weitere leere Paare damit vecLen % 6 === 0
   for (let i = 0; i < addSym; i++) {
     ctsProductions.push({ cycle: kReal + i, trigger: '0', bits: [], tsSym: null, isDummy: true, rule110pad: true });
     ctsProductions.push({ cycle: kReal + i, trigger: '1', bits: [], tsSym: null, isDummy: true, rule110pad: true });
   }
 
-  return { startBits, ctsProductions, symIndex, productionOrder, k: kReal, kTotal, vecLen, addSym, paddingSyms };
+  // Löschzahl p: (p−1)·vecLen leere Slots (Cook §1.3)
+  for (let i = 0; i < (p - 1) * vecLen; i++) {
+    ctsProductions.push({ cycle: kTotal + Math.floor(i / 2), trigger: '0', bits: [], tsSym: null, isDummy: true, pExt: true });
+  }
+
+  return { p, startBits, ctsProductions, symIndex, productionOrder, k: kReal, kTotal, vecLen, addSym, haltSyms };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -770,7 +805,9 @@ function serializeCTS(result, tsData) {
   let out = '';
   out += `; Cyclic Tag System - Wolfram ANKOS Konstruktion\n`;
   out += `; TS-Symbole (${k}): ${productionOrder.join(', ')}\n`;
-  out += `; Zykluslänge: ${ctsProductions.length}${result.addSym > 0 ? ' (Rule110-Pad: +' + result.addSym*2 + ')' : ''}\n\n`;
+  out += `; Zykluslänge: ${ctsProductions.length} = p·Vektorlänge = ${result.p}·${result.vecLen}${result.addSym > 0 ? ' (Rule110-Pad: +' + result.addSym*2 + ' je Vektor)' : ''}\n`;
+  if (result.haltSyms.size) out += `; Halt-Symbole (keine Produktion, Trigger H): ${[...result.haltSyms].join(', ')}\n`;
+  out += `;@ p=${result.p} vec=${result.vecLen}\n\n`;
   out += `(${startBits.join(',')})\n\n`;
   for (let idx = 0; idx < ctsProductions.length; idx++) {
     const p = ctsProductions[idx];
@@ -784,6 +821,8 @@ function serializeCTS(result, tsData) {
 //  PARSER: .cts
 // ═══════════════════════════════════════════════════════════
 function parseCTS(src) {
+  // Optionale Metazeile ";@ p=<p> vec=<Vektorlänge>" für Halt-bei-zu-kurzem-Band
+  const meta = /^\s*;@\s*p=(\d+)\s+vec=(\d+)/m.exec(src);
   const lines = src.split('\n')
     .map(l => l.replace(/;.*$/, '').trim())
     .filter(Boolean);
@@ -797,22 +836,30 @@ function parseCTS(src) {
     const parts = inner.split(',').map(s => s.trim());
 
     if (startBits === null) {
-      startBits = parts.map(Number);
+      const raw = parts.filter(Boolean);
+      if (raw.some(b => b !== '0' && b !== '1')) throw new Error('Startband: nur Bits 0/1 erlaubt');
+      startBits = raw.map(Number);
       continue;
     }
-    // (cycle, trigger, bit, bit, ...)
+    // (cycle, trigger, bit, bit, ...)   trigger: 0 / 1 / H (Halt-Slot)
     if (parts.length >= 2) {
-      const cycle   = parseInt(parts[0]);
-      const trigger = parts[1];
-      const bits    = parts.slice(2).filter(Boolean).map(Number);
-      ctsProductions.push({ cycle, trigger, bits });
+      const cycle   = parseInt(parts[0], 10);
+      const trigger = parts[1].toUpperCase();
+      if (!['0','1','H'].includes(trigger)) throw new Error(`Ungültiger Trigger "${parts[1]}" (erlaubt: 0, 1, H)`);
+      const raw     = parts.slice(2).filter(Boolean);
+      if (raw.some(b => b !== '0' && b !== '1')) throw new Error(`Produktion ${cycle}: nur Bits 0/1 erlaubt`);
+      ctsProductions.push({ cycle, trigger, bits: raw.map(Number) });
     }
   }
 
   if (!startBits) throw new Error('Kein Startband gefunden');
   if (ctsProductions.length === 0) throw new Error('Keine Produktionen gefunden');
 
-  return { startBits, ctsProductions };
+  return {
+    startBits, ctsProductions,
+    p:      meta ? parseInt(meta[1], 10) : null,
+    vecLen: meta ? parseInt(meta[2], 10) : null,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -821,7 +868,6 @@ function parseCTS(src) {
 let simState = null;
 
 function initSim(ctsData) {
-  const s37 = ctsData.ctsProductions[37];
   simState = {
     tape:       [...ctsData.startBits],
     prods:      ctsData.ctsProductions,
@@ -830,22 +876,39 @@ function initSim(ctsData) {
     step:       0,
     halted:     false,
     haltReason: '',
+    // Für die TS-Halt-Erkennung „Band kürzer als p Symbole“ (nur wenn bekannt)
+    minLen:     (ctsData.p && ctsData.vecLen) ? ctsData.p * ctsData.vecLen : 0,
   };
 }
 
 function simStep() {
   if (!simState || simState.halted) return null;
-  const { tape, prods, cycleLen } = simState;
+  const { tape, prods } = simState;
 
   if (tape.length === 0) {
     simState.halted = true;
     simState.haltReason = 'Band leer → Halt';
     return { halted: true, reason: simState.haltReason };
   }
+  // Zyklusanfang = Anfang eines Tag-Schritts: weniger als p Symbole → TS hält
+  if (simState.cyclePos === 0 && simState.minLen && tape.length < simState.minLen) {
+    simState.halted = true;
+    simState.haltReason = `Band kürzer als p Symbole (${tape.length} < ${simState.minLen} Bits) → Tag-System hält`;
+    return { halted: true, reason: simState.haltReason };
+  }
 
   const headBit = tape[0];
   const prod    = prods[simState.cyclePos];
   const trigger = prod.trigger;
+
+  // Halt-Slot: eine 1 hier heißt, ein Symbol ohne Produktion steht am Kopf
+  if (headBit === 1 && trigger === 'H') {
+    simState.halted = true;
+    simState.haltReason = `Halt-Slot ${simState.cyclePos} getroffen` +
+      (prod.tsSym ? ` → Symbol "${prod.tsSym}" ohne Produktion am Kopf` : '') +
+      ' → Tag-System hält';
+    return { halted: true, reason: simState.haltReason, cyclePos: simState.cyclePos };
+  }
 
   // CTS-Schritt:
   // Lese Bit 0. Wenn Bit=1: hänge aktuelle Produktion an (trigger=1 aktiv, trigger=0 leer).
@@ -921,28 +984,31 @@ function hideStatus() { convStatus.style.display = 'none'; }
 // ── Konvertieren
 btnConvert.addEventListener('click', () => {
   hideStatus();
-  // Sicherheitscheck: wurde versehentlich ein CTS statt TS eingegeben?
   const inputVal = tsInput.value;
-  if (!inputVal.includes('(2)') && !inputVal.match(/\(\w+\s+\d+\s+\d+\s+[LR]/)) {
-    // Kein p=2 und keine TM-Transition → prüfe ob es ein CTS ist
-    if (inputVal.match(/^\s*\(\d+,\d+,[\d,]*\)/m)) {
-      showStatus('✗ Eingabe sieht wie ein CTS aus, kein TS. Bitte *.ts Datei laden.', 'err');
-      return;
-    }
-  }
   try {
     const rule110 = document.getElementById('chk-rule110').checked;
-    const ts  = parseTS(tsInput.value);
+    let ts;
+    try {
+      ts = parseTS(inputVal);
+    } catch (pe) {
+      // Sicherheitscheck: wurde versehentlich ein CTS statt TS eingegeben?
+      // (nur als Erklärung, wenn das TS-Parsing ohnehin scheitert)
+      if (/^\s*\(\d+,[01H],[01,]*\)\s*$/mi.test(inputVal)) {
+        throw new Error('Eingabe sieht wie ein CTS aus, kein TS. Bitte *.ts Datei laden.');
+      }
+      throw pe;
+    }
     const res = convertTS2CTS(ts, rule110);
     const txt = serializeCTS(res, ts);
     ctsOutput.value = txt;
     ctsData = parseCTS(txt);
+    ctsData.ctsProductions = res.ctsProductions; // gleiche Daten + Symbolnamen für Halt-Meldung
     ctsData._convResult = res; // für Enkodierungstabelle
     btnSaveCTS.disabled = false;
-    const padCount = res.paddingSyms ? res.paddingSyms.size : 0;
-    const padInfo  = padCount > 0 ? ` · ${padCount} Padding-Symbole (Nullvektor)` : '';
-    const r110info = rule110 ? ` · Rule110-Pad +${res.addSym*2}` : '';
-    showStatus(`✓ Konvertiert · k=${res.k} aktive Symbole${padInfo} · Zykluslänge ${res.ctsProductions.length}${r110info} · Startband ${res.startBits.length} Bits`, 'ok');
+    const haltCount = res.haltSyms.size;
+    const haltInfo  = haltCount > 0 ? ` · ${haltCount} Halt-Symbole` : '';
+    const r110info  = rule110 ? ` · Rule110-Pad +${res.addSym*2}` : '';
+    showStatus(`✓ Konvertiert · p=${res.p} · k=${res.k} Symbole${haltInfo} · Vektorlänge ${res.vecLen} · Zykluslänge ${res.ctsProductions.length} = ${res.p}·${res.vecLen}${r110info} · Startband ${res.startBits.length} Bits`, 'ok');
     loadProductionsTable(res);
     loadEncodingTable(res);
     initSim(ctsData);
@@ -1020,12 +1086,14 @@ function loadProductionsTable(res) {
     const p = res.ctsProductions[idx];
     const tr = document.createElement('tr');
     tr.id = `prod-row-${idx}`;
-    const bitsHtml = p.bits.length > 0
-      ? p.bits.map(b => `<span class="bit ${b?'bit-1':'bit-0'}">${b}</span>`).join('')
-      : `<span class="prod-empty">leer</span>`;
+    const bitsHtml = p.trigger === 'H'
+      ? `<span class="prod-empty" style="color:var(--red)">HALT${p.tsSym ? ' (' + esc(p.tsSym) + ')' : ''}</span>`
+      : p.bits.length > 0
+        ? p.bits.map(b => `<span class="bit ${b?'bit-1':'bit-0'}">${b}</span>`).join('')
+        : `<span class="prod-empty">leer</span>`;
     tr.innerHTML = `
       <td class="prod-cycle">${idx}</td>
-      <td class="${p.trigger==='1'?'prod-trigger-1':'prod-trigger-0'}">${p.trigger}</td>
+      <td class="${p.trigger==='0'?'prod-trigger-0':'prod-trigger-1'}"${p.trigger==='H'?' style="color:var(--red)" title="Halt-Slot: Symbol ohne Produktion"':''}>${p.trigger}</td>
       <td class="prod-arrow">→</td>
       <td><div class="prod-bits">${bitsHtml}</div></td>`;
     prodTbody.appendChild(tr);
@@ -1042,8 +1110,9 @@ function loadEncodingTable(res) {
     vec[2 * i + 1] = 1;
     const tr = document.createElement('tr');
     const bitsHtml = vec.map(b => `<span class="bit ${b?'bit-1':'bit-0'}">${b}</span>`).join('');
+    const isHalt = res.haltSyms && res.haltSyms.has(sym);
     tr.innerHTML = `
-      <td class="enc-sym">${esc(sym)}</td>
+      <td class="enc-sym">${esc(sym)}${isHalt ? ' <span style="color:var(--red)" title="keine Produktion → Halt">⊥</span>' : ''}</td>
       <td class="enc-idx">${i}</td>
       <td><div class="enc-bits">${bitsHtml}</div></td>`;
     encTbody.appendChild(tr);
@@ -1091,16 +1160,16 @@ function renderCycleTrack(res) {
   if (!res || !res.ctsProductions) return;
   const prods = res.ctsProductions;
   const perSlot = 2; // Dummy + Produktion
-  const numCycles = Math.ceil(prods.length / perSlot);
+  const numCycles = res.kTotal; // nur der Lese-Teil; die (p−1)·vecLen leeren Slots als ein Block
   for (let i = 0; i < numCycles; i++) {
-    const p = prods[i * perSlot + 1]; // die aktive Produktion (trigger=1)
+    const p = prods[i * perSlot + 1]; // die aktive Produktion (trigger=1/H)
     if (!p) continue;
     const slot = document.createElement('div');
     slot.className = 'cycle-slot';
     slot.id = `cycle-slot-${i}`;
     const label = document.createElement('div');
     label.className = 'cycle-slot-label';
-    label.textContent = p.tsSym ? p.tsSym.slice(0, 6) : `c${i}`;
+    label.textContent = (p.trigger === 'H' ? '⊥' : '') + (p.tsSym ? p.tsSym.slice(0, 6) : `c${i}`);
     const bitsDiv = document.createElement('div');
     bitsDiv.className = 'cycle-slot-bits';
     (p.bits.slice(0, 8)).forEach(b => {
@@ -1119,6 +1188,23 @@ function renderCycleTrack(res) {
     slot.appendChild(bitsDiv);
     cycleTrack.appendChild(slot);
   }
+  if (res.p > 1) {
+    const slot = document.createElement('div');
+    slot.className = 'cycle-slot';
+    slot.id = 'cycle-slot-ext';
+    const label = document.createElement('div');
+    label.className = 'cycle-slot-label';
+    label.textContent = `+${(res.p - 1) * res.vecLen} leer`;
+    label.title = `(p−1)·Vektorlänge leere Slots: löschen die übrigen ${res.p - 1} Symbol(e) des Tag-Schritts`;
+    slot.appendChild(label);
+    cycleTrack.appendChild(slot);
+  }
+}
+
+// Slot-ID im Cycle-Track zu einer Zyklusposition
+function cycleSlotId(pos) {
+  if (ctsData && ctsData._convResult && pos >= ctsData._convResult.vecLen) return 'cycle-slot-ext';
+  return `cycle-slot-${Math.floor(pos / 2)}`;
 }
 
 function resetSimUI(res) {
@@ -1151,7 +1237,7 @@ function doStep() {
 
   // Cycle-Track aktiven Slot hervorheben
   document.querySelectorAll('.cycle-slot').forEach(s => s.classList.remove('active-slot'));
-  const activeSlot = document.getElementById(`cycle-slot-${simState.cyclePos}`);
+  const activeSlot = document.getElementById(cycleSlotId(simState.cyclePos));
   if (activeSlot) {
     activeSlot.classList.add('active-slot');
     activeSlot.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });

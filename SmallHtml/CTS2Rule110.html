@@ -144,7 +144,7 @@
   /* Step mode: single row display */
   #step-row-canvas {
     display: none;
-    width: 100%; height: 32px; image-rendering: pixelated;
+    width: 100%; height: 32px; image-rendering: pixelated; background: var(--cell-off);
     border-bottom: 1px solid var(--border2);
     flex-shrink: 0;
   }
@@ -155,9 +155,35 @@
     border-radius: 2px; pointer-events: none; display: none; z-index: 100; white-space: nowrap;
   }
 
+  .param-row select {
+    background: var(--surface); border: 1px solid var(--border2); color: var(--text2);
+    font-family: var(--mono); font-size: 11px; padding: 3px 6px; border-radius: 2px; outline: none; flex: 1;
+  }
+  .param-hint { font-family: var(--mono); font-size: 9px; color: var(--dim); line-height: 1.5; }
+  .trace {
+    display: none; margin-top: 8px; padding: 8px 10px; background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 2px; font-family: var(--mono); font-size: 10px; line-height: 1.5; color: var(--text2);
+    white-space: pre; overflow-x: auto; max-height: 260px;
+  }
+  .ctrl-row select {
+    background: var(--surface); border: 1px solid var(--border2); color: var(--text2);
+    font-family: var(--mono); font-size: 11px; padding: 4px 6px; border-radius: 2px; outline: none;
+  }
+  .site-link { font-family: var(--mono); font-size: 10px; color: var(--dim); text-decoration: none; letter-spacing: 0.05em; }
+  .site-link:hover { color: var(--cell-on); }
+
   ::-webkit-scrollbar { width: 5px; height: 5px; }
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  /* Schmale Bildschirme: Bedienfeld oben, Automat darunter */
+  main > * { min-width: 0; }
+  @media (max-width: 760px) {
+    header { flex-wrap: wrap; padding: 12px 16px; }
+    main { grid-template-columns: minmax(0, 1fr); }
+    .left-panel { border-right: none; border-bottom: 1px solid var(--border); overflow-y: visible; }
+    .right-panel { height: 75vh; }
+  }
 </style>
 </head>
 <body>
@@ -196,13 +222,27 @@
     <div>
       <div class="section-label">CTS → Rule 110 (Wolfram)</div>
       <textarea id="cts-input" spellcheck="false" style="min-height:64px"
-        placeholder="CTS aus ts2cts.html einfügen:&#10;(startbits)&#10;(idx,trigger,bits...)&#10;…oder Roh-CTS"></textarea>
+        placeholder="CTS im ts2cts-Format (auch ts2cts_saware):&#10;(startbits)&#10;(idx,trigger,bits...)  trigger 0/1/H&#10;beliebige Regellängen – wird bei Bedarf gestreckt"></textarea>
       <div class="ctrl-row" style="margin-top:8px">
         <label class="file-label" for="file-cts">⬆ .cts</label>
         <input type="file" id="file-cts" accept=".cts">
         <button class="btn-step" id="btn-convert-cts">⚙ Konvertieren</button>
       </div>
       <div id="cts-status" class="status-bar status-info" style="margin-top:8px;display:none"></div>
+      <pre id="cts-trace" class="trace"></pre>
+      <div id="rb-box" style="display:none;margin-top:12px">
+        <div class="section-label">CTS-Zustand aus dem Automaten</div>
+        <div class="ctrl-row">
+          <select id="rb-gens">
+            <option value="100000">bis Gen. 100 000</option>
+            <option value="200000" selected>bis Gen. 200 000</option>
+            <option value="400000">bis Gen. 400 000</option>
+          </select>
+          <button class="btn-step" id="btn-readback">⟲ Zurücklesen</button>
+        </div>
+        <div class="param-hint" style="margin-top:6px">Gleiter-Tracking auf …b1 b1·b2·b3 b3…: stationäre C-Gruppen = Bandsymbole (rechts wird gelesen, links angehängt). Dauert je 100 000 Gen. einige Sekunden; abbrechbar.</div>
+        <pre id="rb-out" class="trace"></pre>
+      </div>
     </div>
 
     <div class="divider"></div>
@@ -233,6 +273,7 @@
         <button class="btn-danger"  id="btn-step-reset" disabled>⟲</button>
         <div class="step-gen">Gen <span id="step-gen-counter">0</span></div>
       </div>
+      <div class="param-hint" style="margin-top:6px">Budget = Generationen-Regler: bis dahin ist der Ausschnitt exakt (Lichtkegel). Ring-Rand läuft unbegrenzt.</div>
       <div class="param-row" style="margin-top:8px">
         <span>Speed</span>
         <input type="range" id="step-speed" min="1" max="20" value="5">
@@ -248,9 +289,11 @@
       <div class="presets">
         <button class="preset-btn" data-preset="single">Einzelzelle</button>
         <button class="preset-btn" data-preset="random">Zufällig</button>
-        <button class="preset-btn" data-preset="ether">Ether</button>
-        <button class="preset-btn" data-preset="glider">Glider A4</button>
-        <button class="preset-btn" data-preset="cook">Cook Demo</button>
+        <button class="preset-btn" data-preset="ether">Äther (Ring)</button>
+        <button class="preset-btn" data-preset="gliderA">A-Gleiter</button>
+        <button class="preset-btn" data-preset="gliderE">E-Gleiter</button>
+        <button class="preset-btn" data-preset="collide">A trifft E</button>
+        <button class="preset-btn" data-preset="nks">NKS-CTS {{}},{1}</button>
       </div>
     </div>
 
@@ -270,16 +313,29 @@
           <span class="param-val" id="cell-val">2</span>
         </div>
         <div class="param-row">
-          <span>Rand-Pad</span>
+          <span>Rand</span>
+          <select id="bound-select">
+            <option value="zero">Nullen (unendlich)</option>
+            <option value="ring">Periodisch (Ring)</option>
+            <option value="cts">CTS-Blöcke b1^∞·b2·b3^∞</option>
+          </select>
+        </div>
+        <div class="param-row">
+          <span>Ansicht-Rand</span>
           <input type="range" id="pad-slider" min="0" max="1000" value="50" step="10">
           <span class="param-val" id="pad-val">50</span>
         </div>
         <div class="param-row" style="font-size:10px">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text2)">
             <input type="checkbox" id="autopad-check" checked style="accent-color:var(--cell-on);width:13px;height:13px;cursor:pointer">
-            Auto-Pad (= Generationen, verhindert Rand-Kollision)
+            Auto (= Generationen, ganzer Lichtkegel sichtbar)
           </label>
         </div>
+        <div class="param-row">
+          <span>Ausschnitt-Mitte</span>
+          <input type="number" id="view-center" placeholder="auto" style="width:96px">
+        </div>
+        <div class="param-hint">Gerechnet wird immer exakt auf der unendlichen Zeile (Lichtkegel um den Ausschnitt); gezeichnet wird nur der Ausschnitt, begrenzt durch die Canvas-Größe.</div>
         <div class="param-row">
           <span>Regel</span>
           <input type="number" id="rule-input" min="0" max="255" value="110">
@@ -292,7 +348,7 @@
     <div id="status-bar" class="status-bar status-info">Bereit.</div>
 
     <div class="stats-grid">
-      <div class="stat-box"><div class="stat-label">Breite</div><div class="stat-value" id="stat-width">—</div></div>
+      <div class="stat-box"><div class="stat-label">Ausschnitt</div><div class="stat-value" id="stat-width">—</div></div>
       <div class="stat-box"><div class="stat-label">Generationen</div><div class="stat-value" id="stat-gens">—</div></div>
       <div class="stat-box"><div class="stat-label">Regel</div><div class="stat-value" id="stat-rule">110</div></div>
       <div class="stat-box"><div class="stat-label">1-Zellen %</div><div class="stat-value" id="stat-density">—</div></div>
@@ -309,9 +365,13 @@
         <input type="number" id="tm-gens" min="1" max="2000" value="20" style="width:72px">
         <span class="param-val" id="tm-gens-info" style="font-size:10px">a<sup>N</sup>-Zähler</span>
       </div>
+      <div class="param-hint" style="margin-top:6px">Exportiert den Lichtkegel des Ausschnitts mit dem gewählten Rand; nach N Durchläufen ist der Ausschnitt exakt (Details als #-Kommentar in der Datei).</div>
       <button class="btn-secondary" id="btn-export-tm" style="width:100%;margin-top:8px"
         title="Vollständige Turing-Maschine: Band + Rule-110-Transitionen (.tm-Format)">⬇ TM exportieren (Band + 110-Transitionen)</button>
     </div>
+
+    <div class="divider"></div>
+    <a class="site-link" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com ↗</a>
 
   </div>
 
@@ -342,7 +402,8 @@ function buildLUT(ruleN) {
   for (let i = 0; i < 8; i++) lut[i] = (ruleN >> i) & 1;
   return lut;
 }
-
+// Feste 0 außerhalb — wird nur auf Lichtkegel-Bereiche angewendet,
+// deren Rand-Fehler den sichtbaren Ausschnitt nie erreichen.
 function nextGen(current, lut, width) {
   const next = new Uint8Array(width);
   for (let i = 0; i < width; i++) {
@@ -353,7 +414,15 @@ function nextGen(current, lut, width) {
   }
   return next;
 }
-
+function nextGenRing(current, lut, width) {
+  const next = new Uint8Array(width);
+  for (let i = 0; i < width; i++) {
+    const l = current[i === 0 ? width - 1 : i - 1];
+    const r = current[i === width - 1 ? 0 : i + 1];
+    next[i] = lut[l*4 + current[i]*2 + r];
+  }
+  return next;
+}
 function parseBitstring(s) {
   const bits = [];
   for (const ch of s) {
@@ -363,26 +432,68 @@ function parseBitstring(s) {
   return bits;
 }
 
-function makePadded(bits, padding) {
-  return new Uint8Array(padding).fill(0)
-    .concat ? new Uint8Array([...new Array(padding).fill(0), ...bits, ...new Array(padding).fill(0)])
-    : null;
-}
+// ═══════════════════════════════════════════════════════════
+//  GRENZEN
+// ═══════════════════════════════════════════════════════════
+const MAX_CANVAS_W    = 16000;     // sichere Canvas-Kantenlänge (Browser ~16384/32767)
+const MAX_CANVAS_H    = 16000;
+const MAX_CANVAS_AREA = 40e6;      // Pixel
+const MAX_WORK        = 1.5e9;     // Zellen × Generationen pro Batch-Lauf
+const STEP_MAX_ROWS   = 1000;      // Höhe des Schrittmodus-Canvas (rollt danach)
 
 // ═══════════════════════════════════════════════════════════
-//  BATCH SIMULATION
+//  QUELLE: unendliche Anfangszeile
+//   zero : Eingabe in unendlichem 0-Hintergrund
+//   ring : Eingabe periodisch fortgesetzt (= Ring)
+//   cts  : … b1 b1 · b2 · b3 b3 …  (Zelle 0 = Beginn von b2)
 // ═══════════════════════════════════════════════════════════
-function simulateBatch(initCells, numGens, lut, padding) {
-  const padded = new Uint8Array([...new Array(padding).fill(0), ...initCells, ...new Array(padding).fill(0)]);
-  const width = padded.length;
-  const grid = [padded];
-  let cur = padded;
-  for (let g = 1; g < numGens; g++) {
-    const nx = nextGen(cur, lut, width);
-    grid.push(nx);
-    cur = nx;
+let ctsResult = null;   // { blocks, dataOffset, dataLen, text }
+
+function makeSource(kind, bits) {
+  if (kind === 'cts') {
+    if (!ctsResult) throw new Error('Rand „CTS-Blöcke“: zuerst ein CTS konvertieren.');
+    if (initInput.value !== ctsResult.text)
+      throw new Error('Startkonfiguration wurde seit der Konvertierung geändert – neu konvertieren oder Rand „Nullen“/„Periodisch“ wählen.');
+    const [b1, b2, b3] = ctsResult.blocks, L1 = b1.length, L2 = b2.length, L3 = b3.length;
+    return { kind, n: L2, focus: Math.round(ctsResult.dataOffset + ctsResult.dataLen / 2),
+      at: i => i < 0 ? b1[((i % L1) + L1) % L1] : i < L2 ? b2[i] : b3[(i - L2) % L3] };
   }
-  return { grid, width };
+  if (!bits.length) throw new Error('Kein Bitstring gefunden.');
+  const n = bits.length;
+  if (kind === 'ring') return { kind, n, focus: n >> 1, at: i => bits[((i % n) + n) % n], bits };
+  return { kind: 'zero', n, focus: n >> 1, at: i => (i >= 0 && i < n) ? bits[i] : 0, bits };
+}
+
+function maxViewCols(rows, cs) {
+  return Math.max(1, Math.min(Math.floor(MAX_CANVAS_W / cs), Math.floor(MAX_CANVAS_AREA / (rows * cs * cs))));
+}
+
+// Sichtbarer Ausschnitt [vs, vs+vw) in Zellkoordinaten der Quelle
+function chooseView(src, G, cols) {
+  let vs, vw;
+  if (src.kind === 'zero') { const m = autopadCheck.checked ? G : +padSlider.value; vs = -m; vw = src.n + 2 * m; }
+  else if (src.kind === 'ring') { vs = 0; vw = src.n; }
+  else { vw = cols; vs = src.focus - (vw >> 1); }
+  const cIn = viewCenterInput.value.trim();
+  let center = (cIn !== '' && Number.isFinite(+cIn)) ? Math.round(+cIn) : null;
+  let clipped = false;
+  if (vw > cols) { clipped = true; if (center === null) center = src.focus; vw = cols; }
+  if (center !== null) vs = center - (vw >> 1);
+  return { vs, vw, clipped };
+}
+
+// Lichtkegel-Simulation: für G Zeilen wird [vs-(G-1), vs+vw+(G-1)) gerechnet;
+// der Ausschnitt ist damit für alle Zeilen exakt wie auf der unendlichen Zeile.
+function simulateView(src, view, G, lut) {
+  const m = G - 1, N = view.vw + 2 * m, lo = view.vs - m;
+  let cur = new Uint8Array(N);
+  for (let i = 0; i < N; i++) cur[i] = src.at(lo + i);
+  const grid = [cur.slice(m, m + view.vw)];
+  for (let g = 1; g < G; g++) {
+    cur = nextGen(cur, lut, N);
+    grid.push(cur.slice(m, m + view.vw));
+  }
+  return { grid, simWidth: N };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -390,79 +501,63 @@ function simulateBatch(initCells, numGens, lut, padding) {
 // ═══════════════════════════════════════════════════════════
 const ON_R=126, ON_G=200, ON_B=69;
 const OFF_R=17,  OFF_G=20, OFF_B=8;
+// Zuordnung Canvas → Zelle/Generation (für Hover)
+let hoverMap = { vs: 0, c0: 0, cs: 2, genBase: 0, rows: 0, cols: 0 };
 
-function renderBatch(grid, cellSize) {
-  const rows = grid.length, cols = grid[0].length;
+function fillRowPixels(d, rowArr, c0, cols, cs, lineW) {
+  for (let col = 0; col < cols; col++) {
+    const v = rowArr[c0 + col];
+    const r = v ? ON_R : OFF_R, g = v ? ON_G : OFF_G, b = v ? ON_B : OFF_B;
+    for (let dy = 0; dy < cs; dy++) {
+      let px = (dy * lineW + col * cs) * 4;
+      for (let dx = 0; dx < cs; dx++, px += 4) { d[px]=r; d[px+1]=g; d[px+2]=b; d[px+3]=255; }
+    }
+  }
+}
+
+function renderBatch(grid, cellSize, view) {
+  const rows = grid.length;
+  let cols = grid[0].length, c0 = 0;
+  const fit = maxViewCols(rows, cellSize);
+  if (cols > fit) { c0 = (cols - fit) >> 1; cols = fit; }
   canvas.width  = cols * cellSize;
   canvas.height = rows * cellSize;
   const imgData = ctx.createImageData(canvas.width, canvas.height);
-  const d = imgData.data;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const v = grid[row][col];
-      const r = v ? ON_R : OFF_R, g = v ? ON_G : OFF_G, b = v ? ON_B : OFF_B;
-      for (let dy = 0; dy < cellSize; dy++) {
-        for (let dx = 0; dx < cellSize; dx++) {
-          const px = ((row*cellSize+dy)*canvas.width + (col*cellSize+dx))*4;
-          d[px]=r; d[px+1]=g; d[px+2]=b; d[px+3]=255;
-        }
-      }
-    }
-  }
+  const d = imgData.data, rowBytes = canvas.width * cellSize * 4;
+  for (let row = 0; row < rows; row++)
+    fillRowPixels(d.subarray(row * rowBytes), grid[row], c0, cols, cellSize, canvas.width);
   ctx.putImageData(imgData, 0, 0);
+  hoverMap = { vs: view.vs, c0, cs: cellSize, genBase: 0, rows, cols };
+  return cols < grid[0].length;
 }
 
-// Append one row to canvas (step mode)
-function appendRow(cells, cellSize) {
-  const cols = cells.length;
-  const oldH = canvas.height;
-  const newH = oldH + cellSize;
-
-  // Preserve existing content only if there is any
-  let tmp = null;
-  if (oldH > 0 && canvas.width > 0) {
-    tmp = document.createElement('canvas');
-    tmp.width = canvas.width; tmp.height = oldH;
-    tmp.getContext('2d').drawImage(canvas, 0, 0);
+// Schrittmodus: Canvas fester Höhe; ist er voll, wird um eine Zeile gerollt
+function drawStepRow(rowArr) {
+  const st = stepState, cs = st.cs;
+  let y;
+  if (st.rowsDrawn < st.maxRows) { y = st.rowsDrawn * cs; st.rowsDrawn++; }
+  else {
+    ctx.drawImage(canvas, 0, cs, canvas.width, canvas.height - cs, 0, 0, canvas.width, canvas.height - cs);
+    y = canvas.height - cs; st.firstGen++;
   }
-
-  canvas.width  = cols * cellSize;  // ensure width set
-  canvas.height = newH;             // resizing clears canvas
-
-  if (tmp) ctx.drawImage(tmp, 0, 0);
-
-  // Draw new row at the bottom
-  const imgData = ctx.createImageData(cols * cellSize, cellSize);
-  const d = imgData.data;
-  for (let col = 0; col < cols; col++) {
-    const v = cells[col];
-    const r = v ? ON_R : OFF_R, g = v ? ON_G : OFF_G, b = v ? ON_B : OFF_B;
-    for (let dy = 0; dy < cellSize; dy++) {
-      for (let dx = 0; dx < cellSize; dx++) {
-        const px = (dy * cols * cellSize + col*cellSize+dx)*4;
-        d[px]=r; d[px+1]=g; d[px+2]=b; d[px+3]=255;
-      }
-    }
-  }
-  ctx.putImageData(imgData, 0, newH - cellSize);
-  canvasWrap.scrollTop = canvasWrap.scrollHeight;
+  const img = ctx.createImageData(canvas.width, cs);
+  fillRowPixels(img.data, rowArr, 0, st.vw, cs, canvas.width);
+  ctx.putImageData(img, 0, y);
+  hoverMap = { vs: st.vs, c0: 0, cs, genBase: st.firstGen, rows: st.rowsDrawn, cols: st.vw };
 }
 
-// Draw single-row preview strip (step mode header)
-function renderStepRow(cells, cellSize) {
-  const cols = cells.length;
-  const cs = Math.min(cellSize, Math.floor(stepRowCanvas.clientWidth / cols)) || 1;
-  stepRowCanvas.width  = cols * cs;
-  stepRowCanvas.height = 32;
+// Vorschaustreifen: aktueller Ausschnitt, 1 Pixel pro Zelle, per CSS gestreckt
+function renderStepRow(rowArr) {
+  const n = rowArr.length;
+  stepRowCanvas.width = n; stepRowCanvas.height = 1;
   const rctx = stepRowCanvas.getContext('2d');
-  for (let col = 0; col < cols; col++) {
-    rctx.fillStyle = cells[col] ? '#7ec845' : '#111408';
-    rctx.fillRect(col * cs, 0, cs, 32);
-  }
+  const img = rctx.createImageData(n, 1);
+  fillRowPixels(img.data, rowArr, 0, n, 1, n);
+  rctx.putImageData(img, 0, 0);
 }
 
 // ═══════════════════════════════════════════════════════════
-//  STATE
+//  STATE / UI ELEMENTS
 // ═══════════════════════════════════════════════════════════
 const canvas      = document.getElementById('ca-canvas');
 const ctx         = canvas.getContext('2d');
@@ -470,17 +565,12 @@ const stepRowCanvas = document.getElementById('step-row-canvas');
 const canvasWrap  = document.getElementById('canvas-wrap');
 
 let mode = 'batch'; // 'batch' | 'step'
-let lastGrid = null, lastCellSize = 2;
+let lastGrid = null, lastView = null;
 
-// Step state
-let stepState = {
-  lut: null, current: null, width: 0, gen: 0, initBits: null,
-  running: false, interval: null, padding: 0
-};
+const emptyStep = () => ({ lut: null, cur: null, N: 0, ring: false, vs: 0, vw: 0, off: 0, budget: 0, gen: 0,
+  cs: 2, maxRows: 0, rowsDrawn: 0, firstGen: 0, running: false, interval: null });
+let stepState = emptyStep();
 
-// ═══════════════════════════════════════════════════════════
-//  UI ELEMENTS
-// ═══════════════════════════════════════════════════════════
 const initInput   = document.getElementById('init-input');
 const statusBar   = document.getElementById('status-bar');
 const genDisplay  = document.getElementById('gen-display');
@@ -499,6 +589,9 @@ const ruleInput   = document.getElementById('rule-input');
 const genVal      = document.getElementById('gen-val');
 const cellVal     = document.getElementById('cell-val');
 const padVal      = document.getElementById('pad-val');
+const boundSel    = document.getElementById('bound-select');
+const viewCenterInput = document.getElementById('view-center');
+const autopadCheck = document.getElementById('autopad-check');
 
 const btnRun      = document.getElementById('btn-run');
 const btnClear    = document.getElementById('btn-clear');
@@ -517,19 +610,25 @@ function showStatus(msg, type='ok') {
   statusBar.textContent = msg;
   statusBar.className = 'status-bar status-' + type;
 }
+// Regel 0 ist gültig — nur leere/ungültige Eingabe fällt auf 110 zurück
+function readRule() {
+  const v = parseInt(ruleInput.value, 10);
+  return Number.isFinite(v) ? Math.max(0, Math.min(255, v)) : 110;
+}
+function density(arr) { let s = 0; for (const v of arr) s += v; return arr.length ? ((s / arr.length) * 100).toFixed(1) + '%' : '—'; }
 
 // ── Slider updates
 genSlider.addEventListener('input',  () => genVal.textContent  = genSlider.value);
 cellSlider.addEventListener('input', () => {
   cellVal.textContent = cellSlider.value;
-  if (lastGrid && mode === 'batch') renderBatch(lastGrid, +cellSlider.value);
+  if (lastGrid && mode === 'batch') {
+    const clipped = renderBatch(lastGrid, +cellSlider.value, lastView);
+    if (clipped) showStatus('Zellgröße zu groß für den Canvas – nur der mittlere Teil des Ausschnitts wird gezeigt.', 'info');
+  }
 });
 padSlider.addEventListener('input',  () => padVal.textContent  = padSlider.value);
-ruleInput.addEventListener('input',  () => statRule.textContent = ruleInput.value || '110');
-stepSpeed.addEventListener('input',  () => stepSpeedVal.textContent = stepSpeed.value);
+ruleInput.addEventListener('input',  () => statRule.textContent = readRule());
 
-// ── Auto-pad checkbox: grey out manual pad slider
-const autopadCheck = document.getElementById('autopad-check');
 function updatePadState() {
   const auto = autopadCheck.checked;
   padSlider.disabled = auto;
@@ -554,103 +653,136 @@ function setMode(m) {
   stopAuto();
 }
 
+const boundName = { zero: 'Nullen', ring: 'periodisch', cts: 'CTS-Blöcke b1^∞·b2·b3^∞' };
+
 // ═══════════════════════════════════════════════════════════
 //  BATCH RUN
 // ═══════════════════════════════════════════════════════════
 btnRun.addEventListener('click', () => {
   const bits = parseBitstring(initInput.value);
-  if (!bits.length) { showStatus('Kein Bitstring gefunden.', 'err'); return; }
-  if (bits.length > 50000) { showStatus('Band zu lang (max 50000).', 'err'); return; }
+  let src;
+  try { src = makeSource(boundSel.value, bits); } catch (e) { showStatus(e.message, 'err'); return; }
 
   const numGens  = +genSlider.value;
   const cellSize = +cellSlider.value;
-  const autopad  = document.getElementById('autopad-check').checked;
-  const padding  = autopad ? numGens : +padSlider.value;
-  const ruleN    = Math.max(0, Math.min(255, +ruleInput.value || 110));
+  const ruleN    = readRule();
   const lut      = buildLUT(ruleN);
+  const view     = chooseView(src, numGens, maxViewCols(numGens, cellSize));
+  const simW     = view.vw + 2 * (numGens - 1);
+  if (simW * numGens > MAX_WORK) {
+    showStatus(`Zu viel Rechenarbeit (${simW} Zellen × ${numGens} Gen). Weniger Generationen oder kleineren Ausschnitt wählen.`, 'err');
+    return;
+  }
 
-  showStatus(`Berechne ${numGens} Gen · ${bits.length+2*padding} Zellen…`, 'info');
+  showStatus(`Berechne ${numGens} Gen · ${simW} Zellen…`, 'info');
   setTimeout(() => {
     const t0 = performance.now();
-    const { grid, width } = simulateBatch(bits, numGens, lut, padding);
+    const { grid } = simulateView(src, view, numGens, lut);
     const t1 = performance.now();
-    renderBatch(grid, cellSize);
-    lastGrid = grid; lastCellSize = cellSize;
+    renderBatch(grid, cellSize, view);
+    lastGrid = grid; lastView = view;
 
-    const last = grid[grid.length-1];
-    const ones = last.reduce((a,b) => a+b, 0);
-    statWidth.textContent   = width;
+    statWidth.textContent   = view.vw;
     statGens.textContent    = numGens;
     statRule.textContent    = ruleN;
-    statDensity.textContent = ((ones/width)*100).toFixed(1)+'%';
-    genDisplay.textContent  = numGens;
-    showStatus(`✓ ${numGens} Gen · ${width} Zellen · ${(t1-t0).toFixed(0)}ms`, 'ok');
+    statDensity.textContent = density(grid[grid.length-1]);
+    genDisplay.textContent  = numGens - 1;
+    showStatus(`✓ ${numGens} Gen · Rand: ${boundName[src.kind]} · Ausschnitt Zelle ${view.vs}…${view.vs + view.vw - 1}` +
+      ` · simuliert ${simW} Zellen (Lichtkegel, exakt) · ${(t1-t0).toFixed(0)}ms` +
+      (view.clipped ? ' · Ausschnitt durch Canvas-Grenze beschränkt (Ausschnitt-Mitte setzen)' : ''), 'ok');
   }, 10);
 });
 
 // ═══════════════════════════════════════════════════════════
 //  STEP MODE
+//  Budget = Generationen-Regler: so weit reicht der Lichtkegel-Rand.
+//  Ring-Modus (≤ 200 000 Zellen) rechnet echt periodisch und ohne Budget.
 // ═══════════════════════════════════════════════════════════
+function stepView() {
+  const st = stepState;
+  if (!st.ring) return st.cur.subarray(st.off, st.off + st.vw);
+  const out = new Uint8Array(st.vw), n = st.N;
+  for (let j = 0; j < st.vw; j++) out[j] = st.cur[(((st.vs + j) % n) + n) % n];
+  return out;
+}
+
+function setStepButtons(on) {
+  btnStepOne.disabled = btnStepTen.disabled = btnStepPlay.disabled = !on;
+}
+
 function stepInit() {
+  stopAuto();
   const bits = parseBitstring(initInput.value);
-  if (!bits.length) { showStatus('Kein Bitstring gefunden.', 'err'); return; }
+  let src;
+  try { src = makeSource(boundSel.value, bits); } catch (e) { showStatus(e.message, 'err'); return; }
 
-  const autopad = document.getElementById('autopad-check').checked;
-  const padding = autopad ? +genSlider.value : +padSlider.value;
-  const ruleN   = Math.max(0, Math.min(255, +ruleInput.value || 110));
-  const padded  = new Uint8Array([...new Array(padding).fill(0), ...bits, ...new Array(padding).fill(0)]);
-  const width   = padded.length;
+  const B     = +genSlider.value;
+  const cs    = +cellSlider.value;
+  const ruleN = readRule();
+  const maxRows = Math.max(16, Math.min(STEP_MAX_ROWS, Math.floor(MAX_CANVAS_H / cs)));
+  const view  = chooseView(src, B, maxViewCols(maxRows, cs));
+  const ring  = src.kind === 'ring' && src.n <= 200000;
 
-  stepState = { lut: buildLUT(ruleN), current: padded, width, gen: 0, initBits: bits, running: false, interval: null, padding };
+  let cur, N, off;
+  if (ring) { N = src.n; cur = Uint8Array.from(src.bits); off = 0; }
+  else {
+    N = view.vw + 2 * B; off = B; cur = new Uint8Array(N);
+    for (let i = 0; i < N; i++) cur[i] = src.at(view.vs - B + i);
+  }
+  stepState = { lut: buildLUT(ruleN), cur, N, ring, vs: view.vs, vw: view.vw, off,
+    budget: ring ? Infinity : B, gen: 0, cs, maxRows, rowsDrawn: 0, firstGen: 0, running: false, interval: null };
 
-  // Init canvas — reset to empty, appendRow sets dimensions
-  const cs = +cellSlider.value;
-  canvas.width  = 0;
-  canvas.height = 0;
-  appendRow(padded, cs);
-  renderStepRow(padded, cs);
+  canvas.width  = view.vw * cs;
+  canvas.height = maxRows * cs;
+  ctx.fillStyle = `rgb(${OFF_R},${OFF_G},${OFF_B})`;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   lastGrid = null;
-
-  // Scroll horizontally to center on the actual seed cells (skip left padding)
-  const seedCenterPx = (padding + bits.length / 2) * cs;
-  canvasWrap.scrollLeft = Math.max(0, seedCenterPx - canvasWrap.clientWidth / 2);
+  const row = stepView();
+  drawStepRow(row);
+  renderStepRow(row);
+  canvasWrap.scrollTop = 0;
+  canvasWrap.scrollLeft = Math.max(0, (canvas.width - canvasWrap.clientWidth) / 2);
 
   stepGenCounter.textContent = '0';
   genDisplay.textContent = '0';
-  statWidth.textContent   = width;
+  statWidth.textContent   = view.vw;
   statGens.textContent    = '0';
   statRule.textContent    = ruleN;
-  statDensity.textContent = ((padded.reduce((a,b)=>a+b,0)/width)*100).toFixed(1)+'%';
+  statDensity.textContent = density(row);
 
-  btnStepOne.disabled   = false;
-  btnStepTen.disabled   = false;
-  btnStepPlay.disabled  = false;
+  setStepButtons(true);
   btnStepReset.disabled = false;
-  showStatus(`✓ Init · ${width} Zellen · Regel ${ruleN} · Schrittmodus aktiv`, 'ok');
+  showStatus(`✓ Init · Rand: ${boundName[src.kind]} · Ausschnitt ${view.vw} Zellen · ` +
+    (ring ? 'echter Ring, unbegrenzt' : `exakt bis Generation ${B} (Lichtkegel)`) + ` · Regel ${ruleN}`, 'ok');
 }
 
 function doSteps(n) {
-  if (!stepState.current) return;
-  const cs = +cellSlider.value;
+  const st = stepState;
+  if (!st.cur) return;
   for (let i = 0; i < n; i++) {
-    stepState.current = nextGen(stepState.current, stepState.lut, stepState.width);
-    stepState.gen++;
-    appendRow(stepState.current, cs);
+    if (st.gen >= st.budget) {
+      stopAuto(); setStepButtons(false);
+      showStatus(`Lichtkegel-Grenze erreicht (Generation ${st.budget}): ab hier würde der Rand den Ausschnitt verfälschen. Generationen-Regler erhöhen und neu initialisieren.`, 'err');
+      break;
+    }
+    st.cur = (st.ring ? nextGenRing : nextGen)(st.cur, st.lut, st.N);
+    st.gen++;
+    drawStepRow(stepView());
   }
-  renderStepRow(stepState.current, cs);
-  stepGenCounter.textContent = stepState.gen;
-  genDisplay.textContent     = stepState.gen;
-  const ones = stepState.current.reduce((a,b)=>a+b,0);
-  statGens.textContent    = stepState.gen;
-  statDensity.textContent = ((ones/stepState.width)*100).toFixed(1)+'%';
+  const row = stepView();
+  renderStepRow(row);
+  canvasWrap.scrollTop = Math.max(0, st.rowsDrawn * st.cs - canvasWrap.clientHeight);
+  stepGenCounter.textContent = st.gen;
+  genDisplay.textContent     = st.gen;
+  statGens.textContent       = st.gen;
+  statDensity.textContent    = density(row);
 }
 
 function startAuto() {
-  if (stepState.running) return;
+  if (stepState.running || !stepState.cur) return;
   stepState.running = true;
   btnStepPlay.textContent = '⏸ Pause';
-  const speed = +stepSpeed.value;
-  const ms = Math.round(1000 / speed);
+  const ms = Math.round(1000 / +stepSpeed.value);
   stepState.interval = setInterval(() => doSteps(1), ms);
 }
 
@@ -677,9 +809,9 @@ btnClear.addEventListener('click', () => {
   initInput.value = '';
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   canvas.width = 0; canvas.height = 0;
-  lastGrid = null;
-  stepState = { lut:null, current:null, width:0, gen:0, initBits:null, running:false, interval:null, padding:0 };
-  btnStepOne.disabled = btnStepTen.disabled = btnStepPlay.disabled = btnStepReset.disabled = true;
+  lastGrid = null; lastView = null;
+  stepState = emptyStep();
+  setStepButtons(false); btnStepReset.disabled = true;
   stepGenCounter.textContent = '0';
   statWidth.textContent = statGens.textContent = statDensity.textContent = '—';
   genDisplay.textContent = '0';
@@ -705,62 +837,95 @@ btnExport.addEventListener('click', () => {
 });
 
 // ═══════════════════════════════════════════════════════════
-//  TM-EXPORT  —  Rule-110-Band als universale Turing-Maschine
-//  (Wolfram NKS: 2 Zustände q0/q1, 5 Symbole x,y,a,b,c)
-//  Codierung: x=0=Blank · y=1 · a=Generationenzähler/Scan-Spur · b,c intern
-//  Bits werden gespiegelt abgelegt (Band rechnet Standard Rule 110 gespiegelt).
-//  Verifiziert: TM-Reihe t (rückgespiegelt) = Rule-110-Generation t+1.
+//  TM-EXPORT  —  Regel 110 als NKS-Turingmaschine (2 Zustände, 5 Symbole x,y,a,b,c)
+//  x = 0 (Blank) · y = 1 · a = Generationenzähler / Scan-Spur · b, c intern.
+//  Die Maschine rechnet Regel 110 auf einem 0-Hintergrund, Bits gespiegelt abgelegt.
+//  Geprüft (eigener TM-Simulator): nach dem k-ten verbrauchten Zähler-a steht
+//  Generation k auf dem Band. Sie hält nie an; nach dem letzten Zähler-a läuft
+//  der Kopf endlos nach rechts, ohne das Band weiter zu verändern.
+//  Randsemantik wie in der Simulation: exportiert wird der Lichtkegel
+//  [vs−n, vs+vw+n) des Ausschnitts; dadurch ist der Ausschnitt nach n Generationen
+//  exakt wie auf der unendlichen Zeile (Nullen / Ring / b1^∞·b2·b3^∞).
 // ═══════════════════════════════════════════════════════════
 const NKS_HEAD = 10;   // Leseposition = 2. Zahl der Kopfzeile (0,10); liegt im 0-Hintergrund
-function bitsToNksTape(bits, numGens, margin = 15) {
-  // margin muss > NKS_HEAD sein, damit die Leseposition links des Cores im 0-Hintergrund liegt
-  const gap  = numGens + 3;                       // gap >= numGens: keine Kollision
+const NKS_MARGIN = 15; // > NKS_HEAD: Leseposition links des Kerns im 0-Hintergrund
+const MAX_TM_CELLS = 200000;
+function bitsToNksTape(bits, numGens, margin = NKS_MARGIN) {
+  const gap  = numGens + 3;                       // Platz für das Wachstum (gespiegelt nach rechts)
   const core = bits.slice().reverse().map(v => v ? 'y' : 'x').join('');
   return 'x'.repeat(margin) + core + 'x'.repeat(gap) + 'a'.repeat(numGens);
 }
+const NKS_RULES =
+  '(0,y,1,c,R) (0,c,1,y,L) (0,b,0,x,L) (0,a,0,x,L) (0,x,0,a,R)\n' +
+  '(1,y,1,b,R) (1,c,1,y,L) (1,b,0,y,L) (1,a,0,x,L) (1,x,0,c,R)';
 
-// Kompaktes .tm-Format (wie das 110-Beispiel):
-//   Zeile 1: (Startzustand, Leseposition auf dem Band)
-//   Zeile 2: (Band)
-//   Zeile 3: Transitionen  (Zustand,gelesen,Folgezustand,geschrieben,Richtung)
-// Kopfzeile und Transitionen sind fuer diese Maschine konstant; nur das Band variiert.
-function buildNksTmExport(bits, numGens) {
-  const tape = bitsToNksTape(bits, numGens);
-  const RULES =
-    '(0,y,1,c,R) (0,c,1,y,L) (0,b,0,x,L) (0,a,0,x,L) (0,x,0,a,R) ' +
-    '(1,y,1,b,R) (1,c,1,y,L) (1,b,0,y,L) (1,a,0,x,L) (1,x,0,c,R)';
-  return `(0,${NKS_HEAD})\n(${tape})\n${RULES}\n`;
+// Baut den Export für die aktuelle Quelle (Rand-Auswahl) und n Generationen.
+// Rückgabe: { text, tape, segStart, segLen, exactFrom, exactTo }
+function buildTmExport(src, n, cs) {
+  let segStart, segLen, exactFrom, exactTo;
+  if (src.kind === 'zero') {                       // 0-Hintergrund: Eingabe genügt, exakt überall
+    segStart = 0; segLen = src.n; exactFrom = -n; exactTo = src.n + n - 1;
+  } else {
+    const view = src.kind === 'ring' ? { vs: 0, vw: src.n } : chooseView(src, n, Math.min(4000, maxViewCols(n, cs)));
+    segStart = view.vs - n; segLen = view.vw + 2 * n; exactFrom = view.vs; exactTo = view.vs + view.vw - 1;
+  }
+  if (segLen + 2 * n > MAX_TM_CELLS) throw new Error(`TM-Band zu lang (${segLen + 2 * n} Zellen) – weniger Generationen oder kleineren Ausschnitt wählen.`);
+  const bits = new Array(segLen);
+  for (let j = 0; j < segLen; j++) bits[j] = src.at(segStart + j);
+  const tape = bitsToNksTape(bits, n);
+  const posOf = c => NKS_MARGIN + (segLen - 1 - (c - segStart));
+  const rand = { zero: 'Nullen (unendlicher 0-Hintergrund)', ring: 'periodisch (Ring)', cts: 'CTS-Blöcke b1^∞·b2·b3^∞' }[src.kind];
+  const text =
+    `# Regel 110 als NKS-Turingmaschine (2 Zustände, 5 Symbole) – Export aus CTS2Rule110\n` +
+    `# Rand: ${rand}; ${n} Generationen (Zähler: ${n} × a am rechten Bandende)\n` +
+    `# Exakt: Zellen ${exactFrom}…${exactTo} = Bandpositionen ${posOf(exactTo)}…${posOf(exactFrom)} (gespiegelt: Zelle c → Position ${NKS_MARGIN + segLen - 1 + segStart} − c)\n` +
+    `# Außerhalb davon rechnet die Maschine auf 0-Hintergrund (Lichtkegel-Ausschnitt der unendlichen Zeile).\n` +
+    `# Nach dem k-ten verbrauchten Zähler-a steht Generation k auf dem Band; die Maschine hält nie an.\n` +
+    `(0,${NKS_HEAD})\n(${tape})\n${NKS_RULES}\n`;
+  return { text, tape, segStart, segLen, exactFrom, exactTo };
 }
 
 document.getElementById('btn-export-tm').addEventListener('click', () => {
   const bits = parseBitstring(initInput.value);
-  if (!bits.length) { showStatus('Kein Bitstring für TM-Export gefunden.', 'err'); return; }
   const n = Math.max(1, Math.min(2000, +document.getElementById('tm-gens').value || 20));
-  const text = buildNksTmExport(bits, n);
-  const tape = bitsToNksTape(bits, n);
-  const blob = new Blob([text], { type: 'text/plain' });
+  let ex;
+  try { ex = buildTmExport(makeSource(boundSel.value, bits), n, +cellSlider.value); }
+  catch (e) { showStatus('TM-Export: ' + e.message, 'err'); return; }
+  const blob = new Blob([ex.text], { type: 'text/plain' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `rule110_nks_tm_${bits.length}c_${n}gen.tm`;
+  a.download = `rule110_nks_tm_${ex.segLen}c_${n}gen.tm`;
   a.click();
-  URL.revokeObjectURL(a.href);
-  showStatus(`✓ Turing-Maschine exportiert · Band ${tape.length} Zellen · ${n} Generationen`, 'ok');
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  showStatus(`✓ Turing-Maschine exportiert · Band ${ex.tape.length} Zellen · ${n} Generationen · exakt: Zellen ${ex.exactFrom}…${ex.exactTo}`, 'ok');
 });
 
+
 // ── Presets
+//  Gleiter-Presets werden aus den verifizierten Strukturen der Konstruktion
+//  erzeugt (A: +2 Zellen / 3 Gen., E: −8 / 30) und laufen im Äther auf einem Ring.
 const PRESETS = {
-  single:  '0'.repeat(99) + '1' + '0'.repeat(100),
-  random:  () => Array.from({length:200}, () => Math.random() > 0.5 ? '1' : '0').join(''),
-  ether:   Array.from({length:20}, () => '10011011111000').join(''),
-  glider:  '100110111110001001101111100010011011111000' + '11110001001101111100010011011111000',
-  cook:    '1' + '0'.repeat(50) + '1' + '0'.repeat(50) + '1',
+  single:  { bound: 'zero', bits: () => '0'.repeat(99) + '1' + '0'.repeat(100) },
+  random:  { bound: 'zero', bits: () => Array.from({length:200}, () => Math.random() > 0.5 ? '1' : '0').join('') },
+  ether:   { bound: 'ring', bits: () => BGI.join('').repeat(20) },
+  gliderA: { bound: 'ring', bits: () => etherRing([gliderState(5)], 20).join('') },
+  gliderE: { bound: 'ring', bits: () => etherRing([gliderState(1)], 20).join('') },
+  collide: { bound: 'ring', bits: () => etherRing([gliderState(5), gliderState(1)], 15).join('') },
 };
 document.querySelectorAll('.preset-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const key = btn.dataset.preset;
-    const val = typeof PRESETS[key] === 'function' ? PRESETS[key]() : PRESETS[key];
+    if (key === 'nks') {                       // NKS-Prüfbeispiel durch den Konverter
+      ctsInput.value = '(1)\n(0,1,)';
+      btnConvCTS.click();
+      return;
+    }
+    const p = PRESETS[key];
+    const val = p.bits();
     initInput.value = val;
-    showStatus(`Preset "${key}" · ${val.length} Bits`, 'info');
+    boundSel.value = p.bound;
+    viewCenterInput.value = '';
+    showStatus(`Preset "${btn.textContent}" · ${val.length} Bits · Rand: ${boundName[p.bound]}`, 'info');
   });
 });
 
@@ -768,16 +933,17 @@ document.querySelectorAll('.preset-btn').forEach(btn => {
 canvasWrap.addEventListener('mousemove', e => {
   if (!canvas.width) return;
   const rect = canvas.getBoundingClientRect();
-  const cs   = +cellSlider.value;
-  const col  = Math.floor((e.clientX - rect.left)  / cs);
-  const row  = Math.floor((e.clientY - rect.top)   / cs);
-  if (col >= 0 && col < canvas.width/cs && row >= 0 && row < canvas.height/cs) {
-    hoverInfo.textContent = `Gen ${row} · Zelle ${col}`;
+  const cs   = hoverMap.cs;
+  const col  = Math.floor((e.clientX - rect.left) / cs);
+  const row  = Math.floor((e.clientY - rect.top)  / cs);
+  if (col >= 0 && col < hoverMap.cols && row >= 0 && row < hoverMap.rows) {
+    const gen = hoverMap.genBase + row, cell = hoverMap.vs + hoverMap.c0 + col;
+    hoverInfo.textContent = `Gen ${gen} · Zelle ${cell}`;
     tooltip.style.display = 'block';
     tooltip.style.left = (e.clientX + 12) + 'px';
     tooltip.style.top  = (e.clientY - 4)  + 'px';
-    tooltip.textContent = `[${row}, ${col}]`;
-  }
+    tooltip.textContent = `[${gen}, ${cell}]`;
+  } else { tooltip.style.display = 'none'; }
 });
 canvasWrap.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; hoverInfo.textContent = ''; });
 
@@ -787,9 +953,14 @@ initInput.addEventListener('keydown', e => { if (e.key === 'Enter' && e.ctrlKey)
 showStatus('Bitstring eingeben → Batch oder Schrittweise wählen. Strg+Enter startet.', 'info');
 
 // ═══════════════════════════════════════════════════════════
-//  CTToR110 — Wolfram ANKOS Konstruktion
+//  CTToR110 — Wolfram ANKOS (NKS S. 1116), Cook-Konstruktion
+//  Ausgabe: drei Blöcke {b1, b2, b3}. Gemeint ist die Anfangszeile
+//  … b1 b1 b1 · b2 · b3 b3 b3 …  (b1 links unendlich oft = Taktpulse,
+//  b2 einmal = Startband des CTS, b3 rechts unendlich oft = Regelzyklus).
+//  Einschränkung der Konstruktion: jede Regellänge ist 0 oder ein
+//  Vielfaches von 6.
 // ═══════════════════════════════════════════════════════════
-const BGI = [1,0,0,1,1,0,1,1,1,1,1,0,0,0];
+const BGI = [1,0,0,1,1,0,1,1,1,1,1,0,0,0];          // Äther, Periode 14 (räumlich) / 7 (zeitlich)
 function cbg(s, n) {
   const out = [];
   for (let i = 0; i < n; i++) out.push(BGI[(((s - 1 + i) % 14) + 14) % 14]);
@@ -804,8 +975,10 @@ function cIntegerDigits(num, base, length) {
 }
 const C_VAL0 = 246005560154658471735510051750569922628065067661n;
 const C_VAL1 = 1043746165489466852897089830441756550889834709645n;
-const C_INIT0 = cIntegerDigits(216n * (C_VAL0 + 432n * 1049n), 2, 0);
-const C_INIT1 = cIntegerDigits(216n * (C_VAL1 + 432n * 1049n), 2, 0);
+// NKS: IntegerDigits[216 (# + 432 10^49), 2] — die Hochzahl 49 gehört zu 10.
+// Ergibt je 180 Zellen pro CTS-Bit, Anfang und Ende in Ätherphase.
+const C_INIT0 = cIntegerDigits(216n * (C_VAL0 + 432n * 10n ** 49n), 2, 0);
+const C_INIT1 = cIntegerDigits(216n * (C_VAL1 + 432n * 10n ** 49n), 2, 0);
 const C_C = {
   1:[22,11,3,39,3,1,63,12,2,48,5,4,29,26,4,43,26,4,23,3,4,47,4,4],
   2:[22,11,3,39,3,1,87,6,2,32,2,4,13,23,4,27,16,4],
@@ -813,6 +986,7 @@ const C_C = {
   4:[17,22,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
   5:[41,16,4,47,18,4,15,19,4,17,22,4,39,27,4,47,4,4],
 };
+// Strukturen: 1–4 = E-Gleiter (−8 Zellen / 30 Gen.), 5 = A-Gleiter (+2 / 3)
 const C_SDEF = {
   1:[3,0,1,10,4,8,2], 2:[3,0,1,1,619,15,2], 3:[3,0,1,10,4956,18,2],
   4:[0,0,9,10,4,8,1], 5:[5,0,9,14,1,1,1],
@@ -826,14 +1000,14 @@ function cEv(st) {
   const [x, y] = st.d, pl = st.pl, pr = st.pr, b = st.b;
   const joined = cbg(pl - 2, 2).concat(b, cbg(pr, 2));
   const conv = cListConvolve([1,2,4], joined);
-  const r = conv.map(v => { const ba = (1 << v) & 110; return ba > 0 ? 1 : (ba < 0 ? -1 : 0); });
+  const r = conv.map(v => ((1 << v) & 110) ? 1 : 0);
   const lr = r.length;
   const bgPl3 = cbg(pl + 3, lr);
   let pl1 = lr;
-  for (let i = 0; i < lr; i++) { const d = r[i] - bgPl3[i]; if (d === 1 || d === -1) { pl1 = i + 1; break; } }
+  for (let i = 0; i < lr; i++) { if (r[i] !== bgPl3[i]) { pl1 = i + 1; break; } }
   const bgPr5 = cbg(pr + 5 - lr, lr);
   let pr1 = 1;
-  for (let i = lr - 1; i >= 0; i--) { const d = r[i] - bgPr5[i]; if (d === 1 || d === -1) { pr1 = i + 1; break; } }
+  for (let i = lr - 1; i >= 0; i--) { if (r[i] !== bgPr5[i]) { pr1 = i + 1; break; } }
   if (pr1 < pl1) pr1 = pl1;
   return { d:[x+pl1-2, y+1], pl: pl1+((pl+2)%14), pr: 1+((pr+4)%14)+pr1-lr, b: r.slice(pl1-1, pr1) };
 }
@@ -843,22 +1017,41 @@ function cMakeStruct(n) {
   let result = [gr], p2 = p + 1;
   const restEq = (a) => a.pl === gr.pl && a.pr === gr.pr && a.b.length === gr.b.length && a.b.every((v,i)=>v===gr.b[i]);
   const test = (lst) => { if (restEq(lst[lst.length-1])) p2--; return p2 > 0; };
-  while (test(result)) result = result.concat([cEv(result[result.length-1])]);
+  while (test(result)) result.push(cEv(result[result.length-1]));
   return result.slice(0, -1);
 }
 let C_S = null;
 function cInitStructs() { C_S = {}; for (let n = 1; n <= 5; n++) C_S[n] = cMakeStruct(n); }
+// Hängt eine Struktur an acc an (mutiert acc.b, vermeidet quadratisches concat)
 function cSadd(acc, item) {
-  const [x, y] = acc.d, b = acc.b, [dx, dy] = item.d, st = item.st;
+  const [x, y] = acc.d, [dx, dy] = item.d, st = item.st;
   let x1 = dx - x, y1 = dy - y;
   while (y1 > 0) { if (st.length === 30) { x1 += 8; y1 -= 30; } else { x1 -= 2; y1 -= 3; } }
   const targetY = -y1;
-  let b2 = null, x2 = 0;
-  for (const e of st) { if (e.d[1] === targetY) { const ex = e.d[0]; b2 = cbg(e.pl - x1 - ex, x1 + ex).concat(e.b); x2 = ex + e.b.length; break; } }
-  if (b2 === null) throw new Error(`sadd: kein Match für y=${targetY}`);
-  return { d:[x2, targetY], b: b.concat(b2) };
+  for (const e of st) {
+    if (e.d[1] === targetY) {
+      const ex = e.d[0];
+      for (const v of cbg(e.pl - x1 - ex, x1 + ex)) acc.b.push(v);
+      for (const v of e.b) acc.b.push(v);
+      acc.d = [ex + e.b.length, targetY];
+      return acc;
+    }
+  }
+  throw new Error(`sadd: kein Match für y=${targetY}`);
+}
+// Prüft die Eingabe gegen die Einschränkungen der Konstruktion
+function cValidateCTS(rules, init) {
+  if (!Array.isArray(rules) || rules.length === 0) throw new Error('Keine Produktionen – das CTS braucht mindestens eine Regel.');
+  if (!init || init.length === 0) throw new Error('Startband ist leer – das CTS hält sofort, es gibt nichts zu kodieren.');
+  const isBit = v => v === 0 || v === 1;
+  if (!init.every(isBit)) throw new Error('Startband: nur 0/1 erlaubt.');
+  rules.forEach((r, i) => { if (!r.every(isBit)) throw new Error(`Produktion ${i}: nur 0/1 erlaubt.`); });
+  const bad = rules.map((r, i) => [i, r.length]).filter(([, l]) => l % 6 !== 0);
+  if (bad.length) throw new Error('Regellänge muss 0 oder ein Vielfaches von 6 sein (Einschränkung der Cook/Wolfram-Konstruktion, NKS S. 1116). Verletzt: ' +
+    bad.map(([i, l]) => `P${i} hat Länge ${l}`).join(', ') + '.');
 }
 function ctToR110(rules, init) {
+  cValidateCTS(rules, init);
   if (!C_S) cInitStructs();
   let g1 = [];
   for (const rule of rules) {
@@ -869,82 +1062,442 @@ function ctToR110(rules, init) {
     const walk = (x) => { if (typeof x === 'number') return expandInt(x); let out = []; for (const it of x) out = out.concat(walk(it)); return out; };
     g1 = g1.concat(walk(block));
   }
-  const s3 = C_S[3], n = g1.length;
-  let g2 = [];
-  for (let i = 0; i < n; i++) {
-    const cur = g1[i], rot = g1[((i-6)%n+n)%n];
-    const special = cur.d[0]===22 && cur.d[1]===11 && cur.st===s3 && rot.d[0]===22 && rot.d[1]===11 && rot.st===s3;
-    g2.push(special ? { d:[20,8], st:s3 } : cur);
-  }
-  g1 = g2.slice();
+  // Hinweis: Das NKS-Original enthält hier eine MapThread-Ersetzung
+  // {d[22,11],s3} → {d[20,8],s3}. Dort ist s3 ein undefiniertes Symbol (≠ s[3]),
+  // die Ersetzung greift also nie. Sie wird deshalb bewusst NICHT ausgeführt.
+  let g2 = g1.slice();
   let nr = 0;
   const sumY = (arr) => arr.reduce((a,it) => a + it.d[1], 0);
-  while (sumY(g2) % 30 !== 0) { nr++; g2 = g2.concat(g1); if (nr > 1000) throw new Error('g2-Schleife divergiert'); }
+  while (sumY(g2) % 30 !== 0) { nr++; g2 = g2.concat(g1); }
+  if (nr === 0) throw new Error('Für dieses CTS ist die Konstruktion nicht definiert: Σy der Gleiterliste ≡ 0 (mod 30) ⇒ nr = 0, ' +
+    'der Taktabstand sp wäre unendlich (auch im NKS-Original eine Division durch 0). Andere Regelwahl versuchen.');
   let y1 = g2[0].d[1] - 11; if (y1 < 0) y1 += 30;
   const lastStruct = g2[g2.length-1].st;
   let x1 = 0;
   for (const e of lastStruct) if (e.d[1] === y1) x1 = e.d[0] + e.b.length;
-  let g3 = { d:[x1, y1], b:[] };
-  for (const item of g2) g3 = cSadd(g3, item);
+  const g3 = { d:[x1, y1], b:[] };
+  for (const item of g2) cSadd(g3, item);
   const sp = Math.ceil(5 * g3.b.length / (28 * nr) + 2);
-  const foldList = [];
+  const g4 = { d:[17,1], b:[] };
   for (let i = 0; i < 3; i++) {
-    foldList.push({ d:[sp*28+6,1], st:C_S[5] });
-    foldList.push({ d:[398,1], st:C_S[5] });
-    foldList.push({ d:[342,1], st:C_S[5] });
-    foldList.push({ d:[370,1], st:C_S[5] });
+    cSadd(g4, { d:[sp*28+6,1], st:C_S[5] });
+    cSadd(g4, { d:[398,1], st:C_S[5] });
+    cSadd(g4, { d:[342,1], st:C_S[5] });
+    cSadd(g4, { d:[370,1], st:C_S[5] });
   }
-  let g4 = { d:[17,1], b:[] };
-  for (const item of foldList) g4 = cSadd(g4, item);
   const b1 = g4.b.concat(cbg(4, 11));
-  let b2 = [];
   const rep = sp*2 + 1 + 24*init.length;
-  for (let i = 0; i < rep; i++) b2 = b2.concat(BGI);
-  for (const bit of init) b2 = b2.concat(bit === 0 ? C_INIT0 : C_INIT1);
-  b2 = b2.concat(cbg(1, 9));
+  if (!Number.isFinite(rep) || rep > 1e6) throw new Error('Konstruktion zu groß (Äther-Vorlauf ' + rep + ' Perioden).');
+  const b2 = [];
+  for (let i = 0; i < rep; i++) for (const v of BGI) b2.push(v);
+  const dataOffset = b2.length;                       // Beginn des Datenblocks in b2
+  // Der Automat liest das Band von rechts (vorderstes Symbol rechts, Anhängen links).
+  // Damit init[0] zuerst gelesen wird, steht das Startband gespiegelt im Datenblock.
+  // (NKS-Original setzt init in Leserichtung links→rechts; per Gleiter-Tracking geprüft:
+  //  sonst rechnet der Automat das CTS mit umgekehrtem Startband.)
+  for (let k = init.length - 1; k >= 0; k--) for (const v of (init[k] === 0 ? C_INIT0 : C_INIT1)) b2.push(v);
+  const dataLen = b2.length - dataOffset;
+  for (const v of cbg(1, 9)) b2.push(v);
   let bgnr = 60 - g2[0].d[0] + g3.d[0];
   if (g2[0].d[1] < g3.d[1]) bgnr += 8;
-  b2 = b2.concat(cbg(6, bgnr));
+  for (const v of cbg(6, bgnr)) b2.push(v);
   const b3 = g3.b;
-  return { blocks: [b1, b2, b3], nr, sp, full: b1.concat(b2, b3) };
+  return { blocks: [b1, b2, b3], nr, sp, dataOffset, dataLen, full: b1.concat(b2, b3) };
 }
+// Lädt das .cts-Format von ts2cts.html / ts2cts_saware.html:
+//   erste Klammer (startband), dann je Zeile (index, trigger, bits…), trigger ∈ {0, 1, H}
+//   ;-Kommentare, Metazeile ";@ p=… vec=…" wird gelesen und angezeigt.
+// Semantik wie in ts2cts.html: angehängt wird nur bei Trigger 1. Trigger 0 hängt nie an
+// (wirkt als leere Regel). H-Slots (Halt-Symbol) werden für Regel 110 als normale leere
+// Regel behandelt — ein Halt ist im Automaten nicht abbildbar.
 function parseCTSForR110(src) {
+  const meta = /^\s*;@\s*p=(\d+)\s+vec=(\d+)/m.exec(src);
   const lines = src.split('\n').map(l => l.replace(/;.*$/,'').trim()).filter(Boolean);
   let startBits = null;
   const prods = [];
-  for (const line of lines) {
-    if (!line.startsWith('(') || !line.endsWith(')')) continue;
+  let hSlots = 0, zeroTrigWithBits = 0;
+  const toBits = (arr, what) => arr.map(x => {
+    if (x !== '0' && x !== '1') throw new Error(`${what}: ungültiges Symbol „${x}“ (nur 0/1 erlaubt).`);
+    return +x;
+  });
+  lines.forEach((line, ln) => {
+    if (!line.startsWith('(') || !line.endsWith(')')) throw new Error(`Zeile ${ln+1}: erwartet „(…)“, gefunden „${line.slice(0, 30)}“.`);
     const parts = line.slice(1, -1).split(',').map(s => s.trim());
-    if (startBits === null) { startBits = parts.filter(x => x !== '').map(Number); continue; }
-    prods.push(parts);
-  }
-  if (!startBits) throw new Error('Kein Startband gefunden');
-  const rules = prods.map(p => p.slice(2).filter(x => x !== '').map(Number));
-  return { rules, init: startBits, numProds: prods.length };
+    if (startBits === null) { startBits = toBits(parts.filter(x => x !== ''), 'Startband'); return; }
+    if (parts.length < 2) throw new Error(`Zeile ${ln+1}: Produktion braucht das Format (index, trigger, bits…).`);
+    const trig = parts[1].toUpperCase();
+    if (!['0', '1', 'H'].includes(trig)) throw new Error(`Zeile ${ln+1}: ungültiger Trigger „${parts[1]}“ (erlaubt: 0, 1, H).`);
+    const bits = toBits(parts.slice(2).filter(x => x !== ''), `Produktion ${prods.length}`);
+    if (trig === 'H') { hSlots++; prods.push([]); }
+    else if (trig === '0') { if (bits.length) zeroTrigWithBits++; prods.push([]); }
+    else prods.push(bits);
+  });
+  if (startBits === null) throw new Error('Kein Startband gefunden – erste Zeile muss (bits…) sein.');
+  if (!prods.length) throw new Error('Keine Produktionen – das CTS braucht mindestens eine Regel.');
+  if (!startBits.length) throw new Error('Startband ist leer – das CTS hält sofort, es gibt nichts zu kodieren.');
+  return { rules: prods, init: startBits, numProds: prods.length, hSlots, zeroTrigWithBits,
+    meta: meta ? { p: +meta[1], vec: +meta[2] } : null };
 }
+
+// ── Äquivalente Streckung auf Regellängen ≡ 0 (mod 6) ──────────────────────
+//  Faktor f: Datenbit b → b 0^(f−1); Regel w_i → S(w_i) gefolgt von f−1 leeren Regeln.
+//  Invariante: nach f·t Schritten des gestreckten Systems ist dessen Band S(Band_t)
+//  und der Regelzeiger steht auf f·(t mod p). Beweis: Schritt 1 eines Blocks liest das
+//  Originalbit b mit Regel S(w_k) (hängt bei b=1 S(w_k) an), die folgenden f−1 Schritte
+//  lesen die Füll-Nullen mit leeren Regeln und löschen sie nur. Leeres Band (Halt)
+//  tritt daher genau zu denselben Originalschritten auf.
+//  1 Schritt des Originals = f Schritte des gestreckten CTS.
+const cGcd = (a, b) => { while (b) [a, b] = [b, a % b]; return a; };
+function ctsStretchFactor(rules) {
+  const g = rules.reduce((acc, r) => cGcd(acc, r.length), 0);   // 0, wenn alle leer
+  return 6 / cGcd(6, g);                                         // gcd(6,0) = 6 → f = 1
+}
+function ctsStretch(rules, init, f) {
+  if (f === 1) return { rules: rules.map(r => r.slice()), init: init.slice() };
+  const S = bits => { const o = []; for (const b of bits) { o.push(b); for (let k = 1; k < f; k++) o.push(0); } return o; };
+  const R = [];
+  for (const r of rules) { R.push(S(r)); for (let k = 1; k < f; k++) R.push([]); }
+  return { rules: R, init: S(init) };
+}
+// Rückabbildung S⁻¹ (null, wenn das Band nicht die Form S(x) hat)
+function ctsUnstretch(tape, f) {
+  if (tape.length % f) return null;
+  const o = [];
+  for (let i = 0; i < tape.length; i += f) {
+    for (let k = 1; k < f; k++) if (tape[i + k]) return null;
+    o.push(tape[i]);
+  }
+  return o;
+}
+// Bereitet ein beliebiges CTS vor: strecken (nur falls nötig), kodieren.
+// Ist die Konstruktion für den kleinsten Faktor nicht definiert (nr = 0),
+// wird das nächste Vielfache versucht (die Äquivalenz gilt für jedes f).
+const MAX_EST_CELLS = 2e7;
+function prepareCTSForR110(rules, init) {
+  const f0 = ctsStretchFactor(rules);
+  let lastErr = null;
+  for (let m = 1; m <= 4; m++) {
+    const f = f0 * m;
+    const s = ctsStretch(rules, init, f);
+    const est = 600 * (s.rules.reduce((a, r) => a + r.length, 0) + s.rules.length) * 30;
+    if (est > MAX_EST_CELLS * 10) throw new Error(`CTS zu groß für die Regel-110-Kodierung (geschätzt bis ${Math.round(est / 1e6)} Mio. Zellen, Streckfaktor ${f}).`);
+    try {
+      const result = ctToR110(s.rules, s.init);
+      if (result.full.length > MAX_EST_CELLS) throw new Error(`Kodierung zu groß (${result.full.length.toLocaleString('de')} Zellen).`);
+      return { result, f, f0, rules: s.rules, init: s.init };
+    } catch (e) {
+      if (!/nr = 0/.test(e.message)) throw e;
+      lastErr = e;
+    }
+  }
+  throw lastErr;
+}
+
+// CTS-Referenzsimulator (Wolfram-Konvention): erstes Bit lesen und löschen;
+// war es 1, wird die aktuelle Regel angehängt; Regelzeiger rückt immer weiter.
+function ctsTrace(rules, init, maxSteps = 24, maxLen = 4000) {
+  let tape = init.slice(), k = 0;
+  const steps = [{ t: 0, k: null, head: null, tape: tape.slice() }];
+  let halted = tape.length === 0, cut = false;
+  for (let t = 1; t <= maxSteps && !halted; t++) {
+    const head = tape.shift();
+    if (head === 1) for (const v of rules[k]) tape.push(v);
+    steps.push({ t, k, head, tape: tape.slice() });
+    k = (k + 1) % rules.length;
+    if (tape.length === 0) halted = true;
+    if (tape.length > maxLen) { cut = true; break; }
+  }
+  return { steps, halted, cut };
+}
+function formatCtsTrace(tr, width = 44) {
+  const lines = tr.steps.map(s => {
+    const tape = s.tape.join('') || '∅';
+    const shown = tape.length > width ? tape.slice(0, width) + '…(' + s.tape.length + ')' : tape;
+    const what = s.k === null ? 'Start   ' : `P${s.k} ${s.head ? '1:+' : '0:-'} `;
+    return String(s.t).padStart(3) + '  ' + what.padEnd(8) + shown;
+  });
+  if (tr.halted) lines.push('     → Band leer: CTS hält.');
+  else if (tr.cut) lines.push('     → Band wächst, Anzeige abgebrochen.');
+  else lines.push('     … (weitere Schritte nicht gezeigt)');
+  return lines.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════
+//  RÜCKLESEN — CTS-Zustand per Gleiter-Tracking aus dem Automaten
+//  1. Äther-Segmentierung: Zelle ist Defekt, wenn kein 14er-Fenster sie überdeckt,
+//     das einer der 14 Äther-Rotationen gleicht (lokale Phase, Periode 7 / Versatz 14).
+//  2. Stationäre C-Gleiter: Bits über 21 Gen. 7-periodisch (±3 Zellen), Defekte über
+//     eine volle Periode (7 Gen.) vereinigt → jeder C ist dann genau 6 Zellen breit.
+//  3. Symbol = 4 stationäre C mit Startabständen 45, 45, 37 („1“) bzw. 45, 29, 37 („0“);
+//     jede E-Kreuzung schiebt ein C um +7, daher Abstände + 7·k (k = 0..2) zulässig.
+//     Isolierte Dreiergruppen (frisch ossifiziert, ein C gerade gekreuzt) werden mitgezählt.
+//  4. Leserichtung der Konstruktion: vorderstes Symbol rechts, Anhängen links (ossifiziert).
+//     Band-Historie = Startband (rechts→links) + angehängte Symbole in Erscheinungsreihenfolge;
+//     gelesen = zusammenhängend verschwundenes Präfix dieser Warteschlange.
+// ═══════════════════════════════════════════════════════════
+const RB_ETHER14 = (() => {
+  const t = new Uint8Array(1 << 14);
+  for (let s = 0; s < 14; s++) { let v = 0; for (let k = 0; k < 14; k++) v = (v << 1) | BGI[(s + k) % 14]; t[v] = 1; }
+  return t;
+})();
+function rbDefectMask(row) {
+  const n = row.length, ok = new Uint8Array(n), d = new Uint8Array(n);
+  let v = 0;
+  for (let i = 0; i < n; i++) { v = ((v << 1) | row[i]) & 0x3fff; if (i >= 13 && RB_ETHER14[v]) ok[i - 13] = 1; }
+  let last = -100;
+  for (let j = 0; j < n; j++) { if (ok[j]) last = j; d[j] = (j - last <= 13) ? 0 : 1; }
+  return d;
+}
+function rbClusters(d) {
+  const out = []; let s = -1;
+  for (let i = 0; i <= d.length; i++) {
+    if (i < d.length && d[i]) { if (s < 0) s = i; }
+    else if (s >= 0) { out.push([s, i - 1]); s = -1; }
+  }
+  return out;
+}
+// Bitparallele Regel-110-Simulation eines Bereichs (nur gültiger Lichtkegel wird gerechnet)
+class RbSim {
+  constructor(at, lo, hi) {
+    this.lo = lo; this.N = hi - lo; this.W = Math.ceil(this.N / 32);
+    this.cur = new Uint32Array(this.W); this.nxt = new Uint32Array(this.W); this.t = 0;
+    for (let i = 0; i < this.N; i++) if (at(lo + i)) this.cur[i >> 5] |= 1 << (i & 31);
+  }
+  step(k) {
+    const W = this.W;
+    for (let r = 0; r < k; r++) {
+      const c0 = this.cur, n0 = this.nxt;
+      const w0 = Math.max(0, (this.t >> 5) - 1), w1 = Math.min(W, ((this.N - this.t) >> 5) + 2);
+      for (let w = w0; w < w1; w++) {
+        const c = c0[w];
+        const L = (c << 1) | (w ? c0[w - 1] >>> 31 : 0);
+        const R = (c >>> 1) | (w < W - 1 ? c0[w + 1] << 31 : 0);
+        n0[w] = (c | R) & ~(L & c & R);                  // Regel 110 = (C ∨ R) ∧ ¬(L ∧ C ∧ R)
+      }
+      this.cur = n0; this.nxt = c0; this.t++;
+    }
+  }
+  row(a, b) {
+    const o = new Uint8Array(b - a);
+    for (let i = a; i < b; i++) { const j = i - this.lo; o[i - a] = (this.cur[j >> 5] >>> (j & 31)) & 1; }
+    return o;
+  }
+}
+function rbStationary(sim, wl, wr) {
+  const R = 3, rows = [];
+  for (let k = 0; k < 28; k++) { rows.push(sim.row(wl, wr)); if (k < 27) sim.step(1); }
+  const n = rows[0].length, chg = new Uint8Array(n), uni = new Uint8Array(n);
+  for (let k = 0; k < 7; k++) { const d = rbDefectMask(rows[k]); for (let i = 0; i < n; i++) uni[i] |= d[i]; }
+  for (let k = 0; k < 21; k++) { const a = rows[k], b = rows[k + 7]; for (let i = 0; i < n; i++) if (a[i] !== b[i]) chg[i] = 1; }
+  const st = new Uint8Array(n), nextChg = new Int32Array(n);
+  let nc = 1e9; for (let i = n - 1; i >= 0; i--) { if (chg[i]) nc = i; nextChg[i] = nc; }
+  let lastChg = -1e9;
+  for (let i = 0; i < n; i++) { if (chg[i]) lastChg = i; if (uni[i] && i - lastChg > R && nextChg[i] - i > R) st[i] = 1; }
+  return st;
+}
+const rbIn7 = (d, base) => d >= base && d <= base + 14 && (d - base) % 7 === 0;
+function rbSymbols(st, off) {
+  const c = rbClusters(st).filter(([a, e]) => e - a + 1 === 6).map(([a]) => off + a), out = [];
+  const usedC = new Uint8Array(c.length);
+  for (let i = c.length - 4; i >= 0; ) {
+    const d1 = c[i+1]-c[i], d2 = c[i+2]-c[i+1], d3 = c[i+3]-c[i+2];
+    const bit = (rbIn7(d1, 45) && rbIn7(d3, 37)) ? (rbIn7(d2, 45) ? 1 : rbIn7(d2, 29) ? 0 : -1) : -1;
+    if (bit >= 0) { out.push({ p: c[i], bit }); usedC.fill(1, i, i + 4); i -= 4; } else i--;
+  }
+  for (let j = 0; j + 2 < c.length; j++) {
+    if (usedC[j] || usedC[j+1] || usedC[j+2]) continue;
+    if (!(j === 0 || c[j] - c[j-1] > 300) || !(j + 3 >= c.length || c[j+3] - c[j+2] > 300)) continue;
+    const da = c[j+1]-c[j], db = c[j+2]-c[j+1];
+    let bit = -1, p = c[j];
+    if (rbIn7(da, 45) && rbIn7(db, 45)) bit = 1;
+    else if (rbIn7(da, 45) && rbIn7(db, 29)) bit = 0;
+    else if (rbIn7(da, 45) && rbIn7(db, 37)) { bit = 1; p -= 45; }
+    else if (rbIn7(da, 29) && rbIn7(db, 37)) { bit = 0; p -= 45; }
+    if (bit >= 0) { out.push({ p, bit }); j += 2; }
+  }
+  return out.sort((x, y) => x.p - y.p);
+}
+// Inkrementeller Rückleser. res = ctToR110-Ergebnis, T = Generationen.
+function createReadback(res, T, every = 350) {
+  const [b1, b2, b3] = res.blocks, L1 = b1.length, L2 = b2.length, L3 = b3.length;
+  const at = i => i < 0 ? b1[((i % L1) + L1) % L1] : i < L2 ? b2[i] : b3[(i - L2) % L3];
+  const D = res.dataOffset, wl0 = -Math.round(0.3 * T) - 3000, wr0 = 2000;
+  const wl = D + wl0, wr = D + wr0;
+  const sim = new RbSim(at, wl - T - 600, wr + T + 600);
+  const objs = []; let initBits = null, done = false;
+  function sample() {
+    const tt = sim.t, sy = rbSymbols(rbStationary(sim, wl, wr), wl0);
+    if (initBits === null) {
+      const inData = sy.filter(s => s.p >= -20 && s.p < res.dataLen + 20).sort((a, b) => b.p - a.p);
+      initBits = inData.map(s => s.bit);
+      for (const s of inData) objs.push({ bit: s.bit, p: s.p, first: 0, last: 0, seen: 3, initial: true });
+    } else {
+      const used = new Set(), alive = objs.filter(o => tt - o.last <= 15000);
+      const leftmost = alive.length ? Math.min(...alive.map(o => o.p)) : Infinity;
+      for (const s of sy.slice().sort((x, y) => y.p - x.p)) {
+        let best = null;
+        for (const o of alive) {
+          if (used.has(o) || o.bit !== s.bit) continue;
+          if (s.p >= o.p - 3 && s.p <= o.p + 12 + 0.025 * (tt - o.last) && (!best || o.last > best.last)) best = o;
+        }
+        if (!best && s.p >= leftmost - 1000)
+          for (const o of alive) if (!used.has(o) && o.bit === s.bit && o.p <= s.p + 3 && (!best || o.p > best.p)) best = o;
+        if (best) { used.add(best); best.p = s.p; best.last = tt; best.seen++; }
+        else if (s.p < leftmost - 1000) objs.push({ bit: s.bit, p: s.p, first: tt, last: tt, seen: 1, initial: false });
+      }
+    }
+    sim.step(every - 27);
+  }
+  return {
+    get t() { return sim.t; }, T, get done() { return done; },
+    // rechnet bis zum Zeitbudget (ms); Rückgabe: Fortschritt 0..1
+    run(budgetMs) {
+      const t0 = performance.now();
+      while (!done && performance.now() - t0 < budgetMs) { if (sim.t > T) { done = true; break; } sample(); }
+      return Math.min(1, sim.t / T);
+    },
+    result() {
+      const real = objs.filter(o => o.initial || o.seen >= 2);
+      const appended = real.filter(o => !o.initial).sort((a, b) => a.first - b.first);
+      const queue = [...real.filter(o => o.initial).sort((a, b) => b.p - a.p), ...appended];
+      // Hinweis: Startobjekte nach Anfangsposition (rechts zuerst); p der Startobjekte driftet
+      // nur nach rechts und überholt nicht, die Reihenfolge bleibt daher erhalten.
+      const tEnd = Math.min(sim.t, T), gone = o => o.last < tEnd - 15000;
+      let readCount = 0; while (readCount < queue.length && gone(queue[readCount])) readCount++;
+      let m = 0; const readTimes = queue.slice(0, readCount).map(o => (m = Math.max(m, o.last)));
+      return { initBits: initBits || [], queue: queue.map(o => o.bit), readCount, readTimes,
+        appTimes: appended.map(o => o.first), tEnd };
+    },
+  };
+}
+// Referenz für den Abgleich: virtuelle Warteschlange (Startband + alle Anhänge) und Kopfbits
+function ctsQueueRef(rules, init, maxSteps = 5000) {
+  let tape = init.slice(), k = 0; const heads = [], app = [];
+  for (let s = 0; s < maxSteps && tape.length; s++) {
+    const h = tape.shift(); heads.push(h);
+    if (h) for (const b of rules[k]) { tape.push(b); app.push(b); }
+    k = (k + 1) % rules.length;
+  }
+  return { queue: [...init, ...app], heads, halted: tape.length === 0, initLen: init.length };
+}
+// Textausgabe: Band-Historie mit Abgleich gegen die Referenz (✓/✗ je Symbol / CTS-Schritt)
+function formatReadback(r, ref, f, ms) {
+  const fmt = n => n.toLocaleString('de');
+  const L = [];
+  L.push(`Gerechnet bis Generation ${fmt(r.tEnd)}` + (ms != null ? ` (${(ms / 1000).toFixed(1)} s)` : ''));
+  if (f > 1) L.push(`Gestrecktes CTS (×${f}): Symbol-Nr. k gehört zu Originalschritt ⌊k/${f}⌋.`);
+  L.push('');
+  L.push(' Nr. Bit Ref  Status');
+  let allOk = true;
+  r.queue.forEach((b, i) => {
+    const rb = ref.queue[i], ok = b === rb; if (!ok) allOk = false;
+    const what = i < r.initBits.length ? 'Startband' : 'angehängt';
+    const st = i < r.readCount ? `gelesen ≤ Gen. ${fmt(r.readTimes[i])}`
+      : (i < r.initBits.length ? 'liegt im Datenblock, ungelesen' : `ossifiziert Gen. ${fmt(r.appTimes[i - r.initBits.length])}, ungelesen`);
+    L.push(`${String(i).padStart(4)}  ${b}   ${rb === undefined ? '–' : rb} ${ok ? '✓' : '✗'}  ${what}, ${st}`);
+  });
+  if (!r.queue.length) L.push('   (keine Symbolgruppe erkannt)');
+  L.push('');
+  const headsOk = r.queue.slice(0, r.readCount).every((b, i) => b === ref.heads[i]);
+  L.push(`Startband: ${r.initBits.join('') || '–'} ${r.initBits.join('') === ref.queue.slice(0, r.initBits.length).join('') && r.initBits.length === ref.initLen ? '✓' : '✗'}`);
+  L.push(`Gelesen: ${r.readCount} CTS-Schritt(e), Kopfbits ${r.queue.slice(0, r.readCount).join('') || '–'} ${headsOk ? '✓' : '✗'}` +
+    (ref.halted && r.readCount === ref.heads.length ? ' – Referenz hält hier (Band leer).' : ''));
+  L.push(allOk && headsOk ? '✓ Alle erkannten Symbole stimmen mit der CTS-Referenz überein.' : '✗ Abweichung zur Referenz!');
+  L.push('Nicht sichtbar: Symbole, die als bewegte E-Pakete noch unterwegs sind (werden erst links ossifiziert).');
+  return L.join('\n');
+}
+
+// Gleiter im Äther auf einem Ring: Zwischenstücke werden phasenrichtig gewählt,
+// damit an keiner Naht ein Defekt entsteht (Ringlänge daher beliebig).
+function etherRing(gliders, periods) {
+  const out = [];
+  gliders.forEach((g, j) => {
+    const nx = gliders[(j + 1) % gliders.length];
+    for (const v of g.b) out.push(v);
+    const m = (((nx.pl - g.pr) % 14) + 14) % 14 + 14 * periods;
+    for (const v of cbg(g.pr, m)) out.push(v);
+  });
+  return out;
+}
+function gliderState(n) { if (!C_S) cInitStructs(); return C_S[n][0]; }
+
+
 const ctsInput   = document.getElementById('cts-input');
 const ctsStatus  = document.getElementById('cts-status');
+const ctsTraceEl = document.getElementById('cts-trace');
 const btnConvCTS = document.getElementById('btn-convert-cts');
 const fileCTS    = document.getElementById('file-cts');
+const MAX_FULL   = 1e6;   // Zeichen im Startkonfigurations-Feld; darüber nur Platzhalter
 function showCTSStatus(msg, type='ok') {
   ctsStatus.textContent = msg; ctsStatus.className = 'status-bar status-' + type; ctsStatus.style.display = 'block';
 }
+// Hinweise zum geladenen CTS (Streckung, H-Slots, Metazeile) als Text
+function ctsNotes(parsed, prep) {
+  const notes = [];
+  if (prep.f > 1) {
+    notes.push(`Gestreckt mit Faktor ${prep.f}` + (prep.f0 === 1 ? ' (Regellängen erfüllten die Bedingung schon, nr = 0 erzwang die Streckung)' : '') +
+      `: Bit b → b${'0'.repeat(prep.f - 1)}, je Regel ${prep.f - 1} leere Regeln dahinter. ` +
+      `Regeln ${parsed.rules.length} → ${prep.rules.length}, Startband ${parsed.init.length} → ${prep.init.length} Bits. ` +
+      `1 CTS-Schritt des Originals = ${prep.f} Schritte des gestreckten CTS.`);
+  } else notes.push('Keine Streckung nötig (alle Regellängen 0 oder Vielfache von 6).');
+  if (parsed.hSlots) notes.push(`${parsed.hSlots} H-Slot(s) als normale leere Regel kodiert – ein Halt ist in Regel 110 nicht abbildbar.`);
+  if (parsed.zeroTrigWithBits) notes.push(`${parsed.zeroTrigWithBits} Produktion(en) mit Trigger 0 und Bits: hängen wie in ts2cts nie an.`);
+  if (parsed.meta) notes.push(`Metazeile: p = ${parsed.meta.p}, Vektorlänge = ${parsed.meta.vec} (nur Anzeige).`);
+  return notes;
+}
 btnConvCTS.addEventListener('click', () => {
   const raw = ctsInput.value.trim();
+  ctsTraceEl.style.display = 'none';
   if (!raw) { showCTSStatus('Kein CTS eingegeben.', 'err'); return; }
   showCTSStatus('Konvertiere…', 'info');
   setTimeout(() => {
     try {
-      const { rules, init } = parseCTSForR110(raw);
+      const parsed = parseCTSForR110(raw);
       const t0 = performance.now();
-      const result = ctToR110(rules, init);
+      const prep = prepareCTSForR110(parsed.rules, parsed.init);
       const t1 = performance.now();
-      initInput.value = result.full.join('');
+      const result = prep.result;
+      ctsTraceEl.textContent = 'CTS-Referenz, Original (Pk 1:+ = angehängt, 0:- = nur gelöscht)\n' +
+        formatCtsTrace(ctsTrace(parsed.rules, parsed.init, 16), 30) + '\n\n' + ctsNotes(parsed, prep).join('\n');
+      ctsTraceEl.style.display = 'block';
+      const text = result.full.length <= MAX_FULL ? result.full.join('')
+        : '(Kodierung zu groß für dieses Feld – sie wird mit Rand „CTS-Blöcke“ direkt verwendet)';
+      initInput.value = text;
+      ctsResult = { blocks: result.blocks, dataOffset: result.dataOffset, dataLen: result.dataLen, text };
+      lastPrep = prep; cancelReadback(); rbBox.style.display = 'block'; rbOut.style.display = 'none';
+      boundSel.value = 'cts';
+      viewCenterInput.value = '';
       const [l1, l2, l3] = result.blocks.map(b => b.length);
-      showCTSStatus(`✓ ${result.full.length} Bits · Blöcke {${l1},${l2},${l3}} · nr=${result.nr} · ${(t1-t0).toFixed(0)}ms`, 'ok');
-      showStatus(`CTS konvertiert → ${result.full.length} Bits geladen. Jetzt simulieren.`, 'ok');
+      showCTSStatus(`✓ Blöcke {${l1}, ${l2}, ${l3}} · nr=${result.nr} · sp=${result.sp}` + (prep.f > 1 ? ` · Streckung ×${prep.f}` : '') +
+        ` · ${(t1-t0).toFixed(0)}ms. Simuliert wird …b1 b1·b2·b3 b3… (Zelle 0 = Beginn b2, Datenblock ab Zelle ${result.dataOffset}).`, 'ok');
+      showStatus(`CTS konvertiert → Rand „CTS-Blöcke“ gesetzt, Ausschnitt um den Datenblock. Jetzt simulieren.`, 'ok');
     } catch (e) { showCTSStatus('✗ ' + e.message, 'err'); console.error(e); }
   }, 10);
+});
+// ── Rücklesen (Gleiter-Tracking), in Zeitscheiben, abbrechbar
+let lastPrep = null, rbJob = null;
+const rbBox = document.getElementById('rb-box'), rbOut = document.getElementById('rb-out');
+const rbGens = document.getElementById('rb-gens'), btnReadback = document.getElementById('btn-readback');
+function cancelReadback() { rbJob = null; btnReadback.textContent = '⟲ Zurücklesen'; }
+btnReadback.addEventListener('click', () => {
+  if (!lastPrep) return;
+  if (rbJob) {                                   // laufend → abbrechen, Zwischenstand zeigen
+    const job = rbJob; cancelReadback();
+    rbOut.textContent = 'Abgebrochen.\n' + formatReadback(job.result(), ctsQueueRef(lastPrep.rules, lastPrep.init), lastPrep.f, null);
+    return;
+  }
+  const prep = lastPrep, T = +rbGens.value, t0 = performance.now();
+  const job = createReadback(prep.result, T), ref = ctsQueueRef(prep.rules, prep.init);
+  rbJob = job; btnReadback.textContent = '■ Abbrechen';
+  rbOut.style.display = 'block'; rbOut.textContent = 'Rechne…';
+  const tick = () => {
+    if (rbJob !== job) return;
+    const p = job.run(40);
+    if (!job.done) { rbOut.textContent = `Rechne… ${Math.round(p * 100)} % (Generation ${job.t.toLocaleString('de')} von ${T.toLocaleString('de')})`; setTimeout(tick, 0); return; }
+    cancelReadback();
+    rbOut.textContent = formatReadback(job.result(), ref, prep.f, performance.now() - t0);
+  };
+  setTimeout(tick, 0);
 });
 fileCTS.addEventListener('change', e => {
   const f = e.target.files[0]; if (!f) return;
@@ -953,7 +1506,6 @@ fileCTS.addEventListener('change', e => {
   r.readAsText(f);
   e.target.value = '';
 });
-
 </script>
 </body>
 </html>
