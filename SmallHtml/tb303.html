@@ -112,7 +112,7 @@ canvas#scope{position:absolute;right:24px;top:0;height:42px;width:110px}
     <div class="knob-section">
       <div class="section-label">VCF &mdash; Filter</div>
       <div class="knobs-row">
-        <div class="knob-wrapper"><div class="knob-label">Cutoff</div><div class="knob" data-param="cutoff" data-min="50" data-max="8000" data-val="800"></div><div class="knob-val" id="val-cutoff">800</div></div>
+        <div class="knob-wrapper"><div class="knob-label">Cutoff</div><div class="knob" data-param="cutoff" data-min="50" data-max="8000" data-val="800" data-curve="exp"></div><div class="knob-val" id="val-cutoff">800</div></div>
         <div class="knob-wrapper"><div class="knob-label">Reso</div><div class="knob" data-param="reso" data-min="0" data-max="0.98" data-val="0.7"></div><div class="knob-val" id="val-reso">0.7</div></div>
         <div class="knob-wrapper"><div class="knob-label">Env Mod</div><div class="knob" data-param="envmod" data-min="0" data-max="1" data-val="0.5"></div><div class="knob-val" id="val-envmod">0.5</div></div>
         <div class="knob-wrapper"><div class="knob-label">Decay</div><div class="knob" data-param="decay" data-min="0.01" data-max="2" data-val="0.3"></div><div class="knob-val" id="val-decay">0.3</div></div>
@@ -174,7 +174,8 @@ canvas#scope{position:absolute;right:24px;top:0;height:42px;width:110px}
     <div class="kb-container" id="kb-container" style="height:86px"></div>
   </div>
 
-  <div class="footer">Roland TB-303 Bass Line &mdash; Browser Emulator &mdash; <span id="engine">Web Audio API</span></div>
+  <div class="footer">Roland TB-303 Bass Line &mdash; Browser Emulator &mdash; <span id="engine">Web Audio API</span><br>
+    <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#ff6600">itzwieseltal.wordpress.com</a></div>
 </div>
 
 <script>
@@ -250,6 +251,7 @@ registerProcessor('ladder-filter',LadderFilter);
 /* --- durchgehende monophone Stimmen (Sequencer + Keyboard) --- */
 let seqVoice=null,kbVoice=null,useLadder=false,audioReady=null;
 const kbHeld=new Set();
+const kbFreqs=new Map();
 
 /* --- Accent-Ladung: bildet den Kondensator nach, der sich zwischen
        den Steps nicht vollstaendig entlaedt --- */
@@ -258,6 +260,11 @@ const ACC_MAX=1.8;       /* Saettigung der Ladung                   */
 const ACC_KICK=1.0;      /* Ladungszuwachs pro akzentuierter Note   */
 const SLIDE_TIME=0.055;  /* Portamento-Zeit des Originals           */
 let accentCharge=0,lastStepTime=0;
+/* Tatsaechlicher Gate-Zustand des Sequencers: true, wenn der zuletzt
+   GESPIELTE Step mit dem naechsten gebunden ist. Nur dann ist die
+   aktuelle Note ein Legato - nicht schon dann, wenn im Pattern davor
+   ein Slide steht (sonst bliebe beim Start die erste Note stumm). */
+let tieOffen=false,tieFreq=0;
 
 /* --- analytischer Zustand der Filterhuellkurve ---------------------
    Die Stimme hat nur EIN Filter, dessen AudioParam eine einzige
@@ -306,10 +313,12 @@ function makeVoice(){
   }else{
     flt=audioCtx.createBiquadFilter();
     flt.type='lowpass';
-    flt.Q.value=params.reso*30;
+    /* Q ist beim Biquad-Tiefpass die Resonanzueberhoehung in dB.
+       Bis 15 dB klingt resonant, ohne zu pfeifen oder zu uebersteuern. */
+    flt.Q.value=params.reso*15;
     flt.frequency.value=params.cutoff;
     cutoff=flt.frequency;
-    setReso=x=>{flt.Q.value=x*30;};
+    setReso=x=>{flt.Q.value=x*15;};
   }
 
   const vca=audioCtx.createGain();
@@ -374,14 +383,13 @@ function scheduleStep(idx,time){
   accentCharge*=Math.exp(-Math.max(0,time-lastStepTime)/ACC_TAU);
   lastStepTime=time;
 
-  if(!s.active)return;
+  if(!s.active){tieOffen=false;return;}
 
   const v=seqVoice;
   if(!v)return;
 
-  const prev=steps[(idx-1+16)%16];
   const next=steps[(idx+1)%16];
-  const legato=prev.active&&prev.slide;   /* wird hineingebunden */
+  const legato=tieOffen;                  /* wird hineingebunden */
   const tieOut=s.slide&&next.active;      /* bindet weiter       */
 
   if(s.accent)accentCharge=Math.min(ACC_MAX,accentCharge+ACC_KICK);
@@ -391,7 +399,7 @@ function scheduleStep(idx,time){
 
   /* --- Tonhoehe --- */
   if(legato){
-    const pf=(NOTE_FREQS[prev.note]||440)*Math.pow(2,params.tune/12);
+    const pf=tieFreq||freq;
     v.osc.frequency.setValueAtTime(pf,time);
     v.osc.frequency.exponentialRampToValueAtTime(freq,time+SLIDE_TIME);
   }else{
@@ -420,6 +428,8 @@ function scheduleStep(idx,time){
   if(!tieOut){
     v.vca.gain.setTargetAtTime(0.0001,time+stepDur*0.55,0.007);
   }
+  tieOffen=tieOut;
+  tieFreq=freq;
 }
 
 function scheduler(){
@@ -432,9 +442,13 @@ function scheduler(){
   timerID=setTimeout(scheduler,25);
 }
 
-let lastHL=-1;
+let lastHL=-1,pauseStep=null;
+/* Anzeige erst dann umschalten, wenn der Step wirklich erklingt -
+   der Scheduler plant bis zu 80 ms im Voraus */
 function flashStep(idx){
-  requestAnimationFrame(()=>{
+  const verz=audioCtx?Math.max(0,(nextNoteTime-audioCtx.currentTime)*1000):0;
+  setTimeout(()=>requestAnimationFrame(()=>{
+    if(!running)return;
     const cells=document.querySelectorAll('.cell-ind');
     if(lastHL>=0&&cells[lastHL])cells[lastHL].classList.remove('playing');
     if(cells[idx])cells[idx].classList.add('playing');
@@ -442,7 +456,7 @@ function flashStep(idx){
     const led=document.getElementById('led');
     led.classList.add('on');
     setTimeout(()=>led.classList.remove('on'),60);
-  });
+  }),verz);
 }
 
 async function togglePlay(){
@@ -451,8 +465,11 @@ async function togglePlay(){
   running=!running;
   const btn=document.getElementById('btn-play');
   if(running){
-    currentStep=0;nextNoteTime=audioCtx.currentTime+0.05;
+    /* nach PAUSE an der angehaltenen Stelle weiter, nach STOP bei Step 1 */
+    if(pauseStep!=null){currentStep=pauseStep;pauseStep=null;}else currentStep=0;
+    nextNoteTime=audioCtx.currentTime+0.05;
     accentCharge=0;lastStepTime=nextNoteTime;
+    tieOffen=false;
     envPeak=envFloor=Math.max(30,params.cutoff);envT0=nextNoteTime;
     scheduler();
     btn.innerHTML='&#9646;&#9646; PAUSE';
@@ -460,6 +477,8 @@ async function togglePlay(){
     document.getElementById('dtext').textContent='PLAYING';
   }else{
     clearTimeout(timerID);
+    /* der Scheduler plant voraus: weiter geht es beim zuletzt angezeigten Step + 1 */
+    pauseStep=lastHL>=0?(lastHL+1)%16:currentStep;
     silence(seqVoice);
     btn.innerHTML='&#9654; PLAY';
     btn.classList.remove('running');
@@ -468,7 +487,7 @@ async function togglePlay(){
 }
 
 function stopAll(){
-  running=false;clearTimeout(timerID);currentStep=0;
+  running=false;clearTimeout(timerID);currentStep=0;pauseStep=null;tieOffen=false;
   const btn=document.getElementById('btn-play');
   btn.innerHTML='&#9654; PLAY';btn.classList.remove('running');
   document.querySelectorAll('.cell-ind').forEach(e=>e.classList.remove('playing'));
@@ -625,12 +644,21 @@ function initKnobs(){
     const min=parseFloat(knob.dataset.min);
     const max=parseFloat(knob.dataset.max);
     let val=parseFloat(knob.dataset.val);
+    /* Cutoff exponentiell: gleicher Drehweg = gleiches Frequenzverhaeltnis */
+    const expo=knob.dataset.curve==='exp';
+    const toNorm=v=>expo?Math.log(v/min)/Math.log(max/min):(v-min)/(max-min);
+    const fromNorm=n=>expo?min*Math.pow(max/min,n):min+n*(max-min);
+    const fmt=v=>{
+      if(param==='cutoff')return Math.round(v);
+      if(param==='tune')return (v>0?'+':'')+v.toFixed(1);
+      return v.toFixed(2);
+    };
     function upd(nv){
       val=Math.max(min,Math.min(max,nv));
       params[param]=val;
-      const norm=(val-min)/(max-min);
+      const norm=toNorm(val);
       knob.style.transform=`rotate(${-135+norm*270}deg)`;
-      document.getElementById('val-'+param).textContent=(val<1&&val>0)?val.toFixed(2):Math.round(val);
+      document.getElementById('val-'+param).textContent=fmt(val);
       if(param==='vol'&&masterGain)masterGain.gain.setTargetAtTime(val,audioCtx?audioCtx.currentTime:0,0.01);
       if(param==='reso'){
         if(seqVoice)seqVoice.setReso(val);
@@ -638,20 +666,20 @@ function initKnobs(){
       }
     }
     upd(val);
-    let sy,sv;
+    let sy,sn;
     knob.addEventListener('mousedown',e=>{
-      sy=e.clientY;sv=val;e.preventDefault();
-      const mv=e=>upd(sv+(sy-e.clientY)/150*(max-min));
+      sy=e.clientY;sn=toNorm(val);e.preventDefault();
+      const mv=e=>upd(fromNorm(Math.max(0,Math.min(1,sn+(sy-e.clientY)/150))));
       const up=()=>{window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);};
       window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);
     });
     knob.addEventListener('touchstart',e=>{
-      sy=e.touches[0].clientY;sv=val;e.preventDefault();
-      const mv=e=>upd(sv+(sy-e.touches[0].clientY)/150*(max-min));
+      sy=e.touches[0].clientY;sn=toNorm(val);e.preventDefault();
+      const mv=e=>upd(fromNorm(Math.max(0,Math.min(1,sn+(sy-e.touches[0].clientY)/150))));
       const up=()=>{window.removeEventListener('touchmove',mv);window.removeEventListener('touchend',up);};
       window.addEventListener('touchmove',mv,{passive:false});window.addEventListener('touchend',up);
-    });
-    knob.addEventListener('wheel',e=>{e.preventDefault();upd(val+(-e.deltaY/500)*(max-min));},{passive:false});
+    },{passive:false});
+    knob.addEventListener('wheel',e=>{e.preventDefault();upd(fromNorm(Math.max(0,Math.min(1,toNorm(val)-e.deltaY/500))));},{passive:false});
   });
 }
 
@@ -660,6 +688,11 @@ const NOTES_ALL=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const WHITE_NOTES=['C','D','E','F','G','A','B'];
 const BLACK_POS=[0.65,1.65,null,3.65,4.65,5.65,null];
 const BLACK_NAMES=['C#','D#',null,'F#','G#','A#',null];
+
+/* Der Sequencer kennt nur C2..B3: Noten ausserhalb oktavieren */
+function seqNote(name,oct){
+  return name+Math.max(2,Math.min(3,oct));
+}
 
 function noteFreqKb(name,oct){
   return 440*Math.pow(2,(12*(oct+1)+NOTES_ALL.indexOf(name)-69)/12);
@@ -709,7 +742,7 @@ async function kPress(k,on){
       kbStart(full,note,oct);
     }else{
       if(recStepIdx>=16)recStepIdx=0;
-      steps[recStepIdx].note=full;steps[recStepIdx].active=true;
+      steps[recStepIdx].note=seqNote(note,oct);steps[recStepIdx].active=true;
       buildSequencer();
       document.getElementById('dtext').textContent='REC:'+recStepIdx;
       recStepIdx++;
@@ -727,7 +760,8 @@ function kbStart(full,note,oct){
   const now=audioCtx.currentTime;
   const freq=noteFreqKb(note,oct)*Math.pow(2,params.tune/12);
   const legato=kbHeld.size>0;
-  kbHeld.add(full);
+  kbHeld.delete(full);kbHeld.add(full);   /* zuletzt gedrueckte Taste ans Ende */
+  kbFreqs.set(full,freq);
 
   v.osc.frequency.cancelScheduledValues(now);
   if(legato){
@@ -747,9 +781,23 @@ function kbStart(full,note,oct){
 }
 
 function kbStop(full){
-  kbHeld.delete(full);
-  if(!kbVoice||!audioCtx||kbHeld.size>0)return;
+  const warLetzte=[...kbHeld].pop()===full;
+  kbHeld.delete(full);kbFreqs.delete(full);
+  if(!kbVoice||!audioCtx)return;
   const now=audioCtx.currentTime;
+  if(kbHeld.size>0){
+    /* Last-Note-Priority: zur noch gehaltenen, zuletzt gedrueckten Note zurueckgleiten */
+    if(warLetzte){
+      const rest=[...kbHeld].pop(), f=kbFreqs.get(rest);
+      if(f){
+        kbVoice.osc.frequency.cancelScheduledValues(now);
+        kbVoice.osc.frequency.setValueAtTime(kbVoice.osc.frequency.value,now);
+        kbVoice.osc.frequency.exponentialRampToValueAtTime(f,now+SLIDE_TIME);
+        document.getElementById('dtext').textContent=rest;
+      }
+    }
+    return;
+  }
   kbVoice.vca.gain.cancelScheduledValues(now);
   kbVoice.vca.gain.setTargetAtTime(0.0001,now,0.02);
   document.getElementById('led').classList.remove('on');
@@ -769,38 +817,49 @@ function shiftOctave(d){
 }
 
 /* Keyboard shortcuts */
+/* Taste -> [Note, Oktavversatz]; k/o/l liegen eine Oktave hoeher */
 const KEY_MAP={
-  'a':'C','w':'C#','s':'D','e':'D#','d':'E','f':'F',
-  't':'F#','g':'G','z':'G#','h':'A','u':'A#','j':'B',
-  'k':'C','o':'C#','l':'D'
+  'a':['C',0],'w':['C#',0],'s':['D',0],'e':['D#',0],'d':['E',0],'f':['F',0],
+  't':['F#',0],'g':['G',0],'z':['G#',0],'y':['G#',0],'h':['A',0],'u':['A#',0],'j':['B',0],
+  'k':['C',1],'o':['C#',1],'l':['D',1]
 };
-const pressedKeys=new Set();
+/* gemerkt wird die beim Druecken gespielte Note, damit ein Oktavwechsel
+   waehrend des Haltens das Loslassen nicht verwechselt */
+const pressedKeys=new Map();
+function markKey(note,oct,on){
+  document.querySelectorAll('.wkey,.bkey').forEach(k=>{
+    if(k.dataset.note===note&&parseInt(k.dataset.oct)===oct)k.classList.toggle('pressed',on);
+  });
+}
 document.addEventListener('keydown',async e=>{
-  if(e.repeat||e.target.tagName==='SELECT')return;
-  const note=KEY_MAP[e.key.toLowerCase()];
-  if(!note)return;
-  const noteIdx=WHITE_NOTES.indexOf(note)!==-1?0:0;
-  const oct=e.key===e.key.toUpperCase()?kbOctave+1:kbOctave;
-  const full=note+kbOctave;
-  if(pressedKeys.has(full))return;
-  pressedKeys.add(full);
+  if(e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.target.tagName==='SELECT'||e.target.tagName==='INPUT')return;
+  const k=e.key.toLowerCase(),m=KEY_MAP[k];
+  if(!m||pressedKeys.has(k))return;
+  const [note,off]=m,oct=kbOctave+off,full=note+oct;
+  pressedKeys.set(k,{note,oct,full});
+  if(kbMode==='rec'){
+    if(recStepIdx>=16)recStepIdx=0;
+    steps[recStepIdx].note=seqNote(note,oct);
+    steps[recStepIdx].active=true;
+    buildSequencer();
+    document.getElementById('dtext').textContent='REC:'+recStepIdx;
+    recStepIdx++;
+    markKey(note,oct,true);
+    return;
+  }
   await initAudio();
   if(audioCtx.state==='suspended')await audioCtx.resume();
-  const n=NOTES_ALL.indexOf(note);
-  kbStart(full,note,kbOctave);
-  document.querySelectorAll('.wkey,.bkey').forEach(k=>{
-    if(k.dataset.note===note&&parseInt(k.dataset.oct)===kbOctave)k.classList.add('pressed');
-  });
+  if(!pressedKeys.has(k))return;   /* schon wieder losgelassen */
+  kbStart(full,note,oct);
+  markKey(note,oct,true);
 });
 document.addEventListener('keyup',e=>{
-  const note=KEY_MAP[e.key.toLowerCase()];
-  if(!note)return;
-  const full=note+kbOctave;
-  pressedKeys.delete(full);
-  if(audioCtx)kbStop(full);
-  document.querySelectorAll('.wkey,.bkey').forEach(k=>{
-    if(k.dataset.note===note&&parseInt(k.dataset.oct)===kbOctave)k.classList.remove('pressed');
-  });
+  const k=e.key.toLowerCase(),p=pressedKeys.get(k);
+  if(!p)return;
+  pressedKeys.delete(k);
+  if(kbMode==='play'&&audioCtx)kbStop(p.full);
+  markKey(p.note,p.oct,false);
 });
 
 loadPreset(0);
