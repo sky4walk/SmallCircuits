@@ -1,0 +1,1369 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Intel 8008 Emulator</title>
+<style>
+
+:root{
+  --bg:#14171b; --panel:#1d2228; --panel2:#232930; --line:#2f363e; --text:#e3e6e9; --mute:#8d96a0;
+  --acc:#e8b04a; --acc2:#5fb3ff; --ok:#59c27a; --bad:#ff6b5e; --led:#ff4b3a; --ledoff:#4c1616;
+  --chip:#202326; --gold:#c9a752; --cur:#3a2e14; --curb:#8a6a24; --brk:#5a1d1a;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+a{color:var(--acc2)}
+.mono,code,textarea,pre,.lst,.hexv{font-family:ui-monospace,"Cascadia Mono","DejaVu Sans Mono",Consolas,monospace}
+header{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line);background:#181c21}
+header h1{margin:0;font-size:20px;letter-spacing:.5px}
+header h1 small{font-weight:400;color:var(--mute);font-size:13px;margin-left:8px}
+.hlinks{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px}
+.bar{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 18px;background:#171b20;border-bottom:1px solid var(--line)}
+button.b{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:7px;padding:6px 11px;font:inherit;cursor:pointer;white-space:nowrap}
+button.b:hover{border-color:#4a535d;background:#29303a}
+button.b.pri{background:#3a2e14;border-color:#6d5420;color:#ffd58a}
+button.b.go{background:#173323;border-color:#2c6b44;color:#a6efbf}
+button.b.stop{background:#3a1a18;border-color:#6d2c28;color:#ffb3ab}
+button.b.sm{padding:3px 8px;font-size:12.5px}
+select{max-width:100%}
+@media(max-width:600px){.bar{position:static}}
+select,input[type=text],input[type=number]{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:5px 7px;font:inherit}
+.sep{width:1px;height:24px;background:var(--line);margin:0 4px}
+.mute{color:var(--mute)}
+.wrap{max-width:1480px;margin:0 auto;padding:16px;display:grid;grid-template-columns:minmax(340px,500px) minmax(0,1fr);gap:16px;align-items:start}
+@media(max-width:980px){.wrap{grid-template-columns:minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;min-width:0}
+.card h2{margin:0 0 10px;font-size:15px;color:var(--acc);font-weight:600;letter-spacing:.3px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.card h2 .mute{font-size:12.5px;font-weight:400;letter-spacing:0}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+/* ---- Chip ---- */
+.chip{position:relative;background:linear-gradient(#26292d,#1b1d20);border:1px solid #3a3d42;border-radius:6px;padding:14px 16px 12px;box-shadow:0 6px 18px rgba(0,0,0,.4)}
+.chip:before,.chip:after{content:"";position:absolute;left:18px;right:18px;height:5px;background:repeating-linear-gradient(90deg,var(--gold) 0 10px,transparent 10px 22px);opacity:.75}
+.chip:before{top:-6px}.chip:after{bottom:-6px}
+.chipname{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
+.chipname b{font-family:ui-monospace,Consolas,monospace;letter-spacing:2px;color:#d9d9d9;font-size:15px}
+.chipname span{font-size:11px;color:var(--mute);letter-spacing:1px}
+.regs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.reg{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:4px 6px;text-align:center;min-width:0}
+.reg .n{font-size:11px;color:var(--mute);letter-spacing:.5px}
+.reg .v{font:600 17px ui-monospace,Consolas,monospace;color:#f1f3f5}
+.reg .s{font:11px ui-monospace,Consolas,monospace;color:var(--mute)}
+.reg.chg{border-color:var(--curb);background:#2b2416}
+.reg.wide{grid-column:span 2}
+.pairs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px}
+.pair{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:3px 4px;text-align:center}
+.pair .n{font-size:10.5px;color:var(--mute)}
+.pair .v{font:600 15px ui-monospace,Consolas,monospace}
+.pair .v i{font-style:normal;padding:0 2px;border-radius:3px}
+.pair .v i.chg{background:#4b3b17;color:#ffd58a}
+.stack{margin-top:8px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.stk{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:3px 4px;text-align:center;font:13px ui-monospace,Consolas,monospace}
+.stk.pc{border-color:var(--acc);color:#ffd58a}
+.stk small{display:block;font:10.5px system-ui;color:var(--mute)}
+.irline{margin-top:10px;padding:7px 10px;background:#11161a;border:1px solid var(--line);border-radius:8px;font:13.5px ui-monospace,Consolas,monospace;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.irline b{color:var(--acc)}
+/* ---- Bus ---- */
+.phases{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:4px}
+.ph{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 2px 5px;text-align:center;min-width:0}
+.ph .pn{font-size:11px;color:var(--mute)}
+.ph .pv{font:600 18px ui-monospace,Consolas,monospace}
+.ph .pb{font:10px ui-monospace,Consolas,monospace;color:var(--mute);letter-spacing:.5px}
+.ph .tags{display:flex;justify-content:center;gap:2px;min-height:15px;margin-top:2px;flex-wrap:wrap}
+.tag{font:9.5px ui-monospace,Consolas,monospace;padding:0 3px;border-radius:3px;background:#2d3540;color:#9fb4c9}
+.tag.rom{background:#20384d;color:#8fd0ff}.tag.ram{background:#36284a;color:#d4a9ff}.tag.syn{background:#2c3a21;color:#b6e38d}
+.ph.now{border-color:var(--acc);background:var(--cur)}
+.ph.fut{opacity:.35}
+.phdesc{margin-top:8px;min-height:38px;padding:7px 10px;background:#11161a;border:1px solid var(--line);border-radius:8px;font-size:13px}
+.phdesc b{color:var(--acc)}
+.groups{display:grid;grid-template-columns:3fr 2fr 3fr;gap:4px;margin-top:3px;font-size:10.5px;color:var(--mute);text-align:center}
+.groups div{border-top:1px solid var(--line);padding-top:2px}
+/* ---- IO ---- */
+.io{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.iobox{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.iobox .t{font-size:12px;color:var(--mute);margin-bottom:6px;display:flex;justify-content:space-between}
+.leds{display:flex;gap:10px;align-items:center}
+.ledc{display:flex;flex-direction:column;align-items:center;gap:2px;font-size:10px;color:var(--mute)}
+.led{width:18px;height:18px;border-radius:50%;background:var(--ledoff);border:2px solid #111}
+.led.on{background:var(--led);box-shadow:0 0 10px 2px rgba(255,75,58,.8)}
+.led.g{background:#173a22}.led.g.on{background:#5be07f;box-shadow:0 0 10px 2px rgba(91,224,127,.7)}
+.big{font:600 22px ui-monospace,Consolas,monospace;margin-left:auto;color:#ffd58a}
+.sw{width:30px;height:40px;border-radius:6px;border:1px solid #555;background:#2a2f36;cursor:pointer;position:relative;padding:0}
+.sw:after{content:"";position:absolute;left:5px;right:5px;height:15px;border-radius:4px;background:#c9ced4;bottom:4px;transition:bottom .08s}
+.sw.on{background:#20442d;border-color:#3b8a57}.sw.on:after{bottom:19px;background:#a6efbf}
+.ports{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:4px;font:12px ui-monospace,Consolas,monospace}
+.ports div{background:#171b20;border:1px solid var(--line);border-radius:5px;text-align:center;padding:2px}
+.ports div small{display:block;color:var(--mute);font-size:9.5px}
+.ports div.sel{border-color:var(--acc2)}
+/* ---- Programm ---- */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:10px;flex-wrap:wrap}
+.tab{background:none;border:none;color:var(--mute);padding:7px 12px;cursor:pointer;font:inherit;border-bottom:2px solid transparent}
+.tab.on{color:var(--text);border-bottom-color:var(--acc)}
+textarea.asm{width:100%;min-height:420px;resize:vertical;background:#101317;color:#dfe5ea;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:13px;line-height:1.5;tab-size:8;white-space:pre}
+.errs{margin-top:8px;font-size:13px}
+.errs div{color:var(--bad);cursor:pointer}
+.errs .ok{color:var(--ok);cursor:default}
+.lst{max-height:520px;overflow:auto;background:#101317;border:1px solid var(--line);border-radius:8px;font-size:13px}
+.lst .l{display:grid;grid-template-columns:22px 46px 56px 1fr;gap:6px;padding:1px 8px;cursor:pointer;white-space:pre}
+.lst .l:hover{background:#1a2026}
+.lst .l .bp{color:transparent}
+.lst .l.brk .bp{color:#ff6b5e}
+.lst .l.brk{background:var(--brk)}
+.lst .l.cur{background:var(--cur);outline:1px solid var(--curb)}
+.lst .l .a{color:var(--mute)}.lst .l .h{color:#8fa3b8}
+.lst .l.data .t{color:#c7a96b}
+.lst .lab{padding:4px 8px 0 92px;color:var(--acc2)}
+.hexv{background:#101317;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12.5px;max-height:520px;overflow:auto;white-space:pre}
+.hexv .pc{background:var(--cur);color:#ffd58a}
+/* ---- RAM ---- */
+table.ram{border-collapse:collapse;font:12.5px ui-monospace,Consolas,monospace;width:100%}
+table.ram th{color:var(--mute);font-weight:400;font-size:10.5px;padding:2px}
+table.ram td{text-align:center;padding:3px 0;border:1px solid var(--line);background:#171b20}
+table.ram td.st{background:#1f1a26}
+table.ram td.sel{outline:2px solid var(--acc2);outline-offset:-2px;color:#bfe2ff}
+table.ram td.nz{color:#ffd58a}
+table.ram td.rn{background:none;border:none;color:var(--mute);text-align:right;padding-right:6px}
+pre.trace{margin:0;max-height:280px;overflow:auto;background:#101317;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12px;line-height:1.4}
+.help{font-size:13.5px;color:#cfd5db}
+.help h3{font-size:14px;color:var(--acc);margin:14px 0 4px}
+.help p{margin:6px 0}
+.help ul{margin:6px 0;padding-left:20px}
+.help code{background:#11161a;border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:12.5px}
+table.ops{border-collapse:collapse;font-size:12.5px;width:100%}
+table.ops td,table.ops th{border-bottom:1px solid var(--line);padding:3px 6px;text-align:left;vertical-align:top}
+table.ops th{color:var(--mute);font-weight:500}
+table.ops td:first-child{font-family:ui-monospace,Consolas,monospace;color:#ffd58a;white-space:nowrap}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20;padding:16px}
+.modal.on{display:flex}
+.modal .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px;max-width:760px;width:100%}
+.modal textarea{width:100%;height:260px;background:#101317;color:#dfe5ea;border:1px solid var(--line);border-radius:8px;padding:8px;font-size:12.5px}
+footer{max-width:1480px;margin:0 auto;padding:6px 16px 28px;color:var(--mute);font-size:13px}
+.flash{animation:fl .6s}
+@keyframes fl{from{background:#3d5a2a}to{background:transparent}}
+
+/* ---- 8008-spezifisch ---- */
+.regs8{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.flags{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:8px}
+.flag{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:3px;text-align:center;font:600 15px ui-monospace,Consolas,monospace}
+.flag small{display:block;font:10.5px system-ui;color:var(--mute);font-weight:400}
+.flag.on{border-color:#2c6b44;background:#173323;color:#a6efbf}
+.flag.chg{outline:1px solid var(--curb)}
+.stack8{margin-top:8px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.states{display:flex;flex-wrap:wrap;gap:4px}
+.cyc{border:1px solid var(--line);border-radius:7px;padding:4px;background:#191d22}
+.cyc .ct{font:600 11px ui-monospace,Consolas,monospace;color:var(--acc2);margin:0 2px 3px;display:flex;justify-content:space-between;gap:8px}
+.cyc .ct span{color:var(--mute);font-weight:400}
+.cyc .row1{display:flex;gap:3px}
+.stt{width:46px;background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:3px 1px 4px;text-align:center}
+.stt .pn{font-size:11px;color:var(--mute)}
+.stt .pv{font:600 15px ui-monospace,Consolas,monospace}
+.stt .pb{font:9.5px ui-monospace,Consolas,monospace;color:var(--mute)}
+.stt.now{border-color:var(--acc);background:var(--cur)}
+.stt.fut{opacity:.35}
+.stt.idle .pv{color:var(--mute)}
+.term{background:#0c120d;color:#9ff0a8;border:1px solid #23402a;border-radius:8px;padding:8px 10px;height:220px;overflow:auto;font:13px/1.35 ui-monospace,"Cascadia Mono","DejaVu Sans Mono",Consolas,monospace;white-space:pre-wrap;word-break:break-all;outline:none;cursor:text}
+.term:focus{border-color:#3b8a57;box-shadow:0 0 0 2px rgba(59,138,87,.35)}
+.term .cur{background:#9ff0a8;color:#0c120d;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{background:transparent;color:#9ff0a8}}
+.leds8{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.irq{display:flex;gap:6px;align-items:center}
+.lst .l{grid-template-columns:22px 46px 76px 1fr}
+.lst .lab{padding-left:112px}
+.leds8{gap:4px}
+.leds8 .ledc{gap:1px}
+.sw.sm{width:20px;height:32px;border-radius:5px}.sw.sm:after{height:11px;left:3px;right:3px}.sw.sm.on:after{bottom:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Intel 8008 <small>8-Bit-Emulator auf Zustandsebene · T1–T5 · MCS-8</small></h1>
+  <div class="hlinks">
+    <a href="https://itzwieseltal.wordpress.com/2026/09/20/der-intel-4004-der-erste-mikroprozessor/" target="_blank" rel="noopener">Artikel: vom 4004 zum 8008</a>
+    <a href="logisim_web_intel8008.html" target="_blank" rel="noopener">Schaltung im Logisim Web</a>
+    <a href="intel4004.html">Schwesterseite: Intel 4004</a>
+    <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  </div>
+</header>
+
+<div class="bar">
+  <button class="b stop" id="bReset" title="CPU zurücksetzen, Speicher bleibt">Reset</button>
+  <span class="sep"></span>
+  <button class="b" id="bSub" title="Ein Zustand (T1 … T5) – beim Original zwei Taktperioden">Zustand</button>
+  <button class="b" id="bCyc" title="Bis zum Ende des Maschinenzyklus">Zyklus</button>
+  <button class="b pri" id="bStep" title="Ein ganzer Befehl">Befehl</button>
+  <button class="b go" id="bRun">▶ Lauf</button>
+  <label class="mute" for="speed">Tempo</label>
+  <select id="speed">
+    <option value="2">2 Zustände/s</option>
+    <option value="8">8 Zustände/s</option>
+    <option value="32">32 Zustände/s</option>
+    <option value="1000">1.000 Zustände/s</option>
+    <option value="250000" selected>500 kHz wie das Original</option>
+    <option value="400000">800 kHz wie der 8008-1</option>
+    <option value="0">so schnell wie möglich</option>
+  </select>
+  <span class="sep"></span>
+  <span class="irq">
+    <button class="b" id="bInt" title="INT-Leitung: beim nächsten Befehl wird statt T1 ein T1I ausgeführt und der gewählte Befehl eingeschleust">Interrupt</button>
+    <select id="intOp" title="Befehl, den die Interrupt-Logik einschleust"></select>
+  </span>
+  <span class="mute" id="runInfo" style="margin-left:auto"></span>
+</div>
+
+<div class="wrap">
+<div class="col">
+
+  <div class="card">
+    <h2>CPU <span class="mute" id="cycInfo"></span></h2>
+    <div class="chip">
+      <div class="chipname"><b>INTEL C8008</b><span>8-BIT · 3500 TRANSISTOREN · 18 PINS</span></div>
+      <div class="regs8" id="regs"></div>
+      <div class="flags" id="flags"></div>
+      <div class="stack8" id="stack"></div>
+      <div class="irline"><span>IR <b id="irHex">00</b> <span id="irTxt">HLT</span></span><span class="mute" id="irAdr"></span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Bus D0–D7 <span class="mute">ein Zustand = 2 Taktperioden = 4 µs bei 500 kHz</span></h2>
+    <div class="states" id="states"></div>
+    <div class="phdesc" id="phdesc"></div>
+  </div>
+
+  <div class="card">
+    <h2>Terminal <span class="row"><span class="mute">OUT 8 · INP 0 / INP 1</span><button class="b sm" id="bTermClr">leeren</button></span></h2>
+    <div class="term" id="term" tabindex="0" title="Hier klicken und tippen: Zeichen gehen an INP 0"></div>
+    <div class="mute" style="font-size:12px;margin-top:6px">Ins Terminal klicken und tippen. INP 1 meldet in Bit 0, dass ein Zeichen bereitliegt, INP 0 holt es ab. <span id="kbInfo"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>Ports</h2>
+    <div class="io">
+      <div class="iobox"><div class="t"><span>Ausgabeport 10</span></div><div class="leds8" id="led10"></div></div>
+      <div class="iobox"><div class="t"><span>Ausgabeport 11</span></div><div class="leds8" id="led11"></div></div>
+      <div class="iobox"><div class="t"><span>Eingabeport 2 (Schalter)</span></div><div class="leds8" id="sw2"></div></div>
+      <div class="iobox"><div class="t"><span>Eingabeport 3 (Schalter)</span></div><div class="leds8" id="sw3"></div></div>
+    </div>
+    <div class="mute" style="font-size:12px;margin:10px 0 4px">Alle Ausgabelatches 8–31 (OUT) – zuletzt geschriebener blau</div>
+    <div class="ports" id="outPorts"></div>
+  </div>
+
+</div>
+<div class="col">
+
+  <div class="card">
+    <h2>Programm
+      <span class="row">
+        <select id="exSel"></select>
+        <button class="b sm" id="bLoadCirc" title="Programm aus dem RAM &quot;Speicher&quot; einer Logisim-Schaltung übernehmen">aus .circ laden</button>
+        <button class="b sm" id="bExport" title="Speicherinhalt im Logisim-Format">für Logisim exportieren</button>
+        <button class="b sm" id="bBinIn">.bin laden</button>
+        <button class="b sm" id="bBinOut">.bin speichern</button>
+        <button class="b sm" id="bAsmOut">.asm speichern</button>
+      </span>
+    </h2>
+    <div class="tabs">
+      <button class="tab on" data-t="tAsm">Assembler</button>
+      <button class="tab" data-t="tLst">Listing &amp; Haltepunkte</button>
+      <button class="tab" data-t="tHex">Speicher</button>
+      <button class="tab" data-t="tOps">Befehlssatz</button>
+    </div>
+    <div id="tAsm">
+      <textarea class="asm" id="src" spellcheck="false"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="b pri" id="bAsm">Übersetzen und laden</button>
+        <span class="mute" id="asmInfo"></span>
+      </div>
+      <div class="errs" id="errs"></div>
+    </div>
+    <div id="tLst" style="display:none">
+      <div class="row" style="margin-bottom:6px;justify-content:space-between">
+        <span class="mute" style="font-size:12.5px">Klick auf eine Zeile setzt oder löscht einen Haltepunkt.</span>
+        <label class="mute" style="font-size:12.5px">Schreibweise <select id="style"><option value="old">Intel 1972 (LAB, JTZ, CAL)</option><option value="new">8080-artig (MOV, JZ, CALL)</option></select></label>
+      </div>
+      <div class="lst" id="lst"></div>
+    </div>
+    <div id="tHex" style="display:none">
+      <div class="row" style="margin-bottom:6px"><span class="mute">Seite</span><select id="hexPage"></select><span class="mute" style="font-size:12.5px">16 KB Adressraum, 64 Seiten zu 256 Byte; gelb: PC, blau: H/L</span></div>
+      <div class="hexv" id="hexv"></div>
+    </div>
+    <div id="tOps" style="display:none" class="help"></div>
+  </div>
+
+  <div class="card">
+    <h2>Spur <span class="row"><label class="mute"><input type="checkbox" id="trOn" checked> mitschreiben</label><button class="b sm" id="bTrCopy">kopieren</button><button class="b sm" id="bTrClr">leeren</button></span></h2>
+    <pre class="trace" id="trace"></pre>
+    <div class="mute" style="font-size:12px;margin-top:6px">Eine Zeile je Befehl: Adresse, Bytes, Befehl, Zustände und die Register danach (A B C D E H L, Flags C Z S P, Stapelzeiger).</div>
+  </div>
+
+  <div class="card help">
+    <h2>Über diesen Emulator</h2>
+    <p>Der Emulator bildet den 8008 Zustand für Zustand nach, so wie ihn das Datenblatt von 1972 beschreibt: In <b>T1</b> geht das untere Adressbyte auf den Bus, in <b>T2</b> die oberen sechs Adressbits zusammen mit der Zykluskennung auf D6/D7, in <b>T3</b> fließen die Daten. <b>T4</b> und <b>T5</b> arbeiten intern und fallen weg, wenn ein Befehl sie nicht braucht. Ein Befehl dauert so zwischen 3 und 11 Zuständen.</p>
+    <table class="ops"><tr><th>D7 D6</th><th>Zyklus</th><th>Bedeutung</th></tr>
+      <tr><td>0 0</td><td>PCI</td><td>Befehl holen (Adresse aus dem PC)</td></tr>
+      <tr><td>1 0</td><td>PCR</td><td>Lesen: weiteres Befehlsbyte oder Daten über H/L</td></tr>
+      <tr><td>0 1</td><td>PCC</td><td>Ein-/Ausgabe: T1 = Akku, T2 = Befehlsregister mit Portnummer</td></tr>
+      <tr><td>1 1</td><td>PCW</td><td>Schreiben über H/L</td></tr>
+    </table>
+    <p>Unter jedem Zustand steht der Code auf den Statusleitungen S0 S1 S2 (T1 = 010, T1I = 011, T2 = 001, T3 = 100, T4 = 111, T5 = 101, STOPPED = 110). Bei INP gibt der 8008 in T4 seine Flags aus: S auf D0, Z auf D1, P auf D2, C auf D3.</p>
+    <h3>Geprüft gegen MAME</h3>
+    <p>Als unabhängige Referenz diente der i8008-Kern aus MAME, herausgelöst und als eigenes Programm übersetzt. Über 3 Millionen Befehle aus Zufallsprogrammen, die alle 256 Opcodes ausführen, stimmen nach jedem Befehl in allen Registern, Flags, PC, Stapel, Speicher, Ausgabeports und der Zahl der Zustände überein. Zwei Stellen sind bewusst anders:</p>
+    <ul>
+      <li>MAME löscht beim Rücksprung den verlassenen Stapeleintrag. Das Datenblatt kennt das nicht; hier bleibt er stehen.</li>
+      <li>Bei HLT zeigt der PC hier hinter den HLT, wie beim echten Chip. MAME setzt ihn zurück und korrigiert das beim Interrupt.</li>
+    </ul>
+    <h3>Die Logikschaltung dazu</h3>
+    <p>Zum Emulator gehört die Schaltung <code>intel8008.circ</code> (im Logisim Web: <a href="logisim_web_intel8008.html" target="_blank" rel="noopener">logisim_web_intel8008.html</a>). Sie wurde Zustand für Zustand gegen diesen Emulator geprüft. Ihr Programm steht im RAM „Speicher“: „aus .circ laden“ holt es hierher, „für Logisim exportieren“ bringt ein hier übersetztes Programm zurück. Die Schaltung hat ein kleineres System: Port 8, 10 und 11 als Ausgaberegister, Schalter an INP 2 und 3, Interrupt fest mit RST 1.</p>
+    <h3>Das System drumherum</h3>
+    <ul>
+      <li>16 KB Speicher, ganz als RAM.</li>
+      <li>OUT 8 schreibt ein Zeichen ins Terminal (13 Wagenrücklauf, 10 neue Zeile, 8 Rückschritt, 12 Bildschirm löschen). INP 1 liefert in Bit 0 „Zeichen bereit“, INP 0 das Zeichen.</li>
+      <li>Ports 10 und 11 sind als Leuchtdioden dargestellt, Eingabeports 2 und 3 als Schalter. Alle 24 Ausgabelatches stehen in der Tabelle.</li>
+      <li>Der Knopf „Interrupt“ zieht INT: Der nächste Befehl beginnt mit T1I statt T1, der PC zählt nicht weiter, und statt des Speichers liefert die Interrupt-Logik den gewählten Befehl, meist ein RST. So weckt man auch einen angehaltenen 8008.</li>
+    </ul>
+    <h3>Unterschiede zum echten Chip</h3>
+    <ul>
+      <li>Nach dem Einschalten steht der echte 8008 im Zustand STOPPED und wird mit einem Interrupt gestartet. Hier startet er nach Reset bei 0000H, außer der Haken unten ist gesetzt.</li>
+      <li>READY/WAIT und der Zweiphasentakt φ1/φ2 sind nicht nachgebildet.</li>
+      <li>Die nicht dokumentierten Opcodes 38H, 39H, 22H, 2AH, 32H und 3AH wirken wie ein NOP mit fünf Zuständen.</li>
+    </ul>
+    <label class="row" style="margin-top:6px"><input type="checkbox" id="startStopped"> nach Reset im Zustand STOPPED wie das Original (mit Interrupt RST 0 starten)</label>
+    <h3>Assembler</h3>
+    <ul>
+      <li>Beide Schreibweisen: die ursprüngliche von Intel (<code>LAB</code>, <code>LMI</code>, <code>ADI</code>, <code>JTZ</code>, <code>CAL</code>, <code>INP</code>) und die spätere, 8080-artige (<code>MOV A,B</code>, <code>MVI M,5</code>, <code>JZ</code>, <code>CALL</code>, <code>IN</code>).</li>
+      <li>Marken mit Doppelpunkt, <code>ORG</code>, <code>DB</code> (auch <code>"Text"</code>), <code>DW</code>, <code>DS</code>, <code>EQU</code>; Zahlen <code>12</code>, <code>0FH</code>, <code>$1F</code>, <code>17Q</code>, <code>'A'</code>; <code>hi(marke)</code>, <code>lo(marke)</code></li>
+    </ul>
+  </div>
+
+</div>
+</div>
+<footer>
+  Ein Projekt der <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">Interessengemeinschaft Informationstechnik Zwieseltal</a> ·
+  Brauen: <a href="https://zwieselbrau.wordpress.com/" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
+</footer>
+
+<div class="modal" id="modal"><div class="box">
+  <h2 style="margin:0 0 8px;font-size:15px;color:var(--acc)" id="mTitle"></h2>
+  <div class="mute" style="font-size:12.5px;margin-bottom:6px" id="mText"></div>
+  <textarea id="mArea" spellcheck="false"></textarea>
+  <div class="row" style="margin-top:8px;justify-content:flex-end">
+    <button class="b" id="mCopy">kopieren</button>
+    <button class="b" id="mDl" style="display:none"></button>
+    <button class="b pri" id="mClose">schließen</button>
+  </div>
+</div></div>
+<input type="file" id="fCirc" accept=".circ,.xml,.html,text/xml" style="display:none">
+<input type="file" id="fBin" accept=".bin,.rom,application/octet-stream" style="display:none">
+
+<script>
+// Intel 8008 – Kern auf Zustandsebene (T1..T5) mit Busmodell nach dem Datenblatt von 1972
+(function (G) {
+'use strict';
+
+// Zykluskennung auf D6/D7 in T2
+const CYC = { PCI: 0x00, PCR: 0x80, PCC: 0x40, PCW: 0xC0 };
+// Statusleitungen S0 S1 S2 (als Bitfolge S0..S2)
+const STATUS = { T1: '010', T1I: '011', T2: '001', WAIT: '000', T3: '100', STOPPED: '110', T4: '111', T5: '101' };
+const RN = 'ABCDEHLM';
+const PAR = new Uint8Array(256);
+for (let i = 0; i < 256; i++) { let p = 0; for (let b = 0; b < 8; b++) p ^= (i >> b) & 1; PAR[i] = p ? 0 : 1; }
+
+class MCS8 {
+  constructor() {
+    this.mem = new Uint8Array(16384);
+    this.romTop = 0;                         // Speicher unterhalb dieser Adresse ist ROM (0 = alles RAM)
+    this.inPorts = new Uint8Array(8);        // Pegel an den 8 Eingabeports
+    this.outPorts = new Uint8Array(32);      // Ausgabelatches 8..31
+    this.onOut = null;                       // Rückruf (port, wert)
+    this.onIn = null;                        // Rückruf (port, A) -> wert oder undefined
+    this.reset();
+  }
+  reset() {
+    this.r = new Uint8Array(7);              // A B C D E H L
+    this.fc = 0; this.fz = 0; this.fs = 0; this.fp = 0;
+    this.stack = new Uint16Array(8);
+    this.sp = 0;
+    this.ir = 0;
+    this.halted = false;
+    this.intReq = false; this.intByte = 0x05; // eingeschleuster Befehl (RST 0)
+    this.states = 0;                         // gezählte Zustände (je 2 Takte)
+    this.instrs = 0;
+    this.instrAddr = 0;
+    this.outPorts.fill(0);
+    this.lastOut = -1;
+  }
+  get pc() { return this.stack[this.sp]; }
+  set pc(v) { this.stack[this.sp] = v & 0x3FFF; }
+  get hl() { return ((this.r[5] & 0x3F) << 8) | this.r[6]; }
+  get flags() { return (this.fc << 3) | (this.fz << 2) | (this.fs << 1) | this.fp; }
+
+  rd(a) { return this.mem[a & 0x3FFF]; }
+  wr(a, v) { a &= 0x3FFF; if (a >= this.romTop) this.mem[a] = v & 0xFF; }
+  getR(i) { return i === 7 ? this.rd(this.hl) : this.r[i]; }
+  setFlags(v) { v &= 0xFF; this.fz = v === 0 ? 1 : 0; this.fs = v >> 7; this.fp = PAR[v]; }
+  alu(op, b) {
+    const A = this.r[0];
+    let t;
+    switch (op) {
+      case 0: t = A + b; this.fc = (t >> 8) & 1; break;                // AD
+      case 1: t = A + b + this.fc; this.fc = (t >> 8) & 1; break;      // AC
+      case 2: t = A - b; this.fc = (t >> 8) & 1; break;                // SU (Carry = Borgen)
+      case 3: t = A - b - this.fc; this.fc = (t >> 8) & 1; break;      // SB
+      case 4: t = A & b; this.fc = 0; break;                           // ND
+      case 5: t = A ^ b; this.fc = 0; break;                           // XR
+      case 6: t = A | b; this.fc = 0; break;                           // OR
+      case 7: t = A - b; this.fc = (t >> 8) & 1; this.setFlags(t); return; // CP
+    }
+    this.r[0] = t & 0xFF; this.setFlags(t);
+  }
+  cond(op) {
+    const v = (op >> 5) & 1;
+    const f = [this.fc, this.fz, this.fs, this.fp][(op >> 3) & 3];
+    return f === v;
+  }
+  inPort(p) {
+    if (this.onIn) { const v = this.onIn(p, this.r[0]); if (v !== undefined) return v & 0xFF; }
+    return this.inPorts[p];
+  }
+
+  // Einen Befehl ausführen. Liefert die Zustände mit Busbelegung.
+  // Jeder Eintrag: {st, cyc, bus (null = Bus frei), pc, note}
+  step() {
+    const S = [];
+    if (this.halted && !this.intReq) {
+      S.push({ st: 'STOPPED', cyc: '', bus: null, pc: this.pc, note: 'angehalten' });
+      this.states += 1;
+      return S;
+    }
+    const self = this;
+    // Speicherzyklus mit PC als Adresse (Befehl/Operand holen)
+    const fetch = (cyc, t1i) => {
+      const a = this.pc;
+      S.push({ st: t1i ? 'T1I' : 'T1', cyc, bus: a & 0xFF, pc: a, src: 'pc' });
+      if (!t1i) this.pc = a + 1;
+      S.push({ st: 'T2', cyc, bus: ((a >> 8) & 0x3F) | CYC[cyc], pc: this.pc });
+      const v = t1i ? this.intByte : this.rd(a);
+      S.push({ st: 'T3', cyc, bus: v, pc: this.pc });
+      return v;
+    };
+    // Speicherzyklus über H/L
+    const memCyc = (cyc, data) => {
+      S.push({ st: 'T1', cyc, bus: this.r[6], pc: this.pc, src: 'hl' });
+      S.push({ st: 'T2', cyc, bus: (this.r[5] & 0x3F) | CYC[cyc], pc: this.pc });
+      if (cyc === 'PCW') { this.wr(this.hl, data); S.push({ st: 'T3', cyc, bus: data & 0xFF, pc: this.pc }); return data; }
+      const v = this.rd(this.hl);
+      S.push({ st: 'T3', cyc, bus: v, pc: this.pc });
+      return v;
+    };
+    const t4 = (bus = null, note) => S.push({ st: 'T4', cyc: S[S.length - 1].cyc, bus, pc: this.pc, note });
+    const t5 = (note) => S.push({ st: 'T5', cyc: S[S.length - 1].cyc, bus: null, pc: this.pc, note });
+
+    const t1i = this.intReq;
+    if (t1i) { this.intReq = false; this.halted = false; }
+    this.instrAddr = this.pc;
+    const op = fetch('PCI', t1i);
+    this.ir = op;
+    const d = (op >> 3) & 7, s = op & 7;
+
+    switch (op >> 6) {
+      case 3:
+        if (op === 0xFF) { this.halted = true; S.push({ st: 'STOPPED', cyc: '', bus: null, pc: this.pc, note: 'HLT' }); break; } // HLT
+        if (s === 7) { const v = memCyc('PCR'); t4(); this.r[d] = v; t5(); }   // LrM
+        else if (d === 7) { t4(); memCyc('PCW', this.r[s]); }                 // LMr
+        else { t4(); this.r[d] = this.r[s]; t5(); }                           // Lrr
+        break;
+      case 2:
+        if (s === 7) { const v = memCyc('PCR'); t4(); this.alu(d, v); t5(); }  // ALU M
+        else { t4(); this.alu(d, this.r[s]); t5(); }                          // ALU r
+        break;
+      case 0:
+        switch (s) {
+          case 0: case 1:
+            if (d === 0) { this.halted = true; S.push({ st: 'STOPPED', cyc: '', bus: null, pc: this.pc, note: 'HLT' }); break; } // HLT (00/01)
+            t4();
+            if (d !== 7) {                                                     // INr / DCr
+              const v = (this.r[d] + (s === 0 ? 1 : -1)) & 0xFF;
+              this.r[d] = v; this.setFlags(v);
+            }
+            t5(); break;
+          case 2: {
+            t4();
+            const A = this.r[0];
+            switch (d) {
+              case 0: this.fc = A >> 7; this.r[0] = ((A << 1) | (A >> 7)) & 0xFF; break;          // RLC
+              case 1: this.fc = A & 1; this.r[0] = (A >> 1) | ((A & 1) << 7); break;               // RRC
+              case 2: { const c = A >> 7; this.r[0] = ((A << 1) | this.fc) & 0xFF; this.fc = c; break; } // RAL
+              case 3: { const c = A & 1; this.r[0] = (A >> 1) | (this.fc << 7); this.fc = c; break; }    // RAR
+            }
+            t5(); break;
+          }
+          case 3:                                                              // Rcc
+            if (this.cond(op)) { t4(); this.sp = (this.sp - 1) & 7; t5(); }
+            break;
+          case 4: { const v = fetch('PCR'); t4(); this.alu(d, v); t5(); break; } // ALU I
+          case 5: { t4(); const ret = this.pc; this.sp = (this.sp + 1) & 7; this.pc = d << 3; t5(); void ret; break; } // RST
+          case 6: {
+            const v = fetch('PCR');
+            if (d === 7) memCyc('PCW', v);                                     // LMI
+            else { t4(); this.r[d] = v; t5(); }                                // LrI
+            break;
+          }
+          case 7: t4(); this.sp = (this.sp - 1) & 7; t5(); break;              // RET
+        }
+        break;
+      case 1:
+        if (s & 1) {
+          const port = (op >> 1) & 0x1F;
+          const A = this.r[0];
+          S.push({ st: 'T1', cyc: 'PCC', bus: A, pc: this.pc, src: 'a' });
+          S.push({ st: 'T2', cyc: 'PCC', bus: op, pc: this.pc });
+          if (port < 8) {                                                      // INP
+            const v = this.inPort(port);
+            S.push({ st: 'T3', cyc: 'PCC', bus: v, pc: this.pc });
+            t4((this.fs) | (this.fz << 1) | (this.fp << 2) | (this.fc << 3), 'Flags S Z P C auf D0–D3');
+            this.r[0] = v; t5();
+          } else {                                                             // OUT
+            S.push({ st: 'T3', cyc: 'PCC', bus: null, pc: this.pc });
+            this.outPorts[port] = A; this.lastOut = port;
+            if (this.onOut) this.onOut(port, A);
+          }
+        } else {
+          const lo = fetch('PCR');
+          const hi = fetch('PCR');
+          const tgt = ((hi & 0x3F) << 8) | lo;
+          const kind = s >> 1;                                                 // 0 Jcc, 1 Ccc, 2 JMP, 3 CAL
+          const take = kind >= 2 || this.cond(op);
+          if (take) {
+            t4();
+            if (kind & 1) this.sp = (this.sp + 1) & 7;                          // CAL/Ccc: Stapel hoch
+            this.pc = tgt;
+            t5();
+          }
+        }
+        break;
+    }
+    this.states += S.length;
+    this.instrs++;
+    return S;
+  }
+}
+
+// ---------------- Disassembler ----------------
+const ALU_OLD = ['AD', 'AC', 'SU', 'SB', 'ND', 'XR', 'OR', 'CP'];
+const ALU_NEW = ['ADD', 'ADC', 'SUB', 'SBB', 'ANA', 'XRA', 'ORA', 'CMP'];
+const ALUI_NEW = ['ADI', 'ACI', 'SUI', 'SBI', 'ANI', 'XRI', 'ORI', 'CPI'];
+const CC_OLD = ['C', 'Z', 'S', 'P'];
+const CC_NEW_F = ['NC', 'NZ', 'P', 'PO'], CC_NEW_T = ['C', 'Z', 'M', 'PE'];
+const ROT = ['RLC', 'RRC', 'RAL', 'RAR'];
+function hex(v, n) { return v.toString(16).toUpperCase().padStart(n, '0'); }
+function oplen(op) {
+  const g = op >> 6, s = op & 7;
+  if (g === 0 && (s === 4 || s === 6)) return 2;
+  if (g === 1 && !(s & 1)) return 3;
+  return 1;
+}
+function disasm(mem, addr, style) {
+  const neu = style === 'new';
+  const op = mem[addr & 0x3FFF], b1 = mem[(addr + 1) & 0x3FFF], b2 = mem[(addr + 2) & 0x3FFF];
+  const d = (op >> 3) & 7, s = op & 7, len = oplen(op);
+  const im = hex(b1, 2) + 'H';
+  const ad = hex(((b2 & 0x3F) << 8) | b1, 4) + 'H';
+  let t;
+  switch (op >> 6) {
+    case 3: t = op === 0xFF ? 'HLT' : neu ? `MOV ${RN[d]},${RN[s]}` : `L${RN[d]}${RN[s]}`; break;
+    case 2: t = neu ? `${ALU_NEW[d]} ${RN[s]}` : `${ALU_OLD[d]}${RN[s]}`; break;
+    case 0:
+      switch (s) {
+        case 0: case 1:
+          if (d === 0) t = 'HLT';
+          else if (d === 7) t = `NOP? (${hex(op, 2)}H)`;
+          else t = neu ? `${s ? 'DCR' : 'INR'} ${RN[d]}` : `${s ? 'DC' : 'IN'}${RN[d]}`;
+          break;
+        case 2: t = d < 4 ? ROT[d] : `NOP? (${hex(op, 2)}H)`; break;
+        case 3: t = neu ? 'R' + ((d & 4) ? CC_NEW_T : CC_NEW_F)[d & 3] : `R${(d & 4) ? 'T' : 'F'}${CC_OLD[d & 3]}`; break;
+        case 4: t = neu ? `${ALUI_NEW[d]} ${im}` : `${ALU_OLD[d]}I ${im}`; break;
+        case 5: t = `RST ${d}`; break;
+        case 6: t = neu ? `MVI ${RN[d]},${im}` : `L${RN[d]}I ${im}`; break;
+        case 7: t = 'RET'; break;
+      }
+      break;
+    case 1:
+      if (s & 1) { const p = (op >> 1) & 0x1F; t = p < 8 ? (neu ? `IN ${p}` : `INP ${p}`) : `OUT ${p}`; }
+      else {
+        const k = s >> 1;
+        if (k === 2) t = `JMP ${ad}`;
+        else if (k === 3) t = `${neu ? 'CALL' : 'CAL'} ${ad}`;
+        else {
+          const j = k === 0 ? 'J' : 'C';
+          t = neu ? `${j}${((d & 4) ? CC_NEW_T : CC_NEW_F)[d & 3]} ${ad}` : `${j}${(d & 4) ? 'T' : 'F'}${CC_OLD[d & 3]} ${ad}`;
+        }
+      }
+      break;
+  }
+  return { len, text: t };
+}
+
+// ---------------- Assembler ----------------
+// Versteht die ursprünglichen Intel-Mnemonics (LAB, LMI, ADI, JTZ, CAL, INP …)
+// und die späteren 8080-artigen (MOV A,B / MVI / JZ / CALL / IN …).
+function buildTable() {
+  const T = Object.create(null);  // name -> {kind, base}
+  const add = (n, kind, base, extra) => { T[n] = Object.assign({ kind, base }, extra || {}); };
+  // alt: Register in den Namen
+  for (let d = 0; d < 8; d++) for (let s = 0; s < 8; s++) if (!(d === 7 && s === 7)) add(`L${RN[d]}${RN[s]}`, 'n', 0xC0 | (d << 3) | s);
+  for (let d = 0; d < 8; d++) add(`L${RN[d]}I`, 'i', 0x06 | (d << 3));
+  for (let d = 1; d < 7; d++) { add(`IN${RN[d]}`, 'n', d << 3); add(`DC${RN[d]}`, 'n', (d << 3) | 1); }
+  for (let o = 0; o < 8; o++) {
+    for (let s = 0; s < 8; s++) add(`${ALU_OLD[o]}${RN[s]}`, 'n', 0x80 | (o << 3) | s);
+    add(`${ALU_OLD[o]}I`, 'i', 0x04 | (o << 3));
+  }
+  for (let c = 0; c < 4; c++) for (const tf of [0, 1]) {
+    const code = (tf << 2) | c, nm = `${tf ? 'T' : 'F'}${CC_OLD[c]}`;
+    add(`J${nm}`, 'a', 0x40 | (code << 3));
+    add(`C${nm}`, 'a', 0x42 | (code << 3));
+    add(`R${nm}`, 'n', 0x03 | (code << 3));
+    const nn = (tf ? CC_NEW_T : CC_NEW_F)[c];
+    const addNew = (n, kind, base) => { if (T[n]) T[n].alt = { kind, base }; else add(n, kind, base); };
+    addNew(`J${nn}`, 'a', 0x40 | (code << 3));
+    addNew(`C${nn}`, 'a', 0x42 | (code << 3));
+    addNew(`R${nn}`, 'n', 0x03 | (code << 3));
+  }
+  ROT.forEach((n, i) => add(n, 'n', 0x02 | (i << 3)));
+  add('HLT', 'n', 0xFF); add('JMP', 'a', 0x44); add('CAL', 'a', 0x46); add('CALL', 'a', 0x46); add('RET', 'n', 0x07);
+  add('RST', 'rst', 0x05); add('INP', 'in', 0x41); add('IN', 'in', 0x41); add('OUT', 'out', 0x41);
+  // neu: mit Registeroperanden
+  add('MOV', 'mov', 0xC0); add('MVI', 'mvi', 0x06); add('INR', 'r1', 0x00); add('DCR', 'r1', 0x01);
+  ALU_NEW.forEach((n, i) => { if (!T[n]) add(n, 'alu', 0x80 | (i << 3)); else T[n].alt = { kind: 'alu', base: 0x80 | (i << 3) }; });
+  ALUI_NEW.forEach((n, i) => { if (!T[n]) add(n, 'i', 0x04 | (i << 3)); });
+  return T;
+}
+const TABLE = buildTable();
+
+function assemble(src) {
+  const lines = src.split(/\r?\n/);
+  const errors = [], labels = Object.create(null);
+  const mem = new Uint8Array(16384), used = new Uint8Array(16384), isData = new Uint8Array(16384);
+  const addrLine = new Int32Array(16384).fill(-1);
+  const codeLabels = Object.create(null);
+  let maxAddr = -1, inDB = false;
+
+  const parseNum = (t) => {
+    let m;
+    if ((m = /^'(.)'$/.exec(t))) return m[1].charCodeAt(0);
+    if ((m = /^(?:0x|\$)([0-9a-f]+)$/i.exec(t))) return parseInt(m[1], 16);
+    if ((m = /^([0-9][0-9a-f]*)h$/i.exec(t))) return parseInt(m[1], 16);
+    if ((m = /^([0-7]+)[oq]$/i.exec(t))) return parseInt(m[1], 8);
+    if ((m = /^0b([01]+)$/i.exec(t)) || (m = /^([01]+)b$/i.exec(t))) return parseInt(m[1], 2);
+    if ((m = /^([0-9]+)d?$/i.exec(t))) return parseInt(m[1], 10);
+    return null;
+  };
+  const evalExpr = (t, pass, pc) => {
+    t = t.trim();
+    if (!t) throw new Error('Operand fehlt');
+    let m;
+    if ((m = /^(lo|hi|low|high)\s*\((.*)\)$/i.exec(t))) {
+      const v = evalExpr(m[2], pass, pc);
+      return /^lo/i.test(m[1]) ? v & 0xFF : (v >> 8) & 0xFF;
+    }
+    const parts = t.split(/(?=[+-])/).map(x => x.trim()).filter(Boolean);
+    let sum = 0;
+    for (let p of parts) {
+      let sign = 1;
+      if (p[0] === '+' || p[0] === '-') { if (p[0] === '-') sign = -1; p = p.slice(1).trim(); }
+      let v;
+      if (p === '$' || p === '*') v = pc;
+      else if ((v = parseNum(p)) === null) {
+        const k = p.toUpperCase();
+        if (k in labels) v = labels[k];
+        else if (pass === 2) throw new Error(`Unbekannte Marke "${p}"`);
+        else v = 0;
+      }
+      sum += sign * v;
+    }
+    return sum;
+  };
+  const reg = (t) => {
+    const k = t.trim().toUpperCase();
+    const i = RN.indexOf(k);
+    if (k.length !== 1 || i < 0) throw new Error(`Register A B C D E H L M erwartet, nicht "${t.trim()}"`);
+    return i;
+  };
+  const splitOps = (s) => {
+    const out = []; let cur = '', q = false;
+    let qc = '';
+    for (const ch of s) {
+      if (!q && (ch === "'" || ch === '"')) { q = true; qc = ch; } else if (q && ch === qc) q = false;
+      if (ch === ',' && !q) { out.push(cur); cur = ''; } else cur += ch;
+    }
+    if (cur.trim() !== '' || out.length) out.push(cur);
+    return out.map(x => x.trim());
+  };
+
+  for (let pass = 1; pass <= 2; pass++) {
+    let pc = 0;
+    lines.forEach((raw, li) => {
+      let line = raw, q = false, cut = -1;
+      let qc = '';
+      for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        if (!q && (ch === "'" || ch === '"')) { q = true; qc = ch; } else if (q && ch === qc) q = false;
+        if (ch === ';' && !q) { cut = i; break; }
+      }
+      if (cut >= 0) line = line.slice(0, cut);
+      line = line.trim();
+      if (!line) return;
+      try {
+        let m;
+        if ((m = /^([A-Za-z_][\w]*)\s*(?:\s+EQU\s+|=)\s*(.+)$/i.exec(line))) { labels[m[1].toUpperCase()] = evalExpr(m[2], pass, pc); return; }
+        if ((m = /^([A-Za-z_][\w]*)\s*:\s*(.*)$/.exec(line))) {
+          const name = m[1].toUpperCase();
+          if (pass === 1) { if (name in labels) throw new Error(`Marke "${m[1]}" doppelt`); labels[name] = pc; }
+          else codeLabels[pc] = codeLabels[pc] ? codeLabels[pc] + ', ' + m[1] : m[1];
+          line = m[2].trim();
+          if (!line) return;
+        }
+        const sp = line.search(/\s/);
+        const op = (sp < 0 ? line : line.slice(0, sp)).toUpperCase();
+        const rest = sp < 0 ? '' : line.slice(sp + 1).trim();
+        const ops = rest ? splitOps(rest) : [];
+        const emit = (b) => {
+          if (pc > 0x3FFF) throw new Error('Programm größer als 16 KB');
+          if (pass === 2) {
+            if (used[pc]) throw new Error(`Adresse ${hex(pc, 4)} doppelt belegt`);
+            mem[pc] = b & 0xFF; used[pc] = 1; addrLine[pc] = li; isData[pc] = inDB ? 1 : 0;
+            if (pc > maxAddr) maxAddr = pc;
+          }
+          pc++;
+        };
+        const need = (n) => { if (ops.length !== n) throw new Error(`${op} erwartet ${n} Operand${n === 1 ? '' : 'en'}`); };
+        const byte = (t) => { const v = evalExpr(t, pass, pc); if (pass === 2 && (v < -128 || v > 255)) throw new Error(`Wert ${v} passt nicht in ein Byte`); return v & 0xFF; };
+        const addr = (t) => { const v = evalExpr(t, pass, pc); if (pass === 2 && (v < 0 || v > 0x3FFF)) throw new Error('Adresse 0000H..3FFFH erwartet'); return v; };
+        if (op === 'ORG') { need(1); pc = evalExpr(ops[0], pass, pc); if (pc < 0 || pc > 0x3FFF) throw new Error('ORG außerhalb 0000H..3FFFH'); return; }
+        if (op === 'DB' || op === 'DEFB') {
+          if (!ops.length) throw new Error('DB braucht Werte');
+          inDB = true;
+          try {
+            for (const o of ops) {
+              const sm = /^"(.*)"$/.exec(o) || /^'(..+)'$/.exec(o);
+              if (sm) for (const ch of sm[1]) emit(ch.charCodeAt(0)); else emit(byte(o));
+            }
+          } finally { inDB = false; }
+          return;
+        }
+        if (op === 'DW') { inDB = true; try { for (const o of ops) { const v = evalExpr(o, pass, pc); emit(v); emit(v >> 8); } } finally { inDB = false; } return; }
+        if (op === 'DS') { need(1); pc += evalExpr(ops[0], pass, pc); return; }
+        let e = TABLE[op];
+        if (!e) throw new Error(`Unbekannter Befehl "${op}"`);
+        if (e.alt && ops.length === 1) e = e.alt;   // SUB B (neu) gegenüber SUB (alt)
+        switch (e.kind) {
+          case 'n': need(0); emit(e.base); break;
+          case 'i': need(1); emit(e.base); emit(byte(ops[0])); break;
+          case 'a': { need(1); const v = addr(ops[0]); emit(e.base); emit(v & 0xFF); emit((v >> 8) & 0x3F); break; }
+          case 'rst': { need(1); let v = evalExpr(ops[0], pass, pc); if (v > 7 && (v & 7) === 0 && v <= 0x38) v >>= 3; if (pass === 2 && (v < 0 || v > 7)) throw new Error('RST 0..7 erwartet'); emit(0x05 | ((v & 7) << 3)); break; }
+          case 'in': { need(1); const p = evalExpr(ops[0], pass, pc); if (pass === 2 && (p < 0 || p > 7)) throw new Error('Eingabeport 0..7 erwartet'); emit(0x41 | ((p & 7) << 1)); break; }
+          case 'out': { need(1); const p = evalExpr(ops[0], pass, pc); if (pass === 2 && (p < 8 || p > 31)) throw new Error('Ausgabeport 8..31 erwartet'); emit(0x41 | ((p & 31) << 1)); break; }
+          case 'mov': { need(2); const d = reg(ops[0]), s = reg(ops[1]); if (d === 7 && s === 7) throw new Error('MOV M,M gibt es nicht (das ist HLT)'); emit(0xC0 | (d << 3) | s); break; }
+          case 'mvi': { need(2); const d = reg(ops[0]); emit(0x06 | (d << 3)); emit(byte(ops[1])); break; }
+          case 'r1': { need(1); const d = reg(ops[0]); if (d === 0 || d === 7) throw new Error(`${op} ${RN[d]} gibt es beim 8008 nicht`); emit(e.base | (d << 3)); break; }
+          case 'alu': { need(1); emit(e.base | reg(ops[0])); break; }
+        }
+      } catch (err) {
+        if (pass === 2 || /doppelt|Unbekannter Befehl|erwartet|ORG|gibt es/.test(err.message)) {
+          if (!errors.some(x => x.line === li)) errors.push({ line: li, msg: err.message });
+        }
+      }
+    });
+    if (errors.length) break;
+  }
+  return { mem, used, isData, addrLine, codeLabels, errors, labels, size: maxAddr + 1 };
+}
+
+G.I8008 = { MCS8, disasm, oplen, assemble, hex, STATUS, CYC, RN };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+'use strict';
+const EXAMPLES = [{"name": "Hallo Welt im Terminal", "src": "; Hallo Welt auf dem Terminal (Ausgabeport 8)\n; Der 8008 kennt keine direkte Speicheradresse im Befehl:\n; jeder Speicherzugriff läuft über das Registerpaar H/L (Pseudoregister M).\n        ORG 0\nstart:  LHI hi(text)       ; H/L zeigen auf den Text\n        LLI lo(text)\nloop:   LAM                ; Zeichen aus dem Speicher holen\n        CPI 0              ; Ende des Textes?\n        JTZ fertig\n        OUT 8              ; ans Terminal\n        INL                ; nächstes Zeichen (der Text liegt in einer Seite)\n        JMP loop\nfertig: HLT\n\ntext:   DB \"Hallo, Welt! Hier rechnet ein Intel 8008.\", 13, 10, 0\n", "term": true}, {"name": "Tastatur-Echo in Großbuchstaben", "src": "; Tastatur-Echo: Was man ins Terminal tippt, kommt als Großbuchstaben zurück.\n; INP 1 liefert den Status (Bit 0 = Zeichen bereit), INP 0 das Zeichen.\nstart:  LAI '>'\n        OUT 8\nwarte:  INP 1              ; Status lesen\n        RRC                ; Bit 0 ins Carry\n        JFC warte          ; noch keine Taste\n        INP 0              ; Zeichen holen\n        CPI 'a'\n        JTC aus            ; kleiner als 'a': unverändert\n        CPI 'z'+1\n        JFC aus            ; größer als 'z': unverändert\n        SUI 32             ; Klein- in Großbuchstaben\naus:    OUT 8\n        CPI 13             ; Return?\n        JFZ warte\n        LAI 10             ; dann neue Zeile und Prompt\n        OUT 8\n        JMP start\n", "term": true}, {"name": "Primzahlen bis 255", "src": "; Primzahlen von 2 bis 255 auf dem Terminal\n; Teilen durch fortgesetztes Subtrahieren, Dezimalausgabe als Unterprogramm\nstart:  LBI 2              ; B = Kandidat\nnext:   LCI 2              ; C = Teiler\nteste:  LAC\n        CPB                ; Teiler hat den Kandidaten erreicht?\n        JTZ prim           ; dann ist B eine Primzahl\n        LAB                ; A = Kandidat\nrest:   SUC                ; A = A - C, solange es geht\n        JTZ keine          ; Rest 0: B ist teilbar\n        JFC rest           ; noch kein Borgen\n        INC                ; Rest > 0: nächster Teiler\n        JMP teste\nprim:   LAB\n        CAL dezimal\n        LAI ' '\n        OUT 8\nkeine:  INB                ; nächster Kandidat\n        JFZ next           ; bis B von 255 auf 0 überläuft\n        LAI 13\n        OUT 8\n        LAI 10\n        OUT 8\n        HLT\n\n; A als Dezimalzahl ausgeben, ohne führende Nullen (verändert A, C, D, E, L)\ndezimal: LEI 0             ; E = 1, sobald eine Ziffer ausgegeben ist\n        LCI 100\n        CAL ziffer\n        LCI 10\n        CAL ziffer\n        ADI '0'            ; Einerstelle immer ausgeben\n        OUT 8\n        RET\n\n; eine Stelle: D = A / C, danach A = A mod C\nziffer: LDI 0\nz1:     CPC                ; A < C ?\n        JTC z2\n        SUC\n        IND\n        JMP z1\nz2:     LLA                ; Rest merken\n        LAD\n        ORE                ; Ziffer 0 und noch nichts ausgegeben?\n        JTZ z3             ; dann weglassen\n        LAD\n        ADI '0'\n        OUT 8\n        LEI 1\nz3:     LAL                ; Rest zurück nach A\n        RET\n", "term": true}, {"name": "Lauflicht am Port 10", "src": "; Lauflicht am Ausgabeport 10 mit einer Warteschleife als Unterprogramm\nstart:  LAI 1\nloop:   OUT 10             ; Muster ausgeben\n        CAL warte\n        RLC                ; ein Bit weiter nach links (rundum)\n        JMP loop\n\n; rund 40 x 256 Durchläufe: bei 500 kHz etwa 0,6 Sekunden\nwarte:  LDI 40\nw1:     LEI 0\nw2:     DCE\n        JFZ w2\n        DCD\n        JFZ w1\n        RET\n"}, {"name": "Zählen per Interrupt (HLT, RST 1)", "src": "; Zählen per Interrupt\n; Das Programm legt sich mit HLT schlafen (Zustand STOPPED).\n; Der Knopf \"Interrupt\" schleust RST 1 ein: Der Prozessor springt nach 0008H,\n; zählt B hoch, zeigt es am Port 10 und kehrt hinter den HLT zurück.\n        ORG 0\nstart:  LBI 0\n        JMP warte\n\n        ORG 8              ; Einsprung für RST 1\n        INB\n        LAB\n        OUT 10\n        RET\n\nwarte:  HLT                ; schlafen bis zum nächsten Interrupt\n        JMP warte\n"}, {"name": "Lauflicht in 8080-Schreibweise", "src": "; Dasselbe Lauflicht in den späteren 8080-artigen Mnemonics\n; (MOV, MVI, DCR, JNZ, CALL …) – der Assembler versteht beide Schreibweisen.\nstart:  MVI A,1\nloop:   OUT 10\n        CALL warte\n        RLC\n        JMP loop\n\nwarte:  MVI D,40\nw1:     MVI E,0\nw2:     DCR E\n        JNZ w2\n        DCR D\n        JNZ w1\n        RET\n", "style": "new"}];
+const { MCS8, disasm, oplen, assemble, hex, STATUS, RN } = I8008;
+const $ = (id) => document.getElementById(id);
+const m = new MCS8();
+
+// ---------------- Terminal und Tastatur ----------------
+const term = { lines: [''], col: 0, dirty: true };
+const kbd = [];
+function termPut(c) {
+  const L = term.lines;
+  if (c === 13) term.col = 0;
+  else if (c === 10) { L.push(''); term.col = 0; if (L.length > 400) L.splice(0, L.length - 400); }
+  else if (c === 8) { if (term.col > 0) term.col--; }
+  else if (c === 12) { term.lines = ['']; term.col = 0; }
+  else if (c >= 32 && c < 127) {
+    let s = L[L.length - 1];
+    if (term.col >= 64) { L.push(''); term.col = 0; s = ''; }
+    s = s.padEnd(term.col, ' ');
+    L[L.length - 1] = s.slice(0, term.col) + String.fromCharCode(c) + s.slice(term.col + 1);
+    term.col++;
+  }
+  term.dirty = true;
+}
+m.onOut = (port, v) => { if (port === 8) termPut(v); };
+m.onIn = (port) => {
+  if (port === 0) { const c = kbd.length ? kbd.shift() : 0; kbdInfo(); return c; }
+  if (port === 1) return kbd.length ? 1 : 0;
+  return undefined;           // sonst Schalter/Pegel aus m.inPorts
+};
+function kbdInfo() { $('kbInfo').textContent = kbd.length ? `Im Puffer: ${kbd.length} Zeichen.` : ''; }
+$('term').addEventListener('keydown', (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  let c = null;
+  if (e.key === 'Enter') c = 13; else if (e.key === 'Backspace') c = 8; else if (e.key === 'Escape') c = 27;
+  else if (e.key.length === 1) c = e.key.charCodeAt(0);
+  if (c !== null && c < 256) { e.preventDefault(); kbd.push(c); kbdInfo(); }
+});
+$('term').addEventListener('paste', (e) => {
+  e.preventDefault();
+  for (const ch of (e.clipboardData.getData('text') || '').replace(/\r?\n/g, '\r')) { const c = ch.charCodeAt(0); if (c < 256) kbd.push(c); }
+  kbdInfo();
+});
+$('bTermClr').onclick = () => { term.lines = ['']; term.col = 0; term.dirty = true; render(); };
+
+// ---------------- Ablauf ----------------
+let cur = null;      // {S, pre, idx}
+let running = false, lastT = 0, acc = 0;
+const breakpoints = new Set();
+let asmInfo = null;
+let trace = [], traceDirty = true;
+let caption = '';
+const TRACE_MAX = 3000;
+
+function snap() {
+  return { r: Array.from(m.r), fc: m.fc, fz: m.fz, fs: m.fs, fp: m.fp, stack: Array.from(m.stack), sp: m.sp,
+           ir: m.ir, instrAddr: m.instrAddr, halted: m.halted, out: Array.from(m.outPorts), lastOut: m.lastOut };
+}
+function logInstr(S, addr) {
+  if (!$('trOn').checked) return;
+  let line;
+  if (S.length === 1 && S[0].st === 'STOPPED' && S[0].note !== 'HLT') return;
+  const len = oplen(m.ir);
+  const bytes = Array.from({ length: len }, (_, i) => hex(m.mem[(addr + i) & 0x3FFF], 2)).join(' ');
+  const t1i = S[0].st === 'T1I';
+  const txt = t1i ? `[INT] ${disasm(Uint8Array.of(m.ir, m.mem[(addr) & 0x3FFF], m.mem[(addr + 1) & 0x3FFF]), 0, $('style').value).text}` : disasm(m.mem, addr, $('style').value).text;
+  const rs = Array.from(m.r).map(v => hex(v, 2)).join(' ');
+  line = `${hex(addr, 4)}  ${(t1i ? '' : bytes).padEnd(9)}${txt.padEnd(17)}${String(S.length).padStart(2)}  ${rs}  ${m.fc ? 'C' : '.'}${m.fz ? 'Z' : '.'}${m.fs ? 'S' : '.'}${m.fp ? 'P' : '.'}  SP=${m.sp}`;
+  trace.push(line);
+  if (trace.length > TRACE_MAX + 500) trace.splice(0, trace.length - TRACE_MAX);
+  traceDirty = true;
+}
+function execInstr() {
+  const pre = snap();
+  const addr = m.pc;
+  const S = m.step();
+  logInstr(S, addr);
+  cur = { S, pre, idx: -1 };
+}
+function stateStep() {
+  if (!cur || cur.idx >= cur.S.length - 1) execInstr();
+  cur.idx++;
+}
+function cycleStep() {
+  if (!cur || cur.idx >= cur.S.length - 1) { execInstr(); cur.idx = 0; }
+  else cur.idx++;
+  // bis zum letzten Zustand dieses Maschinenzyklus (vor dem nächsten T1/T1I)
+  while (cur.idx < cur.S.length - 1 && !/^T1/.test(cur.S[cur.idx + 1].st) && cur.S[cur.idx + 1].st !== 'STOPPED') cur.idx++;
+}
+function instrStep() {
+  if (cur && cur.idx < cur.S.length - 1) { cur.idx = cur.S.length - 1; return; }
+  execInstr(); cur.idx = cur.S.length - 1;
+}
+const atBreak = () => !m.halted && breakpoints.has(m.pc) && (!cur || cur.idx >= cur.S.length - 1);
+
+function runStates(budget) {
+  // ganze Befehle, bis das Zustandsbudget verbraucht ist
+  if (cur && cur.idx < cur.S.length - 1) { budget -= cur.S.length - 1 - cur.idx; cur.idx = cur.S.length - 1; }
+  const logging = $('trOn').checked;
+  while (budget > 0) {
+    const addr = m.pc;
+    const S = m.step();
+    if (logging) logInstr(S, addr);
+    budget -= S.length;
+    cur = { S, pre: null, idx: S.length - 1 };
+    if (m.halted && !m.intReq) return 'halt';
+    if (breakpoints.has(m.pc)) return 'brk';
+  }
+  return null;
+}
+
+function loop(t) {
+  if (!running) return;
+  const sp = +$('speed').value;
+  const dt = Math.min(0.1, (t - lastT) / 1000 || 0); lastT = t;
+  let res = null;
+  if (sp === 0) {
+    const t0 = performance.now();
+    while (performance.now() - t0 < 14 && !res) res = runStates(20000);
+  } else if (sp <= 64) {
+    acc += dt * sp;
+    while (acc >= 1 && !res) {
+      acc -= 1; stateStep();
+      if (cur.idx === cur.S.length - 1) {
+        if (atBreak()) res = 'brk';
+        else if (m.halted && !m.intReq && cur.S[cur.idx].st === 'STOPPED' && cur.S.length > 1) res = 'halt';
+      }
+    }
+  } else {
+    acc += dt * sp;
+    const n = Math.floor(acc); acc -= n;
+    if (n > 0) res = runStates(n);
+  }
+  if (res === 'brk') { setRun(false); caption = `Haltepunkt bei ${hex(m.pc, 4)}H`; }
+  else if (res === 'halt') { setRun(false); caption = 'HLT – angehalten (STOPPED), weiter mit Interrupt'; }
+  render();
+  if (running) requestAnimationFrame(loop);
+}
+function setRun(on) {
+  running = on;
+  $('bRun').textContent = on ? '■ Stopp' : '▶ Lauf';
+  $('bRun').className = 'b ' + (on ? 'stop' : 'go');
+  if (on) {
+    caption = '';
+    lastT = performance.now(); acc = 0;
+    if (atBreak()) instrStep();
+    requestAnimationFrame(loop);
+  }
+  render();
+}
+
+// ---------------- Anzeige ----------------
+const ST_DESC = {
+  T1: 'Unteres Adressbyte auf dem Bus; beim Holen zählt der PC weiter.',
+  T1I: 'Interrupt angenommen: Adresse wie bei T1, aber der PC zählt nicht weiter. Die Interrupt-Logik liefert in T3 den Befehl.',
+  T2: 'Obere sechs Adressbits auf D0–D5, Zykluskennung auf D6/D7.',
+  T3: 'Datenübertragung zwischen Speicher bzw. Port und Prozessor.',
+  T4: 'Interne Ausführung, der Bus ist frei.',
+  T5: 'Interne Ausführung, der Bus ist frei.',
+  STOPPED: 'Angehalten nach HLT. Nur ein Interrupt weckt den Prozessor.',
+};
+function stateText() {
+  if (!cur || cur.idx < 0) return 'Noch kein Befehl ausgeführt. „Zustand“ zeigt den Bus Schritt für Schritt.';
+  const s = cur.S[cur.idx];
+  let t = ST_DESC[s.st];
+  if (s.st === 'T1') {
+    if (s.src === 'a') t = 'Ein-/Ausgabezyklus: der Akku geht auf den Bus (bei OUT der Wert für den Port).';
+    else if (s.src === 'hl') t = 'Speicherzugriff über H/L: L ist das untere Adressbyte.';
+    else if (s.cyc === 'PCR') t = 'Nächstes Befehlsbyte: unteres Adressbyte aus dem PC, der PC zählt weiter.';
+  }
+  if (s.st === 'T2' && cur.S[cur.idx - 1] && cur.S[cur.idx - 1].src === 'hl') t = 'Obere sechs Adressbits aus H auf D0–D5, Zykluskennung auf D6/D7.';
+  if (s.st === 'T2' && s.cyc === 'PCC') t = 'Befehlsregister auf dem Bus: D1–D5 sind die Portnummer, D7 D6 = 0 1 kennzeichnet PCC.';
+  if (s.st === 'T3') {
+    if (s.cyc === 'PCI') t = 'Der Speicher liefert den Befehl ins Befehlsregister.';
+    else if (s.cyc === 'PCR') t = 'Der Speicher liefert ein Byte (Operand oder Daten über H/L).';
+    else if (s.cyc === 'PCW') t = 'Der Prozessor schreibt das Byte in den Speicher bei H/L.';
+    else if (s.cyc === 'PCC') t = s.bus === null ? 'OUT: Das externe Latch hat Akku (T1) und Portnummer (T2) übernommen.' : 'INP: Der Port legt seinen Wert auf den Bus.';
+    if (cur.S[0].st === 'T1I' && s.cyc === 'PCI') t = 'Die Interrupt-Logik schleust den Befehl ein (statt des Speichers).';
+  }
+  if (s.st === 'T4' && s.note) t = s.note + ' (INP gibt in T4 die Flags aus).';
+  const bus = s.bus === null ? 'frei' : `${hex(s.bus, 2)}H (${s.bus.toString(2).padStart(8, '0')})`;
+  return `<b>${s.st}</b>${s.cyc ? ' · ' + s.cyc : ''} · Bus ${bus} · S0 S1 S2 = ${STATUS[s.st]} · ${t}`;
+}
+
+function view() {
+  if (!cur || !cur.pre || cur.idx >= cur.S.length - 1) return snap();
+  const v = JSON.parse(JSON.stringify(cur.pre));
+  // PC wie im Zustand gezeigt
+  v.stack[v.sp] = cur.S[cur.idx].pc;
+  if (cur.idx >= 2) v.ir = m.ir;
+  return v;
+}
+function render() {
+  const v = view();
+  const pv = (cur && cur.pre && cur.idx >= cur.S.length - 1) ? cur.pre : null;
+  // Register
+  let h = '';
+  for (let i = 0; i < 7; i++) {
+    const chg = pv && pv.r[i] !== v.r[i];
+    h += `<div class="reg${chg ? ' chg' : ''}"><div class="n">${'ABCDEHL'[i]}${i === 0 ? ' (Akku)' : ''}</div><div class="v">${hex(v.r[i], 2)}</div><div class="s">${v.r[i].toString(2).padStart(8, '0')}</div></div>`;
+  }
+  const hl = ((v.r[5] & 0x3F) << 8) | v.r[6];
+  h += `<div class="reg"><div class="n">M = (H/L)</div><div class="v">${hex(m.mem[hl], 2)}</div><div class="s">@${hex(hl, 4)}</div></div>`;
+  $('regs').innerHTML = h;
+  const fl = [['C', 'fc', 'Carry'], ['Z', 'fz', 'Null'], ['S', 'fs', 'Vorzeichen'], ['P', 'fp', 'gerade Parität']];
+  $('flags').innerHTML = fl.map(([n, k, d]) => `<div class="flag${v[k] ? ' on' : ''}${pv && pv[k] !== v[k] ? ' chg' : ''}"><small>${d}</small>${n} = ${v[k]}</div>`).join('');
+  let sh = '';
+  for (let i = 0; i < 8; i++) sh += `<div class="stk${i === v.sp ? ' pc' : ''}"><small>${i === v.sp ? 'PC' : 'Stapel ' + i}</small>${hex(v.stack[i], 4)}</div>`;
+  $('stack').innerHTML = sh;
+  $('irHex').textContent = hex(v.ir, 2);
+  const ia = v.instrAddr;
+  $('irTxt').textContent = (cur && cur.S[0].st === 'T1I') ? `${disasm(Uint8Array.of(m.ir, m.mem[ia], m.mem[(ia + 1) & 0x3FFF]), 0, $('style').value).text} (eingeschleust)` : disasm(m.mem, ia, $('style').value).text;
+  $('irAdr').textContent = m.halted ? 'STOPPED' : `von ${hex(ia, 4)}H`;
+  const us = m.states * 4;
+  $('cycInfo').textContent = `${m.instrs.toLocaleString('de-DE')} ${m.instrs === 1 ? 'Befehl' : 'Befehle'} · ${m.states.toLocaleString('de-DE')} Zustände · ${us >= 1e6 ? (us / 1e6).toLocaleString('de-DE', { maximumFractionDigits: 3 }) + ' s' : us >= 1000 ? (us / 1000).toLocaleString('de-DE', { maximumFractionDigits: 2 }) + ' ms' : us + ' µs'} bei 500 kHz`;
+
+  // Zustände des laufenden Befehls, nach Maschinenzyklen gruppiert
+  let sh2 = '';
+  if (cur) {
+    const groups = [];
+    cur.S.forEach((s, i) => {
+      const startNew = !groups.length || /^T1/.test(s.st) || s.st === 'STOPPED';
+      if (startNew) groups.push({ cyc: s.cyc || 'STOPPED', items: [] });
+      groups[groups.length - 1].items.push([s, i]);
+    });
+    for (const g of groups) {
+      const code = g.cyc === 'STOPPED' ? '' : { PCI: '00', PCR: '10', PCC: '01', PCW: '11' }[g.cyc];
+      sh2 += `<div class="cyc"><div class="ct">${g.cyc}${code ? `<span>D7 D6 = ${code[0]} ${code[1]}</span>` : ''}</div><div class="row1">`;
+      for (const [s, i] of g.items) {
+        const vis = i <= cur.idx;
+        sh2 += `<div class="stt${i === cur.idx ? ' now' : ''}${!vis ? ' fut' : ''}${s.bus === null ? ' idle' : ''}"><div class="pn">${s.st === 'STOPPED' ? 'STOP' : s.st}</div><div class="pv">${vis ? (s.bus === null ? '–' : hex(s.bus, 2)) : '·'}</div><div class="pb">${STATUS[s.st]}</div></div>`;
+      }
+      sh2 += '</div></div>';
+    }
+  }
+  $('states').innerHTML = sh2 || '<span class="mute">–</span>';
+  $('phdesc').innerHTML = stateText();
+
+  // Ports
+  const leds = (val) => { let s = ''; for (let b = 7; b >= 0; b--) s += `<div class="ledc"><div class="led${(val >> b) & 1 ? ' on' : ''}"></div>D${b}</div>`; return s + `<span class="big">${hex(val, 2)}</span>`; };
+  $('led10').innerHTML = leds(v.out[10]);
+  $('led11').innerHTML = leds(v.out[11]);
+  for (const p of [2, 3]) {
+    let s = '';
+    for (let b = 7; b >= 0; b--) s += `<div class="ledc"><button class="sw sm${(m.inPorts[p] >> b) & 1 ? ' on' : ''}" data-p="${p}" data-bit="${b}"></button>${b}</div>`;
+    $('sw' + p).innerHTML = s + `<span class="big">${hex(m.inPorts[p], 2)}</span>`;
+  }
+  let op = '';
+  for (let p = 8; p < 32; p++) op += `<div class="${p === v.lastOut ? 'sel' : ''}"><small>${p}</small>${hex(v.out[p], 2)}</div>`;
+  $('outPorts').innerHTML = op;
+
+  // Terminal
+  if (term.dirty) {
+    const el = $('term');
+    const L = term.lines, last = L[L.length - 1];
+    const esc = (s) => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+    const before = L.slice(0, -1).map(esc).join('\n') + (L.length > 1 ? '\n' : '');
+    const lastP = last.padEnd(term.col + 1, ' ');
+    el.innerHTML = before + esc(lastP.slice(0, term.col)) + `<span class="cur">${esc(lastP[term.col])}</span>` + esc(lastP.slice(term.col + 1));
+    el.scrollTop = el.scrollHeight;
+    term.dirty = false;
+  }
+  // Listing
+  const lpc = (cur && cur.idx < cur.S.length - 1) ? v.instrAddr : m.pc;
+  markListing(lpc);
+  if (!$('tHex').style.display) renderHex();
+  if (traceDirty) { const el = $('trace'); el.textContent = trace.slice(-400).join('\n'); el.scrollTop = el.scrollHeight; traceDirty = false; }
+  $('runInfo').textContent = caption || (running ? 'läuft' : m.halted ? 'STOPPED' : 'angehalten');
+  $('bInt').classList.toggle('pri', m.intReq);
+}
+
+// ---------------- Listing ----------------
+const lstRows = new Map();
+let lastMark = -1;
+function buildListing() {
+  const el = $('lst'); el.innerHTML = ''; lstRows.clear(); lastMark = -1;
+  let end = 0;
+  for (let a = 16383; a >= 0; a--) if (m.mem[a]) { end = a + 1; break; }
+  if (asmInfo) end = Math.max(end, asmInfo.size);
+  end = Math.min(16384, Math.max(end + 3, 32));
+  const style = $('style').value;
+  const frag = document.createDocumentFragment();
+  let a = 0;
+  while (a < end) {
+    let z = a; while (z < end && m.mem[z] === 0 && !(asmInfo && asmInfo.used[z]) && !breakpoints.has(z)) z++;
+    if (z - a >= (asmInfo ? 2 : 8)) {
+      const row = document.createElement('div'); row.className = 'l data';
+      row.innerHTML = `<span class="bp"></span><span class="a">${hex(a, 4)}</span><span class="h">00 …</span><span class="t"></span>`;
+      row.lastChild.textContent = `leer bis ${hex(z - 1, 4)}H`;
+      for (let k = a; k < z; k++) lstRows.set(k, row);
+      frag.appendChild(row); a = z; continue;
+    }
+    const lab = asmInfo && asmInfo.codeLabels[a];
+    if (lab) { const d = document.createElement('div'); d.className = 'lab'; d.textContent = lab + ':'; frag.appendChild(d); }
+    const data = asmInfo && asmInfo.isData[a];
+    let len, txt;
+    if (data) {
+      len = 1; const b = m.mem[a];
+      txt = `DB ${hex(b, 2)}H` + (b >= 32 && b < 127 ? `   ; '${String.fromCharCode(b)}'` : '');
+    } else { const d = disasm(m.mem, a, style); len = d.len; txt = d.text; }
+    const bytes = Array.from(m.mem.slice(a, a + len)).map(b => hex(b, 2)).join(' ');
+    const row = document.createElement('div');
+    row.className = 'l' + (data ? ' data' : '') + (breakpoints.has(a) ? ' brk' : '');
+    row.dataset.a = a;
+    row.innerHTML = `<span class="bp">●</span><span class="a">${hex(a, 4)}</span><span class="h">${bytes}</span><span class="t"></span>`;
+    row.lastChild.textContent = txt;
+    frag.appendChild(row); lstRows.set(a, row);
+    a += len;
+  }
+  el.appendChild(frag);
+  render();
+}
+function markListing(pc) {
+  if (pc === lastMark) return;
+  const o = lstRows.get(lastMark); if (o) o.classList.remove('cur');
+  const n = lstRows.get(pc);
+  if (n) {
+    n.classList.add('cur');
+    const box = $('lst');
+    if (box.offsetParent !== null && (!running || +$('speed').value <= 1000)) {
+      const t = n.offsetTop - box.offsetTop, b = t + n.offsetHeight;
+      if (t < box.scrollTop || b > box.scrollTop + box.clientHeight) box.scrollTop = t - box.clientHeight / 3;
+    }
+  }
+  lastMark = pc;
+}
+$('lst').addEventListener('click', (e) => {
+  const row = e.target.closest('.l[data-a]'); if (!row) return;
+  const a = +row.dataset.a;
+  if (breakpoints.has(a)) breakpoints.delete(a); else breakpoints.add(a);
+  row.classList.toggle('brk', breakpoints.has(a));
+});
+$('style').onchange = () => { buildListing(); };
+function renderHex() {
+  const pg = +$('hexPage').value || 0;
+  const pc = m.pc, hl = m.hl;
+  let h = '      ' + Array.from({ length: 16 }, (_, i) => ' ' + hex(i, 1) + ' ').join('') + '  ASCII\n';
+  for (let r = 0; r < 16; r++) {
+    const base = pg * 256 + r * 16;
+    h += hex(base, 4) + '  ';
+    let asc = '';
+    for (let c = 0; c < 16; c++) {
+      const a = base + c, b = m.mem[a], s = hex(b, 2);
+      h += a === pc ? `<span class="pc">${s}</span>  ` : a === hl ? `<span style="background:#20384d;color:#8fd0ff">${s}</span>  ` : s + '  ';
+      asc += b >= 32 && b < 127 ? String.fromCharCode(b).replace(/[&<>]/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[x]) : '.';
+    }
+    h += ' ' + asc + '\n';
+  }
+  $('hexv').innerHTML = h;
+}
+for (let p = 0; p < 64; p++) { const o = document.createElement('option'); o.value = p; o.textContent = `${hex(p * 256, 4)}H`; $('hexPage').appendChild(o); }
+$('hexPage').onchange = renderHex;
+
+// ---------------- Laden / Speichern ----------------
+function hardReset() {
+  m.reset(); cur = null; caption = '';
+  if ($('startStopped').checked) m.halted = true;
+  trace = []; traceDirty = true;
+}
+function loadMem(bytes, info) {
+  setRun(false);
+  m.mem.fill(0); m.mem.set(bytes.slice(0, 16384));
+  asmInfo = info || null;
+  hardReset();
+  buildListing();
+}
+const esc = (s) => s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+function doAssemble() {
+  const r = assemble($('src').value);
+  const el = $('errs');
+  if (r.errors.length) {
+    el.innerHTML = r.errors.map(e => `<div data-l="${e.line}">Zeile ${e.line + 1}: ${esc(e.msg)}</div>`).join('');
+    $('asmInfo').textContent = '';
+    return false;
+  }
+  loadMem(r.mem, r);
+  el.innerHTML = `<div class="ok">✓ ${r.size} Byte übersetzt und geladen, CPU zurückgesetzt.</div>`;
+  const nl = Object.keys(r.codeLabels).length;
+  $('asmInfo').textContent = nl === 1 ? '1 Marke' : `${nl} Marken`;
+  return true;
+}
+$('errs').addEventListener('click', (e) => {
+  const d = e.target.closest('[data-l]'); if (!d) return;
+  const ln = +d.dataset.l, ta = $('src');
+  const lines = ta.value.split('\n'); let pos = 0;
+  for (let i = 0; i < ln; i++) pos += lines[i].length + 1;
+  ta.focus(); ta.setSelectionRange(pos, pos + lines[ln].length);
+  ta.scrollTop = Math.max(0, ln * 19.5 - ta.clientHeight / 3);
+});
+function download(name, data, type) {
+  const blob = data instanceof Uint8Array ? new Blob([data], { type: 'application/octet-stream' }) : new Blob([data], { type: type || 'text/plain' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function disasmSource(bytes, end, title) {
+  const style = $('style').value;
+  const targets = new Set();
+  let a = 0;
+  while (a < end) {
+    const op = bytes[a];
+    if ((op >> 6) === 1 && !(op & 1)) targets.add(((bytes[a + 2] & 0x3F) << 8) | bytes[a + 1]);
+    a += oplen(op);
+  }
+  const name = (t) => 'L' + hex(t, 4);
+  let s = `; ${title}\n`;
+  a = 0;
+  while (a < end) {
+    const op = bytes[a], d = disasm(bytes, a, style);
+    let txt = d.text;
+    if (txt.startsWith('NOP?') || a + d.len > 16384) txt = `DB ${hex(op, 2)}H`;
+    else if ((op >> 6) === 1 && !(op & 1)) txt = txt.replace(/[0-9A-F]{4}H$/, name(((bytes[a + 2] & 0x3F) << 8) | bytes[a + 1]));
+    const len = txt.startsWith('DB') ? 1 : d.len;
+    const lab = targets.has(a) ? (name(a) + ':').padEnd(8) : ''.padEnd(8);
+    s += `${lab}${txt.padEnd(18)}; ${hex(a, 4)}: ${Array.from(bytes.slice(a, a + len)).map(x => hex(x, 2)).join(' ')}\n`;
+    a += len;
+  }
+  for (const t of [...targets].filter(t => t >= end).sort((x, y) => x - y)) s += `${name(t)} EQU ${hex(t, 4)}H\n`;
+  return s;
+}
+// ---- Logisim-Schaltung: Programm im RAM "Speicher" ----
+let circText = null, circName = null;
+function parseLogisimMem(txt) {
+  const out = new Uint8Array(16384);
+  let i = 0;
+  for (const ln of txt.split(/\r?\n/)) {
+    if (/^addr\/data/.test(ln)) continue;
+    for (const tok of ln.trim().split(/\s+/)) {
+      if (!tok) continue;
+      const m2 = /^(\d+)\*([0-9a-f]+)$/i.exec(tok);
+      if (m2) { const n = +m2[1], v = parseInt(m2[2], 16); for (let k = 0; k < n && i < 16384; k++) out[i++] = v; }
+      else if (/^[0-9a-f]+$/i.test(tok)) { if (i < 16384) out[i++] = parseInt(tok, 16); }
+    }
+  }
+  return out;
+}
+function findMem(doc) {
+  const attr = (c, n) => { const x = [...c.children].find(y => y.getAttribute('name') === n); return x ? (x.getAttribute('val') ?? x.textContent) : null; };
+  const mems = [...doc.querySelectorAll('comp[name="RAM"], comp[name="ROM"]')];
+  let best = mems.find(c => /^(speicher|programm)$/i.test(attr(c, 'label') || '') && attr(c, 'addrWidth') === '14');
+  if (!best) best = mems.find(c => attr(c, 'addrWidth') === '14' && attr(c, 'dataWidth') === '8');
+  if (!best) return null;
+  const n = [...best.children].find(x => x.getAttribute('name') === 'contents');
+  return n ? { text: n.textContent } : { text: '' };
+}
+function memTextLogisim() {
+  let end = 0; for (let k = 16383; k >= 0; k--) if (m.mem[k]) { end = k + 1; break; }
+  const toks = [];
+  for (let i = 0; i < end;) { let j = i; while (j < end && m.mem[j] === m.mem[i]) j++; const n = j - i, v = m.mem[i].toString(16); if (n >= 4) toks.push(`${n}*${v}`); else for (let k = 0; k < n; k++) toks.push(v); i = j; }
+  let s = 'addr/data: 14 8\n';
+  for (let i = 0; i < toks.length; i += 8) s += toks.slice(i, i + 8).join(' ') + '\n';
+  return s;
+}
+function loadCircText(text, name) {
+  const emb = /<script type="text\/plain" id="embeddedCirc"[^>]*>([\s\S]*?)<\/script>/.exec(text);
+  if (emb) text = emb[1];
+  text = text.replace(/^\uFEFF/, '').replace(/^\s+/, '');
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  if (doc.querySelector('parsererror')) { alert('Die Datei ist keine gültige .circ-Datei.'); return; }
+  const r = findMem(doc);
+  if (!r) { alert('In der Schaltung wurde kein Speicher „Speicher“ mit 14 Bit Adresse und 8 Bit Daten gefunden.'); return; }
+  circText = text; circName = name;
+  const bytes = parseLogisimMem(r.text);
+  let end = 0; for (let k = 16383; k >= 0; k--) if (bytes[k]) { end = k + 1; break; }
+  $('src').value = disasmSource(bytes, end, `Programm aus ${name}`);
+  loadMem(bytes, null); $('exSel').value = '';
+  circText = text; circName = name;
+  $('errs').innerHTML = `<div class="ok">✓ ${end} Byte aus dem Speicher von ${esc(name)} geladen und rückübersetzt.</div>`;
+}
+function patchedCirc() {
+  if (!circText) return null;
+  const doc = new DOMParser().parseFromString(circText, 'application/xml');
+  const r = findMem(doc); if (!r || !r.text) return null;
+  const i = circText.indexOf(r.text);
+  if (i < 0 || circText.indexOf(r.text, i + 1) >= 0) return null;
+  return circText.slice(0, i) + memTextLogisim() + circText.slice(i + r.text.length);
+}
+$('bLoadCirc').onclick = () => $('fCirc').click();
+$('fCirc').onchange = (e) => { const f = e.target.files[0]; if (!f) return; const rd = new FileReader(); rd.onload = () => loadCircText(rd.result, f.name); rd.readAsText(f); e.target.value = ''; };
+$('bExport').onclick = () => {
+  const pc = patchedCirc();
+  showModal('Speicherinhalt für Logisim',
+    'In Logisim den Inhalt des RAM „Speicher“ ersetzen (im Logisim Web: RAM anklicken). ' + (pc ? `Oder gleich die geladene Schaltung <b>${esc(circName)}</b> mit diesem Programm speichern.` : 'Wer vorher eine .circ geladen hat, kann sie hier direkt mit dem neuen Programm speichern.'),
+    memTextLogisim(), pc ? { label: 'Schaltung speichern', fn: () => download(circName.replace(/\.html$/i, '.circ').replace(/^logisim_web_/, ''), pc, 'application/xml') } : null);
+};
+$('bBinIn').onclick = () => $('fBin').click();
+$('fBin').onchange = (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const b = new Uint8Array(16384); const src = new Uint8Array(rd.result); b.set(src.slice(0, 16384));
+    let end = 0; for (let k = 16383; k >= 0; k--) if (b[k]) { end = k + 1; break; }
+    $('src').value = disasmSource(b, end, `Programm aus ${f.name}`);
+    loadMem(b, null); $('exSel').value = '';
+    $('errs').innerHTML = `<div class="ok">✓ ${Math.min(src.length, 16384)} Byte aus ${esc(f.name)} geladen.</div>`;
+  };
+  rd.readAsArrayBuffer(f); e.target.value = '';
+};
+$('bBinOut').onclick = () => { let end = 0; for (let k = 16383; k >= 0; k--) if (m.mem[k]) { end = k + 1; break; } download('i8008.bin', m.mem.slice(0, Math.max(end, 1))); };
+$('bAsmOut').onclick = () => download('i8008.asm', $('src').value);
+function showModal(title, text, content, dl) {
+  $('mTitle').textContent = title; $('mText').innerHTML = text; $('mArea').value = content;
+  $('mDl').style.display = dl ? '' : 'none';
+  if (dl) { $('mDl').textContent = dl.label; $('mDl').onclick = dl.fn; }
+  $('modal').classList.add('on');
+}
+$('mClose').onclick = () => $('modal').classList.remove('on');
+$('modal').addEventListener('click', e => { if (e.target === $('modal')) $('modal').classList.remove('on'); });
+$('mCopy').onclick = () => { const t = $('mArea'); t.select(); navigator.clipboard?.writeText(t.value).catch(() => document.execCommand('copy')); $('mCopy').textContent = 'kopiert ✓'; setTimeout(() => $('mCopy').textContent = 'kopieren', 1200); };
+
+// ---------------- Bedienung ----------------
+EXAMPLES.forEach((ex, i) => { const o = document.createElement('option'); o.value = i; o.textContent = ex.name; $('exSel').appendChild(o); });
+{ const o = document.createElement('option'); o.value = ''; o.textContent = '– eigenes Programm –'; $('exSel').appendChild(o); }
+$('exSel').onchange = () => {
+  const ex = EXAMPLES[+$('exSel').value]; if (!ex) return;
+  $('src').value = ex.src; breakpoints.clear();
+  if (ex.style) $('style').value = ex.style;
+  doAssemble();
+  if (ex.term) { term.lines = ['']; term.col = 0; term.dirty = true; render(); }
+};
+for (let n = 0; n < 8; n++) { const o = document.createElement('option'); o.value = 0x05 | (n << 3); o.textContent = `RST ${n} → ${hex(n * 8, 4)}H`; $('intOp').appendChild(o); }
+$('intOp').value = 0x0D;
+$('bInt').onclick = () => { m.intByte = +$('intOp').value; m.intReq = true; caption = ''; render(); };
+$('bAsm').onclick = doAssemble;
+$('bReset').onclick = () => { setRun(false); hardReset(); render(); };
+$('bSub').onclick = () => { setRun(false); stateStep(); render(); };
+$('bCyc').onclick = () => { setRun(false); cycleStep(); render(); };
+$('bStep').onclick = () => { setRun(false); instrStep(); render(); };
+$('bRun').onclick = () => setRun(!running);
+document.querySelector('.wrap').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-p][data-bit]'); if (!b) return;
+  m.inPorts[+b.dataset.p] ^= 1 << +b.dataset.bit; render();
+});
+$('speed').onchange = () => { acc = 0; };
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('on', x === t));
+  for (const id of ['tAsm', 'tLst', 'tHex', 'tOps']) $(id).style.display = id === t.dataset.t ? '' : 'none';
+  if (t.dataset.t === 'tLst') { lastMark = -1; render(); }
+  if (t.dataset.t === 'tHex') { $('hexPage').value = m.pc >> 8; renderHex(); }
+});
+$('bTrCopy').onclick = () => showModal('Spur', 'Die letzten Befehle, eine Zeile je Befehl.', trace.join('\n'), { label: 'als Datei speichern', fn: () => download('i8008-spur.txt', trace.join('\n')) });
+$('bTrClr').onclick = () => { trace = []; traceDirty = true; render(); };
+document.addEventListener('keydown', (e) => {
+  const tg = e.target;
+  if (tg.tagName === 'TEXTAREA' || tg.tagName === 'INPUT' || tg.tagName === 'SELECT' || tg.id === 'term') {
+    if (tg.id === 'src' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doAssemble(); }
+    return;
+  }
+  if (e.key === 'F10') { e.preventDefault(); $('bStep').click(); }
+  else if (e.key === 'F11') { e.preventDefault(); $('bSub').click(); }
+  else if (e.key === 'F5') { e.preventDefault(); $('bRun').click(); }
+});
+
+// Befehlssatz
+(function () {
+  const rows = [
+    ['Lrr / MOV r,r', '11 DDD SSS', '5 / 7 / 8', 'Register kopieren; mit M über H/L (LrM 8, LMr 7 Zustände)'],
+    ['LrI / MVI r,n', '00 DDD 110', '8 / 9', 'Register mit Konstante laden (LMI 9)'],
+    ['INr DCr / INR DCR', '00 DDD 00x', '5', 'Register ±1, setzt Z S P, nicht C; nicht für A und M'],
+    ['ADr ACr SUr SBr', '10 0xx SSS', '5 / 8', 'Addieren, mit Carry, Subtrahieren (Carry = Borgen)'],
+    ['NDr XRr ORr CPr', '10 1xx SSS', '5 / 8', 'UND, XOR, ODER (C = 0), Vergleichen'],
+    ['ADI … CPI', '00 xxx 100', '8', 'Dasselbe mit Konstante'],
+    ['RLC RRC RAL RAR', '00 0xx 010', '5', 'Akku rotieren, nur C ändert sich'],
+    ['JMP / JFc JTc', '01 xxx 100 / 01 Tcc 000', '11 / 9–11', 'Sprung; F = Flag 0, T = Flag 1, cc = C Z S P'],
+    ['CAL / CFc CTc', '01 xxx 110 / 01 Tcc 010', '11 / 9–11', 'Unterprogramm (Stapel 7 Ebenen)'],
+    ['RET / RFc RTc', '00 xxx 111 / 00 Tcc 011', '5 / 3–5', 'Rücksprung'],
+    ['RST n', '00 AAA 101', '5', 'Aufruf von AAA·8, meist per Interrupt eingeschleust'],
+    ['INP p / IN', '01 00p pp1', '8', 'Eingabeport 0–7 → A'],
+    ['OUT p', '01 RRp pp1', '6', 'A → Ausgabeport 8–31'],
+    ['HLT', '00 000 00x, FF', '4', 'Anhalten bis zum Interrupt'],
+  ];
+  $('tOps').innerHTML = '<p>Die 48 Befehle des 8008 in der ursprünglichen Schreibweise von Intel und der späteren 8080-artigen. Ein Zustand dauert beim Original 4 µs.</p><table class="ops"><tr><th>Befehl</th><th>Code</th><th>Zustände</th><th>Wirkung</th></tr>' +
+    rows.map(r => `<tr><td>${r[0]}</td><td class="mono">${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`).join('') +
+    '</table><p>Bedingungen: JFC = JNC, JTC = JC, JFZ = JNZ, JTZ = JZ, JFS = JP, JTS = JM, JFP = JPO, JTP = JPE (P = 1 bei gerader Parität).</p>';
+})();
+
+$('exSel').value = 0;
+$('src').value = EXAMPLES[0].src;
+doAssemble();
+render();
+
+</script>
+</body>
+</html>
