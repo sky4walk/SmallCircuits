@@ -3965,9 +3965,16 @@ const FatImage = (function () {
     if (!looksBpb(0) && img[510] === 0x55 && img[511] === 0xAA) {
       for (let i = 0; i < 4; i++) { const t = img[0x1BE + i * 16 + 4]; if ([1, 4, 6, 0x0E].includes(t)) { base = r32(0x1BE + i * 16 + 8) * 512; break; } }
     }
-    if (!looksBpb(base)) throw new Error('Kein FAT-Dateisystem erkannt');
-    const spc = img[base + 13], resv = r16(base + 14), nf = img[base + 16], rootEnt = r16(base + 17);
-    const tot = r16(base + 19) || r32(base + 32), fatSz = r16(base + 22);
+    let spc, resv, nf, rootEnt, tot, fatSz;
+    if (looksBpb(base)) {
+      spc = img[base + 13]; resv = r16(base + 14); nf = img[base + 16]; rootEnt = r16(base + 17);
+      tot = r16(base + 19) || r32(base + 32); fatSz = r16(base + 22);
+    } else {
+      // Frühe DOS-1.x/2.x-Disketten ohne BPB: Aufbau aus dem Medienbyte am Anfang der FAT
+      const old = { 0xFE: [1, 64, 1, 320], 0xFC: [1, 64, 2, 360], 0xFF: [2, 112, 1, 640], 0xFD: [2, 112, 2, 720] }[img[512]];
+      if (!old || img[513] !== 0xFF || img[514] !== 0xFF || img.length < old[3] * 512) throw new Error('Kein FAT-Dateisystem erkannt');
+      [spc, rootEnt, fatSz, tot] = old; resv = 1; nf = 2;
+    }
     const fatOff = base + resv * 512, rootOff = fatOff + nf * fatSz * 512, dataOff = rootOff + Math.ceil(rootEnt * 32 / 512) * 512;
     const clusters = Math.floor((tot - resv - nf * fatSz - Math.ceil(rootEnt * 32 / 512)) / spc);
     const fat12 = clusters < 4085, cb = spc * 512;
@@ -6530,19 +6537,98 @@ function createPC(opts) {
 
   // Pfade auf DOS-Namen (8.3) kürzen, so wie DOS sie sieht
   function dosPath(n) { return n.replace(/\\/g, '/').split('/').filter(Boolean).map(c => FatImage.name83(c).s).join('/'); }
+  // Mehrere lange Pfade auf einmal kürzen. Würden zwei verschiedene lange Namen im selben
+  // Verzeichnis denselben 8.3-Namen ergeben, bekommen sie wie unter Windows ~1, ~2 ...
+  // Namen, die schon gültige 8.3-Namen sind, behalten Vorrang und bleiben unverändert.
+  function dosPaths(longPaths) {
+    const parts = longPaths.map(n => n.replace(/\\/g, '/').split('/').filter(Boolean));
+    const out = parts.map(() => []);
+    const depth = Math.max(0, ...parts.map(p => p.length));
+    for (let lv = 0; lv < depth; lv++) {
+      const used = new Map(), assigned = new Map(); // je Elternverzeichnis: belegte Kurznamen / lang -> kurz
+      const key = (par, c) => par + '|' + c.toUpperCase();
+      const todo = [];
+      parts.forEach((p, i) => { if (lv < p.length) todo.push({ i, par: out[i].join('/'), c: p[lv] }); });
+      const usedIn = par => { if (!used.has(par)) used.set(par, new Set()); return used.get(par); };
+      // 1. Durchgang: verlustfreie Namen reservieren
+      for (const t of todo) {
+        const k = key(t.par, t.c), s = FatImage.name83(t.c).s;
+        if (!assigned.has(k) && s === t.c.toUpperCase()) { assigned.set(k, s); usedIn(t.par).add(s); }
+      }
+      // 2. Durchgang: gekürzte Namen, bei Kollision mit Tilde
+      for (const t of todo) {
+        const k = key(t.par, t.c);
+        if (!assigned.has(k)) {
+          const u = usedIn(t.par), n = FatImage.name83(t.c);
+          let s = n.s;
+          for (let j = 1; u.has(s); j++) { const b = n.b.slice(0, 8 - String(j).length - 1) + '~' + j; s = n.e ? b + '.' + n.e : b; }
+          assigned.set(k, s); u.add(s);
+        }
+        out[t.i].push(assigned.get(k));
+      }
+    }
+    return out.map(p => p.join('/'));
+  }
+  const FLOPPY_MAX = 2949120;
   async function addFiles(fileList) {
+    // Erst alles einsammeln, damit die 8.3-Namen eines Vorgangs gemeinsam vergeben werden
+    const items = []; // { name: langer Pfad, data, src: Herkunft (ZIP-Name oder '') }
     for (const f of fileList) {
       const buf = await f.arrayBuffer();
       if (/\.zip$/i.test(f.name)) {
         try {
           const ents = await readZip(buf);
           let cnt = 0;
-          for (const e of ents) if (!e.dir) { disk.set(dosPath(e.name), e.data); cnt++; }
+          for (const e of ents) if (!e.dir) { items.push({ name: e.name, data: e.data, src: f.name }); cnt++; }
           logLine(`ZIP ${f.name}: ${cnt} Dateien`);
         } catch (err) { setStatus(`${f.name} ist kein lesbares ZIP: ${err.message}`); }
-      } else disk.set(dosPath(f.webkitRelativePath || f.name), new Uint8Array(buf));
+      } else items.push({ name: f.webkitRelativePath || f.name, data: new Uint8Array(buf), src: '' });
     }
+    const names = dosPaths(items.map(it => it.name));
+    items.forEach((it, i) => { it.dos = names[i]; disk.set(it.dos, it.data); });
+    unpackFloppies(items);
     refreshDisk();
+  }
+  // Dateien aus Diskettenabbildern auf C: auspacken. Abbilder aus derselben Quelle und demselben
+  // Verzeichnis (z. B. Disk 1..3 einer Installation) landen gemeinsam in einem Ordner – so wie
+  // ein Installationsprogramm sie zusammenkopieren würde. Das Abbild selbst bleibt erhalten
+  // (Auswahl „Diskette A:“ unter Betriebssystem).
+  function unpackFloppies(items) {
+    const groups = new Map();
+    for (const it of items) {
+      if (!isImage(it.dos) || it.data.length > FLOPPY_MAX) continue;
+      let res;
+      try { res = FatImage.read(it.data); } catch (e) { continue; }
+      if (!res.files.length) continue;
+      const par = it.dos.includes('/') ? it.dos.slice(0, it.dos.lastIndexOf('/') + 1) : '';
+      const gk = it.src + '|' + par;
+      if (!groups.has(gk)) groups.set(gk, { par, src: it.src, imgs: [] });
+      groups.get(gk).imgs.push({ it, res });
+    }
+    for (const g of groups.values()) {
+      // Zielordner: bei mehreren Abbildern aus einem ZIP der ZIP-Name, sonst der Name des Abbilds
+      const longName = g.imgs.length > 1 && g.src ? g.src.replace(/\.zip$/i, '') : g.imgs[0].it.dos.split('/').pop().replace(/\.[^.]*$/, '');
+      const base = FatImage.name83(longName.replace(/\./g, '_')).b;
+      let dir = g.par + base;
+      // nicht mit einer vorhandenen Datei gleichen Namens kollidieren
+      for (let j = 1; disk.has(dir); j++) dir = g.par + base.slice(0, 8 - String(j).length - 1) + '~' + j;
+      let over = 0;
+      // Abbilder in natürlicher Reihenfolge (Disk 1, 2, 3 ...); bei gleichen Dateien gewinnt die spätere Diskette
+      g.imgs.sort((a, b) => a.it.name.localeCompare(b.it.name, undefined, { numeric: true }));
+      const seen = new Set();
+      for (const { it, res } of g.imgs) {
+        for (const f of res.files) {
+          const p = dir + '/' + f.path.toUpperCase();
+          if (seen.has(p)) over++;
+          seen.add(p); disk.set(p, f.data);
+        }
+        logLine(`Diskette C:\\${it.dos.replace(/\//g, '\\')}: ${res.files.length} Dateien nach C:\\${dir.replace(/\//g, '\\')} ausgepackt`);
+      }
+      if (over) logLine(`${over} Dateien kamen auf mehreren Disketten vor – die jeweils letzte wurde behalten.`);
+      const arcs = [...seen].filter(p => /\.(ARC|ZOO|LZH|PAK)$/.test(p)).map(p => p.split('/').pop());
+      const tool = [...seen].map(p => p.split('/').pop()).find(n => /^(UNPACK|PKUNPAK|PKXARC|ARCE|LHA|LHARC)\.(COM|EXE)$/.test(n));
+      if (arcs.length) logLine(`Hinweis: ${arcs.length} gepackte Archive (${arcs.slice(0, 3).join(', ')}${arcs.length > 3 ? ' …' : ''}) – im DOS ${tool ? 'mit ' + tool + ' ' : ''}entpacken.`);
+    }
   }
   function isImage(n) { return /\.(IMG|IMA|VFD|DSK|FLP|HDD)$/.test(n); }
   function refreshDisk() {
