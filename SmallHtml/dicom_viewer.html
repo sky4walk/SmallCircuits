@@ -544,7 +544,6 @@
   </div>
   <div class="sidebar-section">
     <h3>Qualität</h3>
-    <h3>Qualität</h3>
     <div class="slider-group">
       <div class="slider-label">Schrittweite <span id="lbl3-steps">256</span></div>
       <input type="range" id="sl3-steps" min="64" max="512" step="16" value="256" oninput="on3DSteps()">
@@ -622,6 +621,8 @@
 // Unterstützt: Explicit/Implicit LE, undefined-length SQ/Items
 // ═══════════════════════════════════════════════════════════════
 const LONG_VRS = new Set(['OB','OW','SQ','UC','UN','UR','UT','OD','OF','OL','OV','SV','UV']);
+const ALL_VRS = new Set(['AE','AS','AT','CS','DA','DS','DT','FL','FD','IS','LO','LT','OB','OD','OF','OL','OV',
+  'OW','PN','SH','SL','SQ','SS','ST','SV','TM','UC','UI','UL','UN','UR','US','UT','UV']);
 const KNOWN_TS = {
   '1.2.840.10008.1.2':      'implicit_le',
   '1.2.840.10008.1.2.1':    'explicit_le',
@@ -641,9 +642,15 @@ function parseDicom(buf) {
   const u8 = new Uint8Array(buf);
   const dv = new DataView(buf);
 
-  // Validate DICM magic
-  if (u8[128]!==0x44||u8[129]!==0x49||u8[130]!==0x43||u8[131]!==0x4D)
-    throw new Error('Kein DICOM-Preamble gefunden (Magic "DICM" fehlt an Byte 128)');
+  // DICM-Kennung an Byte 128. Fehlt sie, wird der Datensatz ab Byte 0 gelesen
+  // (ältere ACR-NEMA-artige Exporte ohne Präambel), sofern er plausibel beginnt.
+  const hasPreamble = u8.length > 132 &&
+    u8[128]===0x44 && u8[129]===0x49 && u8[130]===0x43 && u8[131]===0x4D;
+  if (!hasPreamble) {
+    const g0 = u8.length > 8 ? dv.getUint16(0, true) : 0;
+    if (![0x0002, 0x0008, 0x0010, 0x0018, 0x0020, 0x0028].includes(g0))
+      throw new Error('Kein DICOM: weder "DICM"-Kennung an Byte 128 noch ein gültiger Datensatzanfang');
+  }
 
   const tags  = new Map(); // key=(group<<16|elem) -> {vr, valueOff, length, rawBytes}
   let transferSyntax = '1.2.840.10008.1.2.1'; // default: explicit LE
@@ -740,7 +747,15 @@ function parseDicom(buf) {
   }
 
   // Main parsing loop
-  let offset = 132;
+  let offset = hasPreamble ? 132 : 0;
+  if (!hasPreamble) {
+    const vr0 = String.fromCharCode(u8[4], u8[5]);
+    isExplicit = ALL_VRS.has(vr0);
+    if (dv.getUint16(0, true) !== 0x0002) {
+      inMeta = false;
+      transferSyntax = isExplicit ? '1.2.840.10008.1.2.1' : '1.2.840.10008.1.2';
+    }
+  }
   while (offset < u8.length - 4) {
     let el;
     try { el = readElementHeader(offset); }
@@ -757,7 +772,14 @@ function parseDicom(buf) {
         const tsStr = ts.str;
         transferSyntax = tsStr;
         const mode = KNOWN_TS[tsStr] || 'explicit_le';
+        if (mode === 'explicit_be')
+          throw new Error('Transfer-Syntax Explicit VR Big Endian (von DICOM zurückgezogen) wird nicht unterstützt');
+        if (tsStr === '1.2.840.10008.1.2.1.99')
+          throw new Error('Transfer-Syntax "Deflated Explicit VR Little Endian" wird nicht unterstützt');
         isExplicit = !mode.startsWith('implicit');
+        // Kopf des ersten Datensatz-Elements im richtigen Modus neu lesen
+        // (vorher im Explicit-Modus der Meta-Gruppe gelesen → bei Implicit VR falsche Länge, Abbruch)
+        el = readElementHeader(offset);
       }
     }
 
@@ -845,26 +867,6 @@ for (let x = 0; x < 8; x++) {
 }
 const C0 = 1/Math.sqrt(2); // C(0) scale factor
 
-function idct2d(coefNat, out) {
-  // coefNat: Float32Array[64] in natural 8×8 order
-  // out: Int32Array or similar, receives 64 values (not level-shifted)
-  for (let y = 0; y < 8; y++) {
-    const cy = COS[y];
-    for (let x = 0; x < 8; x++) {
-      const cx = COS[x];
-      let s = 0;
-      for (let v = 0; v < 8; v++) {
-        const cv_scale = v === 0 ? C0 : 1;
-        const row_coef = coefNat[v*8]; // will be indexed below
-        for (let u = 0; u < 8; u++) {
-          s += (u===0?C0:1) * cv_scale * coefNat[v*8+u] * cx[u] * cy[v];
-        }
-      }
-      out[y*8+x] = s * 0.25; // divide by 4
-    }
-  }
-}
-
 // Optimised: separate row + col IDCT (much faster, same result)
 function idct2dFast(coefNat, tmpBuf, out) {
   // Row IDCT
@@ -946,6 +948,7 @@ window.decodeJpegDCT = function(jpegBytes) {
   const components = {}; // comp_id -> {h,v,qt,dc_pred}
   const scanComps  = []; // [{id,dcTh,acTh}]
   let scanStart = -1;
+  let restartInterval = 0;
 
   function readU16be(pos) { return (u8[pos] << 8) | u8[pos+1]; }
 
@@ -990,6 +993,8 @@ window.decodeJpegDCT = function(jpegBytes) {
         const symbols = Array.from(u8.slice(p, p+total)); p += total;
         htables[tc*16+th] = buildHuffTable(counts, symbols);
       }
+    } else if (m === 0xDD) { // DRI
+      restartInterval = readU16be(ps);
     } else if (m === 0xDA) { // SOS
       const ns = u8[ps];
       for (let ci = 0; ci < ns; ci++) {
@@ -1015,8 +1020,18 @@ window.decodeJpegDCT = function(jpegBytes) {
   const tmpBuf     = new Float64Array(64);
   const blockOut   = new Float64Array(64);
 
+  let mcuCount = 0;
   for (let by = 0; by < blocksY; by++) {
     for (let bx = 0; bx < blocksX; bx++) {
+      // Restart-Intervall: Bitpuffer leeren, RSTn-Marker überspringen, DC-Prädiktion zurücksetzen
+      if (restartInterval && mcuCount > 0 && mcuCount % restartInterval === 0) {
+        stream.bitsLeft = 0;
+        while (stream.pos < u8.length - 1 &&
+               !(u8[stream.pos] === 0xFF && u8[stream.pos+1] >= 0xD0 && u8[stream.pos+1] <= 0xD7)) stream.pos++;
+        stream.pos += 2;
+        for (const c of Object.values(components)) c.dcPred = 0;
+      }
+      mcuCount++;
       for (const { id, dcTh, acTh } of scanComps) {
         const comp     = components[id];
         const dcTable  = htables[dcTh];
@@ -1250,7 +1265,7 @@ function decodeJpegLossless(jpegBytes) {
   if (comps.length === 1) {
     const p0 = planes[0];
     if (sh) for (let k = 0; k < p0.length; k++) p0[k] <<= sh;
-    return { pixels: new Int16Array(p0.buffer), width, height, components: 1, precision };
+    return { pixels: p0, width, height, components: 1, precision };   // Uint16, Vorzeichen in decodePixelData
   }
   const nc = comps.length, n = width * height;
   const out = new Uint16Array(n * nc);
@@ -1268,44 +1283,97 @@ function decodeJpegLossless(jpegBytes) {
 //   spp=3 → Uint8Array/Uint16Array, verschachtelt RGB
 // ═══════════════════════════════════════════════════════════════
 
-// Erstes Bild aus gekapselten Pixeldaten (Fragmente korrekt zusammenfügen)
-function getEncapsulatedFrame(dicom) {
+// Bild Nr. `frame` aus gekapselten Pixeldaten (Fragmente korrekt zusammenfügen).
+// Reihenfolge: Basic Offset Table → ein Fragment pro Frame → Gruppierung über EOI-Marker.
+function getEncapsulatedFrame(dicom, frame = 0, nFrames = 1) {
   const u8 = dicom.u8, dv = dicom.dv;
   let off = dicom.pixTag.valueOff;
-  const frags = [];
-  let first = true;
+  const frags = [];          // {itemPos, start, end}
+  let bot = null, first = true, firstItemPos = -1;
   while (off + 8 <= u8.length) {
     const g = dv.getUint16(off, true), e = dv.getUint16(off + 2, true);
     const len = dv.getUint32(off + 4, true);
-    if (g !== 0xFFFE) break;
-    if (e === 0xE0DD) break;                      // Sequence Delimiter
+    if (g !== 0xFFFE || e !== 0xE000) break;         // Sequence Delimiter oder Ende
+    const itemPos = off;
     off += 8;
-    if (e === 0xE000) {
-      if (first) { first = false; off += len; continue; }   // Basic Offset Table
-      const end = Math.min(off + len, u8.length);
-      frags.push(u8.subarray(off, end));
-      off = end;
-      // Ende des ersten Bildes erreicht? (EOI, evtl. mit Füll-Null)
-      let t = end - 1;
-      while (t > off - len && u8[t] === 0x00) t--;
-      if (u8[t - 1] === 0xFF && u8[t] === 0xD9) break;
-    } else break;
+    const end = Math.min(off + len, u8.length);
+    if (first) {
+      first = false;
+      if (len >= 4) { bot = []; for (let o = off; o + 4 <= end; o += 4) bot.push(dv.getUint32(o, true)); }
+    } else {
+      if (firstItemPos < 0) firstItemPos = itemPos;
+      frags.push({ itemPos, start: off, end });
+    }
+    off = end;
   }
-  if (!frags.length) {
-    // Fallback: altes Verhalten – nach SOI/EOI suchen
-    const s0 = dicom.pixTag.valueOff;
-    let s = s0;
-    while (s < u8.length - 1 && !(u8[s] === 0xFF && u8[s+1] === 0xD8)) s++;
-    let e = s + 2;
-    while (e < u8.length - 1 && !(u8[e] === 0xFF && u8[e+1] === 0xD9)) e++;
-    if (s >= u8.length - 1) throw new Error('JPEG SOI-Marker nicht in Pixel-Daten gefunden');
-    return u8.slice(s, e + 2);
+  const join = list => {
+    if (list.length === 1) return u8.subarray(list[0].start, list[0].end);
+    const out = new Uint8Array(list.reduce((a, f) => a + f.end - f.start, 0));
+    let o = 0; for (const f of list) { out.set(u8.subarray(f.start, f.end), o); o += f.end - f.start; }
+    return out;
+  };
+  if (frags.length) {
+    let pick = null;
+    if (bot && bot.length === nFrames && frame < bot.length) {
+      const lo = bot[frame], hi = frame + 1 < bot.length ? bot[frame + 1] : Infinity;
+      pick = frags.filter(f => f.itemPos - firstItemPos >= lo && f.itemPos - firstItemPos < hi);
+    } else if (frags.length === nFrames) {
+      pick = [frags[frame]];
+    } else {
+      // Nach EOI (FFD9, evtl. mit Füll-Null) gruppieren
+      const groups = []; let cur = [];
+      for (const f of frags) {
+        cur.push(f);
+        let t = f.end - 1;
+        while (t > f.start && u8[t] === 0x00) t--;
+        if (u8[t - 1] === 0xFF && u8[t] === 0xD9) { groups.push(cur); cur = []; }
+      }
+      if (cur.length) groups.push(cur);
+      pick = groups[Math.min(frame, groups.length - 1)];
+    }
+    if (pick && pick.length) return join(pick);
   }
-  if (frags.length === 1) return frags[0];
-  const total = frags.reduce((a, f) => a + f.length, 0);
-  const out = new Uint8Array(total);
-  let o = 0; for (const f of frags) { out.set(f, o); o += f.length; }
+  // Fallback: altes Verhalten – nach SOI/EOI suchen (nur erstes Bild)
+  const s0 = dicom.pixTag.valueOff;
+  let s = s0;
+  while (s < u8.length - 1 && !(u8[s] === 0xFF && u8[s+1] === 0xD8)) s++;
+  let e = s + 2;
+  while (e < u8.length - 1 && !(u8[e] === 0xFF && u8[e+1] === 0xD9)) e++;
+  if (s >= u8.length - 1) throw new Error('JPEG SOI-Marker nicht in Pixel-Daten gefunden');
+  return u8.slice(s, e + 2);
+}
+
+// 16-Bit-Rohwerte → Int32 mit korrektem Vorzeichen und Bits Stored.
+// Unsigned: auf Bits Stored maskieren (alte Overlay-Bits weg), Werte bis 65535 bleiben positiv.
+// Signed: als Int16; ist bei Bits Stored < 16 das Vorzeichen nicht schon erweitert, wird es erweitert.
+function toPixelArray(u16, bitsStored, pixelRep) {
+  const n = u16.length, out = new Int32Array(n);
+  const bits = Math.min(16, Math.max(1, bitsStored || 16));
+  if (pixelRep === 1) {
+    const hiMask = bits >= 16 ? 0 : (0xFFFF & ~((1 << bits) - 1));
+    const signBit = 1 << (bits - 1), sh = 32 - bits;
+    for (let k = 0; k < n; k++) {
+      const v = u16[k];
+      if (hiMask && (v & hiMask) === 0 && (v & signBit)) out[k] = (v << sh) >> sh;
+      else out[k] = (v << 16) >> 16;
+    }
+  } else {
+    const mask = bits >= 16 ? 0xFFFF : (1 << bits) - 1;
+    for (let k = 0; k < n; k++) out[k] = u16[k] & mask;
+  }
   return out;
+}
+
+function numFrames(dicom) {
+  const n = parseInt(dicom.getStr(0x00280008) || '1', 10);
+  return n > 0 ? n : 1;
+}
+
+// Pixel Padding Value (0028,0120) – Pixel außerhalb des Messfelds
+function getPixelPadding(dicom) {
+  const t = dicom.tags.get(0x00280120);
+  if (!t || t.length < 2) return null;
+  return (dicom.getU16(0x00280103) || 0) === 1 ? dicom.dv.getInt16(t.valueOff, true) : dicom.dv.getUint16(t.valueOff, true);
 }
 
 function ybrFullToRgbInPlace(px) {
@@ -1331,7 +1399,7 @@ async function decodeJpegViaBrowser(jpegBytes) {
   return { pixels: out, width: c.width, height: c.height };
 }
 
-async function decodePixelData(dicom, buf) {
+async function decodePixelData(dicom, buf, frame = 0) {
   if (!dicom.pixTag) throw new Error('Kein Pixel-Datenelement (7FE0,0010) gefunden.\nTransfer-Syntax: ' + dicom.transferSyntax);
   let w = dicom.getU16(0x00280011) || 0;
   let h = dicom.getU16(0x00280010) || 0;
@@ -1343,9 +1411,11 @@ async function decodePixelData(dicom, buf) {
   const photo     = (dicom.getStr(0x00280004) || '').toUpperCase();
   const ts   = dicom.transferSyntax;
   const mode = KNOWN_TS[ts] || 'explicit_le';
+  const nFrames = numFrames(dicom);
+  if (frame >= nFrames) frame = nFrames - 1;
 
   if (mode === 'jpeg_lossless' || mode === 'jpeg_dct') {
-    const jpeg = getEncapsulatedFrame(dicom);
+    const jpeg = getEncapsulatedFrame(dicom, frame, nFrames);
     if (mode === 'jpeg_lossless') {
       const res = decodeJpegLossless(jpeg);
       if (res.components >= 3) {
@@ -1358,7 +1428,8 @@ async function decodePixelData(dicom, buf) {
         if (photo.startsWith('YBR') && res.precision <= 8) ybrFullToRgbInPlace(out);
         return { pixels: out, width: res.width, height: res.height, spp: 3, maxVal: (1 << res.precision) - 1 };
       }
-      return { pixels: res.pixels, width: res.width, height: res.height, spp: 1 };
+      return { pixels: toPixelArray(res.pixels, Math.min(bitsStored, res.precision), pixelRep),
+               width: res.width, height: res.height, spp: 1 };
     }
     // DCT: Farbe über Browser, Graustufen (auch 12 Bit) über eigenen Decoder
     if (spp >= 3) {
@@ -1366,15 +1437,18 @@ async function decodePixelData(dicom, buf) {
       return { pixels: res.pixels, width: res.width, height: res.height, spp: 3, maxVal: 255 };
     }
     const res = decodeJpegDCT(jpeg);
-    const pd = new Int16Array(res.pixels.length);
-    for (let k = 0; k < res.pixels.length; k++) pd[k] = res.pixels[k];
+    const pd = toPixelArray(Uint16Array.from(res.pixels), Math.min(bitsStored, res.precision), pixelRep);
     return { pixels: pd, width: res.width, height: res.height, spp: 1 };
   }
 
-  if (mode === 'explicit_le' || mode === 'implicit_le' || mode === 'explicit_be') {
+  if (mode === 'explicit_le' || mode === 'implicit_le') {
     const pt = dicom.pixTag;
-    const rawLen = (pt.length === 0xFFFFFFFF) ? (buf.byteLength - pt.valueOff) : pt.length;
-    const raw = new Uint8Array(buf, pt.valueOff, Math.min(rawLen, buf.byteLength - pt.valueOff));
+    const bpp = bitsAlloc >> 3;
+    if (bpp !== 1 && bpp !== 2) throw new Error('Bits Allocated = ' + bitsAlloc + ' wird nicht unterstützt');
+    const frameBytes = w * h * Math.max(1, spp) * bpp;
+    const start = pt.valueOff + frame * frameBytes;
+    if (start >= buf.byteLength) throw new Error('Frame ' + (frame + 1) + ' fehlt in den Pixeldaten');
+    const raw = new Uint8Array(buf, start, Math.min(frameBytes, buf.byteLength - start));
 
     if (spp >= 3) {
       const n = w * h;
@@ -1391,16 +1465,13 @@ async function decodePixelData(dicom, buf) {
     }
 
     let pd;
-    if (bitsAlloc === 16) {
-      const src = new Uint8Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength - (raw.byteLength & 1)));
-      if (pixelRep === 1) pd = new Int16Array(src.buffer);
-      else {
-        const u = new Uint16Array(src.buffer); pd = new Int16Array(u.length);
-        for (let k = 0; k < u.length; k++) pd[k] = u[k] > 32767 ? u[k] - 65536 : u[k];
-      }
+    if (bpp === 2) {
+      const n = raw.byteLength >> 1;
+      const u = new Uint16Array(raw.buffer.slice(raw.byteOffset, raw.byteOffset + n * 2));
+      pd = toPixelArray(u, bitsStored, pixelRep);
     } else {
-      pd = new Int16Array(raw.length);
-      for (let k = 0; k < raw.length; k++) pd[k] = raw[k];
+      pd = new Int32Array(raw.length);
+      for (let k = 0; k < raw.length; k++) pd[k] = pixelRep === 1 ? ((raw[k] << 24) >> 24) : raw[k];
     }
     return { pixels: pd, width: w, height: h, spp: 1 };
   }
@@ -1435,103 +1506,101 @@ const ctx=canvas.getContext('2d');
 // ═══════════════════════════════════════════════════════════════
 // ZIP EXTRACTOR (pure JS, uses browser DecompressionStream)
 // ═══════════════════════════════════════════════════════════════
+async function inflateRaw(compData) {
+  const ds = new DecompressionStream('deflate-raw');
+  const writer = ds.writable.getWriter();
+  const reader = ds.readable.getReader();
+  const chunks = [];
+  const readAll = (async () => {
+    while (true) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); }
+  })();
+  await writer.write(compData);
+  await writer.close();
+  await readAll;
+  const out = new Uint8Array(chunks.reduce((s, c) => s + c.length, 0));
+  let off = 0; for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
 async function extractZip(arrayBuffer) {
   const u8 = new Uint8Array(arrayBuffer);
   const dv = new DataView(arrayBuffer);
-  const entries = [];
+  const list = [];   // {name, method, compSize, dataStart}
 
-  // Scan for Local File Headers (signature 0x04034b50 = "PK\x03\x04")
-  let pos = 0;
-  while (pos < u8.length - 30) {
-    if (dv.getUint32(pos, true) !== 0x04034b50) { pos++; continue; }
-
-    const version    = dv.getUint16(pos + 4, true);
-    const flags      = dv.getUint16(pos + 6, true);
-    const method     = dv.getUint16(pos + 8, true);
-    const crc32      = dv.getUint32(pos + 14, true);
-    let   compSize   = dv.getUint32(pos + 18, true);
-    let   uncompSize = dv.getUint32(pos + 22, true);
-    const nameLen    = dv.getUint16(pos + 26, true);
-    const extraLen   = dv.getUint16(pos + 28, true);
-    const name       = new TextDecoder().decode(u8.slice(pos + 30, pos + 30 + nameLen));
-    const dataStart  = pos + 30 + nameLen + extraLen;
-
-    // Skip directories
-    if (name.endsWith('/') || compSize === 0) {
-      pos = dataStart + compSize;
-      continue;
+  // 1) Zentralverzeichnis (zuverlässig: enthält die Größen auch bei Data Descriptors)
+  let eocd = -1;
+  for (let p = u8.length - 22; p >= Math.max(0, u8.length - 65557); p--) {
+    if (dv.getUint32(p, true) === 0x06054b50) { eocd = p; break; }
+  }
+  if (eocd >= 0) {
+    const count = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    for (let k = 0; k < count && p + 46 <= u8.length; k++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) break;
+      const method   = dv.getUint16(p + 10, true);
+      const compSize = dv.getUint32(p + 20, true);
+      const nameLen  = dv.getUint16(p + 28, true);
+      const extraLen = dv.getUint16(p + 30, true);
+      const commLen  = dv.getUint16(p + 32, true);
+      const lho      = dv.getUint32(p + 42, true);
+      const name     = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nameLen));
+      p += 46 + nameLen + extraLen + commLen;
+      if (compSize === 0xFFFFFFFF || lho === 0xFFFFFFFF) { console.warn('ZIP64 nicht unterstützt: ' + name); continue; }
+      if (lho + 30 > u8.length || dv.getUint32(lho, true) !== 0x04034b50) continue;
+      const dataStart = lho + 30 + dv.getUint16(lho + 26, true) + dv.getUint16(lho + 28, true);
+      list.push({ name, method, compSize, dataStart });
     }
-
-    // Data descriptor? (bit 3 of flags)
-    if ((flags & 0x08) && compSize === 0) {
-      // Find the next PK header or data descriptor to determine size
-      let nextPK = dataStart + 1;
-      while (nextPK < u8.length - 4) {
-        if (dv.getUint32(nextPK, true) === 0x04034b50 ||
-            dv.getUint32(nextPK, true) === 0x02014b50) break;
-        // Data descriptor signature 0x08074b50
-        if (dv.getUint32(nextPK, true) === 0x08074b50) {
-          compSize = dv.getUint32(nextPK + 8, true);
-          break;
-        }
-        nextPK++;
-      }
-      if (compSize === 0) compSize = nextPK - dataStart;
-    }
-
-    const compData = u8.slice(dataStart, dataStart + compSize);
-    let fileData;
-
-    if (method === 0) {
-      // STORE — no compression
-      fileData = compData;
-    } else if (method === 8) {
-      // DEFLATE — use browser's DecompressionStream
-      try {
-        const ds = new DecompressionStream('deflate-raw');
-        const writer = ds.writable.getWriter();
-        const reader = ds.readable.getReader();
-        const chunks = [];
-        const readAll = (async () => {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            chunks.push(value);
-          }
-        })();
-        await writer.write(compData);
-        await writer.close();
-        await readAll;
-        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-        fileData = new Uint8Array(totalLen);
-        let off = 0;
-        for (const c of chunks) { fileData.set(c, off); off += c.length; }
-      } catch(e) {
-        console.warn('ZIP: Deflate-Fehler bei ' + name + ':', e);
-        pos = dataStart + compSize;
-        continue;
-      }
-    } else {
-      console.warn('ZIP: Unbekannte Methode ' + method + ' für ' + name);
-      pos = dataStart + compSize;
-      continue;
-    }
-
-    // Only add files that look like DICOM (check for DICM magic or no extension)
-    const isDicom = (fileData.length > 132 &&
-      fileData[128]===0x44 && fileData[129]===0x49 &&
-      fileData[130]===0x43 && fileData[131]===0x4D);
-    const ext = name.split('.').pop().toLowerCase();
-    const noDotInName = !name.includes('.') || ext === 'dcm' || ext === 'dicom';
-
-    if (isDicom || noDotInName) {
-      entries.push({ name: name.split('/').pop() || name, buffer: fileData.buffer.slice(
-        fileData.byteOffset, fileData.byteOffset + fileData.byteLength) });
-    }
-
-    pos = dataStart + compSize;
   }
 
+  // 2) Fallback: lokale Header durchsuchen (z. B. abgeschnittene Archive)
+  if (!list.length) {
+    let pos = 0;
+    while (pos < u8.length - 30) {
+      if (dv.getUint32(pos, true) !== 0x04034b50) { pos++; continue; }
+      const flags    = dv.getUint16(pos + 6, true);
+      const method   = dv.getUint16(pos + 8, true);
+      let   compSize = dv.getUint32(pos + 18, true);
+      const nameLen  = dv.getUint16(pos + 26, true);
+      const extraLen = dv.getUint16(pos + 28, true);
+      const name     = new TextDecoder().decode(u8.subarray(pos + 30, pos + 30 + nameLen));
+      const dataStart = pos + 30 + nameLen + extraLen;
+      if ((flags & 0x08) && compSize === 0) {
+        // Größe steht erst im Data Descriptor hinter den Daten
+        let q = dataStart;
+        while (q < u8.length - 4) {
+          const sig = dv.getUint32(q, true);
+          if (sig === 0x08074b50) { compSize = dv.getUint32(q + 8, true); break; }
+          if (sig === 0x04034b50 || sig === 0x02014b50) { compSize = q - dataStart; break; }
+          q++;
+        }
+        if (compSize === 0) compSize = q - dataStart;
+      }
+      list.push({ name, method, compSize, dataStart });
+      pos = dataStart + Math.max(compSize, 1);
+    }
+  }
+
+  const entries = [];
+  for (const it of list) {
+    const base = it.name.split('/').pop() || it.name;
+    if (it.name.endsWith('/') || it.compSize === 0 || base.toUpperCase() === 'DICOMDIR') continue;
+    const compData = u8.subarray(it.dataStart, it.dataStart + it.compSize);
+    let fileData;
+    if (it.method === 0) fileData = compData;
+    else if (it.method === 8) {
+      try { fileData = await inflateRaw(compData); }
+      catch (e) { console.warn('ZIP: Deflate-Fehler bei ' + it.name + ':', e); continue; }
+    } else { console.warn('ZIP: Unbekannte Methode ' + it.method + ' für ' + it.name); continue; }
+
+    // Nur Dateien übernehmen, die nach DICOM aussehen
+    const isDicom = fileData.length > 132 &&
+      fileData[128]===0x44 && fileData[129]===0x49 && fileData[130]===0x43 && fileData[131]===0x4D;
+    const ext = base.includes('.') ? base.split('.').pop().toLowerCase() : '';
+    const likely = !base.includes('.') || ['dcm', 'dicom', 'ima'].includes(ext) || /^\d+(\.\d+)+$/.test(base);
+    if (isDicom || likely) {
+      entries.push({ name: base, buffer: fileData.buffer.slice(fileData.byteOffset, fileData.byteOffset + fileData.byteLength) });
+    }
+  }
   return entries;
 }
 
@@ -1569,7 +1638,12 @@ function loadFiles(fl){
       if(i%50===0) await new Promise(res=>setTimeout(res,5));
       try{
         const dicom=parseDicom(r.buffer);
-        files.push({name:r.name, buf:r.buffer, dicom}); added++;
+        if(!dicom.pixTag) throw new Error('enthält keine Bilddaten (z. B. DICOMDIR oder Befund)');
+        const nF=numFrames(dicom);
+        for(let f=0; f<nF; f++){
+          files.push({name: nF>1 ? `${r.name} [${f+1}/${nF}]` : r.name, buf:r.buffer, dicom, frame:f});
+          added++;
+        }
       }catch(e){
         if(rawFiles.length < 5) showError(r.name + ': ' + e.message);
       }
@@ -1584,9 +1658,11 @@ function loadFiles(fl){
   })();
 }
 
+let frameToken=0;   // verhindert, dass ein langsam dekodiertes älteres Bild ein neueres überschreibt
 async function displayFrame(idx){
+  const my=++frameToken;
   currentIdx=idx;
-  const {name,buf,dicom}=files[idx];
+  const {name,buf,dicom,frame}=files[idx];
   clearError(); showSpinner('Lade Bilddaten…');
   try{
     const ts=dicom.transferSyntax;
@@ -1595,7 +1671,8 @@ async function displayFrame(idx){
       showSpinner(`Dekomprimiere ${mode==='jpeg_lossless'?'JPEG Lossless':'JPEG DCT'}…`);
       await new Promise(r=>setTimeout(r,10));
     }
-    const dec=await decodePixelData(dicom,buf);
+    const dec=await decodePixelData(dicom,buf,frame||0);
+    if(my!==frameToken) return;          // inzwischen wurde weitergeblättert
     pixelData=dec.pixels; imgW=dec.width; imgH=dec.height; samplesPP=dec.spp;
 
     let ww, wc;
@@ -1606,9 +1683,11 @@ async function displayFrame(idx){
     } else {
       slope    =parseFloat(dicom.getStr(0x00281053)||'1')||1;
       intercept=parseFloat(dicom.getStr(0x00281052)||'0')||0;
-      // Auto window
+      // Auto window (Pixel Padding außerhalb des Messfelds ignorieren)
+      const pad=getPixelPadding(dicom);
       let mn=Infinity,mx=-Infinity;
-      for(let i=0;i<pixelData.length;i++){const v=pixelData[i]*slope+intercept;if(v<mn)mn=v;if(v>mx)mx=v;}
+      for(let i=0;i<pixelData.length;i++){if(pixelData[i]===pad)continue;const v=pixelData[i]*slope+intercept;if(v<mn)mn=v;if(v>mx)mx=v;}
+      if(mn===Infinity){mn=0;mx=1;}
       ww=parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
       wc=parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
       if(!ww){ww=mx-mn;wc=(mx+mn)/2;}
@@ -1630,8 +1709,8 @@ async function displayFrame(idx){
     document.getElementById('btn-export').disabled=false;
     document.getElementById('slice-info').textContent=
       `${idx+1} / ${files.length}  ·  ${imgW}×${imgH}  ·  ${ts.split('.').pop()}`;
-  }catch(e){ showError(e.message); }
-  finally{ hideSpinner(); }
+  }catch(e){ if(my===frameToken) showError(e.message); }
+  finally{ if(my===frameToken) hideSpinner(); }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1710,6 +1789,7 @@ window.addEventListener('mousemove',e=>{
 });
 window.addEventListener('mouseup',()=>{dragging=false;});
 canvas.addEventListener('wheel',e=>{
+  if(e.shiftKey) return;   // Shift+Rad = blättern (Handler am Viewer)
   e.preventDefault();zoom=Math.max(0.05,zoom*(e.deltaY<0?1.1:0.9));applyTransform();
 },{passive:false});
 
@@ -1717,16 +1797,18 @@ canvas.addEventListener('wheel',e=>{
 document.getElementById('viewer').addEventListener('wheel', e=>{
   if (!e.shiftKey || files.length < 2) return;
   e.preventDefault();
-  const next = e.deltaY > 0
+  const d = e.deltaY || e.deltaX;   // viele Browser liefern bei Shift nur deltaX
+  if (!d) return;
+  const next = d > 0
     ? (currentIdx + 1) % files.length
     : (currentIdx - 1 + files.length) % files.length;
   displayFrame(next);
 }, {passive: false});
 canvas.addEventListener('mousemove',e=>{
   if(!pixelData) return;
-  const r=canvas.getBoundingClientRect();
-  const px=Math.floor((e.clientX-r.left)/r.width*imgW);
-  const py=Math.floor((e.clientY-r.top)/r.height*imgH);
+  // offsetX/Y liegen im ungedrehten Koordinatensystem des Canvas (CSS-Drehung/Zoom herausgerechnet)
+  const px=Math.floor(e.offsetX/canvas.clientWidth*imgW);
+  const py=Math.floor(e.offsetY/canvas.clientHeight*imgH);
   if(px>=0&&px<imgW&&py>=0&&py<imgH){
     if(samplesPP===3){
       const s=(py*imgW+px)*3;
@@ -1757,8 +1839,9 @@ const META_TAGS=[
   [0x00281053,'Slope'],[0x00281052,'Intercept'],[0x00200013,'Instanz-Nr.'],
   [0x00020010,'Transfer Syntax'],
 ];
+const escHtml=v=>String(v).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function showMeta(dicom,filename){
-  let h=`<tr><td>Datei</td><td style="word-break:break-all">${filename}</td></tr>`;
+  let h=`<tr><td>Datei</td><td style="word-break:break-all">${escHtml(filename)}</td></tr>`;
   const US_TAGS=new Set([0x00280010,0x00280011,0x00280100,0x00280101,0x00280002]);
   const utf8=(dicom.getStr(0x00080005)||'').includes('ISO_IR 192');
   for(const [key,label] of META_TAGS){
@@ -1769,7 +1852,7 @@ function showMeta(dicom,filename){
       if(utf8&&val!=='—'){ try{ val=new TextDecoder('utf-8').decode(Uint8Array.from(val,c=>c.charCodeAt(0)&0xFF)); }catch(e){} }
     }
     val=val.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-    if(key===0x00100010&&val!=='—') val='█████████';
+    if((key===0x00100010||key===0x00100020||key===0x00100030)&&val!=='—') val='█████████';  // Name, ID, Geburtsdatum
     h+=`<tr><td>${label}</td><td>${val}</td></tr>`;
   }
   document.getElementById('meta-table').innerHTML=h;
@@ -1780,11 +1863,15 @@ function showMeta(dicom,filename){
 // ═══════════════════════════════════════════════════════════════
 
 // Background thumbnail decoder: decodes all files except the active one
+let thumbGen = 0;   // wird bei "Zurücksetzen" erhöht, alte Schleifen beenden sich dann
 async function scheduleThumbnails(skipIdx) {
+  const gen = thumbGen;
   for (let i = 0; i < files.length; i++) {
+    if (gen !== thumbGen) return;
     if (i === skipIdx || thumbCache.has(i)) continue;
     // Small delay so UI stays responsive
     await new Promise(r => setTimeout(r, 30));
+    if (gen !== thumbGen) return;
     try {
       await decodeForThumb(i);
     } catch(e) {
@@ -1794,10 +1881,10 @@ async function scheduleThumbnails(skipIdx) {
 }
 
 async function decodeForThumb(idx) {
-  const {buf, dicom} = files[idx];
+  const {buf, dicom, frame} = files[idx];
   if (!dicom.pixTag) return;
   await new Promise(r=>setTimeout(r,0));
-  const dec = await decodePixelData(dicom, buf);
+  const dec = await decodePixelData(dicom, buf, frame || 0);
   const pd = dec.pixels, w = dec.width, h = dec.height, spp = dec.spp;
   let sl = parseFloat(dicom.getStr(0x00281053)||'1')||1;
   let ic = parseFloat(dicom.getStr(0x00281052)||'0')||0;
@@ -1810,8 +1897,9 @@ async function decodeForThumb(idx) {
     ww = parseFloat((dicom.getStr(0x00281051)||'').split('\\')[0])||0;
     wc = parseFloat((dicom.getStr(0x00281050)||'').split('\\')[0])||0;
     if (!ww) {
+      const pad = getPixelPadding(dicom);
       let mn=Infinity, mx=-Infinity;
-      for (let i=0; i<pd.length; i++) { const v=pd[i]*sl+ic; if(v<mn)mn=v; if(v>mx)mx=v; }
+      for (let i=0; i<pd.length; i++) { if (pd[i]===pad) continue; const v=pd[i]*sl+ic; if(v<mn)mn=v; if(v>mx)mx=v; }
       ww=mx-mn; wc=(mx+mn)/2;
     }
   }
@@ -1827,7 +1915,7 @@ async function decodeForThumb(idx) {
 // ═══════════════════════════════════════════════════════════════
 // FILMSTRIP
 // ═══════════════════════════════════════════════════════════════
-const thumbCache = new Map(); // idx -> ImageData (72x72)
+const thumbCache = new Map(); // idx -> volle Pixeldaten + Fenster (wird auch für das 3D-Volumen wiederverwendet)
 
 function renderThumb(idx) {
   // Render a 72x72 thumbnail for file[idx] using current window settings
@@ -1936,7 +2024,8 @@ function hideSpinner(){document.getElementById('spinner').classList.remove('visi
 function showError(msg){const e=document.getElementById('error-box');e.textContent=msg;e.classList.add('visible');}
 function clearError(){document.getElementById('error-box').classList.remove('visible');}
 function resetAll(){
-  files=[];pixelData=null;zoom=1;panX=0;panY=0;rotation=0;
+  files=[];pixelData=null;zoom=1;panX=0;panY=0;rotation=0;currentIdx=0;
+  thumbGen++; frameToken++;
   thumbCache.clear();
   document.getElementById('drop-zone').classList.remove('hidden');
   document.getElementById('canvas-wrap').classList.remove('visible');
@@ -1952,7 +2041,9 @@ function resetAll(){
   const strip=document.getElementById('filmstrip');
   Array.from(strip.querySelectorAll('.film-thumb')).forEach(e=>e.remove());
   document.getElementById('filmstrip-empty').style.display='block';
+  hideSpinner();
   clearError();
+  if (typeof updateBadge === 'function') updateBadge();
 }
 
 // Drag & Drop
@@ -1967,6 +2058,9 @@ initTFEditor();
 
 window.addEventListener('keydown',e=>{
   if(files.length<2) return;
+  const tg=e.target.tagName;
+  if(tg==='INPUT'||tg==='SELECT'||tg==='TEXTAREA') return;                       // Regler/Felder behalten ihre Pfeiltasten
+  if(document.getElementById('viewer-3d').classList.contains('active')) return;  // im 3D-Tab nicht blättern
   if(e.key==='ArrowRight'||e.key==='ArrowDown') displayFrame((currentIdx+1)%files.length);
   else if(e.key==='ArrowLeft'||e.key==='ArrowUp') displayFrame((currentIdx-1+files.length)%files.length);
 });
@@ -2096,7 +2190,17 @@ async function buildVolume() {
     const f = files[i];
     const d = f.dicom;
     const posStr = d.getStr(0x00200032); // ImagePositionPatient
-    const zPos = posStr ? parseFloat(posStr.split('\\').pop()) : i;
+    // Position entlang der Schichtnormale (aus ImageOrientationPatient) – stimmt auch bei sagittal/koronal
+    let zPos = i;
+    if (posStr && numFrames(d) === 1) {
+      const pp = posStr.split('\\').map(Number);
+      const o = (d.getStr(0x00200037) || '').split('\\').map(Number);
+      if (o.length === 6 && o.every(isFinite) && pp.length === 3) {
+        const n = [o[1]*o[5]-o[2]*o[4], o[2]*o[3]-o[0]*o[5], o[0]*o[4]-o[1]*o[3]];
+        zPos = pp[0]*n[0] + pp[1]*n[1] + pp[2]*n[2];
+      } else if (isFinite(pp[2])) zPos = pp[2];
+    }
+    const pad = getPixelPadding(d);
     let w = d.getU16(0x00280011) || 0;
     let h = d.getU16(0x00280010) || 0;
     let sl = parseFloat(d.getStr(0x00281053) || '1') || 1;
@@ -2112,14 +2216,14 @@ async function buildVolume() {
     } else {
       if (!d.pixTag) continue;
       try {
-        const dec = await decodePixelData(d, f.buf);
+        const dec = await decodePixelData(d, f.buf, f.frame || 0);
         pd = dec.pixels; spp = dec.spp; w = dec.width; h = dec.height;
       } catch (e) { console.warn('Volumen: ' + f.name + ': ' + e.message); continue; }
     }
     // Farbbilder: für das Volumen in Luminanz umrechnen
     if (spp === 3) { pd = rgbToLuma(pd); sl = 1; ic = 0; }
 
-    slices.push({ zPos, pd, w, h, sl, ic, spacingXY });
+    slices.push({ zPos, idx: i, pd, w, h, sl, ic, spacingXY, pad: spp === 3 ? null : pad });
     // Read SliceThickness once
     if (i === 0) {
       console.log('Slice 0: zPos=' + zPos + ' spacing=' + spacingXY +
@@ -2132,8 +2236,14 @@ async function buildVolume() {
     return;
   }
 
-  // Sort by Z position
-  slices.sort((a, b) => a.zPos - b.zPos);
+  // Nach Position sortieren; sind die Positionen nicht eindeutig (z. B. Multi-Frame), Ladereihenfolge behalten
+  const distinctZ = new Set(slices.map(s => s.zPos.toFixed(3))).size;
+  if (distinctZ === slices.length) slices.sort((a, b) => a.zPos - b.zPos);
+  else slices.sort((a, b) => a.idx - b.idx);
+  // Nur Schichten mit der Matrix der ersten verwenden (gemischte Serien würden sonst Datenmüll ergeben)
+  const W0 = slices[0].w, H0 = slices[0].h;
+  for (let k = slices.length - 1; k >= 0; k--) if (slices[k].w !== W0 || slices[k].h !== H0) slices.splice(k, 1);
+  if (slices.length < 2) { statusEl.textContent = 'Zu wenige Schichten mit gleicher Matrix.'; progBar.style.display = 'none'; return; }
 
   statusEl.textContent = 'Erstelle Volumen…';
   progFill.style.width = '65%';
@@ -2155,7 +2265,7 @@ async function buildVolume() {
   let medianDist = 0;
   if (dimZ > 1) {
     const dists = [];
-    for (let zi = 1; zi < slices.length; zi++) {
+    for (let zi = 1; zi < (distinctZ === slices.length ? slices.length : 0); zi++) {
       const d = Math.abs(slices[zi].zPos - slices[zi-1].zPos);
       if (d > 0.001) dists.push(d);
     }
@@ -2164,26 +2274,32 @@ async function buildVolume() {
       medianDist = dists[Math.floor(dists.length / 2)];
     }
   }
-  // Pick best: SliceThickness > SpacingBetween > median > 1
-  spacingZ = sliceThick || sliceBetween || medianDist || 1;
+  // Abstand der Schichtmitten zählt, nicht die Schichtdicke (5-mm-Schichten werden oft alle 2,5 mm rekonstruiert)
+  spacingZ = medianDist || sliceBetween || sliceThick || 1;
   console.log('Spacing: X=' + spacingX.toFixed(3) + ' Y=' + spacingY.toFixed(3) +
     ' Z=' + spacingZ.toFixed(3) + ' (thick=' + sliceThick + ' between=' + sliceBetween +
     ' median=' + medianDist.toFixed(3) + ')');
   const volData  = new Float32Array(dimX * dimY * dimZ);
 
   let minHU = Infinity, maxHU = -Infinity;
+  const padMask = new Uint8Array(dimX * dimY * dimZ);
+  let anyPad = false;
   for (let z = 0; z < dimZ; z++) {
     const s = slices[z];
     const off = z * dimX * dimY;
     for (let i = 0; i < dimX * dimY; i++) {
-      const idx = i < s.pd.length ? i : 0;
-      const hu = s.pd[idx] * s.sl + s.ic;
+      const raw = i < s.pd.length ? s.pd[i] : s.pd[0];
+      if (s.pad !== null && s.pad !== undefined && raw === s.pad) { padMask[off + i] = 1; anyPad = true; continue; }
+      const hu = raw * s.sl + s.ic;
       volData[off + i] = hu;
       if (hu < minHU) minHU = hu;
       if (hu > maxHU) maxHU = hu;
     }
     progFill.style.width = `${65 + (z / dimZ * 25)|0}%`;
   }
+  if (minHU === Infinity) { minHU = 0; maxHU = 1; }
+  // Pixel außerhalb des Messfelds bekommen den kleinsten echten Wert (statt z. B. −3024)
+  if (anyPad) for (let i = 0; i < padMask.length; i++) if (padMask[i]) volData[i] = minHU;
 
   volume = { data: volData, dimX, dimY, dimZ, spacingX, spacingY, spacingZ, minHU, maxHU };
   computeHistogram();
@@ -2280,6 +2396,7 @@ uniform float uZoom;           // zoom factor
 uniform vec3 uCropMin;      // spatial crop min (0..1)
 uniform vec3 uCropMax;      // spatial crop max (0..1)
 uniform float uHUThresh;    // HU threshold (skip below)
+uniform float uTFMin, uTFMax;  // HU-Bereich, über den die Transferfunktion angelegt ist
 in vec2 vUV;
 out vec4 fragColor;
 
@@ -2313,7 +2430,7 @@ void main() {
       { fragColor=vec4(0,0,0,1); return; }
     float hu = texture(uVol, pos).r;
     if (uMode == 3) {
-      float t = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+      float t = clamp((hu - uTFMin) / (uTFMax - uTFMin), 0.0, 1.0);
       vec4 c = texture(uTF, vec2(t, 0.5));
       fragColor = vec4(c.rgb, 1.0);
     } else {
@@ -2369,24 +2486,25 @@ void main() {
       float hu = texture(uVol, pos).r;
       // HU threshold
       if (hu < uHUThresh) continue;
-      float tCoord = clamp((hu - lo) / (hi - lo), 0.0, 1.0);
+      // TF ist über den HU-Bereich des Volumens angelegt (nicht über das Fenster), sonst sitzen die Punkte falsch
+      float tCoord = clamp((hu - uTFMin) / (uTFMax - uTFMin), 0.0, 1.0);
       vec4 c = texture(uTF, vec2(tCoord, 0.5));
-      c.a *= uOpacity * dt * 200.0; // scale opacity by step size
+      c.a = min(c.a * uOpacity * dt * 200.0, 1.0); // scale opacity by step size
 
       // Lighting
       if (uLightMode > 0 && c.a > 0.005) {
         vec3 grad = gradient(pos);
+        grad.y = -grad.y;                 // Texturkoordinate y ist gespiegelt (pos.y = 1 - y)
         float gradLen = length(grad);
         if (gradLen > 0.001) {
-          vec3 N = normalize(grad);
-          vec3 L, Ne;
+          // Normale zeigt nach außen (zur geringeren Dichte) und wird in Kamerakoordinaten gedreht
+          vec3 Ne = normalize(transpose(uRotMat) * (-grad));
+          vec3 L;
           if (uLightMode == 1) {
             // Camera-fixed: light from viewer direction
-            Ne = normalize(uRotMat * N);
             L = normalize(vec3(0.1, 0.2, 1.0));
           } else {
-            // World-fixed: light from above, doesn't rotate
-            Ne = N;
+            // World-fixed: Licht von oben im Volumen, dreht sich mit dem Objekt
             L = normalize(transpose(uRotMat) * vec3(0.2, 0.8, 0.5));
           }
           // Wrap lighting: wraps diffuse around the surface
@@ -2585,6 +2703,8 @@ function render3D() {
   gl.uniform3fv(gl.getUniformLocation(glProgram, 'uCropMin'), cropMin);
   gl.uniform3fv(gl.getUniformLocation(glProgram, 'uCropMax'), cropMax);
   gl.uniform1f(gl.getUniformLocation(glProgram, 'uHUThresh'), huThreshold);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uTFMin'), volume.minHU);
+  gl.uniform1f(gl.getUniformLocation(glProgram, 'uTFMax'), volume.maxHU > volume.minHU ? volume.maxHU : volume.minHU + 1);
   // Bind TF texture
   if (tfTexture) {
     gl.activeTexture(gl.TEXTURE1);
@@ -2665,7 +2785,7 @@ function saveVolume() {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);   // sofortiges Freigeben bricht in Firefox den Download ab
 }
 
 async function loadVolumeFile(fileList) {
@@ -2723,7 +2843,7 @@ async function loadVolumeFile(fileList) {
       '<tr><td>Matrix</td><td>' + dimX + '×' + dimY + '</td></tr>' +
       '<tr><td>Spacing</td><td>' + spacingX.toFixed(2) + ' × ' + spacingY.toFixed(2) + ' × ' + spacingZ.toFixed(2) + ' mm</td></tr>' +
       '<tr><td>HU-Bereich</td><td>' + Math.round(minHU) + ' … ' + Math.round(maxHU) + '</td></tr>' +
-      '<tr><td>Quelle</td><td>' + file.name + '</td></tr>';
+      '<tr><td>Quelle</td><td>' + escHtml(file.name) + '</td></tr>';
 
     // Set window sliders
     const slWW = document.getElementById('sl3-ww');
@@ -2777,7 +2897,7 @@ function resetVolume() {
   rotX = -0.4; rotY = 0.3; zoom3D = 1.0; renderMode = 0;
   clipAxis = 0; clipPos = 0.5; clipMode = 0; clipFlip = 0;
   cropMin = [0,0,0]; cropMax = [1,1,1]; huThreshold = -1000;
-  globalOpacity = 1.0; useLighting = 1; ambientVal = 0.15;
+  globalOpacity = 1.0; lightMode = 1; ambientVal = 0.15; wrapVal = 0.0;
 
   // Reset UI
   const canvas3d = document.getElementById('gl-canvas');
@@ -2794,13 +2914,21 @@ function resetVolume() {
   // Reset sidebar controls
   document.getElementById('sec-tf').style.display = 'none';
   document.getElementById('clip-controls').style.display = 'none';
-  document.querySelectorAll('#sidebar-3d .mode-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById('mode-mip').classList.add('active');
-  document.getElementById('clip-off').classList.add('active');
+  setRenderMode('mip');
+  setClipMode('off');
+  setLightMode(1);
+  document.getElementById('sl-opacity').value = 100; onOpacitySlider();
+  document.getElementById('sl-ambient').value = 15;
+  document.getElementById('sl-wrap').value = 0; onLightParams();
+  document.getElementById('sl-clip').value = 50;
+  document.getElementById('chk-clip-flip').checked = false; onClipSlider();
   resetCrop();
 }
 
+let interaction3DReady = false;
 function setup3DInteraction(canvas3d) {
+  if (interaction3DReady) return;   // sonst nach jedem neuen Volumen doppelte Listener (Zoom/Drehen doppelt)
+  interaction3DReady = true;
   canvas3d.addEventListener('mousedown', e => {
     drag3D = true;
     drag3DStart = {x: e.clientX, y: e.clientY};
@@ -3211,10 +3339,7 @@ function initTFEditor() {
   });
 }
 
-// Initialize editor when DOM is ready
-document.addEventListener('DOMContentLoaded', initTFEditor);
-// Also try immediately in case DOMContentLoaded already fired
-if (document.readyState !== 'loading') initTFEditor();
+// (initTFEditor wird oben genau einmal aufgerufen – ein zweiter Aufruf hängte alle Listener doppelt an)
 
 
 
