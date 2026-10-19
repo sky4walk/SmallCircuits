@@ -150,7 +150,7 @@ footer a, .card a { color: var(--amber); }
             <option value="freedos">FreeDOS 1.4 (echtes DOS, bootet von C:)</option>
           </select>
         </label>
-        <label for="cdSel">CD-Laufwerk D: (.iso, .bin oder .img einer CD; jederzeit wechselbar, auch im Betrieb)
+        <label for="cdSel">CD-Laufwerk D: (.iso, .bin oder .img einer CD; jederzeit wechselbar, auch im Betrieb – unter FreeDOS lädt C: den CD-Treiber selbst)
           <select id="cdSel"><option value="">leer (keine CD eingelegt)</option></select>
         </label>
         <label class="check" for="cdDrv"><input type="checkbox" id="cdDrv" checked> CD-Treiber in eigenes Festplattenabbild eintragen (CDWERK.SYS + MSCDEX)</label>
@@ -6572,6 +6572,7 @@ function createPC(opts) {
       case 0x74: ps2Irq(); return;
       case 0xF7: vqDone(); return; // nach den Portzugriffen des Video-ROMs
       case 0xF6: cdRequest(); return; // CDWERK.SYS
+      case 0xF5: cdxCall(); return;   // WERKCDX.COM (CD-Umleiter)
       case 0x08: { // Zeitgeber-Tick
         let t = rd32(0x46C) + 1;
         if (t >= 0x1800B0) { t = 0; mem[0x470] = 1; }
@@ -6843,7 +6844,7 @@ function createPC(opts) {
     const err = c => { st = 0x8100 | c; };
     switch (cmd) {
       case 0: // INIT: Ende des residenten Teils
-        ww(0x0E, CDDRV_END); ww(0x10, S[1]);
+        ww(0x0E, CDDRV_END); ww(0x10, S[1]); cdDrvSeg = S[1];
         log('CDWERK.SYS geladen' + (cd ? ` (CD-Abbild: ${cd.sectors} Sektoren zu ${cd.secSize} Byte)` : ' (kein CD-Abbild eingelegt)'));
         break;
       case 3: { // IOCTL Input
@@ -6886,6 +6887,331 @@ function createPC(opts) {
       default: err(3);
     }
     ww(3, st);
+  }
+
+  // ------------------------------------------------------------------ WERKCDX.COM: CD-Umleiter (MSCDEX-Ersatz) für FreeDOS
+  // Der residente Teil (werkcdx.asm) hängt in INT 2Fh und gibt AH=11h (Netzwerk-Umleiter) und
+  // AH=15h (MSCDEX-Schnittstelle) per F1 F5 hierher. Das CD-Abbild wird als ISO 9660 gelesen.
+  // Datenfelder im residenten Teil (CS = PSP): 107h Modus, 108h Laufwerk, 109h Liste der Listen, 10Dh SDA
+  const CDX_MODE = 0x107, CDX_DRV = 0x108, CDX_LOL = 0x109, CDX_SDA = 0x10D, CDX_MSG = 0x18D;
+  let cdDrvSeg = 0;           // Segment des Treiberkopfs von CDWERK.SYS (für INT 2Fh/1501h)
+  let iso = null;             // zerlegtes ISO-Abbild: { disc, root, dirs, label, pvd }
+  function cdxCall() {
+    const base = lin(S[1], 0);
+    const rb = a => cpu.rb(a), wb = (a, v) => cpu.wb(a, v & 0xFF);
+    const rw = a => rb(a) | (rb(a + 1) << 8), ww = (a, v) => { wb(a, v); wb(a + 1, v >> 8); };
+    const rd = a => rw(a) + rw(a + 2) * 65536, wd = (a, v) => { ww(a, v & 0xFFFF); ww(a + 2, Math.floor(v / 65536)); };
+    const farp = a => lin(rw(a + 2), rw(a));
+    const mode = rb(base + CDX_MODE);
+    const pass = () => wb(base + CDX_MODE, 1);
+    const fail = code => { R[0] = code; retCF(1); };
+    const ok = () => retCF(0);
+    if (mode === 2) return cdxInit();
+    const drv = rb(base + CDX_DRV), letter = String.fromCharCode(65 + drv);
+    const sda = farp(base + CDX_SDA);
+    const dta = () => farp(sda + 0x0C);
+    const fn1 = () => { let s = ''; for (let i = 0; i < 128; i++) { const c = rb(sda + 0x9E + i); if (!c) break; s += String.fromCharCode(c); } return s.toUpperCase(); };
+    const ah = AH(), al = AL();
+
+    // ---------------- MSCDEX-Schnittstelle (INT 2Fh, AH=15h)
+    if (ah === 0x15) {
+      const isDrv = () => CX() === drv;
+      const esbx = lin(S[0], BX());
+      switch (al) {
+        case 0x00: R[3] = 1; R[1] = drv; return;                                  // Anzahl CD-Laufwerke, erstes
+        case 0x01: wb(esbx, 0); ww(esbx + 1, 0); ww(esbx + 3, cdDrvSeg); return;  // Liste der Gerätetreiber
+        case 0x02: case 0x03: case 0x04: {                                        // Copyright-, Abstract-, Bibliografiedatei
+          if (!isDrv()) return fail(15);
+          if (!isoReady()) return fail(21);
+          const off = [702, 739, 776][al - 2];
+          for (let i = 0; i < 37; i++) { const c = iso.pvd[off + i]; wb(esbx + i, c === 32 ? 0 : c); }
+          wb(esbx + 37, 0); return ok();
+        }
+        case 0x05: {                                                              // Datenträgerbeschreibung lesen
+          if (!isDrv()) return fail(15);
+          if (!cd) return fail(21);
+          const lba = 16 + DX();
+          if (lba >= cd.sectors) return fail(21);
+          linCopy(esbx, cd.data, lba * cd.secSize + cd.dataOff, 2048);
+          const t = cd.data[lba * cd.secSize + cd.dataOff];
+          R[0] = t === 1 ? 1 : t === 255 ? 255 : 0; return ok();
+        }
+        case 0x08: {                                                              // Sektoren lesen
+          if (!isDrv()) return fail(15);
+          if (!cd) return fail(21);
+          const start = R[6] * 65536 + R[7], n = DX();
+          for (let i = 0; i < n; i++) {
+            if (start + i >= cd.sectors) return fail(21);
+            linCopy(esbx + i * 2048, cd.data, (start + i) * cd.secSize + cd.dataOff, 2048);
+          }
+          if (pc.onDisk) pc.onDisk(false);
+          return ok();
+        }
+        case 0x09: return fail(isDrv() ? 5 : 15);                                 // Schreiben: nicht möglich
+        case 0x0B: R[0] = isDrv() ? 0x5AD8 : 0; R[3] = 0xADAD; return;            // Ist das ein CD-Laufwerk?
+        case 0x0C: R[3] = 0x0217; return;                                         // Version 2.23
+        case 0x0D: wb(esbx, drv); return;                                         // Laufwerksbuchstaben
+        case 0x0E: if (BX() === 0) R[2] = 0x0100; return ok();                    // Vorzug: Primärer Deskriptor
+        case 0x10: if (!isDrv()) return fail(15); cdRequest(); return ok();       // Geräteanforderung an CDWERK
+        default: return fail(1);
+      }
+    }
+
+    // ---------------- Netzwerk-Umleiter (INT 2Fh, AH=11h)
+    const sft = lin(S[0], R[7]);
+    const mineSft = () => (rw(sft + 5) & 0x8000) && (rw(sft + 5) & 0x3F) === drv;
+    const minePath = () => { const p = fn1(); return p.length >= 2 && p[0] === letter && p[1] === ':'; };
+    const mineCds = () => String.fromCharCode(rb(sft)).toUpperCase() === letter && rb(sft + 1) === 0x3A;
+    switch (al) {
+      case 0x01: case 0x03: case 0x0E: case 0x11: case 0x13: case 0x17: case 0x18: // RD, MD, Attribut setzen, Umbenennen, Löschen, Anlegen
+        if (!minePath()) return pass();
+        return fail(5);
+      case 0x09: case 0x0A: case 0x0B:                                             // Schreiben, Sperren
+        if (!mineSft()) return pass();
+        return fail(5);
+      case 0x05: {                                                                 // CHDIR
+        if (!minePath()) return pass();
+        if (!isoReady()) return fail(21);
+        const p = fn1(), e = isoFind(p.slice(2));
+        if (!e || !(e.attr & 0x10)) return fail(3);
+        const cds = farp(sda + 0x282) || 0;                                        // aktueller CDS-Eintrag laut SDA
+        const own = cdsOf(drv);
+        for (const c of new Set([own, cds])) {
+          if (!c || rb(c) !== p.charCodeAt(0)) continue;
+          const s = p.length > 3 ? p.replace(/\\+$/, '') : letter + ':\\';
+          for (let i = 0; i < 67; i++) wb(c + i, i < s.length ? s.charCodeAt(i) : 0);
+        }
+        return ok();
+      }
+      case 0x06: {                                                                 // Schließen
+        if (!mineSft()) return pass();
+        const n = rw(sft); if (n) ww(sft, n - 1);
+        return ok();
+      }
+      case 0x07: if (!mineSft()) return pass(); return ok();                       // Puffer schreiben
+      case 0x08: {                                                                 // Lesen
+        if (!mineSft()) return pass();
+        if (!isoReady()) return fail(21);
+        const lba = rd(sft + 0x1B), size = rd(sft + 0x11), pos = rd(sft + 0x15);
+        const n = Math.max(0, Math.min(CX(), size - pos));
+        if (lba + Math.ceil((pos + n) / 2048) > cd.sectors) return fail(30);
+        isoCopy(dta(), lba, pos, n);
+        wd(sft + 0x15, pos + n); R[1] = n;
+        if (pc.onDisk) pc.onDisk(false);
+        return ok();
+      }
+      case 0x0C: {                                                                 // freier Platz
+        if (!mineCds()) return pass();
+        R[0] = 0x0001 | (0xF8 << 8); R[3] = cd ? Math.min(cd.sectors, 0xFFFF) : 0; R[1] = 2048; R[2] = 0;
+        return ok();
+      }
+      case 0x0F: {                                                                 // Attribute holen
+        if (!minePath()) return pass();
+        if (!isoReady()) return fail(21);
+        const p = fn1().slice(2), e = isoFind(p);
+        if (!e) return fail(isoFind(p.replace(/\\[^\\]*$/, '')) ? 2 : 3);
+        R[0] = e.attr; R[3] = Math.floor(e.size / 65536); R[7] = e.size & 0xFFFF; R[1] = e.time; R[2] = e.date;
+        return ok();
+      }
+      case 0x16: case 0x2E: {                                                      // Öffnen / erweitertes Öffnen
+        if (!minePath()) return pass();
+        let omode;
+        if (al === 0x16) omode = rw(lin(S[2], R[4] + 6));
+        else {
+          omode = rw(sda + 0x2E1);
+          const act = rw(sda + 0x2DD);
+          if ((act & 0x0F) !== 1) return fail(5);                                   // nur "öffnen, wenn vorhanden"
+        }
+        if ((omode & 3) !== 0) return fail(5);
+        if (!isoReady()) return fail(21);
+        const p = fn1().slice(2), e = isoFind(p);
+        if (!e) return fail(isoFind(p.replace(/\\[^\\]*$/, '')) ? 2 : 3);
+        if (e.attr & 0x10) return fail(5);
+        ww(sft + 2, omode & 0x7F); wb(sft + 4, e.attr);
+        ww(sft + 5, 0x8040 | drv); ww(sft + 0x0B, 0); ww(sft + 0x0D, e.time); ww(sft + 0x0F, e.date);
+        wd(sft + 0x11, e.size); wd(sft + 0x15, 0); ww(sft + 0x19, 0); wd(sft + 0x1B, e.lba); wb(sft + 0x1F, 0);
+        for (let i = 0; i < 11; i++) wb(sft + 0x20 + i, e.fcb.charCodeAt(i));
+        if (al === 0x2E) R[1] = 1;                                                 // Aktion: geöffnet
+        return ok();
+      }
+      case 0x1B: case 0x1C: {                                                      // FindFirst / FindNext
+        const d = dta();
+        let dirLba, idx, tpl, attr;
+        if (al === 0x1B) {
+          if (!minePath()) return pass();
+          if (!isoReady()) return fail(21);
+          const p = fn1().slice(2), cut = p.lastIndexOf('\\');
+          const dir = cut <= 0 ? iso.root : isoFind(p.slice(0, cut));
+          if (!dir || !(dir.attr & 0x10)) return fail(3);
+          dirLba = dir.lba; idx = 0; tpl = fcbName(p.slice(cut + 1), true); attr = rb(sda + 0x24D);
+          isoDir(dir);
+          if ((attr & 0x08) && !(attr & 0x10)) {                                   // Datenträgername
+            wb(d, drv | 0x80); for (let i = 0; i < 11; i++) wb(d + 1 + i, tpl.charCodeAt(i));
+            wb(d + 0x0C, attr); ww(d + 0x0D, 0xFFFF); wd(d + 0x0F, dirLba);
+            const lab = (iso.label + '           ').slice(0, 11);
+            putFound(d, { attr: 0x08, time: iso.root.time, date: iso.root.date, size: 0, fcb: lab, name: lab.trim() });
+            return ok();
+          }
+        } else {
+          if ((rb(d) & 0x80) === 0 || (rb(d) & 0x3F) !== drv) return pass();
+          if (!isoReady()) return fail(18);
+          idx = rw(d + 0x0D); dirLba = rd(d + 0x0F); attr = rb(d + 0x0C);
+          tpl = ''; for (let i = 0; i < 11; i++) tpl += String.fromCharCode(rb(d + 1 + i));
+          if (idx === 0xFFFF) return fail(18);
+        }
+        const list = iso.dirs.get(dirLba);
+        if (!list) return fail(18);
+        for (let i = idx; i < list.length; i++) {
+          const e = list[i];
+          if ((e.attr & 0x16 & ~attr)) continue;                                    // Verzeichnis/versteckt nur auf Wunsch
+          if (!fcbMatch(tpl, e.fcb)) continue;
+          wb(d, drv | 0x80); for (let k = 0; k < 11; k++) wb(d + 1 + k, tpl.charCodeAt(k));
+          wb(d + 0x0C, attr); ww(d + 0x0D, i + 1); wd(d + 0x0F, dirLba);
+          putFound(d, e);
+          return ok();
+        }
+        return fail(al === 0x1B ? 2 : 18);
+      }
+      case 0x21: {                                                                 // Dateizeiger vom Ende
+        if (!mineSft()) return pass();
+        const off = ((CX() << 16) | DX()) | 0, size = rd(sft + 0x11);
+        const np = Math.max(0, size + off);
+        wd(sft + 0x15, np); R[2] = Math.floor(np / 65536); R[0] = np & 0xFFFF;
+        return ok();
+      }
+      default: return pass();                                                      // 1100h, 1120h, 1122h, 1123h ... an DOS
+    }
+
+    // Fundstelle in den DTA-Bereich und in den Verzeichniseintrag der SDA schreiben
+    function putFound(d, e) {
+      wb(d + 0x15, e.attr); ww(d + 0x16, e.time); ww(d + 0x18, e.date); wd(d + 0x1A, e.size);
+      const nm = e.name.slice(0, 12);
+      for (let i = 0; i < 13; i++) wb(d + 0x1E + i, i < nm.length ? nm.charCodeAt(i) : 0);
+      const de = sda + 0x1B3;
+      for (let i = 0; i < 11; i++) wb(de + i, e.fcb.charCodeAt(i));
+      wb(de + 0x0B, e.attr); for (let i = 0x0C; i < 0x16; i++) wb(de + i, 0);
+      ww(de + 0x16, e.time); ww(de + 0x18, e.date); ww(de + 0x1A, 0); wd(de + 0x1C, e.size);
+    }
+    function cdsOf(n) {
+      const lol = farp(base + CDX_LOL);
+      if (n >= rb(lol + 0x21)) return 0;
+      return farp(lol + 0x16) + n * 0x58;
+    }
+    // Installation: Befehlszeile /L:x auswerten, CDS-Eintrag als Netzlaufwerk markieren
+    function cdxInit() {
+      const psp = base;
+      let cmd = ''; for (let i = 0; i < rb(psp + 0x80); i++) cmd += String.fromCharCode(rb(psp + 0x81 + i));
+      cmd = cmd.toUpperCase();
+      const say = (t, okFlag) => {
+        const b = dosText(t + '\r\n$');
+        for (let i = 0; i < b.length; i++) wb(psp + CDX_MSG + i, b[i]);
+        wb(psp + CDX_MODE, okFlag ? 0 : 1);
+      };
+      if (/\/\?/.test(cmd)) return say('WERKCDX – CD-Umleiter der PC-Werkbank (MSCDEX-Ersatz)\r\nAufruf: WERKCDX [/D:WERKCD01] [/L:Laufwerk]', false);
+      const lol = farp(base + CDX_LOL), last = rb(lol + 0x21);
+      const cdsBase = farp(lol + 0x16);
+      const flags = n => rw(cdsBase + n * 0x58 + 0x43);
+      for (let n = 0; n < last; n++)
+        if ((flags(n) & 0x8000) && rb(cdsBase + n * 0x58 + 0x4D) === 0x57 && rb(cdsBase + n * 0x58 + 0x4E) === 0x43)
+          return say(`WERKCDX ist schon geladen (Laufwerk ${String.fromCharCode(65 + n)}:).`, false);
+      const m = /\/L:([A-Z])/.exec(cmd);
+      let n = m ? m[1].charCodeAt(0) - 65 : -1;
+      if (n < 0) { for (let i = 3; i < last; i++) if (!(flags(i) & 0xC000)) { n = i; break; } }
+      if (n < 0 || n >= last) return say('WERKCDX: kein freier Laufwerksbuchstabe – LASTDRIVE in CONFIG.SYS erhöhen.', false);
+      if (flags(n) & 0xC000) return say(`WERKCDX: Laufwerk ${String.fromCharCode(65 + n)}: ist schon belegt.`, false);
+      const c = cdsBase + n * 0x58, s = String.fromCharCode(65 + n) + ':\\';
+      for (let i = 0; i < 0x58; i++) wb(c + i, 0);
+      for (let i = 0; i < s.length; i++) wb(c + i, s.charCodeAt(i));
+      ww(c + 0x43, 0xC000); ww(c + 0x49, 0xFFFF); ww(c + 0x4B, 0xFFFF);
+      wb(c + 0x4D, 0x57); wb(c + 0x4E, 0x43);                                       // Kennung "WC" im Benutzerfeld
+      ww(c + 0x4F, 2);
+      wb(base + CDX_DRV, n);
+      log(`WERKCDX: CD-ROM als Laufwerk ${String.fromCharCode(65 + n)}:` + (cdDrvSeg ? '' : ' (CDWERK.SYS ist nicht geladen)'));
+      say(`WERKCDX: CD-ROM ist Laufwerk ${String.fromCharCode(65 + n)}:` + (cd ? '' : ' (noch keine CD eingelegt)'), true);
+    }
+  }
+  // Text für die DOS-Ausgabe (Codeseite 437)
+  function dosText(t) {
+    const map = { 'ä': 0x84, 'ö': 0x94, 'ü': 0x81, 'Ä': 0x8E, 'Ö': 0x99, 'Ü': 0x9A, 'ß': 0xE1, '–': 0x2D };
+    return Uint8Array.from(t, ch => map[ch] || (ch.charCodeAt(0) & 0x7F));
+  }
+  // ---- ISO 9660
+  function isoSec(lba) { return lba * cd.secSize + cd.dataOff; }
+  function isoReady() {
+    if (!cd) { iso = null; return false; }
+    if (iso && iso.disc === cd) return true;
+    const p = isoSec(16);
+    const pvd = cd.data.subarray(p, p + 2048);
+    if (pvd[0] !== 1 || String.fromCharCode(...pvd.subarray(1, 6)) !== 'CD001') { iso = null; return false; }
+    const root = isoRec(pvd, 156);
+    root.attr = 0x10;
+    iso = { disc: cd, pvd, root, dirs: new Map(), label: String.fromCharCode(...pvd.subarray(40, 72)).trim().toUpperCase() };
+    return true;
+  }
+  function isoRec(b, o) {
+    const u32 = k => (b[o + k] | (b[o + k + 1] << 8) | (b[o + k + 2] << 16)) + b[o + k + 3] * 16777216;
+    const y = b[o + 18], mo = b[o + 19] || 1, dd = b[o + 20] || 1, h = b[o + 21], mi = b[o + 22], s = b[o + 23];
+    const fl = b[o + 25];
+    return {
+      lba: u32(2), size: u32(10), attr: (fl & 2 ? 0x10 : 0) | (fl & 1 ? 0x02 : 0) | 0x01,
+      date: ((Math.max(0, y - 80) & 0x7F) << 9) | ((mo & 15) << 5) | (dd & 31), time: (h << 11) | (mi << 5) | (s >> 1),
+      raw: String.fromCharCode(...b.subarray(o + 33, o + 33 + b[o + 32]))
+    };
+  }
+  function fcbName(n, wild) {
+    if (n === '.' || n === '..') return (n + '           ').slice(0, 11);
+    let base = n, ext = '';
+    const dot = n.lastIndexOf('.');
+    if (dot > 0) { base = n.slice(0, dot); ext = n.slice(dot + 1); }
+    const part = (s, len) => {
+      let r = '';
+      for (const ch of s) { if (r.length >= len) break; if (wild && ch === '*') { r = (r + '???????????').slice(0, len); break; } r += ch; }
+      return (r + '           ').slice(0, len);
+    };
+    return part(base.toUpperCase(), 8) + part(ext.toUpperCase(), 3);
+  }
+  function fcbMatch(t, f) { for (let i = 0; i < 11; i++) if (t[i] !== '?' && t[i] !== f[i]) return false; return true; }
+  function isoDir(dir) {
+    let list = iso.dirs.get(dir.lba);
+    if (list) return list;
+    list = [];
+    for (let s = 0; s * 2048 < dir.size && dir.lba + s < cd.sectors; s++) {
+      const p = isoSec(dir.lba + s), b = cd.data.subarray(p, p + 2048);
+      for (let o = 0; o < 2048;) {
+        const len = b[o];
+        if (!len || o + len > 2048) break;
+        const e = isoRec(b, o);
+        o += len;
+        if (e.raw === '\0') { if (dir !== iso.root) list.push(Object.assign(e, { name: '.', fcb: fcbName('.') })); continue; }
+        if (e.raw === '\x01') { if (dir !== iso.root) list.push(Object.assign(e, { name: '..', fcb: fcbName('..') })); continue; }
+        let nm = e.raw.replace(/;.*$/, '').replace(/\.$/, '').toUpperCase();
+        if (!nm || (b[o - len + 25] & 0x80 && list.some(x => x.raw === e.raw))) continue; // Fortsetzungen mehrteiliger Dateien
+        e.fcb = fcbName(nm);
+        e.name = e.fcb.slice(0, 8).trim() + (e.fcb.slice(8).trim() ? '.' + e.fcb.slice(8).trim() : '');
+        list.push(e);
+      }
+    }
+    iso.dirs.set(dir.lba, list);
+    return list;
+  }
+  function isoFind(path) {
+    let cur = iso.root;
+    for (const part of path.split('\\').filter(Boolean)) {
+      if (!(cur.attr & 0x10)) return null;
+      if (part === '.') continue;
+      const f = fcbName(part);
+      cur = isoDir(cur).find(e => e.fcb === f);
+      if (!cur) return null;
+    }
+    return cur;
+  }
+  function isoCopy(dst, lba, pos, n) {
+    if (cd.secSize === 2048 && !cd.dataOff) { linCopy(dst, cd.data, lba * 2048 + pos, n); return; }
+    for (let done = 0; done < n;) {
+      const p = pos + done, s = Math.floor(p / 2048), o = p % 2048, k = Math.min(n - done, 2048 - o);
+      linCopy(dst + done, cd.data, isoSec(lba + s) + o, k);
+      done += k;
+    }
   }
 
   // ------------------------------------------------------------------ Laufwerke (INT 13h) und Booten
@@ -7616,6 +7942,8 @@ function createPC(opts) {
   }
   // Treiber für das CD-Laufwerk (Quelltext cdwerk.asm)
   const CDWERK_SYS = new Uint8Array([0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xC8, 0x1A, 0x00, 0x25, 0x00, 0x57, 0x45, 0x52, 0x4B, 0x43, 0x44, 0x30, 0x31, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2E, 0x89, 0x1E, 0x16, 0x00, 0x2E, 0x8C, 0x06, 0x18, 0x00, 0xCB, 0x50, 0x53, 0x06, 0x2E, 0xC4, 0x1E, 0x16, 0x00, 0xF1, 0xF6, 0x07, 0x5B, 0x58, 0xCB]);
+  // CD-Umleiter für FreeDOS (Quelltext werkcdx.asm), der Emulator übernimmt ISO 9660 und die MSCDEX-Schnittstelle
+  const WERKCDX_COM = new Uint8Array([0xE9, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xFC, 0x11, 0x74, 0x05, 0x80, 0xFC, 0x15, 0x75, 0x11, 0x2E, 0xC6, 0x06, 0x07, 0x01, 0x00, 0xF1, 0xF5, 0x2E, 0x80, 0x3E, 0x07, 0x01, 0x00, 0x75, 0x01, 0xCF, 0x2E, 0xFF, 0x2E, 0x03, 0x01, 0xB8, 0x2F, 0x35, 0xCD, 0x21, 0x89, 0x1E, 0x03, 0x01, 0x8C, 0x06, 0x05, 0x01, 0xB4, 0x52, 0xCD, 0x21, 0x89, 0x1E, 0x09, 0x01, 0x8C, 0x06, 0x0B, 0x01, 0x1E, 0xB8, 0x06, 0x5D, 0xCD, 0x21, 0x2E, 0x89, 0x36, 0x0D, 0x01, 0x2E, 0x8C, 0x1E, 0x0F, 0x01, 0x1F, 0xC6, 0x06, 0x07, 0x01, 0x02, 0xF1, 0xF5, 0xBA, 0x8D, 0x01, 0xB4, 0x09, 0xCD, 0x21, 0x80, 0x3E, 0x07, 0x01, 0x00, 0x75, 0x18, 0x8E, 0x06, 0x2C, 0x00, 0xB4, 0x49, 0xCD, 0x21, 0xB8, 0x2F, 0x25, 0xBA, 0x11, 0x01, 0xCD, 0x21, 0xBA, 0x14, 0x00, 0xB8, 0x00, 0x31, 0xCD, 0x21, 0xB8, 0x01, 0x4C, 0xCD, 0x21, 0x24]);
   // CDWERK.SYS ins Wurzelverzeichnis eines DOS-Festplattenabbilds legen und in CONFIG.SYS/AUTOEXEC.BAT eintragen
   function patchCdDriver(img) {
     const fs = FatImage.read(img);
@@ -7941,10 +8269,11 @@ function createPC(opts) {
     const add = (n, d) => { if (!has(n)) { entries.push({ path: n, data: d }); generated.set(n, d); } };
     if (withSystem) {
       add('KERNEL.SYS', FD.kernel); add('COMMAND.COM', FD.command); add('WERKXMS.SYS', FD.xms);
+      add('CDWERK.SYS', CDWERK_SYS); add('WERKCDX.COM', WERKCDX_COM); // CD-Laufwerk D: (Treiber + MSCDEX-Ersatz)
       if (!has('FDCONFIG.SYS') && !has('CONFIG.SYS'))
-        add('FDCONFIG.SYS', enc('SWITCHES=/F\nDEVICE=C:\\WERKXMS.SYS\nDOS=HIGH,UMB\nFILES=30\nBUFFERS=20\nLASTDRIVE=Z\nSHELLHIGH=C:\\COMMAND.COM C:\\ /E:1024 /P\n'));
+        add('FDCONFIG.SYS', enc('SWITCHES=/F\nDEVICE=C:\\WERKXMS.SYS\nDOS=HIGH,UMB\nDEVICE=C:\\CDWERK.SYS\nFILES=30\nBUFFERS=20\nLASTDRIVE=Z\nSHELLHIGH=C:\\COMMAND.COM C:\\ /E:1024 /P\n'));
       if (!has('AUTOEXEC.BAT')) {
-        let a = '@ECHO OFF\nPATH C:\\\nPROMPT $P$G\n' + ($('sbOn').checked ? 'SET BLASTER=A220 I7 D1 T3\n' : '');
+        let a = '@ECHO OFF\nPATH C:\\\nPROMPT $P$G\n' + ($('sbOn').checked ? 'SET BLASTER=A220 I7 D1 T3\n' : '') + 'C:\\WERKCDX.COM /D:WERKCD01 /L:D\n';
         const prog = $('prog').value;
         if (prog) {
           const parts = prog.split('/'); const file = parts.pop();
