@@ -55,12 +55,17 @@ code{font-family:ui-monospace,monospace}
 .models button.cur{border-color:var(--acc2)}
 .bankrow{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--line)}
 .bankrow button{padding:2px 8px}
+.piano{position:relative;height:72px;margin:8px 0 4px;user-select:none;touch-action:none}
+.piano div{position:absolute;top:0;border:1px solid #000;border-radius:0 0 4px 4px;cursor:pointer}
+.piano .w{background:#e6e8ee;height:72px;z-index:1}
+.piano .b{background:#1b1d24;height:44px;z-index:2}
+.piano div.on{background:var(--acc)}
 </style>
 </head>
 <body>
 <header>
   <h1><b>MSX</b>-Emulator</h1>
-  <span>MSX1 &amp; MSX2 · Z80 · TMS9918A / V9938 · AY-3-8910 · YM2413 (MSX-MUSIC) · Memory Mapper · Kassette · Diskette · MegaROM inkl. SCC</span>
+  <span>MSX1 &amp; MSX2 · Z80 · TMS9918A / V9938 · AY-3-8910 · YM2413 (MSX-MUSIC) · Yamaha SFG (YM2151, MIDI) · Memory Mapper · Kassette · Diskette · MegaROM inkl. SCC</span>
 </header>
 <main>
 <section>
@@ -95,10 +100,24 @@ code{font-family:ui-monospace,monospace}
     <div class="small" id="cartInfo"></div>
   </div>
   <div class="box">
+    <h2>Yamaha SFG · FM &amp; MIDI <span class="led" id="midiLed"></span></h2>
+    <div class="row"><label class="file" title="ROM des FM Sound Synthesizer Unit (sfg-01.rom oder sfg-05.rom)">SFG-ROM laden…<input type="file" id="fSfg" accept=".rom,.bin,.zip"></label>
+      <button id="bSfgCx" title="Yamaha CX5M: MSX1 mit SFG in Slot 3-3">CX5M</button><button id="bSfgCx2" title="Yamaha CX5MII/128: MSX2 mit SFG in Slot 3-3">CX5MII</button></div>
+    <div class="small" id="sfgInfo"></div>
+    <div class="row"><button id="bMidi" title="echte MIDI-Geräte über Web-MIDI anschließen (Chrome, Edge)">MIDI verbinden</button></div>
+    <div class="row"><select id="selMidiIn"></select></div>
+    <div class="row"><select id="selMidiOut"></select></div>
+    <div class="row"><select id="selPiano" title="wohin die Klaviatur spielt"><option value="yk">Klaviatur = Yamaha-Musiktastatur YK-10</option><option value="midi">Klaviatur → MIDI-IN des Moduls (Kanal 1)</option></select></div>
+    <div class="piano" id="piano"></div>
+    <div class="row"><button id="bOctDn">◂</button><span class="small" id="octInfo" style="flex:1;text-align:center"></span><button id="bOctUp">▸</button></div>
+    <div class="small" id="midiMon"></div>
+    <div class="small" style="margin-top:4px">Eingebautes Programm des Moduls: in BASIC <code>CALL MUSIC</code>. Die Klaviatur ersetzt die Yamaha-Musiktastatur YK-10 (oder spielt wahlweise in den MIDI-IN). Musiksoftware (YRM-Module) kommt als Modul in Slot 1.</div>
+  </div>
+  <div class="box">
     <h2>ROM-Fach</h2>
     <div class="row"><label class="file">ROMs laden…<input type="file" id="fBios" multiple accept=".rom,.bin,.mx1,.mx2,.zip,.cas,.dsk,.msxsnap"></label></div>
     <div class="small">Alle Dateien auf einmal hier auswählen oder auf den Bildschirm ziehen (auch als ZIP). Erkannt wird am Inhalt:
-      MSX1/MSX2/MSX2+-BIOS, Sub-ROM, Disk-ROM, MSX-MUSIC, Module, Kassetten, Disketten.</div>
+      MSX1/MSX2/MSX2+-BIOS, Sub-ROM, Disk-ROM, MSX-MUSIC, Yamaha-SFG-ROM, Module, Kassetten, Disketten.</div>
     <div class="row"><button id="bZipAll" title="ROM-Fach, Module, Disk-ROM, Kassette, alle Disketten der Box und FM-PAC-Speicher als eine ZIP-Datei">Alles als ZIP speichern</button></div>
     <div id="romBank" style="margin-top:6px"></div>
     <div class="small" id="bankNote"></div>
@@ -268,7 +287,7 @@ class Z80{
   interrupt(){
     this.iff1=this.iff2=0;this.halted=false;this.r=(this.r&0x80)|((this.r+1)&0x7F);
     this.push(this.pc);
-    if(this.im===2){this.pc=this.rd16((this.i<<8)|0xFF);return 19+this.m1wait;}
+    if(this.im===2){this.pc=this.rd16((this.i<<8)|(this.ivec?this.ivec():0xFF));return 19+this.m1wait;}
     this.pc=0x38;return 13+this.m1wait;
   }
 
@@ -710,14 +729,280 @@ const PCMAP={Digit0:'0',Digit1:'1',Digit2:'2',Digit3:'3',Digit4:'4',Digit5:'5',D
   Backspace:'BS',PageUp:'SELECT',Enter:'RET',NumpadEnter:'RET',Space:'SPACE',Home:'HOME',Insert:'INS',Delete:'DEL',
   ArrowLeft:'LEFT',ArrowUp:'UP',ArrowDown:'DOWN',ArrowRight:'RIGHT',PageDown:'DEAD'};
 
+// ===================== Yamaha SFG-01 / SFG-05 (FM Sound Synthesizer Unit) =====================
+// YM2151 (OPM, SFG-01) bzw. YM2164 (OPP, SFG-05): 8 Stimmen à 4 Operatoren, 8 Algorithmen, LFO,
+// Rauschen, zwei Timer mit Interrupt. Kern nach dem bewährten MAME-/openMSX-Modell (Hüllkurven-
+// und Phasentabellen wie im echten Chip), Takt 3,579545 MHz, intern 55,93 kHz.
+// Dazu der MIDI-Baustein YM2148 (UART, 31250 Baud). Register im Modul (jede 16-KB-Seite gespiegelt):
+// 3FF0h OPM-Adresse · 3FF1h OPM-Daten/Status · 3FF2h Musiktastatur · 3FF3h/3FF4h IRQ-Vektoren (IM 2)
+// 3FF5h MIDI-Daten · 3FF6h MIDI-Befehl/Status. Das ROM (16 KB SFG-01, 32 KB SFG-05) liegt gespiegelt im ganzen Slot.
+const OPM_PINC_D='11111112111211121111111211121112111111121112111211121112111211121112111211121112111211121112111211121112121112121112111211121113111211121211121211121112121112131112121211121212111212121112121211121212111212121112121211121213111212121212111311121212121211141112121212121113121212121212121312121212121212121212121212121213121212122121212212121212212121231212212212122122121221221212212212122122121221231212212221221213121221222122121312221222122212221222122212221223122212221222122212221222221222131222221312222213122222131222221312222213122222131222221322131223122222132213122412222213221312232221313222213133222131322221313222213132222131342221313222213133222131322221313422213132222331332221313222233133222131322223313422213132222331342221313222233135222131322223313';
+const OPM_LFO_NOISE='FFEED38058DA7F949EE3FA004DFAFF6A7ADE49F60033BB63916051FF00D87FDEDC732185B29C5D24CD919E767F20FBF300A63E422769AE33454411417273DFA232BD7EA813EBD315DDFBC99D612FBE9D2365516A84F9C9D723BF6519DC03F32433B61E575CAC25894DC59C991507CFBAC59B154D8D2A1E1FEA2B2F64A9503DAB5077E9C0AC6D3FCACF717D80A6FDFFB5BD6F247B00995DB148B0287F80ECBF6F6E399042D94E2E1266C8CF3B3F107D7900D31F219334D71922A20820B9B9EF5199DEBFD40975E98AEEFDE44E3017DFCE11B22835C27C64EB915F320C6E00F99219DB8FABAED612C42662CECC0A03E7DDE24D8AA646950F8FF5159732D4281E55';
+const OPM_DT1='000000000000000000000000000000000000111111112222233344455667888811112222233344455667889ABCDEGGGG2222233344455667889ABCDEGHJKMMMM';
+const OPM_FS=3579545/64;
+const OPM_TL=(()=>{const t=new Int32Array(13*2*256);
+  for(let x=0;x<256;x++){let n=Math.floor(65536/Math.pow(2,(x+1)*(1/32)/8));n>>=4;n=(n&1)?(n>>1)+1:n>>1;n<<=2;
+    t[x*2]=n;t[x*2+1]=-n;for(let i=1;i<13;i++){t[x*2+i*512]=n>>i;t[x*2+1+i*512]=-(n>>i);}}return t;})();
+const OPM_TL_LEN=13*2*256,OPM_QUIET=OPM_TL_LEN>>3;
+const OPM_SIN=(()=>{const t=new Int32Array(1024);
+  for(let i=0;i<1024;i++){const m=Math.sin((i*2+1)*Math.PI/1024);let o=-8*Math.log2(Math.abs(m));o=o/(1/32);
+    let n=Math.trunc(2*o);n=(n&1)?(n>>1)+1:n>>1;t[i]=n*2+(m>=0?0:1);}return t;})();
+const OPM_D1L=Array.from({length:16},(_,i)=>(i!==15?i:i+16)*32);
+const OPM_EGINC=Uint8Array.from([0,1,0,1,0,1,0,1, 0,1,0,1,1,1,0,1, 0,1,1,1,0,1,1,1, 0,1,1,1,1,1,1,1,
+  1,1,1,1,1,1,1,1, 1,1,1,2,1,1,1,2, 1,2,1,2,1,2,1,2, 1,2,2,2,1,2,2,2,
+  2,2,2,2,2,2,2,2, 2,2,2,4,2,2,2,4, 2,4,2,4,2,4,2,4, 2,4,4,4,2,4,4,4,
+  4,4,4,4,4,4,4,4, 4,4,4,8,4,4,4,8, 4,8,4,8,4,8,4,8, 4,8,8,8,4,8,8,8,
+  8,8,8,8,8,8,8,8, 16,16,16,16,16,16,16,16, 0,0,0,0,0,0,0,0]);
+// Rate-Index (0…127, 32 + 2·R + Tastenskalierung) → Tabellenzeile und Teiler
+const OPM_SEL=new Uint8Array(128),OPM_SH=new Uint8Array(128);
+for(let i=0;i<128;i++){const r=i-32;
+  if(r<0){OPM_SEL[i]=18*8;OPM_SH[i]=0;}
+  else if(r<48){OPM_SEL[i]=(r&3)*8;OPM_SH[i]=11-(r>>2);}
+  else if(r<60){OPM_SEL[i]=(4+(r-48))*8;OPM_SH[i]=0;}
+  else{OPM_SEL[i]=16*8;OPM_SH[i]=0;}}
+const OPM_DT2=[0,384,500,608];
+// Phaseninkrement je Oktave in 768 Schritten (64 pro Halbton), 11 Oktaven, 16.16-Festkomma
+const OPM_FREQ=(()=>{const pi=[1299];for(const ch of OPM_PINC_D)pi.push(pi[pi.length-1]+ +ch);
+  const f=new Int32Array(11*768);
+  for(let i=0;i<768;i++){const b=(pi[i]*64)&0xFFFFFFC0;f[768+2*768+i]=b;
+    for(let j=0;j<2;j++)f[768+j*768+i]=(b>>(2-j))&0xFFFFFFC0;
+    for(let j=3;j<8;j++)f[768+j*768+i]=b<<(j-2);}
+  for(let i=0;i<768;i++)f[i]=f[768];
+  for(let j=8;j<10;j++)for(let i=0;i<768;i++)f[768+j*768+i]=f[768+8*768-1];
+  return f;})();
+const OPM_DT1F=(()=>{const t=new Int32Array(256);
+  for(let j=0;j<4;j++)for(let i=0;i<32;i++){const c=OPM_DT1.charCodeAt(j*32+i),v=c<58?c-48:c-55;t[j*32+i]=v*64;t[(j+4)*32+i]=-v*64;}return t;})();
+const OPM_NOISE_T=Array.from({length:32},(_,i)=>32-(i!==31?i:30));
+const OPM_LFON=Uint8Array.from(OPM_LFO_NOISE.match(/../g).map(h=>parseInt(h,16)));
+const EGO_OFF=0,EGO_REL=1,EGO_SUS=2,EGO_DEC=3,EGO_ATT=4;
+// Ziele der Operatorausgänge (statt Zeigern): 0 m2, 1 c1, 2 c2, 3 mem, 4…11 Kanalausgang, -1 = Algorithmus 5
+const OPM_OP_KEYS=['idx','freq','dt1','mul','dt1i','dt2','con','memc','memv','fbShift','fbCurr','fbPrev','kc','kci','pms','ams','amMask',
+  'state','tl','volume','d1l','key','ks','ar','d1r','d2r','rr','shAr','selAr','shD1','selD1','shD2','selD2','shRr','selRr'];
+class YM2151{
+  constructor(opp){this.opp=!!opp;this.ops=[];this.ph=new Int32Array(32);for(let i=0;i<32;i++){const o={};for(const k of OPM_OP_KEYS)o[k]=0;this.ops.push(o);}
+    this.bus=new Int32Array(12);this.pan=new Uint8Array(16);this.reg=new Uint8Array(256);this.sr=44100;this.acc=0;this.reset();}
+  setRate(sr){this.sr=sr;}
+  reset(){
+    this.ph.fill(0);this.ops.forEach((o,i)=>{for(const k of OPM_OP_KEYS)o[k]=0;o.idx=i;o.volume=1023;o.kci=768;o.memc=3;o.con=3;o.mul=1;o.ks=5;});this.chk=0;
+    this.egTimer=0;this.egCnt=0;this.lfoTimer=0;this.lfoCounter=0;this.lfoPhase=0;this.lfoW=0;this.pmd=0;this.amd=0;this.lfa=0;this.lfp=0;
+    this.test=0;this.irqEn=0;this.status=0;this.noise=0;this.noiseRng=0;this.noiseP=0;this.noiseF=OPM_NOISE_T[0];this.csm=0;
+    this.taVal=0;this.tbVal=0;this.taRun=false;this.tbRun=false;this.taCnt=0;this.tbCnt=0;this.lfoOver=0;this.lfoAdd=0;this.ct=0;
+    this.reg.fill(0);this.write(0x1B,0);this.write(0x18,0);for(let r=0x20;r<0x100;r++)this.write(r,0);
+    this.status=0;this.out=0;this.silent=true;
+  }
+  get irq(){return(this.status&((this.irqEn>>2)&3))!==0;}
+  rates(o){const v=o.kc>>o.ks;
+    if(o.ar+v<32+62){o.shAr=OPM_SH[o.ar+v];o.selAr=OPM_SEL[o.ar+v];}else{o.shAr=0;o.selAr=17*8;}
+    o.shD1=OPM_SH[o.d1r+v];o.selD1=OPM_SEL[o.d1r+v];o.shD2=OPM_SH[o.d2r+v];o.selD2=OPM_SEL[o.d2r+v];o.shRr=OPM_SH[o.rr+v];o.selRr=OPM_SEL[o.rr+v];}
+  calcFreq(o){o.freq=((OPM_FREQ[o.kci+o.dt2]+o.dt1)*o.mul)>>1;}
+  keyOn(o,set){
+    if(!o.key){this.ph[o.idx]=0;o.state=EGO_ATT;
+      o.volume+=((~o.volume)*OPM_EGINC[o.selAr+((this.egCnt>>o.shAr)&7)])>>4;
+      if(o.volume<=0){o.volume=0;o.state=EGO_DEC;}}
+    o.key|=set;}
+  keyOff(o,clr){if(o.key){o.key&=clr;if(!o.key&&o.state>EGO_REL)o.state=EGO_REL;}}
+  setConnect(ch,v){const o=this.ops,m1=o[ch*4],m2=o[ch*4+1],c1=o[ch*4+2],out=4+ch;
+    switch(v&7){
+      case 0:m1.con=1;c1.con=3;m2.con=2;m1.memc=0;break;
+      case 1:m1.con=3;c1.con=3;m2.con=2;m1.memc=0;break;
+      case 2:m1.con=2;c1.con=3;m2.con=2;m1.memc=0;break;
+      case 3:m1.con=1;c1.con=3;m2.con=2;m1.memc=2;break;
+      case 4:m1.con=1;c1.con=out;m2.con=2;m1.memc=3;break;
+      case 5:m1.con=-1;c1.con=out;m2.con=out;m1.memc=0;break;
+      case 6:m1.con=1;c1.con=out;m2.con=out;m1.memc=3;break;
+      case 7:m1.con=out;c1.con=out;m2.con=out;m1.memc=3;break;}}
+  write(r,v){
+    r&=255;v&=255;this.reg[r]=v;
+    if(r<0x20){
+      switch(r){
+        case 0x01:case 0x09:if((r===1&&!this.opp)||(r===9&&this.opp)){this.test=v;if(v&2)this.lfoPhase=0;}break;
+        case 0x08:{const b=(v&7)*4,o=this.ops;
+          if(v&0x08)this.keyOn(o[b],1);else this.keyOff(o[b],~1);      // M1
+          if(v&0x20)this.keyOn(o[b+1],1);else this.keyOff(o[b+1],~1);  // M2
+          if(v&0x10)this.keyOn(o[b+2],1);else this.keyOff(o[b+2],~1);  // C1
+          if(v&0x40)this.keyOn(o[b+3],1);else this.keyOff(o[b+3],~1);  // C2
+          this.silent=false;break;}
+        case 0x0F:this.noise=v;this.noiseF=OPM_NOISE_T[v&31];this.noiseP=0;break;
+        case 0x10:this.taVal=(this.taVal&3)|(v<<2);break;
+        case 0x11:this.taVal=(this.taVal&0x3FC)|(v&3);break;
+        case 0x12:this.tbVal=v;break;
+        case 0x14:{ // CSM, Flags löschen, IRQ-Freigabe, Timer starten (Bit 0/1 laden, Bit 2/3 IRQ)
+          this.irqEn=v;if(v&0x10)this.status&=~1;if(v&0x20)this.status&=~2;
+          const ra=!!(v&5),rb=!!(v&10);
+          if(ra&&!this.taRun)this.taCnt=0;if(rb&&!this.tbRun)this.tbCnt=0;this.taRun=ra;this.tbRun=rb;break;}
+        case 0x18:this.lfoOver=1<<((15-(v>>4))+3);this.lfoAdd=0x10+(v&15);break;
+        case 0x19:if(v&0x80)this.pmd=v&0x7F;else this.amd=v&0x7F;break;
+        case 0x1B:this.ct=v>>6;this.lfoW=v&3;break;
+      }
+      return;}
+    const ch=r&7;
+    if(r<0x40){const o=this.ops,b=ch*4;
+      switch(r&0x18){
+        case 0x00:o[b].fbShift=((v>>3)&7)?((v>>3)&7)+6:0;this.pan[ch*2]=(v>>6)&1;this.pan[ch*2+1]=(v>>7)&1;this.setConnect(ch,v);break;
+        case 0x08:{v&=0x7F;if(v!==o[b].kc){const kci=((v-(v>>2))*64+768)|(o[b].kci&63);
+          for(let i=0;i<4;i++){const p=o[b+i];p.kc=v;p.kci=kci;p.dt1=OPM_DT1F[p.dt1i+(v>>2)];this.calcFreq(p);this.rates(p);}}break;}
+        case 0x10:{v>>=2;if(v!==(o[b].kci&63)){const kci=v|(o[b].kci&~63);for(let i=0;i<4;i++){o[b+i].kci=kci;this.calcFreq(o[b+i]);}}break;}
+        case 0x18:o[b].pms=(v>>4)&7;o[b].ams=v&3;break;
+      }
+      return;}
+    // Operatorregister: Reihenfolge M1, M2, C1, C2 (Bit 3/4 der Adresse)
+    const o=this.ops[ch*4+((r&0x18)>>3)];
+    switch(r&0xE0){
+      case 0x40:o.dt1i=(v&0x70)<<1;o.mul=(v&15)?(v&15)<<1:1;o.dt1=OPM_DT1F[o.dt1i+(o.kc>>2)];this.calcFreq(o);break;
+      case 0x60:o.tl=(v&0x7F)<<3;break;
+      case 0x80:o.ks=5-(v>>6);o.ar=(v&31)?32+((v&31)<<1):0;this.rates(o);break;
+      case 0xA0:o.amMask=(v&0x80)?-1:0;o.d1r=(v&31)?32+((v&31)<<1):0;this.rates(o);break;
+      case 0xC0:o.dt2=OPM_DT2[v>>6];this.calcFreq(o);o.d2r=(v&31)?32+((v&31)<<1):0;this.rates(o);break;
+      case 0xE0:o.d1l=OPM_D1L[v>>4];o.rr=34+((v&15)<<2);this.rates(o);break;
+    }
+  }
+  // Timer laufen im CPU-Takt (gleicher Quarz wie der Z80): A in Schritten zu 128, B zu 2048 (OPP: 4096) Takten
+  tick(c){
+    if(this.taRun){this.taCnt+=c;const per=128*(1024-this.taVal);
+      while(this.taCnt>=per){this.taCnt-=per;this.status|=1;if(this.irqEn&0x80)this.csm=2;}}
+    if(this.tbRun){this.tbCnt+=c;const per=(this.opp?4096:2048)*(256-this.tbVal);
+      while(this.tbCnt>=per){this.tbCnt-=per;this.status|=2;}}
+  }
+  opCalc(o,env,pm){const p=(env<<3)+OPM_SIN[(((this.ph[o.idx]&0xFFFF0000)+(pm<<15))>>16)&1023];return p>=OPM_TL_LEN?0:OPM_TL[p];}
+  opCalc1(o,env,pm){const p=(env<<3)+OPM_SIN[(((this.ph[o.idx]&0xFFFF0000)+pm)>>16)&1023];return p>=OPM_TL_LEN?0:OPM_TL[p];}
+  chan(ch){
+    const B=this.bus,O=this.ops,m1=O[ch*4],m2=O[ch*4+1],c1=O[ch*4+2],c2=O[ch*4+3];
+    B[0]=B[1]=B[2]=B[3]=0;B[m1.memc]=m1.memv;
+    const AM=m1.ams?this.lfa<<(m1.ams-1):0;
+    let env=m1.tl+m1.volume+(AM&m1.amMask);
+    let out=m1.fbPrev+m1.fbCurr;m1.fbPrev=m1.fbCurr;
+    if(m1.con<0)B[3]=B[1]=B[2]=m1.fbPrev;else B[m1.con]=m1.fbPrev;
+    m1.fbCurr=0;
+    if(env<OPM_QUIET){if(!m1.fbShift)out=0;m1.fbCurr=this.opCalc1(m1,env,out<<m1.fbShift);}
+    env=m2.tl+m2.volume+(AM&m2.amMask);if(env<OPM_QUIET)B[m2.con]+=this.opCalc(m2,env,B[0]);
+    env=c1.tl+c1.volume+(AM&c1.amMask);if(env<OPM_QUIET)B[c1.con]+=this.opCalc(c1,env,B[1]);
+    env=c2.tl+c2.volume+(AM&c2.amMask);
+    if(ch===7&&(this.noise&0x80)){const n=env<0x3FF?(env^0x3FF)*2:0;B[11]+=(this.noiseRng&0x10000)?n:-n;}
+    else if(env<OPM_QUIET)B[4+ch]+=this.opCalc(c2,env,B[2]);
+    m1.memv=B[3];
+  }
+  eg(){
+    if(++this.egTimer<3)return;this.egTimer=0;const cnt=++this.egCnt;
+    for(const o of this.ops){
+      switch(o.state){
+        case EGO_ATT:if(!(cnt&((1<<o.shAr)-1))){o.volume+=((~o.volume)*OPM_EGINC[o.selAr+((cnt>>o.shAr)&7)])>>4;if(o.volume<=0){o.volume=0;o.state=EGO_DEC;}}break;
+        case EGO_DEC:if(!(cnt&((1<<o.shD1)-1))){o.volume+=OPM_EGINC[o.selD1+((cnt>>o.shD1)&7)];if(o.volume>=o.d1l)o.state=EGO_SUS;}break;
+        case EGO_SUS:if(!(cnt&((1<<o.shD2)-1))){o.volume+=OPM_EGINC[o.selD2+((cnt>>o.shD2)&7)];if(o.volume>=1023){o.volume=1023;o.state=EGO_OFF;}}break;
+        case EGO_REL:if(!(cnt&((1<<o.shRr)-1))){o.volume+=OPM_EGINC[o.selRr+((cnt>>o.shRr)&7)];if(o.volume>=1023){o.volume=1023;o.state=EGO_OFF;}}break;
+      }}
+  }
+  advance(){
+    if(this.test&2)this.lfoPhase=0;
+    else if(this.lfoTimer++>=this.lfoOver){this.lfoTimer=0;this.lfoCounter+=this.lfoAdd;this.lfoPhase=(this.lfoPhase+(this.lfoCounter>>4))&255;this.lfoCounter&=15;}
+    const i=this.lfoPhase;let a,p;
+    switch(this.lfoW){
+      case 0:a=255-i;p=i<128?i:i-255;break;
+      case 1:a=i<128?255:0;p=i<128?128:-128;break;
+      case 2:a=i<128?255-i*2:i*2-256;p=i<64?i*2:i<128?255-i*2:i<192?256-i*2:i*2-511;break;
+      default:a=OPM_LFON[i];p=OPM_LFON[i]-128;}
+    this.lfa=Math.trunc(a*this.amd/128);this.lfp=Math.trunc(p*this.pmd/128);
+    this.noiseP-=2;if(this.noiseP<0){this.noiseP+=this.noiseF;const j=((this.noiseRng^(this.noiseRng>>3))&1)^1;this.noiseRng=(j<<16)|(this.noiseRng>>1);}
+    const O=this.ops,ph=this.ph;
+    for(let c=0;c<8;c++){const b=c*4,m=O[b];let mi=0;
+      if(m.pms){mi=this.lfp;mi=m.pms<6?mi>>(6-m.pms):mi<<(m.pms-5);}
+      if(mi){const kc=m.kci+mi;for(let k=b;k<b+4;k++){const o=O[k];ph[k]=(ph[k]+(((OPM_FREQ[kc+o.dt2]+o.dt1)*o.mul)>>1))|0;}}
+      else for(let k=b;k<b+4;k++)ph[k]=(ph[k]+O[k].freq)|0;}
+    if(this.csm){if(this.csm===2){for(const o of O)this.keyOn(o,2);this.csm=1;}else{for(const o of O)this.keyOff(o,~2);this.csm=0;}}
+  }
+  // ein interner Abtastwert (55,93 kHz), Mono-Mischung aus L und R
+  gen1(){
+    this.eg();const B=this.bus;
+    for(let c=0;c<8;c++){B[4+c]=0;this.chan(c);}
+    const P=this.pan;let s=0;for(let c=0;c<8;c++)s+=(P[c*2]+P[c*2+1])*B[4+c];
+    this.advance();return s;
+  }
+  // ein Ausgabewert für die Soundkarte (Kastenfilter über die internen Werte)
+  sample(sr){
+    this.acc+=OPM_FS/sr;let sum=0,n=0;
+    if(this.silent){while(this.acc>=1){this.acc-=1;this.advance();}return 0;}
+    while(this.acc>=1){this.acc-=1;sum+=this.gen1();n++;}
+    if(++this.chk>=256){this.chk=0;if(this.ops.every(o=>o.state===EGO_OFF))this.silent=true;} // alle Hüllkurven aus → Rechenzeit sparen
+    return n?sum/(n*32768):0;
+  }
+  save(){return{g:pick(this,OPM_G_KEYS),ops:this.ops.map(o=>Object.assign({},o)),ph:this.ph.slice(),reg:this.reg.slice(),pan:this.pan.slice()};}
+  load(S){put(this,S.g);S.ops.forEach((o,i)=>Object.assign(this.ops[i],o));this.ph.set(S.ph);this.reg.set(S.reg);this.pan.set(S.pan);this.silent=false;}
+}
+const OPM_G_KEYS=['egTimer','egCnt','lfoTimer','lfoCounter','lfoPhase','lfoW','pmd','amd','lfa','lfp','test','irqEn','status','noise','noiseRng','noiseP','noiseF','csm',
+  'taVal','tbVal','taRun','tbRun','taCnt','tbCnt','lfoOver','lfoAdd','ct'];
+// ----- YM2148: MIDI-UART (31250 Baud, 1 Byte = 10 Bit = 320 µs ≈ 1145 Z80-Takte) -----
+const MIDI_CHAR=Math.round(3579545*10/31250);
+class YM2148{
+  constructor(){this.rxq=[];this.onTx=null;this.reset();}
+  reset(){this.status=0;this.cmd=0;this.rx=0;this.rxWait=0;this.txBusy=0;this.tx2=-1;}
+  get irq(){return!!(((this.cmd&8)&&(this.status&2))||((this.cmd&2)&&(this.status&1)));}
+  push(bytes){for(const b of bytes)this.rxq.push(b&255);if(this.rxq.length>4096)this.rxq.splice(0,this.rxq.length-4096);}
+  tick(c){
+    if(this.rxWait>0)this.rxWait-=c;
+    if(this.rxWait<=0&&this.rxq.length){
+      if(this.cmd&4){const v=this.rxq.shift();if(this.status&2)this.status|=0x10;else{this.rx=v;this.status|=2;}this.rxWait=MIDI_CHAR;}
+      else this.rxq.length=0; // Empfänger aus: eingehende Bytes gehen verloren
+    }
+    if(this.txBusy>0){this.txBusy-=c;if(this.txBusy<=0){this.txBusy=0;if(this.tx2>=0){const v=this.tx2;this.tx2=-1;this.send(v);this.status|=1;}}}
+  }
+  send(v){this.txBusy=MIDI_CHAR;if(this.onTx)this.onTx(v);}
+  readData(){this.status&=~2;return this.rx;}
+  writeCmd(v){
+    if(v&0x80){this.reset();return;}          // interner Reset
+    if(v&0x10){this.status&=~0x30;return;}    // Fehler löschen
+    const d=this.cmd^v;this.cmd=v;
+    if((d&4)&&!(v&4))this.status&=~2;
+    if(d&1){if(v&1)this.status|=1;else{this.status&=~1;this.txBusy=0;this.tx2=-1;}}
+  }
+  writeData(v){if(!(this.cmd&1))return;if(this.txBusy>0){this.tx2=v;this.status&=~1;}else this.send(v);}
+}
+class SfgDev{
+  constructor(rom,name){
+    this.yk=new Uint8Array(8);
+    let n=0x4000;while(n<rom.length&&n<0x8000)n<<=1;
+    this.rom=new Uint8Array(n).fill(0xFF);this.rom.set(rom.subarray(0,n));this.mask=n-1;
+    this.opp=n>0x4000;this.model=this.opp?'SFG-05':'SFG-01';
+    this.name=`${this.model} (${this.opp?'YM2164':'YM2151'}, MIDI)`;this.file=name;
+    this.opm=new YM2151(this.opp);this.uart=new YM2148();this.reset();}
+  reset(){this.latch=0;this.vec=0xFF;this.vecMidi=0xFF;this.kbdRow=0;this.opm.reset();this.uart.reset();}
+  // Musiktastatur YK-10 (49 Tasten C2–C6): 8 Zeilen (3FF2h schreiben, Bit 7 = Zeile 0), gedrückte Taste = 0-Bit.
+  // Das SFG-ROM liest die Tasten als OPM-Tastencode 5Fh (Zeile 0, Bit 7) abwärts; belegt sind 5Eh (C6) bis 1Eh (C2).
+  ykKey(note,down){const t=note-13,r=((t%12)+12)%12,code=Math.floor(t/12)*16+r+Math.floor(r/3),k=0x5F-code;
+    if(k<1||k>65)return;let b,m;
+    if(k===65){b=7;m=0x80;}else{b=k>>3;m=0x80>>(k&7);}
+    if(down)this.yk[b]|=m;else this.yk[b]&=~m;}
+  read(a){const m=a&0x3FFF;if(m<0x3FF0||m>=0x3FF8)return this.rom[a&this.mask];
+    switch(m){
+      case 0x3FF1:return this.opm.status;
+      case 0x3FF2:{let v=0;for(let r=0;r<8;r++)if(this.kbdRow&(0x80>>r))v|=this.yk[r];return(~v)&0xFF;}
+      case 0x3FF5:return this.uart.readData();
+      case 0x3FF6:return this.uart.status;}
+    return 0xFF;}
+  write(a,v){
+    switch(a&0x3FFF){
+      case 0x3FF0:this.latch=v;break;
+      case 0x3FF1:this.opm.write(this.latch,v);break;
+      case 0x3FF2:this.kbdRow=v;break;
+      case 0x3FF3:this.vecMidi=v;break;
+      case 0x3FF4:this.vec=v;break;
+      case 0x3FF5:this.uart.writeData(v);break;
+      case 0x3FF6:this.uart.writeCmd(v);break;}}
+  get irq(){return this.opm.irq||this.uart.irq;}
+  vector(){return this.uart.irq?this.vecMidi:this.vec;}
+  tick(c){this.opm.tick(c);this.uart.tick(c);}
+  sample(sr){return this.opm.sample(sr);}
+  save(){return{opm:this.opm.save(),uart:pick(this.uart,['status','cmd','rx','rxWait','txBusy','tx2']),dev:pick(this,['latch','vec','vecMidi','kbdRow'])};}
+  load(S){this.opm.load(S.opm);put(this.uart,S.uart);put(this,S.dev);}
+}
+
 // ===================== Maschine =====================
 const CPU_HZ=3579545;
 const MACHINES={
   // mit MSX-MUSIC-ROM wird Slot 3 erweitert: 3-0 RAM, 3-1 FM-BIOS
-  msx1:{name:'MSX1 · 64 KB RAM in Slot 3',build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.slot2()},
-    m.fmrom?{sub:[new RamDev(),m.fmrom,new EmptyDev(),new EmptyDev()]}:{dev:new RamDev()}]},
-  msx1x:{name:'MSX1 · Slot 3 erweitert (RAM in 3-0)',build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.slot2()},
-    {sub:[new RamDev(),new EmptyDev(),new EmptyDev(),new EmptyDev()]}]},
+  // ein SFG-Modul kommt nach 3-3 (wie beim Yamaha CX5M)
+  msx1:{name:'MSX1 · 64 KB RAM in Slot 3',sfg:true,build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.slot2()},
+    (m.fmrom||m.sfg)?{sub:[new RamDev(),m.fmrom||new EmptyDev(),new EmptyDev(),m.sfg||new EmptyDev()]}:{dev:new RamDev()}]},
+  msx1x:{name:'MSX1 · Slot 3 erweitert (RAM in 3-0)',sfg:true,build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.slot2()},
+    {sub:[new RamDev(),new EmptyDev(),new EmptyDev(),m.sfg||new EmptyDev()]}]},
   msx1s0:{name:'MSX1 · Slot 0 erweitert (RAM in 0-2)',build:m=>[{sub:[m.bios,new EmptyDev(),new RamDev(),new EmptyDev()]},
     {dev:m.cart[0]},{dev:m.slot2()},{dev:new EmptyDev()}]},
   // MSX2 nach Art des Philips NMS 8250/8280: 3-0 Sub-ROM, 3-2 Memory Mapper, 3-3 Disk-ROM
@@ -726,6 +1011,13 @@ const MACHINES={
   // MSX2 mit MSX-DOS 2.31 und TC8566AF-Diskcontroller (wie turbo R) in 3-1 statt Disk-ROM
   msx2dos2:{name:'MSX2 + MSX-DOS 2 / TC8566AF',msx2:true,build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.cart[1]},
     {sub:[m.subrom||new EmptyDev(),m.dos2||new EmptyDev(),m.mapper,m.fmrom||new EmptyDev()]}]},
+  // Yamaha-Musikcomputer: FM Sound Synthesizer Unit fest im Seitensteckplatz = Slot 3-3
+  // ohne FM-PAC/MSX-MUSIC wie das Original (sonst fängt das FM-BIOS CALL MUSIC ab)
+  cx5m:{name:'Yamaha CX5M · MSX1, SFG-Modul in 3-3',sfg:true,build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.slot2()},
+    {sub:[new RamDev(),new EmptyDev(),new EmptyDev(),m.sfg||new EmptyDev()]}]},
+  // CX5MII/128: 3-0 Sub-ROM, 3-2 Memory Mapper, 3-3 SFG-05; ein Disk-ROM sitzt dann in Slot 2
+  cx5mii:{name:'Yamaha CX5MII/128 · MSX2, SFG-Modul in 3-3',msx2:true,sfg:true,build:m=>[{dev:m.bios},{dev:m.cart[0]},{dev:m.disk||m.cart[1]},
+    {sub:[m.subrom||new EmptyDev(),new EmptyDev(),m.mapper,m.sfg||new EmptyDev()]}]},
 };
 class MSX{
   constructor(){
@@ -733,11 +1025,13 @@ class MSX{
     this.cpu=new Z80({read:a=>this.bus.read(a),write:(a,v)=>this.bus.write(a,v),in:p=>this.ioIn(p&0xFF),out:(p,v)=>this.ioOut(p&0xFF,v)});
     this.bios=new RomDev('BIOS (kein ROM)');this.cart=[new EmptyDev(),new EmptyDev()];
     this.disk=null;this.tape=null;this.trapsOn=true;this.subrom=null;this.dos2=null;
-    this.mapper=new MapperRam(128);this.rtc=new RTC();this.fm=new YM2413();this.fmrom=null;this.cycBase=0;this.lt=0;this.e6Base=0;this.videoForce=null; // MSX-MUSIC nur mit FM-BIOS im Slot
+    this.mapper=new MapperRam(128);this.rtc=new RTC();this.fm=new YM2413();this.fmrom=null;this.sfg=null;this.cycBase=0;this.lt=0;this.e6Base=0;this.videoForce=null; // MSX-MUSIC nur mit FM-BIOS im Slot
     this.keys=new Uint8Array(11).fill(0xFF);this.forceShift=null;this.ppiC=0x50;this.machine='msx1';
     this.pal=false;this.fb=new Uint32Array(SCRW*SCRH);
     this.audio=[];this.sr=44100;this.sacc=0;this.dc=0;this.dcOut=0;this.frames=0;
     this.build();
+    // IM 2: das SFG legt bei jedem Interrupt-Zyklus seinen Vektor auf den Bus (auch wenn der VDP auslöst)
+    this.cpu.ivec=()=>this.sfg?this.sfg.vector():0xFF;
   }
   setRate(sr){this.sr=sr;this.psg.setRate(sr);this.fm.setRate(sr);}
   slot2(){return this.disk||this.cart[1];}
@@ -747,7 +1041,7 @@ class MSX{
   build(){
     const want=this.isMSX2?V9938:VDP;if(!(this.vdp instanceof want))this.vdp=new want();
     this.bus.setLayout(MACHINES[this.machine].build(this));}
-  reset(){this.chgetSeen=0;this.build();this.cpu.reset();this.vdp.reset();this.psg.reset();this.ppiC=0x50;this.mapper.reset();this.fm.reset();if(this.fmrom&&this.fmrom.reset)this.fmrom.reset();
+  reset(){this.chgetSeen=0;this.build();this.cpu.reset();this.vdp.reset();this.psg.reset();this.ppiC=0x50;this.mapper.reset();this.fm.reset();if(this.fmrom&&this.fmrom.reset)this.fmrom.reset();if(this.sfg)this.sfg.reset();
     for(const c of this.cart)if(c.reset)c.reset();if(this.dos2&&this.dos2.reset)this.dos2.reset();}
   ioIn(p){
     switch(p){
@@ -789,7 +1083,7 @@ class MSX{
   key(name,down){const k=MSXKEY[name];if(!k)return;if(down)this.keys[k[0]]&=~(1<<k[1]);else this.keys[k[0]]|=1<<k[1];}
   // Ein Bild (NTSC 262 / PAL 313 Zeilen à 228 Takte)
   runFrame(){
-    const cpu=this.cpu,vdp=this.vdp,fb=this.fb,v2=!!vdp.startLine;
+    const cpu=this.cpu,vdp=this.vdp,fb=this.fb,v2=!!vdp.startLine,sf=this.sfg;
     if(v2)this.pal=this.videoForce?this.videoForce==='pal':!!(vdp.reg[9]&2); // V9938: BIOS stellt 50/60 Hz in R9 ein, außer es ist erzwungen
     const lines=this.pal?313:262;
     const act=vdp.lines,top=14+((212-act)>>1);
@@ -803,14 +1097,14 @@ class MSX{
       let t=over;
       while(t<228){
         this.lt=t;if(v2)vdp.lt=t;
-        cpu.irq=!!vdp.irq;const pc=cpu.pc;
+        cpu.irq=!!vdp.irq||(sf!==null&&sf.irq);const pc=cpu.pc;
         if(this.trapsOn&&((pc>=0x9F&&pc<=0xF3)||(pc>=0x4010&&pc<=0x401F)||pc===0x180||pc===0x183)&&!(cpu.irq&&cpu.iff1&&!cpu.eiDelay)&&!cpu.halted){
           const c=this.trap(pc);if(c){t+=c;continue;}}
         t+=cpu.step();}
-      over=t-228;this.cycBase+=228;
+      over=t-228;this.cycBase+=228;if(sf)sf.tick(228);
       this.genAudio(spl);
     }
-    cpu.irq=!!vdp.irq;this.over=over;
+    cpu.irq=!!vdp.irq||(sf!==null&&sf.irq);this.over=over;
     // Rand oben/unten
     const bdc=vdp.bdColor();
     fb.fill(bdc,0,top*SCRW);fb.fill(bdc,(top+act)*SCRW);
@@ -897,12 +1191,13 @@ class MSX{
     return{name:f.name,start,end,exec};
   }
   genAudio(n){
-    this.sacc+=n;const scc=this.cart.map(c=>c.scc).filter(Boolean),fmOn=this.fmrom&&this.fm.active;
+    this.sacc+=n;const scc=this.cart.map(c=>c.scc).filter(Boolean),fmOn=this.fmrom&&this.fm.active,sf=this.sfg;
     const click=(this.ppiC&0x80)?0.15:0;
     while(this.sacc>=1){this.sacc-=1;
       let s=this.psg.sample()*0.6+click;
       for(const c of scc)s+=c.sample(this.sr)*0.8;
       if(fmOn)s+=this.fm.sample()*1.2;
+      if(sf)s+=sf.sample(this.sr)*0.8;
       // DC-Sperre
       this.dcOut=s-this.dc+0.995*this.dcOut;this.dc=s;
       this.audio.push(this.dcOut);}
@@ -1644,7 +1939,7 @@ const carts=[null,null]; // {name,data}
 // ===================== ROM-Fach: System-ROMs automatisch erkennen =====================
 const romBank=[]; // {role,name,data,info}
 const ROLE_NAMES={msx1main:'MSX1 BIOS+BASIC',msx2main:'MSX2 BIOS+BASIC',msx2pmain:'MSX2+ BIOS+BASIC',trmain:'turbo R BIOS+BASIC',
-  sub:'Sub-ROM (Extended BIOS)',disk:'Disk-ROM',music:'MSX-MUSIC (FM-BIOS)',fmpac:'FM-PAC',dos2:'MSX-DOS 2',kanji:'Kanji-ROM',logo:'C-BIOS-Logo',other:'sonstiges System-ROM'};
+  sub:'Sub-ROM (Extended BIOS)',disk:'Disk-ROM',music:'MSX-MUSIC (FM-BIOS)',fmpac:'FM-PAC',dos2:'MSX-DOS 2',kanji:'Kanji-ROM',sfg:'Yamaha SFG (FM-Synthesizer)',logo:'C-BIOS-Logo',other:'sonstiges System-ROM'};
 const bankGet=role=>romBank.find(r=>r.role===role)||null;
 const CHARSET=['japanisch','international','koreanisch'];
 function isDiskRom(d){return d.length>=0x4000&&d.length<=0x10000&&d[0]===0x41&&d[1]===0x42&&[0x10,0x13,0x16,0x19,0x1C].every(o=>d[o]===0xC3);}
@@ -1659,6 +1954,7 @@ function identify(name,d){
   if(n.endsWith('.sram')&&d.length===0x2000)return[{kind:'sram',name,data:d}];
   if(n.endsWith('.cas')||asText(d,0,8)===String.fromCharCode(...CAS_HDR))return[{kind:'cas',name,data:d}];
   if(n.endsWith('.dsk')||(d.length>=327680&&d.length%512===0&&d[0]===0xEB))return[{kind:'dsk',name,data:d}];
+  {const s=sfgIdent(name,d,false);if(s)return[s];}
   if(d.length>=0x8000&&d[0]===0xF3&&d[1]===0xC3){ // Haupt-BIOS (beginnt mit DI; JP)
     const ver=d[0x2D],f50=d[0x2B]&0x80,role=['msx1main','msx2main','msx2pmain','trmain'][ver]||'msx1main';
     const info=`${f50?'50 Hz (PAL)':'60 Hz (NTSC)'}, Zeichensatz ${CHARSET[d[0x2B]&15]||'?'}`;
@@ -1706,6 +2002,7 @@ async function ingest(fileList){
   // C-BIOS kann nicht von Diskette starten: Modellwahl anbieten
   if(found.some(t=>t.startsWith('Laufwerk A'))&&/^cb/.test(currentModel())&&(diskRom||bankGet('dos2'))&&!newMain)askModelForDisk();
   if(newMain||found.some(t=>t.startsWith(ROLE_NAMES.msx2main))){$('selBios').value='own';}
+  if(found.some(t=>t.startsWith(ROLE_NAMES.sfg))&&!MACHINES[$('selMachine').value].sfg)pickYamaha();
   if(needReset)applyRoms();
   refreshBank();$('ingestInfo').textContent=found.length?'Erkannt: '+found.join(' · '):'';
   return found;
@@ -1720,10 +2017,18 @@ function modelList(){
     set:()=>{$('selMachine').value='msx2';$('selBios').value='own';}});
   if(m2&&bankGet('sub')&&bankGet('dos2'))L.push({id:'m2d',label:'MSX2 · MSX-DOS 2.31',sub:'Disk BASIC 2.01, Unterverzeichnisse, Diskcontroller TC8566AF'+((bankGet('fmpac')||bankGet('music'))?' · MSX-MUSIC':''),
     set:()=>{$('selMachine').value='msx2dos2';$('selBios').value='own';}});
+  const sf=bankGet('sfg');
+  // Yamaha-Musikcomputer immer anbieten, direkt hinter dem passenden MSX1-/MSX2-Eintrag
+  const sfn=sf?(sf.data.length>0x4000?'SFG-05':'SFG-01'):null,miss=' – SFG-ROM fehlt noch (über „SFG-ROM laden…“), startet ohne Modul';
+  const ins=(after,e)=>{const i=L.findIndex(x=>x.id===after);L.splice(i<0?L.length:i+1,0,e);};
+  if(m1)ins('m1',{id:'cx',label:'Yamaha CX5M · MSX1'+(sfn?' + '+sfn:''),sub:'Musikcomputer mit FM-Synthesizer (YM2151) und MIDI in Slot 3-3'+(sfn?', Musiksoftware als Modul in Slot 1':miss),
+    set:()=>{$('selMachine').value='cx5m';$('selBios').value='own';}});
+  if(m2&&bankGet('sub'))ins('m2',{id:'cx2',label:'Yamaha CX5MII/128 · MSX2'+(sfn?' + '+sfn:''),sub:'MSX2-Musikcomputer, FM-Synthesizer-Modul in Slot 3-3'+(diskRom?', Disk-ROM in Slot 2':'')+(sfn?'':miss),
+    set:()=>{$('selMachine').value='cx5mii';$('selBios').value='own';}});
   return L;}
 function ownOk(m2){return $('selBios').value==='own'&&(m2?!!(bankGet('msx2main')&&bankGet('sub')):!!bankGet('msx1main'));}
 function currentModel(){const v=$('selMachine').value,m2=!!MACHINES[v].msx2;
-  if(m2)return!ownOk(true)?'cb2':v==='msx2dos2'?'m2d':'m2';return ownOk(false)?'m1':'cb';}
+  if(m2)return!ownOk(true)?'cb2':v==='msx2dos2'?'m2d':v==='cx5mii'?'cx2':'m2';return ownOk(false)?(v==='cx5m'?'cx':'m1'):'cb';}
 function refreshModels(){
   const box=$('ovModels');if(!box)return;box.innerHTML='';const L=modelList();
   const cur=currentModel();
@@ -1774,6 +2079,9 @@ function applyRoms(){
   const pac=own&&bankGet('fmpac'),mus=own&&!pac&&bankGet('music');
   msx.fmrom=pac?new FmPacDev(pac.data,pac.name,msx.fm,pacSram):mus?new RomDev(mus.name+' (MSX-MUSIC)').add(mus.data.subarray(0,0x4000),0x4000):null;
   msx.dos2=dos2?new TurboRDos2(bankGet('dos2').data,bankGet('dos2').name,drives):null;
+  const sfr=bankGet('sfg');
+  msx.sfg=sfr&&MACHINES[mach].sfg?new SfgDev(sfr.data,sfr.name):null;
+  if(msx.sfg)msx.sfg.uart.onTx=midiTx;
   for(const d of drives)if(d)d.changed=true;
   msx.tape=tape;if(tape)tape.pos=0;
   const vs=$('selVideo').value;msx.videoForce=vs==='auto'?null:vs;
@@ -1783,8 +2091,10 @@ function applyRoms(){
   if(!m2&&own&&diskRom&&typeof pendingAuto!=='undefined'&&!pendingAuto)pendingAuto='\n';
   $('biosInfo').textContent=own?main.name+(sub?' + '+sub.name:'')+' · '+(main.info||'')
     :main.name+' · '+main.info+' · C-BIOS startet nur Module (kein BASIC). Für BASIC, Kassette und Diskette ein Original-BIOS laden.';
-  $('cartInfo').textContent=['Slot 1: '+msx.cart[0].name,'Slot 2: '+(msx.disk&&!m2?'(durch Disk-ROM belegt)':msx.cart[1].name)].join(' · ');
-  $('diskRomInfo').textContent=dos2?'MSX-DOS 2.31 mit nachgebildetem TC8566AF in Slot 3-1':diskRom?diskRom.name+(m2?' in Slot 3-3':' in Slot 2'):'kein Disk-ROM – Laufwerke inaktiv';
+  const dk2=!m2||mach==='cx5mii'; // Disk-ROM in Slot 2 statt 3-3
+  $('cartInfo').textContent=['Slot 1: '+msx.cart[0].name,'Slot 2: '+(msx.disk&&dk2?'(durch Disk-ROM belegt)':msx.cart[1].name)].join(' · ');
+  $('diskRomInfo').textContent=dos2?'MSX-DOS 2.31 mit nachgebildetem TC8566AF in Slot 3-1':diskRom?diskRom.name+(dk2?' in Slot 2':' in Slot 3-3'):'kein Disk-ROM – Laufwerke inaktiv';
+  refreshSfg();
   refreshTape();refreshDrives();
 }
 async function loadInto(input,fn,exts){const f=input.files[0];if(!f)return;
@@ -1827,6 +2137,118 @@ function setJoy(on){joyKeys=on;$('bJoy').classList.toggle('on',joyKeys);$('bJoy'
 $('bFull').onclick=()=>{const el=$('drop');(el.requestFullscreen||el.webkitRequestFullscreen).call(el);};
 $('overlay').onclick=()=>start();
 
+// ===================== Yamaha SFG: ROM, MIDI-Anschluss und Klaviatur =====================
+const SFG_SHA1={'49a1750c10e407293af6bce27a02e99307ceba12':'SFG-01','6680d7118d85418813f1db9449bf3e20942b16da':'SFG-05'};
+function sha1hex(u){
+  const l=u.length,nb=((l+8)>>6)+1,w=new Uint32Array(nb*16),x=new Uint32Array(80);
+  for(let i=0;i<l;i++)w[i>>2]|=u[i]<<(24-(i&3)*8);
+  w[l>>2]|=0x80<<(24-(l&3)*8);w[nb*16-1]=l*8;
+  const H=[0x67452301,0xEFCDAB89,0x98BADCFE,0x10325476,0xC3D2E1F0];
+  for(let b=0;b<nb*16;b+=16){
+    for(let i=0;i<16;i++)x[i]=w[b+i];
+    for(let i=16;i<80;i++){const t=x[i-3]^x[i-8]^x[i-14]^x[i-16];x[i]=(t<<1)|(t>>>31);}
+    let[a,B,c,d,e]=H;
+    for(let i=0;i<80;i++){
+      const f=i<20?(B&c)|(~B&d):i<40?B^c^d:i<60?(B&c)|(B&d)|(c&d):B^c^d;
+      const k=i<20?0x5A827999:i<40?0x6ED9EBA1:i<60?0x8F1BBCDC:0xCA62C1D6;
+      const t=(((a<<5)|(a>>>27))+f+e+k+x[i])|0;e=d;d=c;c=(B<<30)|(B>>>2);B=a;a=t;}
+    H[0]=(H[0]+a)|0;H[1]=(H[1]+B)|0;H[2]=(H[2]+c)|0;H[3]=(H[3]+d)|0;H[4]=(H[4]+e)|0;}
+  return H.map(v=>(v>>>0).toString(16).padStart(8,'0')).join('');
+}
+// SFG-ROM erkennen: an der Prüfsumme (Abbilder wie bei openMSX) oder am Dateinamen; force = ausdrücklich als SFG geladen
+function sfgIdent(n,d,force){
+  if(d.length!==0x4000&&d.length!==0x8000)return null;
+  const known=SFG_SHA1[sha1hex(d)];
+  const sig=asText(d,0x80,6)==='MCHFM0'; // Kennung im Yamaha-ROM
+  if(!known&&!force&&!sig&&!/sfg/i.test(n))return null;
+  const m=known||(d.length>0x4000?'SFG-05':'SFG-01');
+  return{kind:'sys',role:'sfg',name:n,data:d,info:`${m} · ${d.length>>10} KB · FM-Chip ${m==='SFG-05'?'YM2164':'YM2151'}, MIDI-Baustein YM2148${known?' · Prüfsumme stimmt':''}`};
+}
+function pickYamaha(){
+  const m2=!!(bankGet('msx2main')&&bankGet('sub')),m1=!!bankGet('msx1main'),sf=bankGet('sfg');
+  // SFG-05 gehört in den CX5MII, SFG-01 in den CX5M – sofern die passenden BIOS-ROMs da sind
+  const two=m2&&(!m1||(sf&&sf.data.length>0x4000));
+  $('selMachine').value=two?'cx5mii':'cx5m';
+  if(m1||m2)$('selBios').value='own';
+}
+function refreshSfg(){
+  const sf=bankGet('sfg'),mach=$('selMachine').value;let t;
+  if(msx.sfg)t=`${msx.sfg.name} in Slot 3-3 · ${sf?sf.name:''}`;
+  else if(sf)t=`${sf.name} liegt im ROM-Fach, die gewählte Maschine hat aber keinen Platz dafür – „Yamaha CX5M“ oder „CX5MII/128“ wählen.`;
+  else t='Kein SFG-ROM geladen. Das Modul-ROM (16 KB beim SFG-01, 32 KB beim SFG-05) hier oder im ROM-Fach laden – erkannt wird es am Dateinamen („sfg…“) oder an der Prüfsumme.';
+  $('sfgInfo').textContent=t;
+  $('bSfgCx').classList.toggle('on',mach==='cx5m');$('bSfgCx2').classList.toggle('on',mach==='cx5mii');
+}
+$('fSfg').onchange=async e=>{const f=e.target.files[0];e.target.value='';if(!f)return;
+  try{const r=await readRom(f,['.rom','.bin']);const x=sfgIdent(r.name,r.data,true);
+    if(!x)throw new Error(r.name+': kein SFG-ROM (erwartet werden 16 KB beim SFG-01 oder 32 KB beim SFG-05)');
+    addToBank(x);if(!MACHINES[$('selMachine').value].sfg)pickYamaha();applyRoms();refreshBank();start();}
+  catch(err){alert(err.message);}};
+$('bSfgCx').onclick=()=>{$('selMachine').value='cx5m';if(bankGet('msx1main'))$('selBios').value='own';applyRoms();cv.focus();};
+$('bSfgCx2').onclick=()=>{$('selMachine').value='cx5mii';if(bankGet('msx2main')&&bankGet('sub'))$('selBios').value='own';applyRoms();cv.focus();};
+// ----- MIDI (Web MIDI API) -----
+let midiAcc=null,midiIn=null,midiOut=null,midiTxBuf=[],midiNeed=0,midiRun=0,midiInCnt=0,midiOutCnt=0,midiAct=0;
+const midiMon=[];
+function midiLen(st){if(st>=0xF0)return st===0xF1||st===0xF3?2:st===0xF2?3:1;const h=st&0xF0;return(h===0xC0||h===0xD0)?2:3;}
+function midiSend(m){if(midiOut)try{midiOut.send(m);}catch(e){}}
+// Bytes aus dem MIDI-OUT des SFG zu vollständigen Botschaften zusammensetzen (Web MIDI verlangt ganze Nachrichten)
+function midiTx(v){
+  midiOutCnt++;midiAct=performance.now();midiMon.push(v);if(midiMon.length>12)midiMon.shift();
+  if(v>=0xF8){midiSend([v]);return;}                       // Echtzeit-Botschaften sofort
+  if(v===0xF0){midiTxBuf=[v];midiNeed=-1;return;}             // SysEx (z. B. DX7-Klangdaten)
+  if(midiNeed===-1){midiTxBuf.push(v);if(v===0xF7){midiSend(midiTxBuf);midiTxBuf=[];midiNeed=0;}return;}
+  if(v&0x80){midiRun=v<0xF0?v:0;midiTxBuf=[v];midiNeed=midiLen(v);}
+  else{if(!midiTxBuf.length){if(!midiRun)return;midiTxBuf=[midiRun];midiNeed=midiLen(midiRun);}midiTxBuf.push(v);}
+  if(midiTxBuf.length>=midiNeed){midiSend(midiTxBuf);midiTxBuf=[];}
+}
+// Bytes in den MIDI-IN des SFG
+function midiRx(bytes){const b=[...bytes].filter(x=>x!==0xF8&&x!==0xFE);if(!b.length||!msx.sfg)return;
+  msx.sfg.uart.push(b);midiInCnt+=b.length;midiAct=performance.now();}
+function fillMidi(){
+  for(const[id,list,none]of[['selMidiIn',midiAcc.inputs,'MIDI-In: Klaviatur unten'],['selMidiOut',midiAcc.outputs,'MIDI-Out: nur Anzeige']]){
+    const s=$(id),cur=s.value;s.innerHTML='';s.add(new Option(none,''));
+    for(const p of list.values())s.add(new Option((id==='selMidiIn'?'In: ':'Out: ')+p.name,p.id));
+    s.value=[...s.options].some(o=>o.value===cur)?cur:'';s.onchange();}
+}
+$('selMidiIn').onchange=()=>{if(midiIn)midiIn.onmidimessage=null;
+  midiIn=midiAcc&&$('selMidiIn').value?midiAcc.inputs.get($('selMidiIn').value)||null:null;
+  if(midiIn)midiIn.onmidimessage=e=>midiRx(e.data);};
+$('selMidiOut').onchange=()=>{midiOut=midiAcc&&$('selMidiOut').value?midiAcc.outputs.get($('selMidiOut').value)||null:null;};
+$('bMidi').onclick=async()=>{
+  if(!navigator.requestMIDIAccess){alert('Dieser Browser bietet kein Web-MIDI an (Chrome, Edge oder Opera verwenden).');return;}
+  try{midiAcc=await navigator.requestMIDIAccess({sysex:true});}
+  catch(e){try{midiAcc=await navigator.requestMIDIAccess();}catch(e2){alert('MIDI-Zugriff nicht erlaubt: '+e2.message);return;}}
+  midiAcc.onstatechange=fillMidi;fillMidi();$('bMidi').classList.add('on');$('bMidi').textContent='MIDI verbunden';};
+// ----- Klaviatur: spielt in den MIDI-IN des SFG (Kanal 1) -----
+let pianoOct=4;const pianoDown=new Map();
+function buildPiano(){
+  const P=$('piano');P.innerHTML='';const W=14,ww=100/W,base=12*(pianoOct+1);
+  const white=[0,2,4,5,7,9,11],black={1:0,3:1,6:3,8:4,10:5};
+  for(let o=0;o<2;o++)for(let i=0;i<7;i++){const k=document.createElement('div');k.className='w';k.dataset.n=base+o*12+white[i];
+    k.style.left=((o*7+i)*ww)+'%';k.style.width=ww+'%';P.appendChild(k);}
+  for(let o=0;o<2;o++)for(const s in black){const k=document.createElement('div');k.className='b';k.dataset.n=base+o*12+ +s;
+    k.style.left=((o*7+black[s]+1)*ww-ww*0.3)+'%';k.style.width=(ww*0.6)+'%';P.appendChild(k);}
+  $('octInfo').textContent=`C${pianoOct} – H${pianoOct+1}`;
+}
+// Ziel der Klaviatur: Yamaha-Musiktastatur YK-01/YK-10 am Modul oder dessen MIDI-IN
+function pianoNote(n,on){if($('selPiano').value==='yk'){if(msx.sfg)msx.sfg.ykKey(n,on);midiAct=performance.now();}else midiRx(on?[0x90,n,100]:[0x80,n,64]);}
+function pianoOn(el,id){if(!el||!el.dataset.n)return;const n=+el.dataset.n;pianoOff(id);pianoDown.set(id,{n,el});el.classList.add('on');pianoNote(n,true);}
+function pianoOff(id){const p=pianoDown.get(id);if(!p)return;pianoDown.delete(id);p.el.classList.remove('on');pianoNote(p.n,false);}
+$('piano').addEventListener('pointerdown',e=>{e.preventDefault();$('piano').setPointerCapture(e.pointerId);pianoOn(e.target,e.pointerId);});
+$('piano').addEventListener('pointermove',e=>{if(!pianoDown.has(e.pointerId))return;const el=document.elementFromPoint(e.clientX,e.clientY);
+  if(el&&el.parentNode===$('piano')&&+el.dataset.n!==pianoDown.get(e.pointerId).n)pianoOn(el,e.pointerId);});
+for(const t of['pointerup','pointercancel'])$('piano').addEventListener(t,e=>pianoOff(e.pointerId));
+$('bOctDn').onclick=()=>{if(pianoOct>0){pianoOct--;buildPiano();}};
+$('bOctUp').onclick=()=>{if(pianoOct<7){pianoOct++;buildPiano();}};
+buildPiano();
+for(const[id,t]of[['selMidiIn','MIDI-In: keins'],['selMidiOut','MIDI-Out: nur Anzeige']])$(id).add(new Option(t,''));
+function refreshMidiMon(now,full){
+  const on=now-midiAct<150;if(on!==refreshMidiMon.led){refreshMidiMon.led=on;$('midiLed').classList.toggle('on',on);}
+  if(!full)return;
+  if(!msx.sfg){$('midiMon').textContent='';return;}
+  const o=msx.sfg.opm;let keys='';for(let c=0;c<8;c++)keys+=o.ops.slice(c*4,c*4+4).some(p=>p.key&1)?(c+1):'·';
+  $('midiMon').textContent=`Stimmen ${keys} · MIDI-In ${midiInCnt} B · MIDI-Out ${midiOutCnt} B`+(midiMon.length?` (zuletzt ${midiMon.map(v=>h2(v)).join(' ')})`:'');
+}
 // ===================== Kassette =====================
 const CAS_CMD={BASIC:'CLOAD\nRUN\n',ASCII:'RUN"CAS:"\n','Binär':'BLOAD"CAS:",R\n'};
 function insertTape(t){tape=t;msx.tape=t;refreshTape();}
@@ -1930,7 +2352,7 @@ function snapState(){
     fmrom:m.fmrom&&m.fmrom.bank!==undefined?pick(m.fmrom,['bank','enable','r1','r2','sramOn']):null,
     dos2:m.dos2?{bank:m.dos2.bank,pcn:[...m.dos2.fdc.pcn]}:null,
     fm:{reg:f.reg,user:[...f.user],addr:f.addr,amPh:f.amPh,pmPh:f.pmPh,noise:f.noise,slots:f.slots.map(s=>pick(s,['phase','eg','att','out1','out2']))},
-    rtc:{ram:m.rtc.ram,mode:m.rtc.mode,addr:m.rtc.addr},
+    rtc:{ram:m.rtc.ram,mode:m.rtc.mode,addr:m.rtc.addr},sfg:m.sfg?m.sfg.save():null,
     tapePos:m.tape?m.tape.pos:0,fb:m.fb};
 }
 function restoreState(S){
@@ -1949,6 +2371,7 @@ function restoreState(S){
   if(S.dos2&&m.dos2){m.dos2.bank=S.dos2.bank;m.dos2.fdc.pcn=[...S.dos2.pcn];}
   cpy(f.reg,S.fm.reg);f.user=[...S.fm.user];f.addr=S.fm.addr;f.amPh=S.fm.amPh;f.pmPh=S.fm.pmPh;f.noise=S.fm.noise;
   S.fm.slots.forEach((x,i)=>put(f.slots[i],x));
+  if(S.sfg&&m.sfg)m.sfg.load(S.sfg);
   S.rtc.ram.forEach((a,i)=>cpy(m.rtc.ram[i],a));m.rtc.mode=S.rtc.mode;m.rtc.addr=S.rtc.addr;
   if(m.tape)m.tape.pos=S.tapePos;
   if(S.fb)cpy(m.fb,S.fb);
@@ -2150,6 +2573,7 @@ function loop(now){
   const lt=!!(tape&&tape.motor),ld=!!(msx.disk&&msx.frames-msx.disk.led<8&&msx.disk.led)||!!(msx.dos2&&(msx.dos2.fdc.phase!=='idle'||now-msx.dos2.fdc.led<200));
   if(lt!==ledT){ledT=lt;$('tapeLed').classList.toggle('on',lt);}
   if(ld!==ledD){ledD=ld;$('diskLed').classList.toggle('on',ld);}
+  refreshMidiMon(now,now-fpsT>500);
   if(now-fpsT>500){$('fps').textContent=paused?'angehalten':(fpsCnt*1000/(now-fpsT)).toFixed(1)+' Bilder/s';fpsCnt=0;fpsT=now;updateDebug();if(tape&&tape.motor)refreshTape();{const k=drives.map(d=>d?d.name+d.dirty:'-').join();if(k!==drvKey){drvKey=k;refreshDrives();}}}
   requestAnimationFrame(loop);
 }
@@ -2166,7 +2590,8 @@ VDP  ${Array.from(v.reg.slice(0,v.startLine?24:8)).map(x=>h2(x)).join(' ')}  St 
 Modus ${v.modeName()}${(v.reg[1]&0x40)?'':' (dunkel)'}
 PSG  ${Array.from(msx.psg.reg.slice(0,14)).map(x=>h2(x)).join(' ')}
 Kassette ${tape?tape.pos+'/'+tape.len+(tape.motor?' Motor an':''):'-'}
-Bänke ${msx.cart.map((x,i)=>'S'+(i+1)+':'+(x.bankInfo?x.bankInfo()||'-':'-')).join('  ')}`;
+Bänke ${msx.cart.map((x,i)=>'S'+(i+1)+':'+(x.bankInfo?x.bankInfo()||'-':'-')).join('  ')}`+(msx.sfg?`
+OPM  KC ${Array.from(msx.sfg.opm.reg.slice(0x28,0x30)).map(x=>h2(x)).join(' ')}  St ${h2(msx.sfg.opm.status)}  IRQ ${msx.sfg.opm.irqEn&12?'an':'aus'}`:'');
   // Slotkarte
   const sm=$('slotmap'),desc=msx.bus.describe();let html='<div class="h"></div>';
   for(let p=0;p<4;p++)html+=`<div class="h">${h2(p*0x4000,4)}</div>`;
