@@ -119,6 +119,8 @@ footer a, .card a { color: var(--amber); }
         <button class="primary" id="btnPower">Einschalten</button>
         <button id="btnReset" disabled>Reset</button>
         <button id="btnPause" aria-pressed="false" disabled>Pause</button>
+        <button id="btnCad" disabled title="Warmstart wie Strg+Alt+Entf: bootet neu, ohne Laufwerk C: neu aufzubauen">Strg+Alt+Entf</button>
+        <button id="btnEject" disabled title="Diskette aus Laufwerk A: nehmen, damit ein Warmstart (z. B. von Windows-Setup) von C: bootet">Diskette raus</button>
         <div class="leds" aria-hidden="true">
           <span class="led" id="ledPower"><i></i>Power</span>
           <span class="led hdd" id="ledHdd"><i></i>HDD</span>
@@ -154,6 +156,7 @@ footer a, .card a { color: var(--amber); }
           <select id="cdSel"><option value="">leer (keine CD eingelegt)</option></select>
         </label>
         <label class="check" for="cdDrv"><input type="checkbox" id="cdDrv" checked> CD-Treiber in eigenes Festplattenabbild eintragen (CDWERK.SYS + MSCDEX)</label>
+        <label class="check" for="ideOn"><input type="checkbox" id="ideOn"> IDE-Controller nachbilden (Festplatten an 1F0h, CD-ROM an 170h – für Windows 95 und Programme mit eigenem Plattentreiber)</label>
         <label class="check" for="waveDrv"><input type="checkbox" id="waveDrv" checked> Windows-Soundtreiber in eigenes Festplattenabbild eintragen (WERKWAVE.DRV)</label>
         <label for="cFree">Freier Platz auf C: (bei echtem DOS)
           <select id="cFree">
@@ -224,7 +227,7 @@ footer a, .card a { color: var(--amber); }
         <div class="row"><button id="btnSave" disabled>Geänderte Dateien als ZIP</button></div>
         <p class="hint">Bei eigenem Festplattenabbild (z. B. Windows) lädt dieser Knopf die Platte samt allen Änderungen herunter; beim nächsten Mal einfach diese Datei laden.</p>
         <div class="row"><button id="btnSaveHdd" disabled>Festplatte C: als .img speichern</button></div>
-        <label class="check" for="hddCfg"><input type="checkbox" id="hddCfg" checked> Einstellungen mitspeichern (Prozessor, CD-Abbild, Treiber, Klang, Geschwindigkeit als C:\WERKBANK.INI) und beim Laden des Abbilds übernehmen</label>
+        <label class="check" for="hddCfg"><input type="checkbox" id="hddCfg" checked> Einstellungen mitspeichern (Prozessor, CD-Abbild, Treiber, IDE-Controller, Klang, Geschwindigkeit als C:\WERKBANK.INI) und beim Laden des Abbilds übernehmen</label>
       </div>
 
       <div class="card">
@@ -1817,10 +1820,10 @@ function createCPU386(sys) {
   }
   function inB(p) { ioPerm(p, 1); return sys.inb(p) & 0xFF; }
   function inW(p) { ioPerm(p, 2); return sys.inw ? sys.inw(p) & 0xFFFF : (sys.inb(p) | (sys.inb((p + 1) & 0xFFFF) << 8)); }
-  function inD(p) { ioPerm(p, 4); return (sys.inw ? (sys.inw(p) | (sys.inw((p + 2) & 0xFFFF) << 16)) : (sys.inb(p) | (sys.inb(p + 1) << 8) | (sys.inb(p + 2) << 16) | (sys.inb(p + 3) << 24))); }
+  function inD(p) { ioPerm(p, 4); if (sys.ind) return sys.ind(p) | 0; return (sys.inw ? (sys.inw(p) | (sys.inw((p + 2) & 0xFFFF) << 16)) : (sys.inb(p) | (sys.inb(p + 1) << 8) | (sys.inb(p + 2) << 16) | (sys.inb(p + 3) << 24))); }
   function outB(p, v) { ioPerm(p, 1); sys.outb(p, v & 0xFF); }
   function outW(p, v) { ioPerm(p, 2); if (sys.outw) sys.outw(p, v & 0xFFFF); else { sys.outb(p, v & 0xFF); sys.outb((p + 1) & 0xFFFF, (v >> 8) & 0xFF); } }
-  function outD(p, v) { ioPerm(p, 4); if (sys.outw) { sys.outw(p, v & 0xFFFF); sys.outw((p + 2) & 0xFFFF, (v >>> 16) & 0xFFFF); } else { for (var i = 0; i < 4; i++) sys.outb((p + i) & 0xFFFF, (v >> (i * 8)) & 0xFF); } }
+  function outD(p, v) { ioPerm(p, 4); if (sys.outd) { sys.outd(p, v | 0); return; } if (sys.outw) { sys.outw(p, v & 0xFFFF); sys.outw((p + 2) & 0xFFFF, (v >>> 16) & 0xFFFF); } else { for (var i = 0; i < 4; i++) sys.outb((p + i) & 0xFFFF, (v >> (i * 8)) & 0xFF); } }
 
   // ---------------- Bedingungen ----------------
   function cond(c) {
@@ -1888,9 +1891,9 @@ function createCPU386(sys) {
     }
   }
   function inWraw(p) { return sys.inw ? sys.inw(p) & 0xFFFF : (sys.inb(p) | (sys.inb((p + 1) & 0xFFFF) << 8)); }
-  function inDraw(p) { return inWraw(p) | (inWraw((p + 2) & 0xFFFF) << 16); }
+  function inDraw(p) { if (sys.ind) return sys.ind(p) | 0; return inWraw(p) | (inWraw((p + 2) & 0xFFFF) << 16); }
   function outWraw(p, v) { if (sys.outw) sys.outw(p, v & 0xFFFF); else { sys.outb(p, v & 0xFF); sys.outb((p + 1) & 0xFFFF, (v >> 8) & 0xFF); } }
-  function outDraw(p, v) { outWraw(p, v & 0xFFFF); outWraw((p + 2) & 0xFFFF, v >>> 16); }
+  function outDraw(p, v) { if (sys.outd) { sys.outd(p, v | 0); return; } outWraw(p, v & 0xFFFF); outWraw((p + 2) & 0xFFFF, v >>> 16); }
   function plainRam(a, n) { return a >= 0 && ((a + n <= 0xA0000) || (a >= 0x100000 && a + n <= MEMSZ)); }
   // REP MOVS/STOS als Blockoperation, wenn Quelle und Ziel normaler RAM ohne Paging sind
   function fastRep(op, sz, cnt, sB, eB) {
@@ -4245,17 +4248,39 @@ const FatImage = (function () {
 
 // CD-Abbild erkennen: ISO (2048 Byte je Sektor) oder Rohformat (2352 Byte, Mode 1/2 mit Sync-Muster).
 // Liefert { secSize, dataOff, sectors } oder null.
+// ISO 9660: Kennung „CD001“ im Bereich der Datenträgerbeschreibungen ab Sektor 16. Gesucht wird die
+// primäre Beschreibung (Typ 1), auch hinter einem Bootsatz (El Torito). Unvollständige letzte
+// Sektoren (Abbilder, deren Länge kein Vielfaches der Sektorgröße ist) werden ignoriert.
 function cdDetect(d) {
-  const iso = (o) => d.length > o + 6 && d[o] === 1 && d[o + 1] === 0x43 && d[o + 2] === 0x44 && d[o + 3] === 0x30 && d[o + 4] === 0x30 && d[o + 5] === 0x31;
-  if (d.length >= 2352 * 17 && d.length % 2352 === 0 && d[0] === 0 && d[11] === 0) {
+  const sig = o => d.length > o + 6 && d[o + 1] === 0x43 && d[o + 2] === 0x44 && d[o + 3] === 0x30 && d[o + 4] === 0x30 && d[o + 5] === 0x31;
+  const find = (size, off) => {
+    for (let s = 16; s < 48; s++) {
+      const o = s * size + off;
+      if (!sig(o)) return -1;
+      if (d[o] === 1) return s;
+      if (d[o] === 255) return -1;
+    }
+    return -1;
+  };
+  if (d.length >= 2352 * 17 && d[0] === 0 && d[11] === 0) {
     let sync = true; for (let i = 1; i <= 10; i++) if (d[i] !== 0xFF) { sync = false; break; }
     if (sync) {
-      const off = d[15] === 2 ? 24 : 16;
-      if (iso(16 * 2352 + off)) return { secSize: 2352, dataOff: off, sectors: d.length / 2352 };
+      const off = d[15] === 2 ? 24 : 16, pvd = find(2352, off);
+      if (pvd >= 0) return { secSize: 2352, dataOff: off, sectors: Math.floor(d.length / 2352), pvd };
     }
   }
-  if (d.length >= 2048 * 17 && d.length % 2048 === 0 && iso(16 * 2048)) return { secSize: 2048, dataOff: 0, sectors: d.length / 2048 };
+  if (d.length >= 2048 * 17) { const pvd = find(2048, 0); if (pvd >= 0) return { secSize: 2048, dataOff: 0, sectors: Math.floor(d.length / 2048), pvd }; }
   return null;
+}
+// Warum ist das kein CD-Abbild? (für die Meldung beim Laden)
+function cdWhyNot(d) {
+  if (d.length < 2048 * 17) return 'zu klein für eine CD';
+  const at = o => String.fromCharCode(...d.subarray(o, o + 5));
+  for (const [sz, off] of [[2048, 0], [2352, 16], [2352, 24], [2336, 8]]) if (at(16 * sz + off + 1) === 'CD001') return 'Sektorformat ' + sz + ' Byte wird nicht unterstützt';
+  if (at(0x8001) === 'BEA01' || at(0x8001) === 'NSR02' || at(0x8001) === 'NSR03') return 'nur UDF, kein ISO 9660';
+  const head = String.fromCharCode(...d.subarray(0, 16));
+  if (/^NERO|^MEDIA DESCRIPTOR|^.{0,4}CCD|^\x00\xFF{10}/.test(head)) return 'anderes Abbildformat (z. B. NRG/MDF) – bitte als ISO speichern';
+  return 'keine ISO-9660-Kennung „CD001“ ab Sektor 16 gefunden';
 }
 
 function createPC(opts) {
@@ -4266,6 +4291,7 @@ function createPC(opts) {
   const cpuType = opts.cpu === '386' || opts.cpu === '486' ? opts.cpu : '286';
   const log = opts.log || (() => {});
   const pc = { mem, log, cpuType };
+  let ide = null;                          // IDE-Controller (siehe unten), nur mit opts.ide
 
   // ------------------------------------------------------------------ Zeit
   let ipms = opts.ipms || 20000;            // Befehle pro emulierter Millisekunde
@@ -4485,7 +4511,7 @@ function createPC(opts) {
       case 0xE0: ctlReply(0x00); return;
       case 0x60: case 0xD1: case 0xD2: case 0xD3: case 0xD4: kbdCmd = v; return;
     }
-    if (v === 0xFE || (v >= 0xF0 && !(v & 1))) { log('Neustart über Tastaturcontroller angefordert'); return; }
+    if (v === 0xFE || (v >= 0xF0 && !(v & 1))) { requestReboot('Neustart über Tastaturcontroller angefordert'); return; }
   }
   function ctlDataWrite(v) { // Byte an Port 60h
     ctlLastCmd = false;
@@ -4840,6 +4866,23 @@ function createPC(opts) {
     cmos[0x10] = 0x40;            // Diskette A: 1,44 MB
     cmos[0x14] = 0x21;            // eine Diskette, 80x25 Farbe, kein Koprozessor
     cmos[0x15] = 0x80; cmos[0x16] = 0x02; // 640 KB Basisspeicher
+    cmosDisks();
+  }
+  // Mit IDE-Controller: Festplattentyp 47 (frei einstellbar) mit der Geometrie von INT 13h eintragen
+  function cmosDisks() {
+    const dk = pc.disks || {};
+    if (!opts.ide) return;
+    let t = 0;
+    [0x80, 0x81].forEach((n, i) => {
+      const d = dk[n]; if (!d) return;
+      t |= 0xF0 >> (i * 4); cmos[0x19 + i] = 47;
+      const o = i ? 0x24 : 0x1B, cyl = Math.min(d.cyl, 1024);
+      cmos[o] = cyl & 0xFF; cmos[o + 1] = cyl >> 8; cmos[o + 2] = d.heads; cmos[o + 3] = 0xFF; cmos[o + 4] = 0xFF;
+      cmos[o + 5] = d.heads > 8 ? 0x08 : 0; cmos[o + 6] = cyl & 0xFF; cmos[o + 7] = cyl >> 8; cmos[o + 8] = d.spt;
+    });
+    cmos[0x12] = t;
+    let s = 0; for (let i = 0x10; i < 0x2E; i++) s += cmos[i];
+    cmos[0x2E] = (s >> 8) & 0xFF; cmos[0x2F] = s & 0xFF;
   }
   cmosDefaults();
   let rtcNextPer = Infinity, rtcNextUpd = 0;
@@ -4891,6 +4934,7 @@ function createPC(opts) {
     p &= 0xFFFF;
     baseTime += IO_MS;
     if (p >= 0x3C0 && p <= 0x3DF) return vga.inb(p);
+    if (ide) { const r = idePort(p); if (r >= 0) return ideIn(r); }
     switch (p) {
       case 0x20: return pic.readIsr ? pic.isr : masterIrr();
       case 0x21: return pic.imr;
@@ -4924,6 +4968,7 @@ function createPC(opts) {
       if (p === 0x3D9) { pc.cgaColor = v; return; }
       vga.outb(p, v); return;
     }
+    if (ide) { const r = idePort(p); if (r >= 0) { ideOut(r, v); return; } }
     switch (p) {
       case 0x20: case 0x21: picOut(p, v); return;
       case 0xA0: case 0xA1: pic2Out(p, v); return;
@@ -4953,6 +4998,7 @@ function createPC(opts) {
     if (p === 0x1CE || p === 0x1CF) { baseTime += IO_MS; return vga.dispiIn(p); }
     if (p === 0x5E0) return ww.res.length ? ww.res.shift() : 0;
     if (p === 0x5E2) return 0x5757;
+    if (ide) { const r = idePort(p); if (r >= 0) { baseTime += IO_MS; return ideInW(r); } }
     return inb(p) | (inb((p + 1) & 0xFFFF) << 8);
   }
   function outw(p, v) {
@@ -4960,12 +5006,24 @@ function createPC(opts) {
     if (p === 0x1CE || p === 0x1CF) { baseTime += IO_MS; vga.dispiOut(p, v); return; }
     if (p === 0x5E0) { if (ww.args.length < 16) ww.args.push(v & 0xFFFF); return; }
     if (p === 0x5E2) { const a = ww.args; ww.args = []; wwCommand(v & 0xFFFF, a); return; }
+    if (ide) { const r = idePort(p); if (r >= 0) { baseTime += IO_MS; ideOutW(r, v); return; } }
     outb(p, v & 0xFF); outb((p + 1) & 0xFFFF, v >> 8);
+  }
+  // 32-Bit-Zugriffe: das IDE-Datenregister liefert zwei Wörter, sonst zwei 16-Bit-Zugriffe
+  function ind(p) {
+    p &= 0xFFFF;
+    if (ide) { const r = idePort(p); if (r >= 0 && (r & 0x0F) === 0) { baseTime += IO_MS; const a = ideDataIn(r >> 4); return a | (ideDataIn(r >> 4) << 16); } }
+    return inw(p) | (inw((p + 2) & 0xFFFF) << 16);
+  }
+  function outd(p, v) {
+    p &= 0xFFFF;
+    if (ide) { const r = idePort(p); if (r >= 0 && (r & 0x0F) === 0) { baseTime += IO_MS; ideDataOut(r >> 4, v & 0xFFFF); ideDataOut(r >> 4, (v >>> 16) & 0xFFFF); return; } }
+    outw(p, v & 0xFFFF); outw((p + 2) & 0xFFFF, (v >>> 16) & 0xFFFF);
   }
 
   // ------------------------------------------------------------------ CPU
   const cpuSys = {
-    mem, inb, outb, inw, outw, ackIRQ,
+    mem, inb, outb, inw, outw, ind, outd, ackIRQ,
     vgaRead: a => vga.read(a), vgaWrite: (a, v) => vga.write(a, v),
     lfbRead: o => vga.lfbRead(o), lfbWrite: (o, v) => vga.lfbWrite(o, v), lfbSize: vga.SVGA_SIZE,
     hle: n => hle(n),
@@ -4976,7 +5034,7 @@ function createPC(opts) {
     cpuSys.jitDebug = !!opts.jitDebug; if (opts.jit === false) cpuSys.jit = false;
     cpuSys.jitReal = opts.jitReal !== false;
     cpuSys.log = log;
-    cpuSys.onShutdown = () => { log('CPU: Dreifachfehler – Neustart wäre nötig, Rechner angehalten'); };
+    cpuSys.onShutdown = () => { if (!requestReboot('CPU: Dreifachfehler')) log('CPU: Dreifachfehler – Neustart wäre nötig, Rechner angehalten'); };
     cpu = createCPU386(cpuSys);
   }
   pc.cpu = cpu;
@@ -5676,7 +5734,7 @@ function createPC(opts) {
     if (rel) return;
     const shift = (f & 3) !== 0, ctrl = (f & 4) !== 0, alt = (f & 8) !== 0, caps = (f & 0x40) !== 0;
     let a = 0, s = code;
-    if (code === 0x53 && ctrl && alt) { log('Strg+Alt+Entf'); return; }
+    if (code === 0x53 && ctrl && alt) { if (!requestReboot('Strg+Alt+Entf')) log('Strg+Alt+Entf'); return; }
     if (ext) {
       if (code === 0x1C) a = 13; else if (code === 0x35) a = '/'.charCodeAt(0); else a = 0xE0;
       if (a !== 0xE0) s = code === 0x1C ? 0xE0 : 0xE0;
@@ -6806,7 +6864,7 @@ function createPC(opts) {
         allocStrategy, lineBuf, tickCount, consoleText,
       },
       shell: JSON.parse(JSON.stringify(sh)), lastRetShell,
-      disks: Object.entries(disks).map(([k, d]) => ({ drive: +k, data: d.data, cyl: d.cyl, heads: d.heads, spt: d.spt, dirty: d.dirty })), equip: rd16(0x410),
+      ide: ideState(), disks: Object.entries(disks).map(([k, d]) => ({ drive: +k, data: d.data, cyl: d.cyl, heads: d.heads, spt: d.spt, dirty: d.dirty })), equip: rd16(0x410),
     };
   };
   pc.setState = function (st) {
@@ -6849,6 +6907,7 @@ function createPC(opts) {
     allocStrategy = d.allocStrategy; lineBuf = d.lineBuf; tickCount = d.tickCount; consoleText = d.consoleText;
     for (const k of Object.keys(disks)) delete disks[k];
     for (const d of st.disks || []) { pc.attachDisk(d.drive, d.data, d); disks[d.drive].dirty = d.dirty; }
+    ideRestore(st.ide);
     if (st.shell) Object.assign(sh, st.shell); lastRetShell = st.lastRetShell || 0;
     picUpdate();
     audioTime = now(); audioLen = 0;
@@ -7194,7 +7253,7 @@ function createPC(opts) {
   function isoReady() {
     if (!cd) { iso = null; return false; }
     if (iso && iso.disc === cd) return true;
-    const p = isoSec(16);
+    const p = isoSec(cd.pvd || 16);
     const pvd = cd.data.subarray(p, p + 2048);
     if (pvd[0] !== 1 || String.fromCharCode(...pvd.subarray(1, 6)) !== 'CD001') { iso = null; return false; }
     const root = isoRec(pvd, 156);
@@ -7277,7 +7336,295 @@ function createPC(opts) {
     const total = Math.floor(data.length / 512);
     if (!geo) geo = drive < 0x80 ? (FatImage.floppyGeometry(data.length) || { cyl: 80, heads: 2, spt: 18 }) : { heads: 16, spt: 63, cyl: Math.ceil(total / (16 * 63)) };
     disks[drive] = { data, cyl: geo.cyl, heads: geo.heads, spt: geo.spt, total, dirty: false };
+    if (ide && (drive === 0x80 || drive === 0x81)) { ideSignature(ide[0], drive & 1); cmosDisks(); }
   };
+
+  // ------------------------------------------------------------------ IDE-Controller (ATA/ATAPI), nur wenn eingeschaltet
+  // Kanal 0 (1F0h–1F7h, 3F6h, IRQ 14): Festplatten 80h (Master) und 81h (Slave)
+  // Kanal 1 (170h–177h, 376h, IRQ 15): ATAPI-CD-ROM (Master) mit dem eingelegten CD-Abbild
+  // Datenübertragung per PIO (16 oder 32 Bit), kein DMA. Die BIOS-Routinen (INT 13h) arbeiten
+  // unabhängig davon auf denselben Abbildern.
+  ide = opts.ide ? [mkIdeChan(0x1F0, 0x3F6, 14), mkIdeChan(0x170, 0x376, 15)] : null;
+  pc.ide = ide;
+  pc.port = { inb: p => inb(p), outb: (p, v) => outb(p, v), inw: p => inw(p), outw: (p, v) => outw(p, v), ind: p => ind(p), outd: (p, v) => outd(p, v) }; // für Tests
+  function mkIdeChan(base, ctl, irq) {
+    return { base, ctl, irq, dev: [mkIdeDev(), mkIdeDev()], sel: 0, nien: false, srst: false };
+  }
+  function mkIdeDev() {
+    return { feat: 0, cnt: 1, lo: 1, mid: 0, hi: 0, dh: 0xA0, st: 0x50, err: 1, buf: new Uint8Array(65536 + 4), pos: 0, len: 0,
+      op: 0, left: 0, multi: 16, multiOn: 0, lheads: 0, lspt: 0, pkt: null, sense: [0, 0, 0], discSeen: null, pending: false, xferLeft: 0, limit: 0 };
+  }
+  const ideKind = (c, i) => c === 0 ? (disks[0x80 + i] ? 'hd' : null) : (i === 0 ? 'cd' : null);
+  function ideDisk(c, i) { return disks[0x80 + i]; }
+  function ideIrq(ch) { if (!ch.nien) raiseIRQ(ch.irq); }
+  function ideSignature(ch, i) {
+    const d = ch.dev[i], k = ideKind(ide.indexOf(ch), i);
+    d.cnt = 1; d.lo = 1; d.err = 1; d.dh = 0xA0 | (i << 4);
+    if (k === 'cd') { d.mid = 0x14; d.hi = 0xEB; d.st = 0x00; } else { d.mid = 0; d.hi = 0; d.st = k ? 0x50 : 0; }
+    d.op = 0; d.len = d.pos = 0; d.pkt = null;
+  }
+  function ideReset(ch) { for (let i = 0; i < 2; i++) ideSignature(ch, i); ch.sel = 0; }
+  if (ide) ide.forEach(ideReset);
+  // Geometrie für CHS-Adressen: Standard aus IDENTIFY, änderbar mit INITIALIZE DEVICE PARAMETERS
+  function ideGeo(c, i) {
+    const dk = ideDisk(c, i), d = ide[c].dev[i];
+    const heads = d.lheads || 16, spt = d.lspt || 63;
+    return { heads, spt, cyl: Math.min(16383, Math.floor(dk.total / (16 * 63))) };
+  }
+  function ideLba(c, i) {
+    const d = ide[c].dev[i];
+    if (d.dh & 0x40) return ((d.dh & 0x0F) << 24) | (d.hi << 16) | (d.mid << 8) | d.lo;
+    const g = ideGeo(c, i);
+    return ((d.mid | (d.hi << 8)) * g.heads + (d.dh & 0x0F)) * g.spt + d.lo - 1;
+  }
+  function ideSetLba(c, i, lba) {
+    const d = ide[c].dev[i];
+    if (d.dh & 0x40) { d.lo = lba & 0xFF; d.mid = (lba >> 8) & 0xFF; d.hi = (lba >> 16) & 0xFF; d.dh = (d.dh & 0xF0) | ((lba >> 24) & 0x0F); return; }
+    const g = ideGeo(c, i), s = lba % g.spt, t = Math.floor(lba / g.spt), hd = t % g.heads, cy = Math.floor(t / g.heads);
+    d.lo = s + 1; d.mid = cy & 0xFF; d.hi = (cy >> 8) & 0xFF; d.dh = (d.dh & 0xF0) | hd;
+  }
+  function ideAbort(c, i) { const d = ide[c].dev[i]; d.err = 0x04; d.st = 0x51; d.op = 0; d.len = d.pos = 0; ideIrq(ide[c]); }
+  const ideStr = (b, o, s, n) => { s = (s + ' '.repeat(n)).slice(0, n); for (let k = 0; k < n; k += 2) { b[o + k] = s.charCodeAt(k + 1); b[o + k + 1] = s.charCodeAt(k); } };
+  function ideIdentify(c, i) {
+    const d = ide[c].dev[i], b = d.buf; b.fill(0, 0, 512);
+    const w = (n, v) => { b[n * 2] = v & 0xFF; b[n * 2 + 1] = (v >> 8) & 0xFF; };
+    if (ideKind(c, i) === 'cd') {
+      w(0, 0x85C0);                                   // ATAPI, CD-ROM, wechselbar, 12-Byte-Pakete, DRQ in 3 ms
+      ideStr(b, 20, 'WB' + (2000 + c * 2 + i), 20); ideStr(b, 46, '1.0', 8); ideStr(b, 54, 'WERKBANK CD-ROM', 40);
+      w(49, 0x0200); w(53, 0x0002); w(64, 0x0003); w(67, 120); w(68, 120); w(80, 0x001E); w(82, 0x4010);
+    } else {
+      const dk = ideDisk(c, i), g = { heads: 16, spt: 63, cyl: Math.min(16383, Math.floor(dk.total / (16 * 63))) };
+      const cur = ideGeo(c, i), curCyl = Math.min(65535, Math.floor(dk.total / (cur.heads * cur.spt)));
+      w(0, 0x0040); w(1, g.cyl); w(3, g.heads); w(4, 512 * g.spt); w(5, 512); w(6, g.spt);
+      ideStr(b, 20, 'WB' + (1000 + i), 20); w(20, 3); w(21, 16); w(22, 4); ideStr(b, 46, '1.0', 8); ideStr(b, 54, 'WERKBANK FESTPLATTE ' + (i ? '2' : '1'), 40);
+      w(47, 0x8010); w(48, 1); w(49, 0x0200); w(51, 0x0200); w(53, 0x0003);
+      w(54, curCyl); w(55, cur.heads); w(56, cur.spt); const cap = curCyl * cur.heads * cur.spt; w(57, cap & 0xFFFF); w(58, cap >>> 16);
+      w(59, d.multiOn ? 0x100 | d.multiOn : 0); w(60, dk.total & 0xFFFF); w(61, dk.total >>> 16);
+      w(64, 0x0003); w(65, 120); w(66, 120); w(67, 120); w(68, 120); w(80, 0x001E); w(82, 0x4000); w(83, 0x4000); w(84, 0x4000); w(85, 0x4000); w(86, 0x4000); w(87, 0x4000);
+    }
+    d.len = 512; d.pos = 0; d.op = 'pio-in-done'; d.st = 0x58; d.err = 0; ideIrq(ide[c]);
+  }
+  // Festplatte: nächsten Block (1 Sektor bzw. READ MULTIPLE) bereitlegen
+  function ideHdLoad(c, i) {
+    const d = ide[c].dev[i], dk = ideDisk(c, i);
+    const n = Math.min(d.left, d.op === 'rmulti' ? d.multiOn || 1 : 1);
+    const lba = ideLba(c, i);
+    if (lba < 0 || lba + n > dk.total) { d.err = 0x10; d.st = 0x51; d.op = 0; ideIrq(ide[c]); return; }
+    d.buf.set(dk.data.subarray(lba * 512, (lba + n) * 512), 0);
+    d.len = n * 512; d.pos = 0; d.blk = n; d.st = 0x58; d.err = 0;
+    if (pc.onDisk) pc.onDisk(false);
+    ideIrq(ide[c]);
+  }
+  function ideHdCommand(c, i, cmd) {
+    const d = ide[c].dev[i], dk = ideDisk(c, i);
+    let n = d.cnt || 256;
+    switch (cmd) {
+      case 0xEC: ideIdentify(c, i); return;
+      case 0x20: case 0x21: d.op = 'read'; d.left = n; ideHdLoad(c, i); return;
+      case 0xC4: if (!d.multiOn) { ideAbort(c, i); return; } d.op = 'rmulti'; d.left = n; ideHdLoad(c, i); return;
+      case 0x30: case 0x31: case 0xC5: {
+        if (cmd === 0xC5 && !d.multiOn) { ideAbort(c, i); return; }
+        d.op = cmd === 0xC5 ? 'wmulti' : 'write'; d.left = n;
+        d.blk = Math.min(n, d.op === 'wmulti' ? d.multiOn : 1); d.len = d.blk * 512; d.pos = 0; d.st = 0x58; d.err = 0; return; // DRQ ohne IRQ
+      }
+      case 0x40: case 0x41: { const lba = ideLba(c, i); if (lba + n > dk.total) { d.err = 0x10; d.st = 0x51; } else { ideSetLba(c, i, lba + n - 1); d.st = 0x50; d.err = 0; } ideIrq(ide[c]); return; }
+      case 0xC6: if (n > 16 || (n & (n - 1))) { ideAbort(c, i); return; } d.multiOn = d.cnt; d.st = 0x50; d.err = 0; ideIrq(ide[c]); return;
+      case 0x91: d.lheads = (d.dh & 0x0F) + 1; d.lspt = d.cnt; d.st = 0x50; d.err = 0; ideIrq(ide[c]); return;
+      case 0x90: for (let k = 0; k < 2; k++) ideSignature(ide[c], k); ide[c].sel = 0; d.st = 0x50; ideIrq(ide[c]); return;
+      case 0xE5: case 0x98: d.cnt = 0xFF; d.st = 0x50; d.err = 0; ideIrq(ide[c]); return; // Energiezustand: aktiv
+      case 0x70: case 0xEF: case 0xE0: case 0xE1: case 0xE2: case 0xE3: case 0xE6: case 0x94: case 0x95: case 0x96: case 0x97: case 0x99:
+      case 0xE7: case 0xEA: case 0x08:
+        d.st = 0x50; d.err = 0; ideIrq(ide[c]); return;
+      default:
+        if (cmd >= 0x10 && cmd <= 0x1F) { d.st = 0x50; d.err = 0; ideIrq(ide[c]); return; } // Rekalibrieren
+        ideAbort(c, i);
+    }
+  }
+  // ---- ATAPI (SCSI-Befehle über PACKET)
+  function cdSense(d, key, asc, ascq) { d.sense = [key, asc, ascq || 0]; }
+  function cdFail(c, i, key, asc, ascq) { const d = ide[c].dev[i]; cdSense(d, key, asc, ascq); d.err = key << 4; d.st = 0x41; d.cnt = 3; d.op = 0; d.len = 0; ideIrq(ide[c]); }
+  function cdDone(c, i) { const d = ide[c].dev[i]; d.st = 0x50; d.err = 0; d.cnt = 3; d.op = 0; d.len = 0; cdSense(d, 0, 0); ideIrq(ide[c]); }
+  // Daten an den Rechner: in Häppchen der vom Treiber genannten Größe (Bytezähler in mid/hi)
+  function cdData(c, i, total) {
+    const d = ide[c].dev[i];
+    d.xferLeft = total; d.dataPos = 0; d.op = 'cd-in';
+    cdChunk(c, i);
+  }
+  function cdChunk(c, i) {
+    const d = ide[c].dev[i];
+    let n = Math.min(d.xferLeft, d.limit || 0xFFFE); if (n & 1 && n < d.xferLeft) n--;
+    if (d.big) { d.buf.set(d.big.subarray(d.dataPos, d.dataPos + n), 0); }
+    else d.buf.copyWithin(0, d.dataPos, d.dataPos + n);
+    d.len = n; d.pos = 0; d.dataPos += n; d.xferLeft -= n;
+    d.mid = n & 0xFF; d.hi = (n >> 8) & 0xFF; d.cnt = 2; d.st = 0x58; d.err = 0;
+    ideIrq(ide[c]);
+  }
+  function cdPacket(c, i) {
+    const d = ide[c].dev[i], p = d.buf.slice(0, 12);
+    d.big = null;
+    const out = (arr, alloc) => { const n = Math.min(arr.length, alloc); if (!n) { cdDone(c, i); return; } d.big = Uint8Array.from(arr.slice(0, n)); cdData(c, i, n); };
+    const be16 = o => (p[o] << 8) | p[o + 1], be32 = o => ((p[o] << 24) >>> 0) + (p[o + 1] << 16) + (p[o + 2] << 8) + p[o + 3];
+    const disc = cd;
+    // Medienwechsel einmal melden
+    if (disc !== d.discSeen && p[0] !== 0x03 && p[0] !== 0x12) { d.discSeen = disc; if (disc) { cdFail(c, i, 6, 0x28); return; } }
+    const need = () => { if (!disc) { cdFail(c, i, 2, 0x3A); return false; } return true; };
+    switch (p[0]) {
+      case 0x00: if (need()) cdDone(c, i); return;                              // TEST UNIT READY
+      case 0x03: { const s = d.sense; out([0x70, 0, s[0], 0, 0, 0, 0, 10, 0, 0, 0, 0, s[1], s[2], 0, 0, 0, 0], p[4]); cdSense(d, 0, 0); return; }
+      case 0x12: { const r = [0x05, 0x80, 0x00, 0x21, 31, 0, 0, 0]; for (const ch of 'WERKBANKCD-ROM          1.0 ') r.push(ch.charCodeAt(0)); out(r, p[4]); return; }
+      case 0x1B: case 0x1E: case 0x2B: case 0x45: case 0x47: case 0x4B: case 0x4E: case 0xBB: case 0xA5: cdDone(c, i); return; // Start/Stop, Sperre, Suchen, Audio
+      case 0x25: if (!need()) return; { const l = disc.sectors - 1; out([l >>> 24, (l >> 16) & 255, (l >> 8) & 255, l & 255, 0, 0, 8, 0], 8); } return;
+      case 0x28: case 0xA8: case 0xBE: {                                         // READ(10), READ(12), READ CD
+        if (!need()) return;
+        const lba = be32(2), n = p[0] === 0x28 ? be16(7) : p[0] === 0xA8 ? be32(6) : ((p[6] << 16) | (p[7] << 8) | p[8]);
+        if (p[0] === 0xBE && !(p[9] & 0x10)) { cdDone(c, i); return; }           // READ CD ohne Nutzdaten
+        if (!n) { cdDone(c, i); return; }
+        if (lba + n > disc.sectors) { cdFail(c, i, 5, 0x21); return; }
+        const sz = 2048, buf = new Uint8Array(n * sz);
+        for (let k = 0; k < n; k++) { const o = (lba + k) * disc.secSize + disc.dataOff; buf.set(disc.data.subarray(o, o + 2048), k * sz); }
+        if (pc.onDisk) pc.onDisk(false);
+        d.big = buf; cdData(c, i, buf.length); return;
+      }
+      case 0x43: {                                                              // READ TOC
+        if (!need()) return;
+        const msfOn = (p[1] & 2) !== 0, fmt = (p[9] >> 6) || (p[2] & 0x0F), alloc = be16(7);
+        const addr = v => msfOn ? [0, ...msf(v).slice(0, 3).reverse()] : [v >>> 24, (v >> 16) & 255, (v >> 8) & 255, v & 255];
+        let r;
+        if (fmt === 1) r = [0, 10, 1, 1, 0, 0x14, 1, 0, ...addr(0)];             // Sitzungsinfo
+        else {
+          const t = [];
+          if (p[6] <= 1) t.push(0, 0x14, 1, 0, ...addr(0));
+          t.push(0, 0x16, 0xAA, 0, ...addr(disc.sectors));
+          r = [((t.length + 2) >> 8) & 255, (t.length + 2) & 255, 1, 1, ...t];
+        }
+        out(r, alloc); return;
+      }
+      case 0x42: { const r = [0, 0x15, 0, 0]; out(r, be16(7)); return; }       // READ SUB-CHANNEL: kein Audio
+      case 0x1A: case 0x5A: {                                                    // MODE SENSE (6/10)
+        const page = p[2] & 0x3F, ten = p[0] === 0x5A, alloc = ten ? be16(7) : p[4];
+        const pages = [];
+        if (page === 0x2A || page === 0x3F) pages.push(0x2A, 0x12, 0x03, 0x00, 0x71, 0x00, 0x29, 0x03, 0x02, 0xC2, 0x00, 0x02, 0x00, 0x80, 0x02, 0xC2, 0, 0, 0, 0);
+        if (page === 0x0E || page === 0x3F) pages.push(0x0E, 0x0E, 0x04, 0, 0, 0, 0, 0, 0x01, 0xFF, 0x02, 0xFF, 0, 0, 0, 0);
+        if (page === 0x01 || page === 0x3F) pages.push(0x01, 0x06, 0, 5, 0, 0, 0, 0);
+        if (!pages.length) { cdFail(c, i, 5, 0x24); return; }
+        const r = ten ? [((pages.length + 6) >> 8) & 255, (pages.length + 6) & 255, disc ? 0x01 : 0x70, 0, 0, 0, 0, 0, ...pages] : [pages.length + 3, disc ? 0x01 : 0x70, 0, 0, ...pages];
+        out(r, alloc); return;
+      }
+      case 0x4A: out([0, 6, 0x04, 0x10, 0, disc ? 2 : 0, 0, 0], be16(7)); return; // GET EVENT STATUS: Medium
+      case 0x46: out([0, 0, 0, 8, 0, 0, 0, 8], be16(7)); return;                 // GET CONFIGURATION: CD-ROM
+      case 0x51: if (!need()) return; out([0, 32, 0x0E, 1, 1, 1, 1, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], be16(7)); return;
+      case 0xBD: out([0, 0, 0, 0, 0, 0, 0, 0], be16(8)); return;                 // MECHANISM STATUS
+      default: cdFail(c, i, 5, 0x20);                                            // unbekannter Befehl
+    }
+  }
+  function ideCdCommand(c, i, cmd) {
+    const d = ide[c].dev[i];
+    switch (cmd) {
+      case 0xA1: ideIdentify(c, i); return;
+      case 0xA0: d.limit = d.mid | (d.hi << 8); d.op = 'packet'; d.len = 12; d.pos = 0; d.cnt = 1; d.st = 0x58; d.err = 0; return; // Paket erwartet, ohne IRQ
+      case 0x08: ideSignature(ide[c], i); d.st = 0x00; return;                   // DEVICE RESET
+      case 0xEC: ideAbort(c, i); d.cnt = 1; d.lo = 1; d.mid = 0x14; d.hi = 0xEB; return;
+      case 0x90: for (let k = 0; k < 2; k++) ideSignature(ide[c], k); ide[c].sel = 0; d.st = 0x50; ideIrq(ide[c]); return;
+      case 0xEF: case 0xE0: case 0xE1: case 0xE5: case 0xE7: d.st = 0x50; d.err = 0; ideIrq(ide[c]); return;
+      default: ideAbort(c, i);
+    }
+  }
+  // Datenregister: Wort lesen bzw. schreiben
+  function ideDataIn(c) {
+    const ch = ide[c], i = ch.sel, d = ch.dev[i];
+    if (!(d.st & 0x08) || d.pos >= d.len) return 0xFFFF;
+    const v = d.buf[d.pos] | (d.buf[d.pos + 1] << 8); d.pos += 2;
+    if (d.pos >= d.len) {
+      if (d.op === 'read' || d.op === 'rmulti') {
+        const lba = ideLba(c, i) + d.blk; d.left -= d.blk;
+        ideSetLba(c, i, lba - (d.left ? 0 : 1));
+        if (d.left > 0) ideHdLoad(c, i); else { d.st = 0x50; d.op = 0; d.len = 0; }
+      } else if (d.op === 'cd-in') {
+        if (d.xferLeft > 0) cdChunk(c, i); else cdDone(c, i);
+      } else { d.st = 0x50; d.op = 0; d.len = 0; }
+    }
+    return v;
+  }
+  function ideDataOut(c, v) {
+    const ch = ide[c], i = ch.sel, d = ch.dev[i];
+    if (!(d.st & 0x08) || d.pos >= d.len) return;
+    d.buf[d.pos] = v & 0xFF; d.buf[d.pos + 1] = (v >> 8) & 0xFF; d.pos += 2;
+    if (d.pos < d.len) return;
+    if (d.op === 'packet') { d.st = 0x80; d.len = 0; cdPacket(c, i); return; }
+    if (d.op === 'write' || d.op === 'wmulti') {
+      const dk = ideDisk(c, i), lba = ideLba(c, i);
+      if (lba < 0 || lba + d.blk > dk.total) { d.err = 0x10; d.st = 0x51; d.op = 0; ideIrq(ch); return; }
+      dk.data.set(d.buf.subarray(0, d.blk * 512), lba * 512); dk.dirty = true;
+      if (pc.onDisk) pc.onDisk(true);
+      d.left -= d.blk;
+      ideSetLba(c, i, lba + d.blk - (d.left ? 0 : 1));
+      if (d.left > 0) { d.blk = Math.min(d.left, d.op === 'wmulti' ? d.multiOn : 1); d.len = d.blk * 512; d.pos = 0; d.st = 0x58; }
+      else { d.st = 0x50; d.op = 0; d.len = 0; }
+      ideIrq(ch);
+    }
+  }
+  function idePort(p) {
+    if (!ide) return -1;
+    if (p >= 0x1F0 && p <= 0x1F7) return p - 0x1F0;
+    if (p === 0x3F6) return 8;
+    if (p >= 0x170 && p <= 0x177) return 0x10 + p - 0x170;
+    if (p === 0x376) return 0x18;
+    return -1;
+  }
+  function ideIn(r) {
+    const c = r >> 4, reg = r & 0x0F, ch = ide[c], i = ch.sel, d = ch.dev[i];
+    const present = ideKind(c, i), any = ideKind(c, 0) || ideKind(c, 1);
+    if (!any) return 0xFF;                                                   // kein Gerät am Kanal
+    if (reg === 0) return ideDataIn(c) & 0xFF;
+    if (!present) return reg === 6 ? d.dh : 0;                               // nicht vorhandener Slave
+    switch (reg) {
+      case 1: return d.err;
+      case 2: return d.cnt;
+      case 3: return d.lo;
+      case 4: return d.mid;
+      case 5: return d.hi;
+      case 6: return d.dh | 0xA0;
+      case 7: lowerIRQ(ch.irq); return d.st;
+      case 8: return d.st;                                                   // Alternativer Status
+    }
+    return 0xFF;
+  }
+  function ideOut(r, v) {
+    const c = r >> 4, reg = r & 0x0F, ch = ide[c];
+    if (reg === 8) {                                                         // Gerätesteuerung
+      ch.nien = (v & 2) !== 0;
+      if (v & 4) ch.srst = true;
+      else if (ch.srst) { ch.srst = false; ideReset(ch); }
+      return;
+    }
+    if (reg === 0) { ideDataOut(c, v); return; }
+    const both = f => { for (const d of ch.dev) f(d); };                     // Register gelten für beide Geräte
+    switch (reg) {
+      case 1: both(d => d.feat = v); return;
+      case 2: both(d => d.cnt = v); return;
+      case 3: both(d => d.lo = v); return;
+      case 4: both(d => d.mid = v); return;
+      case 5: both(d => d.hi = v); return;
+      case 6: ch.sel = (v >> 4) & 1; both(d => d.dh = (v & 0xEF) | (d === ch.dev[1] ? 0x10 : 0)); return;
+      case 7: {
+        const i = ch.sel, k = ideKind(c, i);
+        if (!k) return;
+        lowerIRQ(ch.irq);
+        if (k === 'hd') ideHdCommand(c, i, v); else ideCdCommand(c, i, v);
+        return;
+      }
+    }
+  }
+  function ideInW(r) { return (r & 0x0F) === 0 ? ideDataIn(r >> 4) : ideIn(r) | (0xFF << 8); }
+  function ideOutW(r, v) { if ((r & 0x0F) === 0) ideDataOut(r >> 4, v); else ideOut(r, v & 0xFF); }
+  function ideState() {
+    return ide && ide.map(ch => ({ sel: ch.sel, nien: ch.nien, dev: ch.dev.map(d => ({ multiOn: d.multiOn, lheads: d.lheads, lspt: d.lspt, dh: d.dh })) }));
+  }
+  function ideRestore(s) {
+    if (!ide || !s) return;
+    s.forEach((cs, c) => { ide[c].sel = cs.sel; ide[c].nien = cs.nien; cs.dev.forEach((ds, i) => { const d = ide[c].dev[i]; ideSignature(ide[c], i); Object.assign(d, ds); d.st = ideKind(c, i) === 'hd' ? 0x50 : 0; }); });
+  }
+
   function diskXfer(d, lba, count, linAddr, write) {
     if (lba < 0 || lba + count > d.total) return false;
     if (pc.onDisk) pc.onDisk(write);
@@ -7348,7 +7695,20 @@ function createPC(opts) {
     }
   }
   // Bootet ein echtes DOS vom Laufwerk drive (0x00 = A:, 0x80 = C:)
+  // Warmstart (Tastaturcontroller FEh oder Dreifachfehler) eines gebooteten Systems: die Oberfläche
+  // baut den Rechner neu auf und bootet dieselben Abbilder, ohne C: neu zu erzeugen.
+  // CMOS-Abschaltcodes außer 0/4 (Rückkehr aus dem Protected Mode des 286) werden nicht nachgebildet.
+  function requestReboot(why) {
+    const code = cmos[0x0F];
+    if (pc.bootDrive === undefined || !pc.onReboot || (code !== 0 && code !== 4)) { log(why + (code ? ` (CMOS-Abschaltcode ${hex(code, 2)})` : '')); return false; }
+    log(why + ' – Warmstart');
+    running = false; cpu.halted = true;
+    pc.onReboot();
+    return true;
+  }
+  pc.warmReboot = () => requestReboot('Warmstart (Strg+Alt+Entf)');
   pc.bootDisk = function (drive) {
+    pc.bootDrive = drive;
     const d = disks[drive];
     if (!d) return 'Kein Abbild für dieses Laufwerk';
     // DOS-Hochebene abschalten: das gebootete System bringt sein eigenes DOS mit
@@ -7966,6 +8326,8 @@ function createPC(opts) {
     unpackFloppies(items);
     refreshDisk();
     for (const it of items) if (isImage(it.dos) && !isCD(it.dos)) applyWerkbankIni(it.dos, it.data);
+    for (const it of items) if (/\.(ISO|BIN|CDR|RAW)$/.test(it.dos) && it.data.length > FLOPPY_MAX && !isCD(it.dos))
+      logLine(it.dos.split('/').pop() + ' (' + (it.data.length / 1048576).toFixed(0) + ' MB) wird nicht als CD erkannt: ' + cdWhyNot(it.data) + '.');
     selectPendingCd();
   }
   // Dateien aus Diskettenabbildern auf C: auspacken. Abbilder aus derselben Quelle und demselben
@@ -8400,6 +8762,7 @@ function createPC(opts) {
       audio: soundOn,
       xms: $('osMode').value === 'freedos' || ($('osMode').value === 'shell' && $('xmsOn').checked), // eigene DOS-Abbilder bringen ihr HIMEM.SYS mit
       sbBase: $('sbOn').checked ? 0x220 : 0,
+      ide: pendingMachine ? !!pendingMachine.ide : $('ideOn').checked,
       audioRate: actx ? actx.sampleRate : 44100,
     };
     const env = ['COMSPEC=C:\\COMMAND.COM', 'PATH=C:\\', 'PROMPT=$P$G'];
@@ -8414,8 +8777,30 @@ function createPC(opts) {
       setStatus('DOS mit EXIT beendet. Einschalten startet den PC neu.');
       updateChanged();
     };
+    p.onReboot = () => setTimeout(warmReboot, 0);
     p.boot(FONT16);
     return p;
+  }
+  // Warmstart aus dem laufenden System (z. B. Windows-Setup): neuer Rechner, dieselben Laufwerksabbilder
+  let rebootTimes = [];
+  function warmReboot() {
+    const old = pc;
+    if (!old || old.bootDrive === undefined) return;
+    // Neustartschleife (z. B. nicht startfähige Platte, die sofort abstürzt): nach 3 Starts in 10 s anhalten
+    const t = performance.now();
+    rebootTimes = rebootTimes.filter(x => t - x < 10000); rebootTimes.push(t);
+    if (rebootTimes.length > 3) { rebootTimes = []; setStatus('Der PC startet ständig neu – angehalten. Ist das Startlaufwerk bootfähig?'); logLine('Neustartschleife erkannt – Rechner angehalten.'); return; }
+    const keep = Object.entries(old.disks).map(([k, d]) => ({ k: +k, d }));
+    pc = buildPC();
+    for (const { k, d } of keep) { pc.attachDisk(k, d.data, d); pc.disks[k].dirty = d.dirty; if (d.userImage !== undefined) pc.disks[k].userImage = d.userImage; }
+    // ohne Diskette in A: bootet das BIOS von C: (wie nach „Bitte Diskette entfernen“)
+    const drv = old.bootDrive < 0x80 && !pc.disks[old.bootDrive] && pc.disks[0x80] ? 0x80 : old.bootDrive;
+    const err = pc.bootDisk(drv);
+    if (err) { setStatus(err); pc = null; return; }
+    syncCd(); pc.setAudio(soundOn);
+    $('btnSaveHdd').disabled = !pc.disks[0x80]; $('btnEject').disabled = !pc.disks[0];
+    statInstr = pc.cpu.icount;
+    setStatus('Warmstart: der PC bootet neu von ' + (drv >= 0x80 ? 'C:' : 'A:') + ' (Laufwerke unverändert).');
   }
 
   async function powerOn() {
@@ -8471,6 +8856,7 @@ function createPC(opts) {
     overlay.hidden = true;
     $('ledPower').classList.add('on');
     $('btnReset').disabled = false; $('btnPause').disabled = false; $('btnPause').setAttribute('aria-pressed', 'false');
+    $('btnEject').disabled = !pc.disks[0]; $('btnCad').disabled = $('osMode').value === 'shell';
     $('btnPower').textContent = 'Neu starten';
     if ($('osMode').value === 'shell') setStatus(prog ? 'Läuft: C:\\' + prog.replace(/\//g, '\\') + ' – nach dem Beenden erscheint die DOS-Eingabe.' : 'DOS-Eingabe bereit. HELP zeigt die Befehle.');
     else setStatus('PC bootet ' + $('osMode').selectedOptions[0].textContent + ' …');
@@ -8480,6 +8866,12 @@ function createPC(opts) {
   }
   $('btnPower').addEventListener('click', powerOn);
   $('btnReset').addEventListener('click', powerOn);
+  $('btnCad').addEventListener('click', () => { if (pc && pc.warmReboot) pc.warmReboot(); screenEl.focus(); });
+  $('btnEject').addEventListener('click', () => {
+    if (!pc || !pc.disks[0]) return;
+    pc.attachDisk(0, null); $('btnEject').disabled = true;
+    setStatus('Diskette aus A: genommen – der nächste Warmstart bootet von C:. „Einschalten“ legt sie wieder ein.');
+  });
   $('btnPause').addEventListener('click', () => {
     if (!pc) return;
     paused = !paused;
@@ -8558,7 +8950,7 @@ function createPC(opts) {
   // Einstellungen als WERKBANK.INI (im Wurzelverzeichnis des gespeicherten Festplattenabbilds)
   const INI_KEYS = [ // Schlüssel, Element, Art
     ['Prozessor', 'cpuSel', 'v'], ['CDTreiber', 'cdDrv', 'c'], ['Soundtreiber', 'waveDrv', 'c'], ['AdLib', 'adlibOn', 'c'],
-    ['SoundBlaster', 'sbOn', 'c'], ['JIT', 'jitOn', 'c'], ['GeschwindigkeitAuto', 'autoSpeed', 'c'], ['MIPS', 'speed', 'v'], ['Glaetten', 'smooth', 'c']];
+    ['SoundBlaster', 'sbOn', 'c'], ['IDE', 'ideOn', 'c'], ['JIT', 'jitOn', 'c'], ['GeschwindigkeitAuto', 'autoSpeed', 'c'], ['MIPS', 'speed', 'v'], ['Glaetten', 'smooth', 'c']];
   function werkbankIni() {
     const cd = $('cdSel').value;
     const l = ['[PC-Werkbank]', '; Einstellungen der PC-Werkbank (x86pc.html), werden beim Laden dieses Abbilds uebernommen',
@@ -8635,7 +9027,7 @@ function createPC(opts) {
   }
   function settings() {
     return { prog: $('prog').value, args: $('args').value, auto: autoSpeed.checked, speed: +speed.value,
-      adlib: $('adlibOn').checked, sb: $('sbOn').checked, xms: $('xmsOn').checked, smooth: $('smooth').checked, sound: soundOn, os: $('osMode').value, cpu: $('cpuSel').value, jit: $('jitOn').checked };
+      adlib: $('adlibOn').checked, sb: $('sbOn').checked, xms: $('xmsOn').checked, smooth: $('smooth').checked, sound: soundOn, os: $('osMode').value, cpu: $('cpuSel').value, jit: $('jitOn').checked, ide: $('ideOn').checked };
   }
   $('btnHtml').addEventListener('click', async () => {
     if (!disk.size) return;
@@ -8670,6 +9062,7 @@ function createPC(opts) {
       autoSpeed.checked = st.auto !== false; if (st.speed) speed.value = st.speed; applySpeed();
       $('adlibOn').checked = !!st.adlib; $('sbOn').checked = !!st.sb; $('xmsOn').checked = !!st.xms;
       if (st.jit === false) $('jitOn').checked = false;
+      $('ideOn').checked = !!st.ide;
       $('smooth').checked = !!st.smooth; screenEl.classList.toggle('smooth', !!st.smooth);
       $('args').value = st.args || '';
       if (st.cpu) $('cpuSel').value = st.cpu;
