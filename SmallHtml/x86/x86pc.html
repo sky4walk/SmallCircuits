@@ -9007,23 +9007,85 @@ function createPC(opts) {
   // Format: gzip( [Länge JSON][JSON][Länge][Bytes]... ), Base64 im Block <script id="zustand">
   function b64enc(u) { let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
   function b64dec(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
-  async function pack(obj) {
-    const bins = [];
-    const json = new TextEncoder().encode(JSON.stringify(obj, (k, v) => v instanceof Uint8Array ? { $b: bins.push(v) - 1 } : v === Infinity ? { $inf: 1 } : v));
-    let total = 4 + json.length; for (const b of bins) total += 4 + b.length;
-    const out = new Uint8Array(total), dv = new DataView(out.buffer);
-    dv.setUint32(0, json.length, true); out.set(json, 4); let o = 4 + json.length;
-    for (const b of bins) { dv.setUint32(o, b.length, true); out.set(b, o + 4); o += 4 + b.length; }
-    const gz = new Response(new Blob([out]).stream().pipeThrough(new CompressionStream('gzip')));
-    return b64enc(new Uint8Array(await gz.arrayBuffer()));
+  // Große Puffer (Festplatten, Speicher) werden dünn gespeichert: nur 4-KB-Blöcke, die nicht nur aus
+  // Nullen bestehen, plus eine Bitmaske. Das spart dem Packer bei einer halb leeren Platte die meiste Arbeit.
+  const SPARSE_MIN = 1 << 20, SPARSE_BS = 4096;
+  function sparse(v) {
+    const n = Math.ceil(v.length / SPARSE_BS), mask = new Uint8Array((n + 7) >> 3), parts = [];
+    const w = (v.byteOffset & 3) === 0 ? new Uint32Array(v.buffer, v.byteOffset, v.length >> 2) : null;
+    for (let b = 0; b < n; b++) {
+      const s = b * SPARSE_BS, e = Math.min(v.length, s + SPARSE_BS);
+      let nz = false;
+      if (w && e - s === SPARSE_BS) { for (let i = s >> 2, j = e >> 2; i < j; i++) if (w[i]) { nz = true; break; } }
+      else for (let i = s; i < e; i++) if (v[i]) { nz = true; break; }
+      if (nz) { mask[b >> 3] |= 1 << (b & 7); parts.push(v.subarray(s, e)); }
+    }
+    return { mask, parts };
+  }
+  const tick = () => new Promise(r => setTimeout(r, 0));
+  // Blob → Base64 ohne Blockieren (der Browser kodiert selbst)
+  function blobToB64(blob) {
+    return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => { const s = fr.result; res(s.slice(s.indexOf(',') + 1)); }; fr.onerror = () => rej(fr.error); fr.readAsDataURL(blob); });
+  }
+  async function pack(obj, progress) {
+    const say = progress || (() => {});
+    const parts = [];          // Blob-Teile: [Länge][Daten] je Binärblock
+    let nb = 0;
+    const addBin = u => { const l = new Uint8Array(4); new DataView(l.buffer).setUint32(0, u.length, true); parts.push(l, u); return nb++; };
+    const big = [];
+    const json = new TextEncoder().encode(JSON.stringify(obj, (k, v) => {
+      if (v instanceof Uint8Array) {
+        if (v.length < SPARSE_MIN) return { $b: addBin(v) };
+        const ref = { $s: v.length, bs: SPARSE_BS, m: -1, d: -1 }; big.push({ v, ref }); return ref;
+      }
+      return v === Infinity ? { $inf: 1 } : v;
+    }));
+    // Gibt es große Puffer, erst deren belegte Blöcke suchen und dann in einem zweiten Durchlauf
+    // (gleiche Reihenfolge) mit den endgültigen Blocknummern schreiben
+    if (big.length) {
+      parts.length = 0; nb = 0; let bi = 0;
+      const plan = [];
+      for (const it of big) { say(`Suche belegte Bereiche (${++bi}/${big.length}) …`); await tick(); plan.push(sparse(it.v)); }
+      bi = 0;
+      const json2 = new TextEncoder().encode(JSON.stringify(obj, (k, v) => {
+        if (v instanceof Uint8Array) {
+          if (v.length < SPARSE_MIN) return { $b: addBin(v) };
+          const sp = plan[bi++], m = addBin(sp.mask);
+          const l = new Uint8Array(4); let tot = 0; for (const q of sp.parts) tot += q.length;
+          new DataView(l.buffer).setUint32(0, tot, true); parts.push(l, ...sp.parts);
+          return { $s: v.length, bs: SPARSE_BS, m, d: nb++ };
+        }
+        return v === Infinity ? { $inf: 1 } : v;
+      }));
+      return finish(json2);
+    }
+    return finish(json);
+    async function finish(js) {
+      const head = new Uint8Array(4); new DataView(head.buffer).setUint32(0, js.length, true);
+      say('Komprimiere …'); await tick();
+      const gz = await new Response(new Blob([head, js, ...parts]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+      say(`Kodiere ${(gz.size / 1e6).toFixed(1)} MB …`); await tick();
+      return blobToB64(gz);
+    }
   }
   async function unpack(b64) {
-    const raw = new Response(new Blob([b64dec(b64)]).stream().pipeThrough(new DecompressionStream('gzip')));
+    let packed;
+    try { packed = new Uint8Array(await (await fetch('data:application/octet-stream;base64,' + b64)).arrayBuffer()); }
+    catch (e) { packed = b64dec(b64); }
+    const raw = new Response(new Blob([packed]).stream().pipeThrough(new DecompressionStream('gzip')));
     const u = new Uint8Array(await raw.arrayBuffer()), dv = new DataView(u.buffer);
     const jl = dv.getUint32(0, true);
     const bins = []; let o = 4 + jl;
-    while (o < u.length) { const l = dv.getUint32(o, true); bins.push(u.slice(o + 4, o + 4 + l)); o += 4 + l; }
-    return JSON.parse(new TextDecoder().decode(u.subarray(4, 4 + jl)), (k, v) => v && typeof v === 'object' ? (v.$b !== undefined ? bins[v.$b] : v.$inf ? Infinity : v) : v);
+    while (o < u.length) { const l = dv.getUint32(o, true); bins.push(u.subarray(o + 4, o + 4 + l)); o += 4 + l; }
+    const unsparse = r => {
+      const out = new Uint8Array(r.$s), mask = bins[r.m], data = bins[r.d];
+      let p = 0;
+      for (let b = 0, n = Math.ceil(r.$s / r.bs); b < n; b++) if (mask[b >> 3] & (1 << (b & 7))) {
+        const s = b * r.bs, len = Math.min(r.bs, r.$s - s); out.set(data.subarray(p, p + len), s); p += len;
+      }
+      return out;
+    };
+    return JSON.parse(new TextDecoder().decode(u.subarray(4, 4 + jl)), (k, v) => v && typeof v === 'object' ? (v.$b !== undefined ? bins[v.$b].slice() : v.$s !== undefined ? unsparse(v) : v.$inf ? Infinity : v) : v);
   }
   function settings() {
     return { prog: $('prog').value, args: $('args').value, auto: autoSpeed.checked, speed: +speed.value,
@@ -9039,7 +9101,8 @@ function createPC(opts) {
       const payload = { v: 1, settings: settings(), files: [], machine: null, prog: $('prog').value, generated: generated ? [...generated].map(([n, d]) => ({ n, d })) : null };
       if (withMachine) payload.machine = pc.getState(); // enthält alle Dateien des Laufwerks
       else for (const [name, data] of disk) if (!isCD(name)) payload.files.push({ name, data }); // CD-Abbilder sind zu groß und bleiben draußen
-      const b64 = await pack(payload);
+      const b64 = await pack(payload, m => setStatus('Speichern: ' + m));
+      setStatus('Speichern: baue die HTML-Datei …'); await tick();
       const html = PAGE_SRC.replace(/(<script id="zustand" type="application\/json">)[\s\S]*?(<\/script>)/, (m, a, b) => a + JSON.stringify({ v: 1, gz: b64 }) + b);
       const base = ($('prog').value.split('/').pop() || 'pc').replace(/\.(EXE|COM)$/i, '').toLowerCase();
       const d = new Date(), pad = n => String(n).padStart(2, '0');
