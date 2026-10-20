@@ -1,0 +1,1489 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paketwerk – Netzwerkmitschnitt nach OSI-Schichten</title>
+<style>
+:root{
+  --bg:#f4f1ea; --panel:#fffdf8; --ink:#1d1b16; --mute:#6b665a; --line:#d9d3c4; --sel:#1f4e79; --selink:#fff;
+  --hl:#ffe08a; --hl2:#ffd04d;
+  --l7:#b8452b; --l6:#b8762b; --l5:#8a8a1f; --l4:#2e7d4f; --l3:#1f6f8b; --l2:#4b4f9e; --l1:#7a4a8f;
+  --mono: "JetBrains Mono","DejaVu Sans Mono",Consolas,monospace;
+  --sans: "Inter","Segoe UI",system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#16181c; --panel:#1e2126; --ink:#e7e3d8; --mute:#9a958a; --line:#343840; --sel:#3d6fa5; --selink:#fff;
+    --hl:#6b5a14; --hl2:#8c7417;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#16181c; --panel:#1e2126; --ink:#e7e3d8; --mute:#9a958a; --line:#343840; --sel:#3d6fa5; --selink:#fff;
+  --hl:#6b5a14; --hl2:#8c7417;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;display:flex;flex-direction:column;min-height:100vh}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;padding:10px 16px;border-bottom:2px solid var(--ink)}
+header h1{font-size:20px;margin:0;letter-spacing:.5px;font-family:var(--mono)}
+header h1 span{color:var(--l7)}
+header .sub{color:var(--mute);font-size:12px}
+.bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+button,.btn{font:inherit;font-size:13px;padding:5px 11px;border:1px solid var(--ink);background:var(--panel);color:var(--ink);cursor:pointer;border-radius:3px}
+button:hover,.btn:hover{background:var(--ink);color:var(--panel)}
+button.on{background:var(--ink);color:var(--panel)}
+input[type=file]{display:none}
+#filter{flex:1;min-width:200px;font-family:var(--mono);font-size:13px;padding:6px 9px;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:3px}
+#filter.bad{border-color:#c0392b;background:rgba(192,57,43,.08)}
+#filter.good{border-color:#2e7d4f}
+#status{color:var(--mute);font-size:12px;font-family:var(--mono)}
+main{flex:1;display:grid;grid-template-rows:minmax(140px,34vh) minmax(0,1fr);min-height:0}
+body{height:100vh}
+#listwrap{overflow:auto;border-bottom:2px solid var(--line);background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-family:var(--mono);font-size:12px}
+thead th{position:sticky;top:0;background:var(--bg);text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);font-weight:600;cursor:pointer;white-space:nowrap}
+tbody td{padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:520px}
+tbody tr{cursor:pointer;border-bottom:1px solid transparent}
+tbody tr:hover{outline:1px solid var(--mute)}
+tbody tr.sel{background:var(--sel)!important;color:var(--selink)}
+tr.c-tcp{background:rgba(46,125,79,.10)} tr.c-udp{background:rgba(31,111,139,.10)}
+tr.c-http{background:rgba(184,69,43,.16)} tr.c-tls{background:rgba(184,118,43,.14)}
+tr.c-dns{background:rgba(75,79,158,.14)} tr.c-arp{background:rgba(138,138,31,.18)}
+tr.c-icmp{background:rgba(122,74,143,.16)} tr.c-dhcp{background:rgba(31,111,139,.20)}
+tr.c-err{background:rgba(192,57,43,.22)}
+#lower{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);min-height:0;overflow:hidden}
+#osi{overflow:auto;padding:12px 16px;border-right:1px solid var(--line)}
+#hexpane{overflow:auto;padding:12px 16px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:1.5px;margin:0 0 8px;color:var(--mute);font-weight:600}
+.encap{display:flex;height:30px;border:1px solid var(--ink);margin:4px 0 14px;font-family:var(--mono);font-size:11px;overflow:hidden}
+.encap div{display:flex;align-items:center;justify-content:center;color:#fff;overflow:hidden;white-space:nowrap;border-right:1px solid rgba(255,255,255,.5);cursor:pointer;min-width:4px}
+.encap div:last-child{border-right:none}
+.layer{border:1px solid var(--line);border-left:8px solid var(--c);margin-bottom:6px;background:var(--panel)}
+.layer.empty{opacity:.62}
+.lhead{display:flex;gap:10px;align-items:baseline;padding:6px 10px;cursor:pointer;user-select:none}
+.lnum{font-family:var(--mono);font-weight:700;color:var(--c);font-size:16px;width:18px}
+.lname{font-weight:600;min-width:150px}
+.lproto{font-family:var(--mono);font-size:12px;color:var(--ink)}
+.lrange{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--mute);white-space:nowrap}
+.lbody{padding:2px 10px 8px 38px;display:none}
+.layer.open .lbody{display:block}
+.lnote{color:var(--mute);font-size:12px;margin:2px 0 6px;line-height:1.45}
+.proto{margin:4px 0 6px}
+.proto>.pt{font-family:var(--mono);font-size:12px;font-weight:700;margin-bottom:2px}
+ul.f{list-style:none;margin:0;padding-left:0;font-family:var(--mono);font-size:12px}
+ul.f ul.f{padding-left:16px;border-left:1px dotted var(--line);margin-left:4px}
+ul.f li>.fl{padding:1px 4px;cursor:pointer;border-radius:2px;display:block;word-break:break-all}
+ul.f li>.fl:hover{background:var(--bg)}
+ul.f li>.fl.act{background:var(--hl2);color:var(--ink)}
+.fn{color:var(--mute)} .fv{color:var(--ink)}
+.tg{display:inline-block;width:12px;color:var(--mute)}
+li.closed>ul.f{display:none}
+.warn{color:#c0392b}
+#hex{font-family:var(--mono);font-size:12px;line-height:1.5;white-space:pre}
+#hex .off{color:var(--mute)}
+#hex b{font-weight:normal;cursor:pointer}
+#hex b.h{background:var(--hl)}
+#hex b.L2{box-shadow:inset 0 -2px 0 var(--l2)} #hex b.L3{box-shadow:inset 0 -2px 0 var(--l3)}
+#hex b.L4{box-shadow:inset 0 -2px 0 var(--l4)} #hex b.L6{box-shadow:inset 0 -2px 0 var(--l6)}
+#hex b.L7{box-shadow:inset 0 -2px 0 var(--l7)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:11px;color:var(--mute);margin:0 0 8px}
+.legend i{display:inline-block;width:10px;height:3px;margin-right:4px;vertical-align:middle}
+.tabs{display:flex;flex-wrap:wrap;gap:3px;align-items:flex-end;margin:0 0 10px;border-bottom:2px solid var(--ink);position:sticky;top:-12px;background:var(--bg);padding-top:4px;z-index:2}
+.tabs button{border:1px solid var(--line);border-bottom:none;border-radius:3px 3px 0 0;font-size:12px;padding:4px 9px}
+.tabs button.on{background:var(--ink);color:var(--panel);border-color:var(--ink)}
+.tabs label{margin-left:auto;font-size:12px;color:var(--mute);padding:0 4px 4px;cursor:pointer;white-space:nowrap}
+.tabintro{border-left:5px solid var(--c);padding:6px 10px;background:var(--panel);margin:0 0 10px;font-size:13px;line-height:1.5}
+.h3{font-size:13px;margin:16px 0 6px}
+.gwrap{overflow-x:auto;margin:0 0 10px;max-width:100%}
+.grid{display:grid;font-family:var(--mono);font-size:11px;min-width:640px}
+.gh{color:var(--mute);text-align:center;font-size:9px;padding-bottom:2px}
+.gh.go{text-align:right;padding-right:6px;align-self:center;font-size:10px}
+.gc{border:1px solid var(--ink);margin:-1px 0 0 -1px;padding:3px 2px;background:var(--panel);cursor:pointer;overflow:hidden;min-height:48px;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;border-top:3px solid var(--c);min-width:0}
+.gc:hover{background:var(--bg)}
+.gc.on1{background:rgba(46,125,79,.18)}
+.gc.act,.ftab tr.act td{background:var(--hl2)!important}
+.gc.nar .gn{font-size:8.5px;letter-spacing:-.3px}
+.ftab td.nw{white-space:nowrap!important}
+.gc .gn{font-family:var(--sans);font-size:10.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.gc .gv{font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.gc .gr{font-size:10px;color:var(--mute);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+table.ftab{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:8px}
+.ftab td{padding:3px 6px;border-bottom:1px solid var(--line);vertical-align:top;white-space:normal!important;max-width:none!important;overflow:visible!important}
+.ftab td.tn{font-family:var(--sans);font-weight:600;white-space:nowrap!important}
+.ftab td.tb{color:var(--mute);white-space:nowrap!important;font-size:11px}
+.ftab td.tr{word-break:break-all}
+.ftab tr.ex td{color:var(--mute);font-family:var(--sans);font-size:12px;padding:0 6px 7px;border-bottom:1px solid var(--line);line-height:1.45}
+.ftab tr:not(.ex){border-bottom:none}
+.calc{font-family:var(--mono);white-space:pre-wrap;color:var(--ink);background:var(--bg);padding:5px 8px;margin-top:4px;display:block;font-size:11.5px;border-left:3px solid var(--line)}
+.quiz .ans{background:var(--mute)!important;color:transparent!important;border-radius:2px;cursor:help;user-select:none}
+.quiz .ans.shown{background:transparent!important;color:inherit!important}
+.quiz .gc .gv.ans{min-width:40px;min-height:12px}
+.enc2{position:relative}
+.erow{position:relative;height:42px;margin:4px 0}
+.elab{position:absolute;left:0;top:0;width:144px;font-size:11px;line-height:1.25}
+.elab span{color:var(--mute);font-family:var(--mono)}
+.eb{position:absolute;top:2px;height:36px;color:#fff;font-family:var(--mono);font-size:10px;line-height:1.2;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;overflow:hidden;white-space:nowrap;border-radius:2px;cursor:pointer}
+.wbtn{display:flex;flex-wrap:wrap;gap:4px;align-items:center;margin-bottom:6px;font-size:12px}
+.wbtn button{font-size:11px;padding:3px 8px}
+.wbtn input{font:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--line);padding:2px 4px}
+svg.wave{display:block;margin:4px 0;color:var(--ink)}
+svg.wave .wp{fill:none;stroke:var(--l3);stroke-width:2}
+svg.wave .wg{stroke:var(--line);stroke-width:1} svg.wave .wg8{stroke:var(--mute)}
+svg.wave .wt{font:10px var(--mono);fill:var(--mute);text-anchor:middle}
+svg.wave .wl{font:600 11px var(--sans);fill:var(--ink)} svg.wave .wu{font-weight:400;fill:var(--mute);font-size:10px}
+svg.lad .lh{font:600 11px var(--mono);fill:var(--ink)} svg.lad .lv{stroke:var(--mute);stroke-width:2}
+svg.lad .lt{font:11px var(--mono);fill:var(--ink)} svg.lad .ll{stroke:var(--l4);stroke-width:1.6} svg.lad .la{fill:var(--l4)}
+svg.lad .lbg{fill:transparent} svg.lad .lg{cursor:pointer} svg.lad .lg:hover .lbg{fill:var(--bg)}
+svg.lad .cur .lbg{fill:var(--hl)} svg.lad .rt .ll{stroke:#c0392b;stroke-dasharray:4 3}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:10;padding:16px}
+.overlay.show{display:flex}
+.dlg{background:var(--panel);border:2px solid var(--ink);max-width:900px;width:100%;max-height:88vh;display:flex;flex-direction:column}
+.dlg header{border-bottom:1px solid var(--line);justify-content:space-between}
+.dlg .content{overflow:auto;padding:14px 18px;line-height:1.55}
+.dlg pre{font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;margin:0}
+.dlg pre .cli{color:#c0392b} .dlg pre .srv{color:#1f6f8b}
+.dlg table td,.dlg table th{padding:3px 8px;border-bottom:1px solid var(--line);text-align:left}
+.dlg ol li{margin-bottom:6px}
+.dlg code{font-family:var(--mono);background:var(--bg);padding:1px 4px}
+.drop{position:fixed;inset:0;border:4px dashed var(--l7);display:none;align-items:center;justify-content:center;font-size:24px;background:rgba(0,0,0,.25);z-index:20;pointer-events:none;color:#fff}
+.drop.show{display:flex}
+footer{padding:8px 16px;border-top:1px solid var(--line);font-size:12px;color:var(--mute);display:flex;flex-wrap:wrap;gap:6px 18px}
+footer a{color:var(--l3)}
+.empty-hint{padding:30px 16px;color:var(--mute);text-align:center;font-size:14px;line-height:1.7}
+@media (max-width: 860px){
+  #lower{grid-template-columns:1fr}
+  #osi{border-right:none;border-bottom:1px solid var(--line)}
+  body{height:auto}
+  main{grid-template-rows:minmax(160px,40vh) auto}
+  #lower{overflow:visible}
+  .lname{min-width:0}
+  header,.bar,footer{padding-left:16px;padding-right:16px}
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>PAKET<span>WERK</span></h1>
+  <div class="sub">Netzwerkmitschnitt (.pcap / .pcapng / FRITZ!Box .eth) Schicht für Schicht nach dem OSI-Modell zerlegen – alles lokal im Browser</div>
+</header>
+<div class="bar">
+  <label class="btn" for="file">Mitschnitt öffnen …</label>
+  <input type="file" id="file" accept=".pcap,.pcapng,.eth,.cap,.dmp,application/vnd.tcpdump.pcap">
+  <button id="demo">Demo-Mitschnitt</button>
+  <input id="filter" placeholder="Filter, z. B.  dns  ·  tcp.port==443  ·  ip.addr==192.168.178.1 && !arp  ·  http || tls" spellcheck="false">
+  <button id="stream" title="Alle Nutzdaten der TCP-Verbindung des gewählten Pakets zusammensetzen">Strom folgen</button>
+  <button id="stats">Statistik</button>
+  <button id="fritz">FRITZ!Box-Mitschnitt?</button>
+  <span id="status">kein Mitschnitt geladen</span>
+</div>
+<main>
+  <div id="listwrap">
+    <table>
+      <thead><tr><th data-k="no">Nr.</th><th data-k="t">Zeit</th><th data-k="src">Quelle</th><th data-k="dst">Ziel</th><th data-k="proto">Protokoll</th><th data-k="len">Länge</th><th data-k="info">Info</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty-hint" id="hint">Datei hierher ziehen, über „Mitschnitt öffnen“ laden – oder den <b>Demo-Mitschnitt</b> ansehen.<br>
+      Mitschnitt von der FRITZ!Box: <code>http://fritz.box/html/capture.html</code> → Knopf „FRITZ!Box-Mitschnitt?“</div>
+  </div>
+  <div id="lower">
+    <section id="osi"><div class="tabs" id="tabs"></div><div id="osibody" class="lnote">Ein Paket in der Liste anklicken.</div></section>
+    <section id="hexpane"><h2>Rohdaten</h2>
+      <div class="legend"><span><i style="background:var(--l2)"></i>Sicherung</span><span><i style="background:var(--l3)"></i>Vermittlung</span><span><i style="background:var(--l4)"></i>Transport</span><span><i style="background:var(--l6)"></i>Darstellung</span><span><i style="background:var(--l7)"></i>Anwendung</span></div>
+      <div id="hex"></div></section>
+  </div>
+</main>
+<footer>
+  <span>Paketwerk · eigenständige HTML-Seite, keine Daten verlassen den Rechner</span>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
+</footer>
+<div class="overlay" id="ov"><div class="dlg"><header><b id="ovt"></b><button id="ovx">schließen</button></header><div class="content" id="ovc"></div></div></div>
+<div class="drop" id="drop">Mitschnitt fallen lassen</div>
+<script>
+"use strict";
+/* ===================== Hilfsfunktionen ===================== */
+const OSI_NAMES = {1:"Bitübertragung",2:"Sicherung",3:"Vermittlung",4:"Transport",5:"Sitzung",6:"Darstellung",7:"Anwendung"};
+const OSI_EN = {1:"Physical",2:"Data Link",3:"Network",4:"Transport",5:"Session",6:"Presentation",7:"Application"};
+const hex2 = n => n.toString(16).padStart(2,"0");
+const hex4 = n => n.toString(16).padStart(4,"0");
+const hx = (n,w) => "0x"+n.toString(16).padStart(w||2,"0");
+function u16(d,o){return (d[o]<<8)|d[o+1];}
+function u32(d,o){return ((d[o]<<24)>>>0)+(d[o+1]<<16)+(d[o+2]<<8)+d[o+3];}
+function mac(d,o){const a=[];for(let i=0;i<6;i++)a.push(hex2(d[o+i]));return a.join(":");}
+function ip4(d,o){return d[o]+"."+d[o+1]+"."+d[o+2]+"."+d[o+3];}
+function ip6(d,o){
+  const g=[];for(let i=0;i<8;i++)g.push(u16(d,o+i*2));
+  let bs=-1,bl=0;for(let i=0;i<8;){if(g[i]===0){let j=i;while(j<8&&g[j]===0)j++;if(j-i>bl&&j-i>1){bs=i;bl=j-i;}i=j;}else i++;}
+  const h=x=>x.map(v=>v.toString(16)).join(":");
+  return bs<0?h(g):h(g.slice(0,bs))+"::"+h(g.slice(bs+bl));
+}
+function ascii(d,o,l){let s="";for(let i=0;i<l&&o+i<d.length;i++){const c=d[o+i];s+=(c>=32&&c<127)?String.fromCharCode(c):".";}return s;}
+function str(d,o,l){let s="";for(let i=0;i<l&&o+i<d.length;i++)s+=String.fromCharCode(d[o+i]);return s;}
+function utf8(d,o,l){try{return new TextDecoder("utf-8",{fatal:false}).decode(d.subarray(o,o+l));}catch(e){return str(d,o,l);}}
+function bytesHex(d,o,l,max){max=max||32;const a=[];for(let i=0;i<Math.min(l,max);i++)a.push(hex2(d[o+i]));return a.join(" ")+(l>max?" …":"");}
+function F(name,value,off,len,kids){return {name:name,value:value,off:off,len:len,kids:kids||null};}
+function bits(v,width,mask){let s="";for(let i=width-1;i>=0;i--){const b=1<<i;s+=(mask&b)?((v&b)?"1":"0"):".";if(i%4===0&&i)s+=" ";}return s;}
+function inetSum(d,o,l,init){let s=init||0;for(let i=0;i+1<l;i+=2)s+=u16(d,o+i);if(l&1)s+=d[o+l-1]<<8;while(s>>16)s=(s&0xffff)+(s>>16);return s;}
+function textKind(d,o,l){
+  if(l===0)return "leer";
+  let pr=0,hi=0;for(let i=0;i<l;i++){const c=d[o+i];if((c>=32&&c<127)||c===9||c===10||c===13)pr++;else if(c>=128)hi++;}
+  if(pr===l)return "reiner ASCII-Text";
+  if(pr+hi===l){try{new TextDecoder("utf-8",{fatal:true}).decode(d.subarray(o,o+l));return "UTF-8-Text";}catch(e){return "Text (8-Bit, kein gültiges UTF-8)";}}
+  if(pr/l>0.85)return "überwiegend Text";
+  return "Binärdaten";
+}
+
+/* ===================== Mitschnitt-Dateien lesen ===================== */
+const LINKTYPES={0:"BSD Loopback",1:"Ethernet",12:"Raw IP",101:"Raw IP",105:"IEEE 802.11 WLAN",113:"Linux cooked (SLL)",127:"802.11 + Radiotap",228:"Raw IPv4",229:"Raw IPv6",276:"Linux cooked v2 (SLL2)"};
+function parseCapture(buf){
+  const d=new Uint8Array(buf);
+  if(d.length<24)throw new Error("Datei zu kurz für einen Mitschnitt");
+  const dv=new DataView(buf);
+  const m=dv.getUint32(0,false);
+  if(m===0x0a0d0d0a)return parsePcapng(d,dv);
+  let le,nano=false;
+  if(m===0xa1b2c3d4){le=false;}else if(m===0xd4c3b2a1){le=true;}
+  else if(m===0xa1b23c4d){le=false;nano=true;}else if(m===0x4d3cb2a1){le=true;nano=true;}
+  else throw new Error("Unbekanntes Format (Magic "+hx(m,8)+") – erwartet pcap oder pcapng");
+  const lt=dv.getUint32(20,le)&0x0fffffff;
+  const pk=[];let o=24;
+  while(o+16<=d.length){
+    const sec=dv.getUint32(o,le),frac=dv.getUint32(o+4,le),incl=dv.getUint32(o+8,le),orig=dv.getUint32(o+12,le);
+    o+=16;if(incl>262144||o+incl>d.length){if(o+incl>d.length&&incl<262144){pk.push({data:d.slice(o,d.length),ts:sec+frac/(nano?1e9:1e6),orig:orig,lt:lt,iface:0,trunc:true});}break;}
+    pk.push({data:d.slice(o,o+incl),ts:sec+frac/(nano?1e9:1e6),orig:orig,lt:lt,iface:0});
+    o+=incl;
+  }
+  return {format:"pcap ("+(le?"little":"big")+" endian"+(nano?", ns":", µs")+")",packets:pk,ifaces:[{lt:lt,name:""}]};
+}
+function parsePcapng(d,dv){
+  let o=0,le=true;const ifs=[];const pk=[];
+  while(o+12<=d.length){
+    let type=dv.getUint32(o,le);
+    if(type===0x0a0d0d0a){const bom=dv.getUint32(o+8,true);le=(bom===0x1a2b3c4d);ifs.length=0;}
+    const len=dv.getUint32(o+4,le);
+    if(len<12||o+len>d.length)break;
+    if(type===1){
+      const lt=dv.getUint16(o+8,le);let res=6,name="";
+      let p=o+16;while(p+4<=o+len-4){const c=dv.getUint16(p,le),l=dv.getUint16(p+2,le);if(c===0)break;
+        if(c===2)name=str(d,p+4,l);if(c===9)res=d[p+4];p+=4+((l+3)&~3);}
+      const div=(res&0x80)?Math.pow(2,res&0x7f):Math.pow(10,res);
+      ifs.push({lt:lt,name:name,div:div});
+    }else if(type===6||type===3){
+      let id=0,ts=0,cap,orig,po;
+      if(type===6){id=dv.getUint32(o+8,le);const hi=dv.getUint32(o+12,le),lo=dv.getUint32(o+16,le);
+        cap=dv.getUint32(o+20,le);orig=dv.getUint32(o+24,le);po=o+28;const div=(ifs[id]||{div:1e6}).div;ts=(hi*4294967296+lo)/div;}
+      else{orig=dv.getUint32(o+8,le);po=o+12;cap=Math.min(orig,len-16);}
+      const ifc=ifs[id]||{lt:1};
+      pk.push({data:d.slice(po,po+cap),ts:ts,orig:orig,lt:ifc.lt,iface:id});
+    }
+    o+=len;
+  }
+  return {format:"pcapng",packets:pk,ifaces:ifs};
+}
+
+/* ===================== Zerlegung: Rahmen ===================== */
+function dissect(p,no,t0,stt){
+  const d=p.data;
+  const r={no:no,layers:[],src:"",dst:"",proto:"",info:"",cls:"",stack:[],len:d.length,orig:p.orig,ts:p.ts,rel:p.ts-t0,flow:null,payload:null};
+  const l1={osi:1,proto:"Frame",title:"Rahmen "+no+", "+p.orig+" Byte auf der Leitung, "+d.length+" Byte mitgeschnitten",off:0,len:d.length,fields:[
+    F("Rahmennummer",String(no),0,0),
+    F("Ankunftszeit",fmtAbs(p.ts),0,0),
+    F("Zeit seit erstem Paket",r.rel.toFixed(6)+" s",0,0),
+    F("Länge auf der Leitung",p.orig+" Byte ("+p.orig*8+" Bit)",0,0),
+    F("Mitgeschnittene Länge",d.length+" Byte"+(p.trunc||d.length<p.orig?" – gekürzt!":""),0,0),
+    F("Verkapselung",(LINKTYPES[p.lt]||"Linktyp "+p.lt)+" (Linktyp "+p.lt+")",0,0),
+    F("Schnittstelle",String(p.iface),0,0)],
+    note:"Die eigentliche Bitübertragung (Spannungspegel, Funk, Präambel, Start-Frame-Delimiter, Prüfsumme FCS) passiert in der Netzwerkkarte. Ein Mitschnitt sieht nur den fertig dekodierten Rahmen – deshalb stehen hier Zeit- und Längenangaben."};
+  r.layers.push(l1);
+  try{
+    switch(p.lt){
+      case 1: dEth(d,0,r,stt);break;
+      case 113: dSLL(d,0,r,stt);break;
+      case 276: dSLL2(d,0,r,stt);break;
+      case 0: {const fam=d[0]||d[3];if(fam===2)dIPv4(d,4,d.length-4,r,stt);else dIPv6(d,4,d.length-4,r,stt);break;}
+      case 12: case 101: case 228: case 229:
+        if((d[0]>>4)===4)dIPv4(d,0,d.length,r,stt);else dIPv6(d,0,d.length,r,stt);break;
+      default: r.proto="Linktyp "+p.lt;r.info="(nicht unterstützte Verkapselung)";
+    }
+  }catch(e){r.info+=" [Zerlegefehler: "+e.message+"]";r.cls="c-err";}
+  if(!r.proto)r.proto=r.stack[r.stack.length-1]||"?";
+  return r;
+}
+function fmtAbs(ts){if(!ts)return "–";const dt=new Date(ts*1000);const us=Math.round((ts%1)*1e6);
+  return dt.toLocaleDateString("de-DE")+" "+dt.toLocaleTimeString("de-DE")+"."+String(us).padStart(6,"0");}
+function push(r,osi,proto,title,off,len,fields,note){const L={osi:osi,proto:proto,title:title,off:off,len:len,fields:fields,note:note||""};r.layers.push(L);r.stack.push(proto);return L;}
+
+const ETHERTYPES={0x0800:"IPv4",0x86dd:"IPv6",0x0806:"ARP",0x8100:"802.1Q VLAN",0x88a8:"802.1ad",0x8863:"PPPoE Discovery",0x8864:"PPPoE Session",0x888e:"EAPOL (802.1X)",0x88cc:"LLDP",0x893a:"IEEE 1905.1",0x88e1:"HomePlug AV",0x9000:"Loopback"};
+const OUI={"00:04:0e":"AVM","3c:a6:2f":"AVM","7c:ff:4d":"AVM","c8:0e:14":"AVM","e0:28:6d":"AVM","2c:91:ab":"AVM","98:9b:cb":"AVM","dc:39:6f":"AVM","b8:27:eb":"Raspberry Pi","dc:a6:32":"Raspberry Pi","e4:5f:01":"Raspberry Pi","00:11:32":"Synology","00:1a:11":"Google","f0:9f:c2":"Ubiquiti","00:50:56":"VMware","08:00:27":"VirtualBox","52:54:00":"QEMU/KVM"};
+function macInfo(m){
+  if(m==="ff:ff:ff:ff:ff:ff")return m+" (Broadcast – an alle)";
+  const f=parseInt(m.slice(0,2),16);let s=m;const v=OUI[m.slice(0,8)];if(v)s+=" ("+v+")";
+  if(m.startsWith("01:00:5e"))s+=" (IPv4-Multicast)";else if(m.startsWith("33:33"))s+=" (IPv6-Multicast)";
+  else if(f&1)s+=" (Multicast)";else if(f&2)s+=" (lokal verwaltet/zufällig)";
+  return s;
+}
+function nextByEther(d,o,end,type,r,stt){
+  switch(type){
+    case 0x0800:return dIPv4(d,o,end-o,r,stt);
+    case 0x86dd:return dIPv6(d,o,end-o,r,stt);
+    case 0x0806:return dARP(d,o,r);
+    case 0x8864:return dPPPoE(d,o,end,r,stt,true);
+    case 0x8863:return dPPPoE(d,o,end,r,stt,false);
+    default: if(!r.info)r.info=(ETHERTYPES[type]||"EtherType "+hx(type,4))+", "+(end-o)+" Byte";r.proto=ETHERTYPES[type]||"Ethernet";
+  }
+}
+function dEth(d,o,r,stt){
+  if(d.length<14)throw new Error("Ethernet-Kopf unvollständig");
+  const dm=mac(d,o),sm=mac(d,o+6);let t=u16(d,o+12),p=o+14;const f=[
+    F("Zieladresse (MAC)",macInfo(dm),o,6),F("Quelladresse (MAC)",macInfo(sm),o+6,6)];
+  while(t===0x8100||t===0x88a8){const tci=u16(d,p);f.push(F("VLAN-Tag "+hx(t,4),"VLAN "+(tci&0xfff)+", Priorität "+(tci>>13),p-2,6,
+    [F("PCP (Priorität)",String(tci>>13),p,2),F("DEI",String((tci>>12)&1),p,2),F("VLAN-ID",String(tci&0xfff),p,2)]));t=u16(d,p+2);p+=4;}
+  if(t<=1500){f.push(F("Länge (IEEE 802.3)",t+" Byte",p-2,2));
+    f.push(F("LLC DSAP / SSAP / Control",hx(d[p])+" / "+hx(d[p+1])+" / "+hx(d[p+2]),p,3));
+    push(r,2,"Ethernet/LLC","IEEE 802.3, "+sm+" → "+dm,o,p-o+3,f,"Rahmen mit Längenfeld statt EtherType (z. B. Spanning Tree).");
+    r.src=sm;r.dst=dm;r.proto=d[p]===0x42?"STP":"LLC";r.info=d[p]===0x42?"Spanning Tree BPDU":"802.3 LLC, DSAP "+hx(d[p]);return;}
+  f.push(F("EtherType",hx(t,4)+" = "+(ETHERTYPES[t]||"unbekannt"),p-2,2));
+  push(r,2,"Ethernet II","Ethernet II, "+sm+" → "+dm,o,p-o,f,
+    "Die Sicherungsschicht adressiert Geräte im selben Netzsegment über ihre MAC-Adresse. Der EtherType sagt, welches Protokoll im Nutzteil steckt.");
+  r.src=sm;r.dst=dm;
+  nextByEther(d,p,d.length,t,r,stt);
+}
+function dSLL(d,o,r,stt){
+  const pt=u16(d,o),ha=u16(d,o+2),al=u16(d,o+4),pr=u16(d,o+14);
+  const PT=["an uns","Broadcast","Multicast","an anderen Host","von uns gesendet"];
+  const a=al===6?mac(d,o+6):bytesHex(d,o+6,Math.min(al,8));
+  push(r,2,"Linux SLL","Linux cooked capture, "+(PT[pt]||pt)+", "+a,o,16,[
+    F("Pakettyp",(PT[pt]||"?")+" ("+pt+")",o,2),F("ARPHRD-Typ",String(ha),o+2,2),F("Adresslänge",String(al),o+4,2),
+    F("Quelladresse",a,o+6,8),F("Protokoll",hx(pr,4)+" = "+(ETHERTYPES[pr]||"?"),o+14,2)],
+    "Pseudo-Kopf von Linux statt echtem Ethernet-Rahmen (z. B. Mitschnitt auf „any“ oder einer PPP-Schnittstelle).");
+  r.src=a;nextByEther(d,o+16,d.length,pr,r,stt);
+}
+function dSLL2(d,o,r,stt){
+  const pr=u16(d,o),ifi=u32(d,o+4),pt=d[o+10],al=d[o+11];const a=al===6?mac(d,o+12):bytesHex(d,o+12,Math.min(al,8));
+  push(r,2,"Linux SLL2","Linux cooked capture v2, if "+ifi+", "+a,o,20,[
+    F("Protokoll",hx(pr,4)+" = "+(ETHERTYPES[pr]||"?"),o,2),F("Schnittstellenindex",String(ifi),o+4,4),
+    F("Pakettyp",String(pt),o+10,1),F("Quelladresse",a,o+12,8)]);
+  r.src=a;nextByEther(d,o+20,d.length,pr,r,stt);
+}
+function dPPPoE(d,o,end,r,stt,sess){
+  const code=d[o+1],sid=u16(d,o+2),len=u16(d,o+4);
+  const CODES={0:"Session-Daten",9:"PADI",7:"PADO",0x19:"PADR",0x65:"PADS",0xa7:"PADT"};
+  const f=[F("Version/Typ",(d[o]>>4)+"/"+(d[o]&15),o,1),F("Code",(CODES[code]||hx(code))+" ("+hx(code)+")",o+1,1),F("Session-ID",hx(sid,4),o+2,2),F("Länge",len+" Byte",o+4,2)];
+  if(!sess){push(r,2,"PPPoE","PPPoE Discovery "+(CODES[code]||""),o,6+len,f,"Aufbau einer DSL-Sitzung zwischen Router und Provider.");r.proto="PPPoE";r.info="PPPoE "+(CODES[code]||hx(code));return;}
+  const pp=u16(d,o+6);f.push(F("PPP-Protokoll",hx(pp,4)+(pp===0x21?" = IPv4":pp===0x57?" = IPv6":pp===0xc021?" = LCP":pp===0xc023?" = PAP":pp===0x8021?" = IPCP":""),o+6,2));
+  push(r,2,"PPPoE/PPP","PPPoE-Sitzung "+hx(sid,4)+", PPP",o,8,f,"Typisch auf der Internet-Schnittstelle einer FRITZ!Box an DSL: IP-Pakete werden in PPP und dann in PPPoE verpackt.");
+  if(pp===0x21)dIPv4(d,o+8,len-2,r,stt);else if(pp===0x57)dIPv6(d,o+8,len-2,r,stt);
+  else{r.proto=pp===0xc021?"PPP LCP":pp===0xc023?"PPP PAP":pp===0x8021?"PPP IPCP":"PPP";r.info=r.proto+" Code "+d[o+8]+", ID "+d[o+9];}
+}
+function dARP(d,o,r){
+  const op=u16(d,o+6),hl=d[o+4],pl=d[o+5];
+  const sha=mac(d,o+8),spa=ip4(d,o+14),tha=mac(d,o+18),tpa=ip4(d,o+24);
+  const OP={1:"Anfrage (Request)",2:"Antwort (Reply)"};
+  push(r,2,"ARP","Address Resolution Protocol, "+(OP[op]||op),o,8+2*hl+2*pl,[
+    F("Hardwaretyp",u16(d,o)+(u16(d,o)===1?" (Ethernet)":""),o,2),F("Protokolltyp",hx(u16(d,o+2),4)+" (IPv4)",o+2,2),
+    F("Hardware-Adresslänge",String(hl),o+4,1),F("Protokoll-Adresslänge",String(pl),o+5,1),F("Operation",OP[op]||String(op),o+6,2),
+    F("Absender-MAC",macInfo(sha),o+8,6),F("Absender-IP",spa,o+14,4),F("Ziel-MAC",tha,o+18,6),F("Ziel-IP",tpa,o+24,4)],
+    "ARP sitzt zwischen Schicht 2 und 3: Es übersetzt eine IP-Adresse (Schicht 3) in die MAC-Adresse (Schicht 2) im lokalen Netz.");
+  r.proto="ARP";
+  if(op===1)r.info=(spa===tpa?"Gratuitous ARP für "+spa:(spa==="0.0.0.0"?"ARP-Probe: Wer hat "+tpa+"?":"Wer hat "+tpa+"? Antwort an "+spa));
+  else r.info=spa+" ist bei "+sha;
+}
+
+/* ===================== Schicht 3 ===================== */
+const IPPROTO={1:"ICMP",2:"IGMP",6:"TCP",17:"UDP",41:"IPv6-in-IPv4",47:"GRE",50:"ESP",51:"AH",58:"ICMPv6",89:"OSPF",132:"SCTP"};
+function ipScope4(a){
+  const p=a.split(".").map(Number);
+  if(p[0]===10||(p[0]===172&&p[1]>=16&&p[1]<32)||(p[0]===192&&p[1]===168))return "privat";
+  if(p[0]===127)return "Loopback";if(p[0]===169&&p[1]===254)return "Link-lokal";
+  if(p[0]>=224&&p[0]<240)return "Multicast";if(a==="255.255.255.255")return "Broadcast";if(a==="0.0.0.0")return "unbestimmt";
+  if(p[0]===100&&p[1]>=64&&p[1]<128)return "Carrier-Grade-NAT";return "öffentlich";
+}
+function ipScope6(a){
+  if(a==="::1")return "Loopback";if(a==="::")return "unbestimmt";const f=a.split(":")[0].toLowerCase();
+  if(f.startsWith("fe8"))return "Link-lokal";if(f.startsWith("ff"))return "Multicast";if(f.startsWith("fd")||f.startsWith("fc"))return "Unique-Local (privat)";
+  if(/^[23]/.test(f))return "global";return "";
+}
+function dIPv4(d,o,len,r,stt){
+  const v=d[o]>>4,ihl=(d[o]&15)*4,tos=d[o+1],tl=u16(d,o+2),id=u16(d,o+4),ff=u16(d,o+6),ttl=d[o+8],pr=d[o+9],ck=u16(d,o+10);
+  const s=ip4(d,o+12),t=ip4(d,o+16);
+  const calc=inetSum(d,o,ihl);const ok=calc===0xffff;
+  const fo=(ff&0x1fff)*8,mf=(ff>>13)&1,df=(ff>>14)&1;
+  const f=[F("Version",String(v),o,1),F("Kopflänge (IHL)",ihl+" Byte ("+(ihl/4)+" × 32 Bit)",o,1),
+    F("DSCP / ECN","DSCP "+(tos>>2)+", ECN "+(tos&3),o+1,1),F("Gesamtlänge",tl+" Byte",o+2,2),F("Identifikation",hx(id,4)+" ("+id+")",o+4,2),
+    F("Flags",hx(ff>>13)+(df?" Don't Fragment":"")+(mf?" More Fragments":""),o+6,2,[F("Reserviert",bits(ff,16,0x8000),o+6,2),F("DF – nicht fragmentieren",bits(ff,16,0x4000)+" = "+df,o+6,2),F("MF – weitere Fragmente",bits(ff,16,0x2000)+" = "+mf,o+6,2)]),
+    F("Fragment-Offset",fo+" Byte",o+6,2),F("TTL (Lebensdauer)",ttl+" Hops",o+8,1),F("Protokoll",pr+" = "+(IPPROTO[pr]||"?"),o+9,1),
+    F("Kopf-Prüfsumme",hx(ck,4)+(ok?" ✓ korrekt":" ✗ falsch (bei selbst gesendeten Paketen oft Offloading der Karte)"),o+10,2),
+    F("Quelladresse",s+" ("+ipScope4(s)+")",o+12,4),F("Zieladresse",t+" ("+ipScope4(t)+")",o+16,4)];
+  if(ihl>20)f.push(F("Optionen",bytesHex(d,o+20,ihl-20),o+20,ihl-20));
+  push(r,3,"IPv4","Internet Protocol Version 4, "+s+" → "+t,o,ihl,f,
+    "Die Vermittlungsschicht sorgt für die Wegewahl über Netzgrenzen hinweg. Jeder Router zieht 1 von der TTL ab; bei 0 wird das Paket verworfen.");
+  r.src=s;r.dst=t;r.ttl=ttl;
+  const pl=Math.max(0,Math.min(tl,len,d.length-o)-ihl);
+  if(fo>0){r.proto="IPv4";r.info="Fragment (Offset "+fo+") von "+(IPPROTO[pr]||pr)+", ID "+hx(id,4);return;}
+  nextByIP(d,o+ihl,pl,pr,r,stt,4,o);
+}
+function dIPv6(d,o,len,r,stt){
+  const w=u32(d,o),pl=u16(d,o+4);let nh=d[o+6];const hl=d[o+7];const s=ip6(d,o+8),t=ip6(d,o+24);
+  const f=[F("Version",String(w>>>28),o,1),F("Traffic Class",hx((w>>>20)&0xff),o,2),F("Flow Label",hx(w&0xfffff,5),o+1,3),
+    F("Nutzlast-Länge",pl+" Byte",o+4,2),F("Next Header",nh+" = "+(IPPROTO[nh]||"?"),o+6,1),F("Hop Limit",String(hl),o+7,1),
+    F("Quelladresse",s+" ("+ipScope6(s)+")",o+8,16),F("Zieladresse",t+" ("+ipScope6(t)+")",o+24,16)];
+  let p=o+40;
+  while(nh===0||nh===43||nh===60||nh===44){
+    const n2=d[p];let el=(d[p+1]+1)*8;const nm={0:"Hop-by-Hop-Optionen",43:"Routing-Kopf",60:"Ziel-Optionen",44:"Fragment-Kopf"}[nh];
+    if(nh===44)el=8;f.push(F("Erweiterungskopf",nm+", "+el+" Byte, weiter: "+(IPPROTO[n2]||n2),p,el));nh=n2;p+=el;
+  }
+  push(r,3,"IPv6","Internet Protocol Version 6, "+s+" → "+t,o,p-o,f,
+    "IPv6 hat einen festen 40-Byte-Kopf ohne Prüfsumme; Zusätze kommen als verkettete Erweiterungsköpfe.");
+  r.src=s;r.dst=t;
+  nextByIP(d,p,Math.max(0,Math.min(pl-(p-o-40),d.length-p)),nh,r,stt,6,o);
+}
+function pseudoSum(d,ipo,ver,proto,len){
+  if(ver===4){let s=inetSum(d,ipo+12,8);s+=proto+len;while(s>>16)s=(s&0xffff)+(s>>16);return s;}
+  let s=inetSum(d,ipo+8,32);s+=(len>>>16)+(len&0xffff)+proto;while(s>>16)s=(s&0xffff)+(s>>16);return s;
+}
+function nextByIP(d,o,len,pr,r,stt,ver,ipo){
+  switch(pr){
+    case 6:return dTCP(d,o,len,r,stt,ver,ipo);
+    case 17:return dUDP(d,o,len,r,stt,ver,ipo);
+    case 1:return dICMP(d,o,len,r);
+    case 58:return dICMP6(d,o,len,r,ver,ipo);
+    case 2:return dIGMP(d,o,len,r);
+    default:r.proto=IPPROTO[pr]||("IP-Proto "+pr);r.info=r.proto+", "+len+" Byte";
+  }
+}
+const ICMPT={0:"Echo-Antwort (Ping-Antwort)",3:"Ziel unerreichbar",5:"Umleitung (Redirect)",8:"Echo-Anfrage (Ping)",11:"Zeit überschritten (TTL abgelaufen)",12:"Parameterproblem"};
+const UNREACH={0:"Netz",1:"Host",2:"Protokoll",3:"Port",4:"Fragmentierung nötig, DF gesetzt",13:"administrativ gesperrt"};
+function dICMP(d,o,len,r){
+  const t=d[o],c=d[o+1],ck=u16(d,o+2);const ok=inetSum(d,o,len)===0xffff;
+  const f=[F("Typ",t+" = "+(ICMPT[t]||"?"),o,1),F("Code",c+(t===3?" = "+(UNREACH[c]||"?")+" unerreichbar":""),o+1,1),F("Prüfsumme",hx(ck,4)+(ok?" ✓":" ✗"),o+2,2)];
+  let info=(ICMPT[t]||"ICMP Typ "+t);
+  if(t===0||t===8){const id=u16(d,o+4),sq=u16(d,o+6);f.push(F("Kennung",hx(id,4),o+4,2),F("Sequenznummer",String(sq),o+6,2),F("Daten",len-8+" Byte: "+ascii(d,o+8,Math.min(len-8,48)),o+8,len-8));info+=", id="+hx(id,4)+", seq="+sq+", ttl="+r.ttl;}
+  else if(t===3||t===11){f.push(F("Enthaltener Originalkopf",bytesHex(d,o+8,Math.min(28,len-8)),o+8,len-8));if(t===3)info+=" ("+(UNREACH[c]||c)+")";}
+  push(r,3,"ICMP","Internet Control Message Protocol",o,len,f,"ICMP ist ein Hilfsprotokoll der Vermittlungsschicht (läuft zwar in IP, gehört aber logisch zu Schicht 3): Fehlermeldungen und Ping.");
+  r.proto="ICMP";r.info=info;
+}
+const ICMP6T={1:"Ziel unerreichbar",2:"Paket zu groß",3:"Zeit überschritten",128:"Echo-Anfrage",129:"Echo-Antwort",130:"MLD-Abfrage",131:"MLD-Bericht",143:"MLDv2-Bericht",133:"Router Solicitation",134:"Router Advertisement",135:"Neighbor Solicitation",136:"Neighbor Advertisement",137:"Redirect"};
+function dICMP6(d,o,len,r,ver,ipo){
+  const t=d[o],c=d[o+1],ck=u16(d,o+2);const ok=((inetSum(d,o,len,pseudoSum(d,ipo,6,58,len)))&0xffff)===0xffff;
+  const f=[F("Typ",t+" = "+(ICMP6T[t]||"?"),o,1),F("Code",String(c),o+1,1),F("Prüfsumme",hx(ck,4)+(ok?" ✓":" ✗"),o+2,2)];
+  let info="ICMPv6 "+(ICMP6T[t]||t);
+  if(t===135||t===136){const tg=ip6(d,o+8);f.push(F("Zieladresse",tg,o+8,16));info+=(t===135?" – wer hat "+tg+"?":" – "+tg);}
+  if(t===128||t===129){f.push(F("Kennung",hx(u16(d,o+4),4),o+4,2),F("Sequenz",String(u16(d,o+6)),o+6,2));info+=", seq="+u16(d,o+6);}
+  if(t===134){f.push(F("Hop Limit",String(d[o+4]),o+4,1),F("Flags M/O",((d[o+5]>>7)&1)+"/"+((d[o+5]>>6)&1),o+5,1),F("Router-Lebensdauer",u16(d,o+6)+" s",o+6,2));
+    let p=o+16;while(p+2<=o+len){const ot=d[p],ol=d[p+1]*8;if(!ol)break;if(ot===3)f.push(F("Präfix",ip6(d,p+16)+"/"+d[p+2],p,ol));else if(ot===25)f.push(F("DNS-Server (RDNSS)",ip6(d,p+8),p,ol));else if(ot===1)f.push(F("Quell-Linkadresse",mac(d,p+2),p,ol));p+=ol;}}
+  push(r,3,"ICMPv6","Internet Control Message Protocol v6",o,len,f,"ICMPv6 übernimmt bei IPv6 zusätzlich die Rolle von ARP (Neighbor Discovery) und die automatische Adressvergabe (Router Advertisement).");
+  r.proto="ICMPv6";r.info=info;
+}
+function dIGMP(d,o,len,r){
+  const t=d[o];const T={0x11:"Mitgliedschaftsabfrage",0x16:"v2-Beitritt",0x17:"Gruppe verlassen",0x22:"v3-Bericht"};
+  push(r,3,"IGMP","Internet Group Management Protocol",o,len,[F("Typ",hx(t)+" = "+(T[t]||"?"),o,1),F("Gruppe",ip4(d,o+4),o+4,4)],"Meldet, welche Multicast-Gruppen ein Gerät empfangen möchte.");
+  r.proto="IGMP";r.info=(T[t]||"IGMP "+hx(t))+" "+(t===0x22?"":ip4(d,o+4));
+}
+/* ===================== Schicht 4 + Sitzung ===================== */
+const PORTS={20:"FTP-Daten",21:"FTP",22:"SSH",23:"Telnet",25:"SMTP",53:"DNS",67:"DHCP-Server",68:"DHCP-Client",69:"TFTP",80:"HTTP",110:"POP3",123:"NTP",137:"NetBIOS-NS",138:"NetBIOS-DGM",139:"NetBIOS",143:"IMAP",161:"SNMP",389:"LDAP",443:"HTTPS",445:"SMB",465:"SMTPS",514:"Syslog",546:"DHCPv6-Client",547:"DHCPv6-Server",587:"SMTP-Submission",853:"DNS-over-TLS",993:"IMAPS",995:"POP3S",1883:"MQTT",1900:"SSDP/UPnP",3478:"STUN",3389:"RDP",5060:"SIP",5353:"mDNS",5355:"LLMNR",8080:"HTTP-Alt",8443:"HTTPS-Alt",8883:"MQTT-TLS",49000:"TR-064 (FRITZ!Box)"};
+const portName=p=>PORTS[p]?p+" ("+PORTS[p]+")":String(p);
+function newState(){return {streams:new Map(),n:0,dns:new Map()};}
+function tcpStream(stt,s,sp,t,dp){
+  const a=s+":"+sp,b=t+":"+dp;const k=a<b?a+"|"+b:b+"|"+a;let st=stt.streams.get(k);
+  if(!st){st={id:stt.n++,a:a,b:b,isn:{},max:{},state:"neu",pkts:[],app:null,sni:"",alpn:"",cookie:false,synSeen:false};stt.streams.set(k,st);}
+  return {st:st,dir:a===st.a?0:1};
+}
+function dTCP(d,o,len,r,stt,ver,ipo){
+  const sp=u16(d,o),dp=u16(d,o+2),seq=u32(d,o+4),ack=u32(d,o+8),hl=(d[o+12]>>4)*4,fl=((d[o+12]&1)<<8)|d[o+13],win=u16(d,o+14),ck=u16(d,o+16);
+  const FN=["FIN","SYN","RST","PSH","ACK","URG","ECE","CWR","AE"];const set=FN.filter((n,i)=>fl&(1<<i));
+  const {st,dir}=tcpStream(stt,r.src,sp,r.dst,dp);
+  const SYN=fl&2,ACK=fl&16,FIN=fl&1,RST=fl&4;
+  if(st.isn[dir]===undefined||SYN)st.isn[dir]=seq;
+  const rs=(seq-st.isn[dir])>>>0;const ra=st.isn[1-dir]!==undefined?((ack-st.isn[1-dir])>>>0):ack;
+  const plen=Math.max(0,len-hl);
+  let ok=null;if(len<=d.length-o){ok=((inetSum(d,o,len,pseudoSum(d,ipo,ver,6,len)))&0xffff)===0xffff;}
+  // Analyse
+  let note="";const end=rs+plen+(SYN?1:0)+(FIN?1:0);
+  if(plen>0&&st.max[dir]!==undefined&&end<=st.max[dir])note="Wiederholung (Retransmission) – Daten wurden schon einmal gesendet";
+  if(st.max[dir]===undefined||end>st.max[dir])st.max[dir]=end;
+  let wsc,mssv;const opts=[];let p=o+20;const optF=[];
+  while(p<o+hl){const k=d[p];if(k===0)break;if(k===1){p++;continue;}const l=d[p+1]||2;
+    let v="";if(k===2){v="MSS = "+u16(d,p+2)+" Byte";mssv=u16(d,p+2);}else if(k===3){wsc=d[p+2];v="Fensterskalierung ×"+(1<<d[p+2]);}else if(k===4)v="SACK erlaubt";
+    else if(k===5)v="SACK-Blöcke";else if(k===8)v="Zeitstempel "+u32(d,p+2)+" / Echo "+u32(d,p+6);else v="Option "+k;
+    opts.push(v.split(" ")[0]);optF.push(F("Option "+k,v,p,l));p+=l;}
+  const f=[F("Quellport",portName(sp),o,2),F("Zielport",portName(dp),o+2,2),
+    F("Sequenznummer",rs+" (relativ)  ·  roh "+seq,o+4,4),F("Bestätigungsnummer",ACK?ra+" (relativ)  ·  roh "+ack:"– (ACK nicht gesetzt)",o+8,4),
+    F("Kopflänge",hl+" Byte",o+12,1),
+    F("Flags",hx(fl,3)+" ["+set.join(", ")+"]",o+12,2,FN.map((n,i)=>F(n,bits(fl,9,1<<i)+" = "+((fl>>i)&1),o+12,2)).reverse()),
+    F("Fenstergröße",win+" Byte (vor Skalierung)",o+14,2),
+    F("Prüfsumme",hx(ck,4)+(ok===null?"":ok?" ✓ korrekt":" ✗ falsch (oft: Prüfsummen-Offloading der Netzkarte)"),o+16,2),
+    F("Urgent-Zeiger",String(u16(d,o+18)),o+18,2)];
+  if(optF.length)f.push(F("Optionen",opts.join(", "),o+20,hl-20,optF));
+  f.push(F("Nutzdaten",plen+" Byte",o+hl,plen));
+  if(note)f.push(F("⚠ Analyse",note,o,0));
+  push(r,4,"TCP","Transmission Control Protocol, Port "+sp+" → "+dp+", Seq "+rs+", Len "+plen,o,hl,f,
+    "TCP liefert einen zuverlässigen, geordneten Bytestrom: Sequenznummern zählen Bytes, Bestätigungen (ACK) melden Empfang, das Fenster bremst den Sender.");
+  // Sitzungszustand
+  let phase;
+  if(SYN&&!ACK){st.state="SYN gesendet";st.synSeen=true;phase="Verbindungsaufbau, Schritt 1 von 3 (SYN): Client möchte eine Sitzung öffnen";}
+  else if(SYN&&ACK){st.state="SYN-ACK";phase="Verbindungsaufbau, Schritt 2 von 3 (SYN-ACK): Server stimmt zu";}
+  else if(RST){st.state="abgebrochen";phase="Abbruch (RST): Sitzung wird sofort verworfen";}
+  else if(FIN){st.state=st.state==="FIN"?"geschlossen":"FIN";phase="Verbindungsabbau (FIN): eine Seite hat nichts mehr zu senden";}
+  else if(st.state==="SYN-ACK"&&ACK&&plen===0){st.state="aufgebaut";phase="Verbindungsaufbau, Schritt 3 von 3 (ACK): Sitzung steht";}
+  else{if(st.state==="SYN-ACK"||st.state==="neu")st.state="aufgebaut";phase=plen?"Datenaustausch in bestehender Sitzung":"Bestätigung (reines ACK)";}
+  st.pkts.push(r.no);
+  push(r,5,"TCP-Sitzung","TCP-Verbindung #"+st.id+" – "+phase.split(":")[0],0,0,[
+    F("Verbindungsnummer","#"+st.id,0,0),F("Endpunkte",st.a+"  ⇄  "+st.b,0,0),F("Richtung",dir===0?"A → B":"B → A",0,0),
+    F("Phase",phase,0,0),F("Zustand danach",st.state,0,0),F("Pakete bisher",String(st.pkts.length),0,0)],
+    "TCP erledigt auch die Aufgaben der Sitzungsschicht: Auf- und Abbau einer Verbindung (Drei-Wege-Handschlag, FIN/RST). Eine eigene Schicht-5-Kennung im Paket gibt es nicht – sie wird aus IP-Adressen und Ports abgeleitet.");
+  if(SYN){st.ws=st.ws||{};st.ws[dir]=wsc===undefined?null:wsc;if(mssv)(st.mss=st.mss||{})[dir]=mssv;}
+  const both=st.ws&&st.ws[0]!=null&&st.ws[1]!=null;
+  r.tcp={seq:seq,ack:ack,rs:rs,ra:ra,plen:plen,fl:fl,win:win,hl:hl,isn:st.isn[dir],peerIsn:st.isn[1-dir],next:end,dir:dir,
+    wsc:SYN?null:(both?st.ws[dir]:null),effwin:SYN?win:(both?win*(1<<st.ws[dir]):win),scaleKnown:!!st.ws,sid:st.id};
+  r.flow={id:st.id,dir:dir,off:o+hl,len:Math.min(plen,d.length-o-hl)};
+  r.proto="TCP";r.info=sp+" → "+dp+" ["+set.join(", ")+"] Seq="+rs+(ACK?" Ack="+ra:"")+" Win="+win+" Len="+plen;
+  if(note){r.info="[Wiederholung] "+r.info;r.cls="c-err";}
+  r.sp=sp;r.dp=dp;r.l4="tcp";
+  if(plen>0&&r.flow.len>0&&!note)tcpApp(d,o+hl,r.flow.len,r,st,sp,dp,stt);
+  else if(note&&r.flow.len>0)push(r,7,"Wiederholung","bereits gesendete Daten ("+(st.app||"?")+")",o+hl,r.flow.len,[F("Hinweis","Gleiche Bytes wie ein früheres Segment – der Sender bekam keine rechtzeitige Bestätigung und schickt erneut.",o+hl,r.flow.len),F("Als Text",ascii(d,o+hl,Math.min(r.flow.len,200)),o+hl,r.flow.len)]);
+  if(!r.cls)r.cls="c-tcp";
+}
+function tcpApp(d,o,len,r,st,sp,dp,stt){
+  const s4=str(d,o,8);
+  if(sp===53||dp===53){return dDNS(d,o+2,Math.min(len-2,u16(d,o)),r,stt,"DNS (TCP)",o);}
+  if(/^(GET|POST|PUT|HEAD|DELETE|OPTIONS|PATCH|CONNECT|SUBSCRIBE|NOTIFY|M-SEARCH) /.test(s4+str(d,o+8,4))||s4.startsWith("HTTP/1.")){st.app="HTTP";return dHTTP(d,o,len,r,st,"HTTP");}
+  if(d[o]>=20&&d[o]<=23&&d[o+1]===3&&d[o+2]<=4){st.app="TLS";return dTLS(d,o,len,r,st);}
+  if(s4.startsWith("SSH-")){st.app="SSH";push(r,7,"SSH","SSH-Kennung",o,len,[F("Versionszeile",str(d,o,len).trim(),o,len)],"Beide Seiten stellen sich zuerst im Klartext vor, danach ist alles verschlüsselt.");r.proto="SSH";r.info="SSH-Kennung: "+str(d,o,len).trim();return;}
+  if(st.app==="TLS"){addPres(r,"TLS (Fortsetzung)",o,len,"Fortsetzung eines TLS-Datensatzes aus einem früheren Segment (TCP teilt den Bytestrom beliebig in Segmente).");push(r,7,"Daten","verschlüsselte Anwendungsdaten",o,len,[F("Inhalt","nicht lesbar, "+len+" Byte",o,len)]);r.proto="TLS";r.info="TLS-Fortsetzung, "+len+" Byte"+(st.sni?" ("+st.sni+")":"");r.cls="c-tls";return;}
+  if(st.app==="HTTP"){return dGenericData(d,o,len,r,"HTTP-Körper (Fortsetzung)");}
+  if(sp===22||dp===22){push(r,6,"SSH","verschlüsselt",o,len,[F("Verschlüsseltes SSH-Paket",len+" Byte",o,len)]);push(r,7,"SSH","Inhalt verschlüsselt",o,len,[]);r.proto="SSH";r.info="verschlüsseltes SSH-Paket, "+len+" Byte";return;}
+  if(sp===1883||dp===1883)return dMQTT(d,o,len,r);
+  if([21,25,110,143,587].includes(sp)||[21,25,110,143,587].includes(dp)){const pn=PORTS[Math.min(sp,dp)]||"Text";
+    const lines=str(d,o,len).split("\r\n").filter(x=>x);addPres(r,"Zeilentext",o,len,"Befehle und Antworten als ASCII-Zeilen mit CRLF-Abschluss.");
+    push(r,7,pn,pn+"-Dialog",o,len,lines.map(l=>F("Zeile",l,o,len)));r.proto=pn;r.info=lines[0]||"";return;}
+  dGenericData(d,o,len,r);
+}
+function dUDP(d,o,len,r,stt,ver,ipo){
+  const sp=u16(d,o),dp=u16(d,o+2),ul=u16(d,o+4),ck=u16(d,o+6);
+  let ok=null;if(ck===0)ok="aus";else if(ul<=d.length-o)ok=((inetSum(d,o,ul,pseudoSum(d,ipo,ver,17,ul)))&0xffff)===0xffff;
+  push(r,4,"UDP","User Datagram Protocol, Port "+sp+" → "+dp,o,8,[F("Quellport",portName(sp),o,2),F("Zielport",portName(dp),o+2,2),
+    F("Länge",ul+" Byte (Kopf + Nutzdaten)",o+4,2),F("Prüfsumme",hx(ck,4)+(ok==="aus"?" (nicht benutzt)":ok===null?"":ok?" ✓ korrekt":" ✗ falsch"),o+6,2),
+    F("Nutzdaten",(ul-8)+" Byte",o+8,ul-8)],
+    "UDP verschickt einzelne Datagramme ohne Verbindung, ohne Bestätigung und ohne Reihenfolge – schnell und schlank, z. B. für DNS, DHCP, Telefonie.");
+  r.proto="UDP";r.info=sp+" → "+dp+" Len="+(ul-8);r.cls="c-udp";r.sp=sp;r.dp=dp;r.l4="udp";
+  const po=o+8,pl=Math.max(0,Math.min(ul-8,d.length-po));if(!pl)return;
+  const has=p=>sp===p||dp===p;
+  if(has(53))return dDNS(d,po,pl,r,stt,"DNS");
+  if(has(5353))return dDNS(d,po,pl,r,stt,"mDNS");
+  if(has(5355))return dDNS(d,po,pl,r,stt,"LLMNR");
+  if(has(67)||has(68))return dDHCP(d,po,pl,r);
+  if(has(123))return dNTP(d,po,pl,r);
+  if(has(1900))return dHTTP(d,po,pl,r,null,"SSDP");
+  if(has(5060))return dHTTP(d,po,pl,r,null,"SIP");
+  if(has(3478)||(pl>=20&&u32(d,po+4)===0x2112a442))return dSTUN(d,po,pl,r);
+  if(has(443)&&(d[po]&0x40))return dQUIC(d,po,pl,r);
+  if(has(514)){addPres(r,"Text",po,pl,"Syslog-Meldungen sind schlichter Text.");push(r,7,"Syslog","Syslog-Meldung",po,pl,[F("Meldung",str(d,po,pl),po,pl)]);r.proto="Syslog";r.info=str(d,po,Math.min(pl,90));return;}
+  dGenericData(d,po,pl,r);
+}
+function addPres(r,proto,o,len,note,fields){push(r,6,proto,proto,o,len,fields||[F("Kodierung",note,o,len)],note);}
+function dGenericData(d,o,len,r,label){
+  const k=textKind(d,o,len);
+  addPres(r,k,o,len,"Ohne bekanntes Protokoll lässt sich nur raten, wie die Bytes zu deuten sind: Erkannt wurde „"+k+"“.",[F("Vermutete Kodierung",k,o,len)]);
+  push(r,7,label||"Daten",(label||"Nutzdaten")+", "+len+" Byte",o,len,[F("Hex",bytesHex(d,o,len,48),o,len),F("Als Text",ascii(d,o,Math.min(len,200)),o,len)],
+    "Für diesen Port ist kein Protokoll-Zerleger hinterlegt; gezeigt werden die rohen Nutzdaten.");
+  if(label){r.proto=label.split(" ")[0];r.info=label+", "+len+" Byte";}else r.info+=" · "+len+" Byte Daten";
+}
+
+/* ===================== Anwendungsprotokolle ===================== */
+const DNSTYPES={1:"A",2:"NS",5:"CNAME",6:"SOA",12:"PTR",15:"MX",16:"TXT",28:"AAAA",33:"SRV",41:"OPT",47:"NSEC",64:"SVCB",65:"HTTPS",255:"ANY"};
+function dnsName(d,base,o,end){
+  const parts=[];let p=o,jumped=false,next=o,guard=0;
+  while(p<end&&guard++<128){const l=d[p];
+    if(l===0){p++;break;}
+    if((l&0xc0)===0xc0){if(!jumped)next=p+2;jumped=true;p=base+(((l&0x3f)<<8)|d[p+1]);continue;}
+    parts.push(utf8(d,p+1,l));p+=l+1;}
+  return {name:parts.join(".")||"<Wurzel>",end:jumped?next:p};
+}
+function dDNS(d,o,len,r,stt,label,tcpo){
+  const end=o+len;if(len<12){return dGenericData(d,o,len,r);}
+  const id=u16(d,o),fl=u16(d,o+2),qd=u16(d,o+4),an=u16(d,o+6),ns=u16(d,o+8),ar=u16(d,o+10);
+  const qr=fl>>15,op=(fl>>11)&15,rc=fl&15;const RC={0:"kein Fehler",1:"Formatfehler",2:"Serverfehler",3:"Name existiert nicht (NXDOMAIN)",5:"abgelehnt"};
+  const f=[];if(tcpo!==undefined)f.push(F("Längenpräfix (TCP)",len+" Byte",tcpo,2));
+  f.push(F("Transaktions-ID",hx(id,4),o,2),F("Flags",hx(fl,4)+" "+(qr?"Antwort":"Anfrage")+(qr?", "+(RC[rc]||"Fehler "+rc):""),o+2,2,[
+    F("QR",bits(fl,16,0x8000)+" = "+(qr?"Antwort":"Anfrage"),o+2,2),F("Opcode",String(op),o+2,2),F("AA (autoritativ)",String((fl>>10)&1),o+2,2),
+    F("TC (gekürzt)",String((fl>>9)&1),o+2,2),F("RD (Rekursion gewünscht)",String((fl>>8)&1),o+2,2),F("RA (Rekursion verfügbar)",String((fl>>7)&1),o+2,2),F("Antwortcode",rc+" = "+(RC[rc]||"?"),o+2,2)]),
+    F("Fragen / Antworten / Autorität / Zusatz",qd+" / "+an+" / "+ns+" / "+ar,o+4,8));
+  let p=o+12;const qs=[];const ans=[];
+  for(let i=0;i<qd&&p<end;i++){const n=dnsName(d,o,p,end);const t=u16(d,n.end),c=u16(d,n.end+2);
+    qs.push((DNSTYPES[t]||t)+" "+n.name);f.push(F("Frage",n.name+"  Typ "+(DNSTYPES[t]||t)+"  Klasse "+((c&0x7fff)===1?"IN":c)+((c&0x8000)?" (Unicast-Antwort erwünscht)":""),p,n.end+4-p));p=n.end+4;}
+  const secs=[["Antwort",an],["Autorität",ns],["Zusatz",ar]];
+  for(const [sn,cnt] of secs)for(let i=0;i<cnt&&p<end;i++){
+    const n=dnsName(d,o,p,end);const t=u16(d,n.end),ttl=u32(d,n.end+4),rl=u16(d,n.end+8),rd=n.end+10;let v;
+    if(t===1&&rl===4)v=ip4(d,rd);else if(t===28&&rl===16)v=ip6(d,rd);
+    else if(t===5||t===12||t===2)v=dnsName(d,o,rd,end).name;
+    else if(t===15)v=u16(d,rd)+" "+dnsName(d,o,rd+2,end).name;
+    else if(t===33)v="Prio "+u16(d,rd)+" Gew. "+u16(d,rd+2)+" Port "+u16(d,rd+4)+" "+dnsName(d,o,rd+6,end).name;
+    else if(t===16){let q=rd,a=[];while(q<rd+rl){a.push(utf8(d,q+1,d[q]));q+=d[q]+1;}v='"'+a.join('" "')+'"';}
+    else if(t===41)v="EDNS0, UDP-Puffer "+u16(d,n.end+2)+" Byte";
+    else v=bytesHex(d,rd,rl,24);
+    if(sn==="Antwort")ans.push((DNSTYPES[t]||t)+" "+v);
+    f.push(F(sn,n.name+"  "+(DNSTYPES[t]||"Typ "+t)+"  "+v+(t!==41?"  (TTL "+ttl+" s)":""),p,rd+rl-p));p=rd+rl;
+    if((t===1||t===28)&&stt)stt.dns.set(v,n.name);
+  }
+  push(r,5,label+"-Austausch","keine Sitzung – Zuordnung über Transaktions-ID",0,0,[F("Transaktions-ID",hx(id,4),o,2),F("Rolle",qr?"Antwort auf frühere Anfrage mit gleicher ID":"Anfrage, wartet auf Antwort mit gleicher ID",0,0)],
+    "DNS hat keine echte Sitzung. Frage und Antwort werden nur über die 16-Bit-Transaktions-ID und die Ports einander zugeordnet.");
+  addPres(r,"DNS-Namenskodierung",o+12,Math.max(0,p-o-12),"Domainnamen werden als Folge von Längen-Präfix-Labels gespeichert („3www7example3com0“); wiederholte Namen werden durch 2-Byte-Zeiger (0xC0…) komprimiert.");
+  push(r,7,label,label+" "+(qr?"Antwort":"Anfrage")+" "+hx(id,4),o,len,f,"Das Domain Name System übersetzt Namen in Adressen.");
+  r.proto=label;r.cls="c-dns";
+  r.info=(qr?"Antwort ":"Anfrage ")+hx(id,4)+" "+qs.join(", ")+(qr?(rc?" → "+(RC[rc]||rc):" → "+(ans.join(", ")||"(leer)")):"");
+}
+const DHCPMSG={1:"DISCOVER",2:"OFFER",3:"REQUEST",4:"DECLINE",5:"ACK",6:"NAK",7:"RELEASE",8:"INFORM"};
+const DHCPOPT={1:"Subnetzmaske",3:"Router (Gateway)",6:"DNS-Server",12:"Hostname",15:"Domainname",28:"Broadcast-Adresse",42:"NTP-Server",50:"Gewünschte IP",51:"Lease-Dauer",53:"Nachrichtentyp",54:"DHCP-Server",55:"Parameter-Wunschliste",57:"Max. Nachrichtengröße",58:"Erneuern nach (T1)",59:"Neu binden nach (T2)",60:"Herstellerkennung",61:"Client-Kennung",81:"Client-FQDN",119:"Domain-Suchliste",252:"Proxy-Autokonfig"};
+function dDHCP(d,o,len,r){
+  if(len<240)return dGenericData(d,o,len,r);
+  const op=d[o],xid=u32(d,o+4);const f=[F("Operation",op===1?"1 = Anfrage (BOOTREQUEST)":"2 = Antwort (BOOTREPLY)",o,1),F("Hardwaretyp / -länge",d[o+1]+" / "+d[o+2],o+1,2),
+    F("Hops",String(d[o+3]),o+3,1),F("Transaktions-ID",hx(xid,8),o+4,4),F("Sekunden",String(u16(d,o+8)),o+8,2),F("Flags",u16(d,o+10)&0x8000?"Broadcast":"Unicast",o+10,2),
+    F("Client-IP (ciaddr)",ip4(d,o+12),o+12,4),F("Zugewiesene IP (yiaddr)",ip4(d,o+16),o+16,4),F("Server-IP (siaddr)",ip4(d,o+20),o+20,4),F("Relay (giaddr)",ip4(d,o+24),o+24,4),
+    F("Client-MAC (chaddr)",macInfo(mac(d,o+28)),o+28,16),F("Servername / Bootdatei","(unbenutzt)",o+44,192),F("Magic Cookie",hx(u32(d,o+236),8)+" (DHCP)",o+236,4)];
+  let p=o+240,mt=0,host="",req="";const of=[];
+  while(p<o+len){const c=d[p];if(c===255){of.push(F("Ende",String(c),p,1));break;}if(c===0){p++;continue;}const l=d[p+1],v=p+2;let s;
+    if([1,3,6,28,42,50,54].includes(c)){const a=[];for(let i=0;i<l;i+=4)a.push(ip4(d,v+i));s=a.join(", ");}
+    else if(c===53){mt=d[v];s=DHCPMSG[mt]||mt;}else if([51,58,59].includes(c)){const t=u32(d,v);s=t+" s ("+(t/3600).toFixed(1)+" h)";}
+    else if([12,15,60].includes(c)){s=str(d,v,l);if(c===12)host=s;}else if(c===55){s=Array.from(d.subarray(v,v+l)).map(x=>DHCPOPT[x]||x).join(", ");}
+    else if(c===61)s=d[v]===1?"MAC "+mac(d,v+1):bytesHex(d,v,l);else s=bytesHex(d,v,l);
+    if(c===50)req=s;
+    of.push(F("Option "+c+" "+(DHCPOPT[c]||""),s,p,l+2));p+=l+2;}
+  f.push(F("Optionen",of.length+" Stück",o+240,p-o-240+1,of));
+  push(r,5,"DHCP-Ablauf","Transaktion "+hx(xid,8),0,0,[F("Transaktions-ID",hx(xid,8),o+4,4),F("Schritt",{1:"1/4 – Client sucht einen Server",2:"2/4 – Server bietet eine Adresse an",3:"3/4 – Client fordert die Adresse an",5:"4/4 – Server bestätigt, Adresse ist vergeben"}[mt]||(DHCPMSG[mt]||""),0,0)],
+    "DHCP läuft als vierstufiger Dialog („DORA“: Discover, Offer, Request, Ack), zusammengehalten durch die Transaktions-ID.");
+  push(r,7,"DHCP","Dynamic Host Configuration Protocol – "+(DHCPMSG[mt]||""),o,len,f,"DHCP verteilt IP-Adresse, Netzmaske, Router und DNS-Server an neue Geräte – zu Hause meist von der FRITZ!Box.");
+  r.proto="DHCP";r.cls="c-dhcp";r.info="DHCP "+(DHCPMSG[mt]||mt)+" – Transaktion "+hx(xid,8)+(ip4(d,o+16)!=="0.0.0.0"?" → "+ip4(d,o+16):"")+(req?" (wünscht "+req+")":"")+(host?" ["+host+"]":"");
+}
+function ntpTime(d,o){const s=u32(d,o),f=u32(d,o+4);if(!s)return "0";return fmtAbs(s-2208988800+f/4294967296);}
+function dNTP(d,o,len,r){
+  if(len<48)return dGenericData(d,o,len,r);
+  const li=d[o]>>6,vn=(d[o]>>3)&7,md=d[o]&7,strat=d[o+1];const MD={1:"symmetrisch aktiv",2:"symmetrisch passiv",3:"Client",4:"Server",5:"Broadcast"};
+  const ref=strat<=1?str(d,o+12,4).replace(/\0/g,""):ip4(d,o+12);
+  push(r,6,"NTP-Zeitformat","64-Bit-Festkomma, Sekunden seit 1.1.1900",o+16,32,[F("Kodierung","32 Bit Sekunden + 32 Bit Bruchteile seit 1900-01-01",o+16,32)],"NTP zählt Zeit nicht in Unix-Sekunden (ab 1970), sondern ab 1900 – die Darstellung muss umgerechnet werden.");
+  push(r,7,"NTP","Network Time Protocol v"+vn+", "+(MD[md]||md),o,len,[F("Leap / Version / Modus",li+" / "+vn+" / "+(MD[md]||md),o,1),F("Stratum",strat+(strat===1?" (direkt an Referenzuhr)":""),o+1,1),
+    F("Abfrageintervall",(1<<d[o+2])+" s",o+2,1),F("Präzision","2^"+((d[o+3]<<24)>>24)+" s",o+3,1),F("Referenz-ID",ref,o+12,4),
+    F("Referenzzeit",ntpTime(d,o+16),o+16,8),F("Ursprungszeit",ntpTime(d,o+24),o+24,8),F("Empfangszeit",ntpTime(d,o+32),o+32,8),F("Sendezeit",ntpTime(d,o+40),o+40,8)],
+    "NTP stellt die Uhren im Netz: Aus den vier Zeitstempeln berechnet der Client Laufzeit und Abweichung.");
+  r.proto="NTP";r.info="NTP v"+vn+" "+(MD[md]||md)+", Stratum "+strat;
+}
+function parseHeaders(d,o,len){
+  let txt=str(d,o,Math.min(len,8192));const he=txt.indexOf("\r\n\r\n");const hlen=he>=0?he+4:len;
+  const lines=txt.slice(0,he>=0?he:txt.length).split("\r\n");const hd={};const fl=[];let p=o;
+  lines.forEach((l,i)=>{fl.push({line:l,off:p,len:l.length+2});p+=l.length+2;if(i){const c=l.indexOf(":");if(c>0)hd[l.slice(0,c).trim().toLowerCase()]=l.slice(c+1).trim();}});
+  return {first:lines[0],hd:hd,lines:fl,hlen:hlen,complete:he>=0};
+}
+function dHTTP(d,o,len,r,st,label){
+  const h=parseHeaders(d,o,len);const bo=o+h.hlen,bl=Math.max(0,o+len-bo);
+  const f=h.lines.map((l,i)=>i===0?F(/^(HTTP|SIP)\//.test(l.line)?"Statuszeile":"Anfragezeile",l.line,l.off,l.len):F(l.line.split(":")[0],l.line.slice(l.line.indexOf(":")+1).trim(),l.off,l.len));
+  if(!h.complete)f.push(F("⚠ Hinweis","Kopf endet nicht in diesem Segment (geht im nächsten weiter)",o,0));
+  if(bl)f.push(F("Nachrichtenkörper",bl+" Byte",bo,bl));
+  // Sitzung
+  const s5=[];
+  if(label==="SIP"){if(h.hd["call-id"])s5.push(F("Call-ID",h.hd["call-id"],o,0));if(h.hd["cseq"])s5.push(F("CSeq",h.hd["cseq"],o,0));if(h.hd["from"])s5.push(F("Von",h.hd["from"],o,0));if(h.hd["to"])s5.push(F("An",h.hd["to"],o,0));
+    push(r,5,"SIP-Dialog","Telefonie-Sitzung "+(h.hd["call-id"]||""),0,0,s5,"SIP ist ein echtes Sitzungsprotokoll: Es baut Telefongespräche auf (INVITE), hält sie und beendet sie (BYE). Die Call-ID kennzeichnet die Sitzung – so telefoniert auch die FRITZ!Box.");}
+  else if(label==="HTTP"){
+    if(h.hd["cookie"])s5.push(F("Cookie",h.hd["cookie"],o,0));if(h.hd["set-cookie"])s5.push(F("Set-Cookie",h.hd["set-cookie"],o,0));
+    if(h.hd["connection"])s5.push(F("Connection",h.hd["connection"],o,0));if(h.hd["authorization"])s5.push(F("Authorization",h.hd["authorization"],o,0));
+    if(st&&(h.hd["cookie"]||h.hd["set-cookie"]))st.cookie=true;
+    push(r,5,"HTTP-Zustand",s5.length?"Sitzungszustand über Kopfzeilen":"zustandslos",0,0,s5,"HTTP selbst ist zustandslos – jede Anfrage steht für sich. Eine „Sitzung“ (Anmeldung, Warenkorb) entsteht erst durch Cookies oder Tokens in den Kopfzeilen; die TCP-Verbindung kann per Keep-Alive für mehrere Anfragen bestehen bleiben.");}
+  const ct=h.hd["content-type"]||"",ce=h.hd["content-encoding"]||"",te=h.hd["transfer-encoding"]||"";
+  const pf=[F("Kopfzeilen-Kodierung","ASCII-Text, Zeilenende CR LF, Kopfende = Leerzeile",o,h.hlen)];
+  if(ct)pf.push(F("Inhaltstyp (MIME)",ct,o,0));if(ce)pf.push(F("Kompression",ce,o,0));if(te)pf.push(F("Übertragungskodierung",te,o,0));
+  if(bl)pf.push(F("Körper erkannt als",ce?"komprimiert ("+ce+")":textKind(d,bo,bl),bo,bl));
+  push(r,6,label+"-Darstellung",ct||"Textprotokoll",o,len,pf,"Schicht 6 beschreibt, wie die Daten kodiert sind: Zeichensatz, Datenformat (MIME-Typ), Kompression. Bei "+label+" steht das in den Kopfzeilen.");
+  if(bl&&!ce&&textKind(d,bo,bl)!=="Binärdaten")f.push(F("Körper als Text",utf8(d,bo,Math.min(bl,400)),bo,bl));
+  push(r,7,label,label+" "+h.first,o,len,f,label==="HTTP"?"Das Hypertext Transfer Protocol – die Sprache des Webs. Hier unverschlüsselt und damit vollständig lesbar!":label==="SSDP"?"Simple Service Discovery – Geräte (FRITZ!Box, Fernseher, NAS) kündigen sich per Multicast im Heimnetz an (UPnP).":"Session Initiation Protocol – Signalisierung für Internettelefonie.");
+  r.proto=label;r.cls=label==="HTTP"?"c-http":"c-udp";r.info=h.first;
+}
+const CIPHERS={0x1301:"TLS_AES_128_GCM_SHA256",0x1302:"TLS_AES_256_GCM_SHA384",0x1303:"TLS_CHACHA20_POLY1305_SHA256",0xc02b:"ECDHE_ECDSA_AES_128_GCM_SHA256",0xc02c:"ECDHE_ECDSA_AES_256_GCM_SHA384",0xc02f:"ECDHE_RSA_AES_128_GCM_SHA256",0xc030:"ECDHE_RSA_AES_256_GCM_SHA384",0xcca8:"ECDHE_RSA_CHACHA20_POLY1305",0xcca9:"ECDHE_ECDSA_CHACHA20_POLY1305",0x009c:"RSA_AES_128_GCM_SHA256",0x002f:"RSA_AES_128_CBC_SHA",0x0035:"RSA_AES_256_CBC_SHA",0x00ff:"Renegotiation-SCSV"};
+const TLSVER={0x0300:"SSL 3.0",0x0301:"TLS 1.0",0x0302:"TLS 1.1",0x0303:"TLS 1.2",0x0304:"TLS 1.3"};
+const GROUPS={0x1d:"x25519",0x17:"secp256r1",0x18:"secp384r1",0x11ec:"X25519MLKEM768",0x6399:"X25519Kyber768"};
+const EXTN={0:"server_name (SNI)",10:"supported_groups",11:"ec_point_formats",13:"signature_algorithms",16:"ALPN",23:"extended_master_secret",35:"session_ticket",43:"supported_versions",45:"psk_key_exchange_modes",51:"key_share",65281:"renegotiation_info",41:"pre_shared_key",5:"status_request",18:"SCT",27:"compress_certificate",17513:"ALPS",65037:"encrypted_client_hello"};
+const grease=v=>(v&0x0f0f)===0x0a0a&&(v>>8)===(v&0xff);
+const HSN={1:"ClientHello",2:"ServerHello",4:"NewSessionTicket",8:"EncryptedExtensions",11:"Certificate",12:"ServerKeyExchange",13:"CertificateRequest",14:"ServerHelloDone",15:"CertificateVerify",16:"ClientKeyExchange",20:"Finished"};
+function dTLS(d,o,len,r,st){
+  const end=o+len;let p=o;const recs=[];const s5=[];const i7=[];let app=0;
+  while(p+5<=end){
+    const ct=d[p],ver=u16(d,p+1),rl=u16(d,p+3);if(ct<20||ct>23)break;const avail=Math.min(rl,end-p-5);
+    const CT={20:"ChangeCipherSpec",21:"Alert",22:"Handshake",23:"Anwendungsdaten"};
+    const rf=[F("Inhaltstyp",ct+" = "+CT[ct],p,1),F("Version (Record)",TLSVER[ver]||hx(ver,4),p+1,2),F("Länge",rl+" Byte"+(avail<rl?" (nur "+avail+" in diesem Segment)":""),p+3,2)];
+    const q=p+5;
+    if(ct===22&&avail>=4){
+      const ht=d[q],hl=(d[q+1]<<16)|(d[q+2]<<8)|d[q+3];const hn=HSN[ht]||("Handshake "+ht);
+      if(st&&st.state!=="aufgebaut"&&ht>20){rf.push(F("Handshake (verschlüsselt)",avail+" Byte",q,avail));recs.push(F("TLS-Datensatz: verschlüsselter Handshake",rl+" Byte",p,5+avail,rf));p+=5+rl;continue;}
+      const hf=[F("Nachrichtentyp",ht+" = "+hn,q,1),F("Länge",hl+" Byte",q+1,3)];
+      if((ht===1||ht===2)&&avail>=38){
+        let x=q+4;hf.push(F("Version (veraltet, fest)",TLSVER[u16(d,x)]||hx(u16(d,x),4),x,2));hf.push(F("Zufallswert",bytesHex(d,x+2,32,16),x+2,32));x+=34;
+        const sl=d[x];hf.push(F("Sitzungs-ID",sl?bytesHex(d,x+1,sl,16):"(leer)",x,1+sl));s5.push(F("Sitzungs-ID",sl?bytesHex(d,x+1,sl,12):"keine",x,1+sl));x+=1+sl;
+        let chosen=0;
+        if(ht===1){const cl=u16(d,x);const cs=[];for(let i=0;i<cl;i+=2){const c=u16(d,x+2+i);if(!grease(c))cs.push(CIPHERS[c]||hx(c,4));}
+          hf.push(F("Angebotene Verschlüsselungsverfahren",cs.length+" Stück",x,2+cl,cs.map(c=>F("Suite",c,x,2+cl))));x+=2+cl;hf.push(F("Kompression",d[x]+" Verfahren",x,1+d[x]));x+=1+d[x];}
+        else{chosen=u16(d,x);hf.push(F("Gewähltes Verfahren",CIPHERS[chosen]||hx(chosen,4),x,2));x+=2;hf.push(F("Kompression",String(d[x]),x,1));x+=1;}
+        let realv="";
+        if(x+2<=q+4+hl&&x+2<=end){const el=u16(d,x);const ef=[];let e=x+2;const ee=Math.min(x+2+el,end);
+          while(e+4<=ee){const et=u16(d,e),elen=u16(d,e+2),ev=e+4;let s="";
+            if(grease(et)){s="GREASE (Platzhalter gegen Verknöcherung)";}
+            else if(et===0&&elen>5){const nl=u16(d,ev+3);s=str(d,ev+5,nl);if(st)st.sni=s;}
+            else if(et===16){const a=[];let k=ev+2;while(k<ev+elen){a.push(str(d,k+1,d[k]));k+=d[k]+1;}s=a.join(", ");if(st&&ht===2)st.alpn=s;else if(st&&!st.alpn)st.alpnOffer=s;}
+            else if(et===43){if(ht===1){const a=[];for(let k=1;k<=d[ev];k+=2){const v=u16(d,ev+k);if(!grease(v))a.push(TLSVER[v]||hx(v,4));}s=a.join(", ");}else{realv=TLSVER[u16(d,ev)]||"";s=realv;}}
+            else if(et===10){const a=[];for(let k=2;k<2+u16(d,ev);k+=2){const g=u16(d,ev+k);if(!grease(g))a.push(GROUPS[g]||hx(g,4));}s=a.join(", ");}
+            else if(et===51){s=ht===2?(GROUPS[u16(d,ev)]||hx(u16(d,ev),4)):"Schlüsselanteile für "+elen+" Byte";}
+            else s=elen+" Byte";
+            ef.push(F(EXTN[et]||("Erweiterung "+et),s,e,4+elen));e+=4+elen;}
+          hf.push(F("Erweiterungen",ef.length+" Stück",x,2+el,ef));}
+        if(ht===1){i7.push("ClientHello"+(st&&st.sni?" für "+st.sni:""));s5.push(F("Schritt","Client eröffnet die TLS-Sitzung (ClientHello)",q,0));if(st&&st.sni)s5.push(F("Servername (SNI)",st.sni,q,0));if(st&&st.alpnOffer)s5.push(F("Gewünschte Protokolle (ALPN)",st.alpnOffer,q,0));}
+        else{i7.push("ServerHello"+(realv?" ("+realv+")":""));s5.push(F("Schritt","Server nimmt an: "+(realv||TLSVER[u16(d,q+4)]||"")+", "+(CIPHERS[chosen]||hx(chosen,4)),q,0));if(st)st.state2="TLS ausgehandelt";if(realv==="TLS 1.3"&&st)st.tls13=true;}
+      }else{i7.push(hn);s5.push(F("Schritt",hn,q,0));}
+      rf.push(F("Handshake: "+hn,hl+" Byte",q,Math.min(4+hl,avail),hf));
+    }else if(ct===23){app+=rl;rf.push(F("Verschlüsselte Nutzdaten",avail+" Byte (AEAD-verschlüsselt)",q,avail));}
+    else if(ct===21){rf.push(F("Alarm",avail===2?("Stufe "+d[q]+", Beschreibung "+d[q+1]):"verschlüsselt",q,avail));i7.push("Alert");}
+    else if(ct===20){rf.push(F("Wechsel",st&&st.tls13?"nur Kompatibilität (TLS 1.3)":"ab jetzt verschlüsselt",q,avail));i7.push("ChangeCipherSpec");}
+    recs.push(F("TLS-Datensatz: "+CT[ct],rl+" Byte",p,5+avail,rf));
+    p+=5+rl;
+  }
+  if(s5.length)push(r,5,"TLS-Sitzung","Aushandlung der sicheren Sitzung",0,0,s5,"Im Handshake vereinbaren Client und Server Version, Verfahren und Schlüssel – das ist der Aufbau einer Sitzung im Sinne von Schicht 5. Mit Sitzungs-ID oder Ticket kann sie später fortgesetzt werden.");
+  push(r,6,"TLS","Transport Layer Security – Verschlüsselung",o,len,recs,"TLS ist die klassische Darstellungsschicht-Aufgabe: Daten werden verschlüsselt und authentisiert, bevor sie über TCP gehen. Ohne Schlüssel ist der Inhalt nicht lesbar.");
+  const alpn=st&&st.alpn?st.alpn:"";
+  if(app)push(r,7,alpn==="h2"?"HTTP/2 (verschlüsselt)":alpn?alpn+" (verschlüsselt)":"verschlüsselt","Anwendungsdaten – Inhalt nicht sichtbar",o,len,[F("Menge",app+" Byte",o,len),F("Vermutetes Protokoll",alpn?"ALPN sagt „"+alpn+"“":(st&&st.sni?"Web (HTTPS) zu "+st.sni:"unbekannt"),o,0)],
+    "Nur Client und Server können das entschlüsseln. Hinweise auf den Inhalt geben nur Servername (SNI), ALPN, Paketgrößen und Zeitpunkte.");
+  r.proto="TLS"+(st&&st.tls13?"v1.3":"");r.cls="c-tls";
+  r.info=(i7.length?i7.join(", "):"")+(app?(i7.length?", ":"")+"Anwendungsdaten "+app+" Byte":"")+(st&&st.sni&&!i7.length?" ("+st.sni+")":"");
+}
+function dQUIC(d,o,len,r){
+  const lf=d[o]&0x80;const f=[F("Kopfform",lf?"lang (Verbindungsaufbau)":"kurz (Datenphase)",o,1)];let info="QUIC";
+  if(lf){const v=u32(d,o+1);const dl=d[o+5];const T=["Initial","0-RTT","Handshake","Retry"];const t=(d[o]>>4)&3;
+    f.push(F("Pakettyp",T[t],o,1),F("Version",hx(v,8)+(v===1?" (QUIC v1)":v===0x6b3343cf?" (QUIC v2)":""),o+1,4),F("Ziel-Verbindungs-ID",bytesHex(d,o+6,dl),o+5,1+dl));info="QUIC "+T[t]+", DCID "+bytesHex(d,o+6,Math.min(dl,8),8).replace(/ /g,"");}
+  else{f.push(F("Ziel-Verbindungs-ID + verschlüsselter Rest",len-1+" Byte",o+1,len-1));info="QUIC kurzer Kopf (geschützte Daten)";}
+  push(r,5,"QUIC-Verbindung","Verbindung über Verbindungs-ID",0,0,[F("Hinweis","QUIC bündelt Transport, Sitzung und Verschlüsselung (TLS 1.3) in einem Protokoll über UDP",o,0)],"QUIC hält die Verbindung per Verbindungs-ID – sie überlebt sogar einen Wechsel von WLAN zu Mobilfunk.");
+  push(r,6,"QUIC/TLS 1.3","integrierte Verschlüsselung",o,len,f);
+  push(r,7,"HTTP/3 (verschlüsselt)","vermutlich HTTP/3",o,len,[F("Inhalt","verschlüsselt",o,len)]);
+  r.proto="QUIC";r.cls="c-tls";r.info=info;
+}
+function dSTUN(d,o,len,r){
+  const t=u16(d,o),l=u16(d,o+2);const T={1:"Binding-Anfrage",0x101:"Binding-Antwort",0x111:"Binding-Fehler"};const f=[F("Nachrichtentyp",hx(t,4)+" "+(T[t]||""),o,2),F("Länge",String(l),o+2,2),F("Magic Cookie",hx(u32(d,o+4),8),o+4,4),F("Transaktions-ID",bytesHex(d,o+8,12),o+8,12)];
+  let p=o+20,info=T[t]||"STUN";while(p+4<=o+20+l&&p+4<=o+len){const at=u16(d,p),al=u16(d,p+2);
+    if(at===0x20&&d[p+5]===1){const port=u16(d,p+6)^0x2112;const a=[0,1,2,3].map(i=>d[p+8+i]^[0x21,0x12,0xa4,0x42][i]).join(".");f.push(F("XOR-Mapped-Address",a+":"+port+" (so sieht dich das Internet)",p,4+al));info+=" → "+a+":"+port;}
+    else f.push(F("Attribut "+hx(at,4),bytesHex(d,p+4,al),p,4+al));p+=4+((al+3)&~3);}
+  push(r,7,"STUN","Session Traversal Utilities for NAT",o,len,f,"STUN fragt einen Server, unter welcher öffentlichen Adresse man hinter dem NAT des Routers erscheint – wichtig für Telefonie und Videokonferenzen.");
+  r.proto="STUN";r.info=info;
+}
+function dMQTT(d,o,len,r){
+  const t=d[o]>>4;const T=["?","CONNECT","CONNACK","PUBLISH","PUBACK","PUBREC","PUBREL","PUBCOMP","SUBSCRIBE","SUBACK","UNSUBSCRIBE","UNSUBACK","PINGREQ","PINGRESP","DISCONNECT","AUTH"];
+  let p=o+1,rl=0,m=1;do{rl+=(d[p]&127)*m;m*=128;}while(d[p++]&128&&p<o+5);
+  const f=[F("Typ",T[t],o,1),F("Restlänge",String(rl),o+1,p-o-1)];let info="MQTT "+T[t];
+  if(t===3){const tl=u16(d,p);const topic=str(d,p+2,tl);const q=(d[o]>>1)&3;let pp=p+2+tl+(q?2:0);f.push(F("Thema (Topic)",topic,p,2+tl),F("Nachricht",utf8(d,pp,o+len-pp),pp,o+len-pp));info+=" "+topic+" = "+ascii(d,pp,Math.min(40,o+len-pp));}
+  push(r,7,"MQTT","Message Queuing Telemetry Transport",o,len,f,"Leichtgewichtiges Publish/Subscribe-Protokoll fürs Internet der Dinge (z. B. Sensoren, Brausteuerungen).");
+  r.proto="MQTT";r.info=info;
+}
+/* ===================== Demo-Mitschnitt erzeugen ===================== */
+function buildDemo(){
+  const B=a=>Array.from(a);const s2b=s=>Array.from(new TextEncoder().encode(s));
+  const be16=v=>[(v>>8)&255,v&255],be32=v=>[(v>>>24)&255,(v>>16)&255,(v>>8)&255,v&255];
+  const macB=m=>m.split(":").map(x=>parseInt(x,16));const ipB=a=>a.split(".").map(Number);
+  const ip6B=a=>{const [h,t]=a.split("::");const hp=h?h.split(":"):[],tp=t!==undefined&&t?t.split(":"):[];const g=hp.concat(Array(8-hp.length-tp.length).fill("0"),tp);return g.flatMap(x=>be16(parseInt(x,16)));};
+  const sum=(arr,init)=>{let s=init||0;for(let i=0;i+1<arr.length;i+=2)s+=(arr[i]<<8)|arr[i+1];if(arr.length&1)s+=arr[arr.length-1]<<8;while(s>>16)s=(s&0xffff)+(s>>16);return s;};
+  const FB_MAC="3c:a6:2f:11:22:33",PC_MAC="dc:a6:32:aa:bb:cc",FB="192.168.178.1",PC="192.168.178.20";
+  const eth=(dst,src,type,pl)=>macB(dst).concat(macB(src),be16(type),pl);
+  let ipid=0x1c46;
+  const ipv4=(s,t,pr,pl,ttl)=>{const h=[0x45,0,...be16(20+pl.length),...be16(ipid++),0x40,0,ttl||64,pr,0,0,...ipB(s),...ipB(t)];const c=(~sum(h))&0xffff;h[10]=c>>8;h[11]=c&255;return h.concat(pl);};
+  const l4ck=(s,t,pr,seg)=>{const ps=ipB(s).concat(ipB(t),[0,pr],be16(seg.length));return (~sum(ps.concat(seg)))&0xffff;};
+  const udp=(s,t,sp,dp,pl)=>{const u=[...be16(sp),...be16(dp),...be16(8+pl.length),0,0].concat(pl);const c=l4ck(s,t,17,u)||0xffff;u[6]=c>>8;u[7]=c&255;return ipv4(s,t,17,u);};
+  const tcpSeg=(s,t,sp,dp,seq,ack,fl,pl,opts)=>{opts=opts||[];const hl=20+opts.length;const g=[...be16(sp),...be16(dp),...be32(seq),...be32(ack),(hl/4)<<4,fl,...be16(64240),0,0,0,0].concat(opts,pl||[]);const c=l4ck(s,t,6,g);g[16]=c>>8;g[17]=c&255;return ipv4(s,t,6,g);};
+  const pk=[];let T=1792915200.0;const add=(bytes,dt)=>{T+=dt||0.0004;pk.push({t:T,b:bytes});};
+  const dnsName=n=>n.split(".").flatMap(l=>[l.length].concat(s2b(l))).concat([0]);
+  // --- DHCP DORA
+  const xid=0x3903f326;
+  const dhcp=(op,yi,mt,extra)=>{const b=Array(240).fill(0);b[0]=op;b[1]=1;b[2]=6;be32(xid).forEach((v,i)=>b[4+i]=v);b[10]=0x80;ipB(yi).forEach((v,i)=>b[16+i]=v);if(op===2)ipB(FB).forEach((v,i)=>b[20+i]=v);macB(PC_MAC).forEach((v,i)=>b[28+i]=v);[0x63,0x82,0x53,0x63].forEach((v,i)=>b[236+i]=v);return b.concat([53,1,mt],extra,[255]);};
+  const hn=s2b("braurechner");
+  add(eth("ff:ff:ff:ff:ff:ff",PC_MAC,0x800,udp("0.0.0.0","255.255.255.255",68,67,dhcp(1,"0.0.0.0",1,[61,7,1,...macB(PC_MAC),12,hn.length,...hn,55,4,1,3,6,15]))),0);
+  add(eth("ff:ff:ff:ff:ff:ff",FB_MAC,0x800,udp(FB,"255.255.255.255",67,68,dhcp(2,PC,2,[54,4,...ipB(FB),51,4,...be32(864000),1,4,255,255,255,0,3,4,...ipB(FB),6,4,...ipB(FB),15,9,...s2b("fritz.box")]))),0.012);
+  add(eth("ff:ff:ff:ff:ff:ff",PC_MAC,0x800,udp("0.0.0.0","255.255.255.255",68,67,dhcp(1,"0.0.0.0",3,[61,7,1,...macB(PC_MAC),50,4,...ipB(PC),54,4,...ipB(FB),12,hn.length,...hn]))),0.003);
+  add(eth("ff:ff:ff:ff:ff:ff",FB_MAC,0x800,udp(FB,"255.255.255.255",67,68,dhcp(2,PC,5,[54,4,...ipB(FB),51,4,...be32(864000),1,4,255,255,255,0,3,4,...ipB(FB),6,4,...ipB(FB)]))),0.009);
+  // --- ARP
+  const arp=(op,sha,spa,tha,tpa)=>[0,1,8,0,6,4,0,op,...macB(sha),...ipB(spa),...macB(tha),...ipB(tpa)];
+  add(eth("ff:ff:ff:ff:ff:ff",PC_MAC,0x806,arp(1,PC_MAC,PC,"00:00:00:00:00:00",FB).concat(Array(18).fill(0))),0.05);
+  add(eth(PC_MAC,FB_MAC,0x806,arp(2,FB_MAC,FB,PC_MAC,PC).concat(Array(18).fill(0))),0.0006);
+  // --- IPv6 Router Advertisement
+  const FB6="fe80::3ea6:2fff:fe11:2233";
+  const ra=[134,0,0,0,64,0x40,...be16(1800),0,0,0,0,0,0,0,0, 1,1,...macB(FB_MAC), 3,4,64,0xc0,...be32(7200),...be32(3600),0,0,0,0,...ip6B("2001:db8:4711:1::"), 25,3,0,0,...be32(1200),...ip6B(FB6)];
+  {const s=ip6B(FB6),t=ip6B("ff02::1");const ps=s.concat(t,be32(ra.length),[0,0,0,58]);const c=(~sum(ps.concat(ra)))&0xffff;ra[2]=c>>8;ra[3]=c&255;
+   add(eth("33:33:00:00:00:01",FB_MAC,0x86dd,[0x60,0,0,0,...be16(ra.length),58,255].concat(s,t,ra)),0.2);}
+  // --- DNS
+  const q1=[...be16(0x7a31),1,0,0,1,0,0,0,0,0,0].concat(dnsName("itzwieseltal.wordpress.com"),[0,1,0,1]);
+  add(eth(FB_MAC,PC_MAC,0x800,udp(PC,FB,53124,53,q1)),0.3);
+  const a1=[...be16(0x7a31),0x81,0x80,0,1,0,2,0,0,0,0].concat(dnsName("itzwieseltal.wordpress.com"),[0,1,0,1],[0xc0,12,0,5,0,1,...be32(300)],(()=>{const n=dnsName("lb.wordpress.com");return be16(n.length).concat(n);})(),[0xc0,54,0,1,0,1,...be32(60),0,4,192,0,78,12]);
+  // fix CNAME pointer offset: name of answer2 points to CNAME target at offset 12+28+4+10=54
+  add(eth(PC_MAC,FB_MAC,0x800,udp(FB,PC,53,53124,a1)),0.018);
+  // --- HTTP über TCP
+  const W="192.0.78.12";let cs=0x5a1c0001,ss=0x91e30000;const cp=51744;
+  const mss=[2,4,0x05,0xb4,1,3,3,7,4,2,0,0];
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,0,0x02,[],mss)),0.01);
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(W,PC,80,cp,ss,cs+1,0x12,[],[2,4,0x05,0x78,1,1,4,2,1,3,3,9])),0.021);
+  cs++;ss++;add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x10,[])),0.0002);
+  const req=s2b("GET /2026/10/paketwerk/ HTTP/1.1\r\nHost: itzwieseltal.wordpress.com\r\nUser-Agent: Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0\r\nAccept: text/html\r\nAccept-Language: de-DE,de;q=0.9\r\nCookie: wp_lang=de_DE\r\nConnection: keep-alive\r\n\r\n");
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x18,req)),0.0003);
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x18,req)),0.25); // Wiederholung
+  cs+=req.length;
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(W,PC,80,cp,ss,cs,0x10,[])),0.02);
+  const body="<!doctype html>\n<html lang=\"de\"><head><title>Paketwerk</title></head>\n<body><h1>Hallo aus dem Zwieseltal!</h1><p>Dieses Paket ist unverschlüsselt – jeder auf dem Weg kann es lesen.</p></body></html>\n";
+  const bb=s2b(body);
+  const resp=s2b("HTTP/1.1 200 OK\r\nServer: nginx\r\nDate: Tue, 20 Oct 2026 12:00:00 GMT\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Length: "+bb.length+"\r\nSet-Cookie: besuch=1; Path=/\r\nConnection: keep-alive\r\n\r\n").concat(bb);
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(W,PC,80,cp,ss,cs,0x18,resp)),0.004);ss+=resp.length;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x10,[])),0.0001);
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x11,[])),1.2);cs++;
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(W,PC,80,cp,ss,cs,0x11,[])),0.02);ss++;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,W,cp,80,cs,ss,0x10,[])),0.0001);
+  // --- TLS 1.3 zu example.org
+  const q2=[...be16(0x1f02),1,0,0,1,0,0,0,0,0,0].concat(dnsName("www.example.org"),[0,1,0,1]);
+  add(eth(FB_MAC,PC_MAC,0x800,udp(PC,FB,40211,53,q2)),0.4);
+  const a2=[...be16(0x1f02),0x81,0x80,0,1,0,1,0,0,0,0].concat(dnsName("www.example.org"),[0,1,0,1],[0xc0,12,0,1,0,1,...be32(3600),0,4,93,184,215,14]);
+  add(eth(PC_MAC,FB_MAC,0x800,udp(FB,PC,53,40211,a2)),0.015);
+  const S="93.184.215.14";let c2=0x01020304,s2=0xa0b0c0d0;const p2=51790;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,0,0x02,[],mss)),0.001);
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(S,PC,443,p2,s2,c2+1,0x12,[],[2,4,0x05,0xb4,1,1,4,2,1,3,3,7])),0.09);c2++;s2++;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,s2,0x10,[])),0.0001);
+  const ext=(t,v)=>be16(t).concat(be16(v.length),v);
+  const sni=s2b("www.example.org");const alpn=[2,...s2b("h2"),8,...s2b("http/1.1")];
+  const rnd=()=>Array.from({length:32},(_,i)=>(i*73+19)&255);
+  const exts=[].concat(ext(0x0a0a,[]),ext(0,[...be16(sni.length+3),0,...be16(sni.length),...sni]),ext(23,[]),ext(65281,[0]),ext(10,[0,8,0x1a,0x1a,0,0x1d,0,0x17,0,0x18]),ext(11,[1,0]),ext(35,[]),
+    ext(16,be16(alpn.length).concat(alpn)),ext(13,[0,8,4,3,8,4,4,1,5,3]),ext(51,[0,38,0,0x1d,0,32].concat(rnd())),ext(45,[1,1]),ext(43,[6,0x7a,0x7a,3,4,3,3]));
+  const chBody=[3,3].concat(rnd(),[32],rnd().reverse(),be16(10),[0x2a,0x2a,0x13,1,0x13,2,0x13,3,0xc0,0x2b],[1,0],be16(exts.length),exts);
+  const ch=[22,3,1].concat(be16(chBody.length+4),[1,0],be16(chBody.length),chBody);
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,s2,0x18,ch)),0.0004);c2+=ch.length;
+  const sext=[].concat(ext(51,[0,0x1d,0,32].concat(rnd().map(x=>x^0x55))),ext(43,[3,4]));
+  const shBody=[3,3].concat(rnd().map(x=>x^0xaa),[32],rnd().reverse(),[0x13,1,0],be16(sext.length),sext);
+  const sh=[22,3,3].concat(be16(shBody.length+4),[2,0],be16(shBody.length),shBody);
+  const ccs=[20,3,3,0,1,1];const enc=n=>[23,3,3].concat(be16(n),Array.from({length:n},(_,i)=>(i*151+7)&255));
+  const srv=sh.concat(ccs,enc(2800).slice(0,1300));
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(S,PC,443,p2,s2,c2,0x10,srv)),0.088);s2+=srv.length;
+  const srv2=enc(2800).slice(1300);
+  add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(S,PC,443,p2,s2,c2,0x18,srv2)),0.0002);s2+=srv2.length;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,s2,0x10,[])),0.0001);
+  const cfin=ccs.concat(enc(53),enc(92));
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,s2,0x18,cfin)),0.002);c2+=cfin.length;
+  const sapp=enc(1180);add(eth(PC_MAC,FB_MAC,0x800,tcpSeg(S,PC,443,p2,s2,c2,0x18,sapp)),0.09);s2+=sapp.length;
+  add(eth(FB_MAC,PC_MAC,0x800,tcpSeg(PC,S,p2,443,c2,s2,0x14,[])),2.0);
+  // --- Ping
+  const icmp=(t,seq)=>{const pl=s2b("abcdefghijklmnopqrstuvwabcdefghi");const m=[t,0,0,0,0x00,0x01,...be16(seq)].concat(pl);const c=(~sum(m))&0xffff;m[2]=c>>8;m[3]=c&255;return m;};
+  for(let i=1;i<=2;i++){add(eth(FB_MAC,PC_MAC,0x800,ipv4(PC,FB,1,icmp(8,i),128)),i===1?0.5:0.98);add(eth(PC_MAC,FB_MAC,0x800,ipv4(FB,PC,1,icmp(0,i),64)),0.0011);}
+  // --- NTP
+  const nt=Math.floor(T)+2208988800;
+  const ntpc=[0xe3,0,6,0xec].concat(Array(36).fill(0),be32(nt),[0x40,0,0,0]);
+  add(eth(FB_MAC,PC_MAC,0x800,udp(PC,FB,45678,123,ntpc)),0.3);
+  const ntps=[0x24,2,6,0xe9,0,0,0,0x10,0,0,0,0x20,...ipB("192.53.103.108"),...be32(nt-40),0,0,0,0,...be32(nt),0x40,0,0,0,...be32(nt),0x40,0x20,0,0,...be32(nt),0x40,0x30,0,0];
+  add(eth(PC_MAC,FB_MAC,0x800,udp(FB,PC,123,45678,ntps)),0.0009);
+  // --- SSDP
+  const ssdp=s2b("NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://192.168.178.1:49000/igddesc.xml\r\nNT: urn:schemas-upnp-org:device:InternetGatewayDevice:2\r\nNTS: ssdp:alive\r\nSERVER: FRITZ!Box 7590 UPnP/1.0 AVM FRITZ!Box 7590 154.08.00\r\nUSN: uuid:75802409-bccb-40e7-8e6c-3ca62f112233::urn:schemas-upnp-org:device:InternetGatewayDevice:2\r\n\r\n");
+  add(eth("01:00:5e:7f:ff:fa",FB_MAC,0x800,udp(FB,"239.255.255.250",1900,1900,ssdp)),0.7);
+  // --- mDNS
+  const md=[0,0,0,0,0,1,0,0,0,0,0,0].concat(dnsName("_googlecast._tcp.local"),[0,12,0x80,1]);
+  add(eth("01:00:5e:00:00:fb",PC_MAC,0x800,udp(PC,"224.0.0.251",5353,5353,md)),0.4);
+  // --- SIP
+  const sip=s2b("OPTIONS sip:192.168.178.1 SIP/2.0\r\nVia: SIP/2.0/UDP 192.168.178.31:5060;branch=z9hG4bK-4711\r\nFrom: <sip:620@fritz.box>;tag=abc\r\nTo: <sip:620@fritz.box>\r\nCall-ID: 3f2a91c0@192.168.178.31\r\nCSeq: 17 OPTIONS\r\nUser-Agent: Gigaset DECT\r\nContent-Length: 0\r\n\r\n");
+  add(eth(FB_MAC,"7c:2f:80:01:02:03",0x800,udp("192.168.178.31",FB,5060,5060,sip)),0.6);
+  // --- pcap schreiben
+  let n=24;pk.forEach(p=>n+=16+p.b.length);const out=new Uint8Array(n);const dv=new DataView(out.buffer);
+  dv.setUint32(0,0xa1b2c3d4,true);dv.setUint16(4,2,true);dv.setUint16(6,4,true);dv.setUint32(16,262144,true);dv.setUint32(20,1,true);
+  let o=24;pk.forEach(p=>{const s=Math.floor(p.t);dv.setUint32(o,s,true);dv.setUint32(o+4,Math.round((p.t-s)*1e6),true);dv.setUint32(o+8,p.b.length,true);dv.setUint32(o+12,p.b.length,true);out.set(p.b,o+16);o+=16+p.b.length;});
+  return out.buffer;
+}
+/* ===================== Schicht-Tabs: Kopf-Raster ===================== */
+function gb(d,o,bp,w){let v=0;for(let i=0;i<w;i++){const b=bp+i;v=v*2+((d[o+(b>>3)]>>(7-(b&7)))&1);}return v;}
+function bin(v,w){let s=v.toString(2).padStart(w,"0");let out="";for(let i=0;i<s.length;i++){if(i&&(s.length-i)%4===0)out+=" ";out+=s[i];}return out;}
+function binBytes(d,o,n){const a=[];for(let i=0;i<n;i++)a.push(d[o+i].toString(2).padStart(8,"0"));return a.join(" ");}
+function ipBin(d,o){return [0,1,2,3].map(i=>d[o+i].toString(2).padStart(8,"0")).join(".");}
+const DSCP={0:"Standard (best effort)",8:"CS1 – niedrige Priorität",10:"AF11",18:"AF21",26:"AF31",34:"AF41 – Video",40:"CS5",46:"EF – Sprache/Telefonie",48:"CS6 – Netzsteuerung",56:"CS7"};
+const ECN={0:"nicht ECN-fähig",1:"ECT(1) – ECN-fähig",2:"ECT(0) – ECN-fähig",3:"CE – Stau erlebt!"};
+function macCalc(d,fo){
+  const b=d[fo];const ig=b&1,ul=(b>>1)&1;const m=mac(d,fo);const v=OUI[m.slice(0,8)];
+  return "Erstes Byte "+hx(b)+" = "+bin(b,8)+"\n"+
+   "  Bit ganz rechts (I/G) = "+ig+" → "+(ig?"Gruppenadresse (Multicast/Broadcast)":"Einzeladresse (Unicast)")+"\n"+
+   "  Bit daneben  (U/L)    = "+ul+" → "+(ul?"lokal verwaltet (z. B. zufällige MAC des Handys)":"weltweit eindeutig, vom Hersteller vergeben")+"\n"+
+   "Die ersten 3 Byte "+m.slice(0,8)+" sind die Herstellerkennung (OUI)"+(v?": "+v:"")+", die letzten 3 Byte "+m.slice(9)+" die Seriennummer.\n"+
+   "Ethernet sendet jedes Byte mit dem niederwertigsten Bit zuerst – das I/G-Bit ist darum das allererste Bit der Adresse auf der Leitung.";
+}
+function csumCalc(groups,stored){
+  // groups: [{label, words:[...]}]
+  let s=0;const lines=[];let total=0;
+  groups.forEach(g=>{let gs=0;g.words.forEach(w=>gs+=w);s+=gs;total+=g.words.length;
+    const shown=g.words.slice(0,10).map(w=>hex4(w)).join(" + ")+(g.words.length>10?" + … ("+(g.words.length-10)+" weitere Wörter)":"");
+    lines.push(g.label.padEnd(16)+shown);});
+  lines.push("Summe".padEnd(16)+"0x"+s.toString(16));
+  let f=s;while(f>>16){const nf=(f&0xffff)+(f>>16);lines.push("Übertrag falten".padEnd(16)+"0x"+(f&0xffff).toString(16)+" + 0x"+(f>>16).toString(16)+" = 0x"+nf.toString(16));f=nf;}
+  const res=(~f)&0xffff;
+  lines.push("Einerkomplement".padEnd(16)+"~0x"+hex4(f)+" = 0x"+hex4(res));
+  lines.push("Im Paket".padEnd(16)+"0x"+hex4(stored)+(res===stored||(res===0&&stored===0xffff)?"  ✓ stimmt":"  ✗ weicht ab"));
+  return lines.join("\n");
+}
+function wordsOf(d,o,n,zeroAt){const w=[];for(let i=0;i<n;i+=2){let v=(d[o+i]<<8)|(i+1<n?d[o+i+1]:0);if(zeroAt!==undefined&&o+i===zeroAt)v=0;w.push(v);}return w;}
+function ttlGuess(t){const s=[32,64,128,255].find(x=>x>=t);return "Startwert vermutlich "+s+" ("+(s===64?"Linux, macOS, Android, FRITZ!Box":s===128?"Windows":s===255?"Netzwerkgeräte, Solaris":"alt")+") → das Paket hat etwa "+(s-t)+" Router passiert.";}
+
+/* Felddefinitionen: n=Name, s=Kurzname, b=Bitbreite, dec=Deutung, ex=Erklärung, calc=Rechenweg */
+function defsEthernet(d){
+  const f=[
+    {n:"Ziel-MAC",s:"Ziel",b:48,dec:(v,c,fo)=>macInfo(mac(d,fo)),calc:(v,c,fo)=>macCalc(d,fo),ex:"An wen der Rahmen im lokalen Netz geht. Ein Switch schaut nur auf dieses Feld und schickt den Rahmen an den Port, an dem er diese Adresse zuletzt als Absender gesehen hat. ff:ff:ff:ff:ff:ff geht an alle."},
+    {n:"Quell-MAC",s:"Quelle",b:48,dec:(v,c,fo)=>macInfo(mac(d,fo)),calc:(v,c,fo)=>macCalc(d,fo),ex:"Wer den Rahmen gesendet hat. Ein Switch lernt daraus, hinter welchem Port dieses Gerät sitzt (MAC-Tabelle). Router tauschen bei jedem Sprung beide MAC-Adressen aus – die IP-Adressen bleiben."}];
+  let p=12;
+  while(u16(d,p)===0x8100||u16(d,p)===0x88a8){
+    f.push({n:"TPID",s:"TPID",b:16,dec:v=>hx(v,4)+" → VLAN-Tag folgt",ex:"Steht hier 0x8100 statt eines EtherTypes, ist ein 4-Byte-VLAN-Tag (IEEE 802.1Q) eingeschoben. Der eigentliche EtherType steht dann 4 Byte später."},
+      {n:"Priorität (PCP)",s:"PCP",b:3,dec:v=>String(v),ex:"Klasse 0–7 für Dienstgüte; Telefonie bekommt oft 5 oder 6."},
+      {n:"DEI",s:"DEI",b:1,dec:v=>v?"darf bei Stau verworfen werden":"normal",ex:"Drop Eligible Indicator."},
+      {n:"VLAN-ID",s:"VLAN-ID",b:12,dec:v=>String(v),ex:"Nummer des virtuellen Netzes (1–4094). Ein Switch trennt damit z. B. Gast- und Heimnetz auf derselben Leitung."});p+=4;}
+  f.push({n:"EtherType",s:"Typ",b:16,dec:v=>v>=0x600?hx(v,4)+" = "+(ETHERTYPES[v]||"unbekannt"):v+" = Länge (IEEE 802.3)",
+    calc:v=>v>=0x600?hx(v,4)+" = "+v+" ≥ 1536 (0x0600) → das Feld ist ein EtherType und nennt das Protokoll der nächsten Schicht.":v+" ≤ 1500 → das Feld ist eine Längenangabe (alter IEEE-802.3-Rahmen mit LLC-Kopf).",
+    ex:"Sagt dem Empfänger, an wen er den Nutzteil weiterreichen soll: 0x0800 IPv4, 0x86DD IPv6, 0x0806 ARP. Das ist die einzige Verbindung zwischen Schicht 2 und 3."});
+  return f;
+}
+function defsARP(d){
+  const OP={1:"Anfrage – „Wer hat …?“",2:"Antwort – „… ist bei …“"};
+  return [{n:"Hardwaretyp",s:"HTYPE",b:16,dec:v=>v+(v===1?" = Ethernet":""),ex:"Art der Schicht-2-Adressen."},
+    {n:"Protokolltyp",s:"PTYPE",b:16,dec:v=>hx(v,4)+(v===0x800?" = IPv4":""),ex:"Für welche Schicht-3-Adressen aufgelöst wird – derselbe Wert wie der EtherType von IPv4."},
+    {n:"Hardware-Adresslänge",s:"HLEN",b:8,dec:v=>v+" Byte",ex:"6 Byte für MAC-Adressen."},
+    {n:"Protokoll-Adresslänge",s:"PLEN",b:8,dec:v=>v+" Byte",ex:"4 Byte für IPv4-Adressen."},
+    {n:"Operation",s:"OPER",b:16,dec:v=>v+" = "+(OP[v]||"?"),ex:"1 = Anfrage (als Broadcast an alle), 2 = Antwort (direkt an den Fragenden)."},
+    {n:"Absender-MAC",s:"SHA",b:48,dec:(v,c,fo)=>macInfo(mac(d,fo)),ex:"MAC des Absenders. Jeder Empfänger darf sich die Zuordnung Absender-IP → Absender-MAC sofort in seinen ARP-Cache schreiben."},
+    {n:"Absender-IP",s:"SPA",b:32,dec:(v,c,fo)=>ip4(d,fo),calc:(v,c,fo)=>ipBin(d,fo),ex:"IP-Adresse des Absenders; 0.0.0.0 bei einer ARP-Probe (Gerät prüft, ob eine Adresse frei ist)."},
+    {n:"Ziel-MAC",s:"THA",b:48,dec:(v,c,fo)=>mac(d,fo),ex:"In der Anfrage unbekannt und daher 00:00:00:00:00:00 – genau das will man ja herausfinden."},
+    {n:"Ziel-IP",s:"TPA",b:32,dec:(v,c,fo)=>ip4(d,fo),calc:(v,c,fo)=>ipBin(d,fo),ex:"Die IP-Adresse, zu der die MAC gesucht wird. Liegt das Ziel außerhalb des eigenen Netzes, fragt der Rechner hier nach dem Router (Gateway)."}];
+}
+function defsIPv4(d,o){
+  const ihl=(d[o]&15)*4;const tl=u16(d,o+2);
+  const f=[{n:"Version",s:"Ver",b:4,dec:v=>"IPv"+v,ex:"Immer 4. Das erste Halbbyte jedes IP-Pakets – damit unterscheidet ein Empfänger IPv4 (0x4_) von IPv6 (0x6_)."},
+    {n:"Kopflänge (IHL)",s:"IHL",b:4,dec:v=>v*4+" Byte",calc:v=>v+" × 4 Byte = "+v*4+" Byte"+(v===5?" (Standard, keine Optionen)":" → "+(v*4-20)+" Byte Optionen"),ex:"Länge des Kopfes in 32-Bit-Worten. 5 ist der Normalfall; deshalb beginnt fast jedes IPv4-Paket mit 0x45."},
+    {n:"DSCP",s:"DSCP",b:6,dec:v=>v+" = "+(DSCP[v]||"Klasse "+v),ex:"Differentiated Services: Dienstklasse für Router mit Priorisierung (z. B. Telefonie vor Downloads)."},
+    {n:"ECN",s:"ECN",b:2,dec:v=>ECN[v],ex:"Explicit Congestion Notification: Router können Stau melden, statt Pakete zu verwerfen."},
+    {n:"Gesamtlänge",s:"Länge",b:16,dec:v=>v+" Byte",calc:v=>v+" Byte gesamt − "+ihl+" Byte Kopf = "+(v-ihl)+" Byte Nutzlast für Schicht 4",ex:"Länge des ganzen IP-Pakets inkl. Kopf. Was danach im Ethernet-Rahmen noch kommt, sind Füllbytes."},
+    {n:"Identifikation",s:"ID",b:16,dec:v=>hx(v,4)+" = "+v,ex:"Nummer des Pakets. Wird es unterwegs zerteilt (fragmentiert), tragen alle Teile dieselbe ID, damit der Empfänger sie wieder zusammensetzen kann."},
+    {n:"reserviert",s:"0",b:1,dec:v=>String(v),ex:"Muss 0 sein (scherzhaft „Evil Bit“, RFC 3514)."},
+    {n:"DF – Don't Fragment",s:"DF",b:1,dec:v=>v?"gesetzt – nicht zerteilen":"nicht gesetzt",ex:"Gesetzt heißt: Ist das Paket zu groß für eine Leitung, soll der Router es verwerfen und per ICMP „Fragmentation needed“ melden. Darauf baut die Path-MTU-Erkennung auf."},
+    {n:"MF – More Fragments",s:"MF",b:1,dec:v=>v?"weitere Fragmente folgen":"letztes (oder einziges) Stück",ex:"Bei allen Fragmenten außer dem letzten gesetzt."},
+    {n:"Fragment-Offset",s:"Offset",b:13,dec:v=>v*8+" Byte",calc:v=>v+" × 8 = "+v*8+" Byte"+(v?" – dieses Stück beginnt mitten im Original":" – Anfang des Originalpakets"),ex:"Wo dieses Stück im ursprünglichen Paket hingehört, gezählt in 8-Byte-Einheiten."},
+    {n:"TTL",s:"TTL",b:8,dec:v=>v+" Hops",calc:v=>ttlGuess(v),ex:"Time to Live: Jeder Router zieht 1 ab, bei 0 wird das Paket verworfen und der Absender bekommt ICMP „Time exceeded“. Das verhindert ewig kreisende Pakete – und traceroute nutzt genau das."},
+    {n:"Protokoll",s:"Proto",b:8,dec:v=>v+" = "+(IPPROTO[v]||"?"),ex:"Welches Protokoll im Nutzteil steckt: 1 ICMP, 6 TCP, 17 UDP. Das Gegenstück zum EtherType eine Schicht tiefer."},
+    {n:"Kopf-Prüfsumme",s:"Prüfsumme",b:16,dec:v=>hx(v,4),calc:v=>csumCalc([{label:"Kopfwörter",words:wordsOf(d,o,ihl,o+10)}],v),ex:"Einerkomplement-Summe über die 16-Bit-Wörter des Kopfes (Prüfsummenfeld als 0 gerechnet). Weil sich die TTL ändert, rechnet jeder Router sie neu. Die Nutzdaten deckt sie nicht ab."},
+    {n:"Quelladresse",s:"Quelle",b:32,dec:(v,c,fo)=>ip4(d,fo)+" ("+ipScope4(ip4(d,fo))+")",calc:(v,c,fo)=>ipBin(d,fo)+"\n"+bytesHex(d,fo,4)+" hex = "+ip4(d,fo)+" (jedes Byte einzeln dezimal)",ex:"Absender. Hinter der FRITZ!Box wird eine private Adresse (192.168.x.x) beim Weg ins Internet per NAT gegen die öffentliche Adresse getauscht."},
+    {n:"Zieladresse",s:"Ziel",b:32,dec:(v,c,fo)=>ip4(d,fo)+" ("+ipScope4(ip4(d,fo))+")",calc:(v,c,fo)=>ipBin(d,fo)+"\n"+bytesHex(d,fo,4)+" hex = "+ip4(d,fo),ex:"Empfänger. Danach entscheiden Router den Weg: Liegt die Adresse im eigenen Netz, wird direkt zugestellt, sonst geht es zum nächsten Router."}];
+  if(ihl>20)f.push({n:"Optionen",s:"Optionen",b:(ihl-20)*8,dec:(v,c,fo)=>bytesHex(d,fo,ihl-20),ex:"Selten genutzt (z. B. Router Alert bei IGMP)."});
+  return {fields:f,len:ihl};
+}
+function defsIPv6(d,o){
+  return {len:40,fields:[{n:"Version",s:"Ver",b:4,dec:v=>"IPv"+v,ex:"Immer 6."},
+    {n:"Traffic Class",s:"TC",b:8,dec:v=>"DSCP "+(v>>2)+", ECN "+(v&3),ex:"Entspricht DSCP+ECN bei IPv4."},
+    {n:"Flow Label",s:"Flow Label",b:20,dec:v=>hx(v,5),ex:"Kennzeichnet zusammengehörende Pakete eines Datenstroms, damit Router sie gleich behandeln können."},
+    {n:"Nutzlast-Länge",s:"Länge",b:16,dec:v=>v+" Byte",calc:v=>"40 Byte Kopf + "+v+" Byte Nutzlast = "+(40+v)+" Byte",ex:"Anders als bei IPv4 ohne den festen 40-Byte-Kopf."},
+    {n:"Next Header",s:"Next",b:8,dec:v=>v+" = "+(IPPROTO[v]||{0:"Hop-by-Hop",43:"Routing",44:"Fragment",60:"Ziel-Optionen"}[v]||"?"),ex:"Wie das Protokollfeld bei IPv4 – kann aber auch auf einen Erweiterungskopf zeigen, der wiederum einen Next Header hat (Kette)."},
+    {n:"Hop Limit",s:"Hops",b:8,dec:v=>String(v),calc:v=>v===255?"255 → Nachricht darf das lokale Netz nicht verlassen haben (Pflicht bei Neighbor Discovery)":ttlGuess(v),ex:"Die TTL von IPv6."},
+    {n:"Quelladresse",s:"Quelle",b:128,dec:(v,c,fo)=>ip6(d,fo)+" ("+ipScope6(ip6(d,fo))+")",calc:(v,c,fo)=>v6calc(d,fo),ex:"128 Bit, geschrieben als 8 Gruppen à 16 Bit in Hex; führende Nullen und eine Folge von Null-Gruppen („::“) dürfen weggelassen werden."},
+    {n:"Zieladresse",s:"Ziel",b:128,dec:(v,c,fo)=>ip6(d,fo)+" ("+ipScope6(ip6(d,fo))+")",calc:(v,c,fo)=>v6calc(d,fo),ex:"ff02::1 = alle Geräte im Link, ff02::2 = alle Router, ff02::1:ffXX:XXXX = Solicited-Node-Adresse für Neighbor Discovery."}]};
+}
+function v6calc(d,fo){
+  const g=[];for(let i=0;i<8;i++)g.push(hex4(u16(d,fo+i*2)));let s="voll: "+g.join(":")+"\nkurz: "+ip6(d,fo);
+  if(d[fo+11]===0xff&&d[fo+12]===0xfe){const m=[d[fo+8]^2,d[fo+9],d[fo+10],d[fo+13],d[fo+14],d[fo+15]].map(hex2).join(":");
+    s+="\nEUI-64: Die hintere Hälfte enthält ff:fe in der Mitte → aus einer MAC gebildet.\n  "+[8,9,10,11,12,13,14,15].map(i=>hex2(d[fo+i])).join(" ")+"  →  ff:fe entfernen, U/L-Bit (0x02) im 1. Byte zurückdrehen\n  MAC = "+m;}
+  return s;
+}
+function defsICMP(d,o,v6){
+  const t=d[o];const f=[{n:"Typ",s:"Typ",b:8,dec:v=>v+" = "+((v6?ICMP6T:ICMPT)[v]||"?"),ex:v6?"1–127 Fehlermeldungen, 128–255 Informationen (Ping, Neighbor Discovery, MLD).":"Art der Nachricht: 8 Ping-Anfrage, 0 Ping-Antwort, 3 Ziel unerreichbar, 11 TTL abgelaufen."},
+    {n:"Code",s:"Code",b:8,dec:v=>String(v)+(!v6&&t===3?" = "+(UNREACH[v]||"?")+" unerreichbar":""),ex:"Genauere Unterart; bei „Ziel unerreichbar“ z. B. 3 = Port unerreichbar (am Ziel lauscht niemand auf diesem UDP-Port)."},
+    {n:"Prüfsumme",s:"Prüfsumme",b:16,dec:v=>hx(v,4),ex:v6?"Über die ganze Nachricht plus IPv6-Pseudokopf.":"Über die ganze ICMP-Nachricht."}];
+  if((!v6&&(t===0||t===8))||(v6&&(t===128||t===129))){f.push({n:"Kennung",s:"ID",b:16,dec:v=>hx(v,4),ex:"Unterscheidet gleichzeitig laufende Ping-Programme."},{n:"Sequenznummer",s:"Seq",b:16,dec:v=>String(v),ex:"Zählt die Pings hoch – so erkennt ping verlorene Antworten."});}
+  else f.push({n:"Rest des Kopfes",s:"Rest",b:32,dec:(v)=>hx(v,8),ex:"Bedeutung hängt vom Typ ab (bei Fehlermeldungen meist unbenutzt; danach folgt der Kopf des auslösenden Pakets)."});
+  return {fields:f,len:8};
+}
+function defsUDP(d,o,ipL){
+  return {len:8,fields:[{n:"Quellport",s:"Quellport",b:16,dec:v=>portName(v),ex:"Port des Absenders. Clients nehmen meist einen zufälligen hohen Port (49152–65535)."},
+    {n:"Zielport",s:"Zielport",b:16,dec:v=>portName(v),ex:"Port des Dienstes beim Empfänger, z. B. 53 für DNS. Erst damit weiß das Betriebssystem, welches Programm die Daten bekommt."},
+    {n:"Länge",s:"Länge",b:16,dec:v=>v+" Byte",calc:v=>v+" − 8 Byte Kopf = "+(v-8)+" Byte Nutzdaten",ex:"Kopf + Nutzdaten."},
+    {n:"Prüfsumme",s:"Prüfsumme",b:16,dec:v=>v?hx(v,4):"0 = nicht benutzt",calc:v=>v?l4csum(d,o,ipL,17,v):"Bei IPv4 darf die UDP-Prüfsumme 0 sein (= abgeschaltet).",ex:"Über Pseudokopf (Quell-IP, Ziel-IP, Protokoll, Länge), UDP-Kopf und Daten."}]};
+}
+function l4csum(d,o,ipL,proto,stored){
+  const ipo=ipL.off,v4=ipL.proto==="IPv4";let len;
+  if(v4)len=u16(d,ipo+2)-(d[ipo]&15)*4;else len=d.length-o;
+  if(o+len>d.length)return "Segment ist im Mitschnitt gekürzt – Prüfsumme nicht nachrechenbar.";
+  const pseudo=v4?wordsOf(d,ipo+12,8).concat([proto,len]):wordsOf(d,ipo+8,32).concat([len>>>16,len&0xffff,0,proto]);
+  const ckAt=o+(proto===6?16:6);
+  return "Pseudokopf = "+(v4?"Quell-IP, Ziel-IP, 0x0006/0x0011 (Protokoll), Länge":"Quell-IP, Ziel-IP (je 128 Bit), Länge, Next Header")+"\n"+
+    csumCalc([{label:"Pseudokopf",words:pseudo},{label:"Segment",words:wordsOf(d,o,len,ckAt)}],stored)+
+    (stored&&csumCalcOk(pseudo,d,o,len,ckAt,stored)?"":"\nHinweis: Bei Paketen, die der mitschneidende Rechner selbst gesendet hat, rechnet oft erst die Netzwerkkarte die Prüfsumme (Checksum-Offloading) – dann steht hier Unsinn.");
+}
+function csumCalcOk(pseudo,d,o,len,ckAt,stored){let s=0;pseudo.concat(wordsOf(d,o,len,ckAt)).forEach(w=>s+=w);while(s>>16)s=(s&0xffff)+(s>>16);const r=(~s)&0xffff;return r===stored||(r===0&&stored===0xffff);}
+const TCPOPT={0:"Ende",1:"NOP (Füller)",2:"MSS",3:"Fensterskalierung",4:"SACK erlaubt",5:"SACK",8:"Zeitstempel",30:"MPTCP",34:"TCP Fast Open"};
+function defsTCP(d,o,r,ipL){
+  const hl=(d[o+12]>>4)*4;const T=r.tcp||{};
+  const fl=(n,s,ex)=>({n:n,s:s,b:1,dec:v=>v?"gesetzt":"–",ex:ex,flag:1});
+  const f=[{n:"Quellport",s:"Quellport",b:16,dec:v=>portName(v),ex:"Port des Absenders. Zusammen mit den beiden IP-Adressen und dem Zielport bildet er das „4-Tupel“, das eine Verbindung eindeutig kennzeichnet."},
+    {n:"Zielport",s:"Zielport",b:16,dec:v=>portName(v),ex:"Port des Dienstes: 80 HTTP, 443 HTTPS, 22 SSH … Beim Server ist das der Port, auf dem er lauscht (listen)."},
+    {n:"Sequenznummer",s:"Sequenznummer",b:32,dec:v=>v+(T.isn!==undefined?" (relativ "+T.rs+")":""),calc:v=>T.isn===undefined?"":
+      (T.fl&2?"SYN gesetzt → Diese Zahl ist die zufällige Startnummer (ISN) dieser Seite. Das SYN selbst verbraucht 1 Sequenznummer.":
+      "relativ = "+v+" − ISN "+T.isn+" = "+T.rs+"\n→ Das erste Datenbyte dieses Segments ist Byte Nr. "+T.rs+" des Stroms dieser Seite.")+
+      "\nNächste Sequenznummer dieser Seite = "+T.rs+" + "+T.plen+" Byte Daten"+(T.fl&2?" + 1 (SYN)":"")+(T.fl&1?" + 1 (FIN)":"")+" = "+T.next,
+      ex:"Zählt Bytes, nicht Pakete. Jede Seite startet bei einer Zufallszahl; Wireshark und Paketwerk zeigen „relative“ Nummern ab 0, damit man rechnen kann."},
+    {n:"Bestätigungsnummer",s:"Bestätigungsnummer",b:32,dec:v=>(T.fl&16)?v+(T.peerIsn!==undefined?" (relativ "+T.ra+")":""):"ungültig (ACK-Flag fehlt)",
+      calc:v=>(T.fl&16)?"relativ = "+v+" − ISN der Gegenseite "+T.peerIsn+" = "+T.ra+"\n→ „Ich habe alles bis Byte "+(T.ra-1)+" erhalten, als Nächstes erwarte ich Byte "+T.ra+".“":"",
+      ex:"Nur gültig, wenn das ACK-Flag gesetzt ist – also in jedem Segment außer dem allerersten SYN. Bestätigt kumulativ: alles davor ist angekommen."},
+    {n:"Datenoffset",s:"Offset",b:4,dec:v=>v*4+" Byte Kopf",calc:v=>v+" × 4 = "+v*4+" Byte Kopf → "+(v*4-20)+" Byte Optionen; Nutzdaten beginnen bei Byte "+(o+v*4)+" des Rahmens",ex:"Kopflänge in 32-Bit-Worten (5–15). Bei SYN-Paketen meist größer, weil dort die Optionen ausgehandelt werden."},
+    {n:"reserviert",s:"res",b:3,dec:v=>String(v),ex:"Ungenutzt, muss 0 sein."},
+    fl("AE (früher NS)","AE","Accurate ECN – kaum zu sehen."),
+    fl("CWR","CWR","Congestion Window Reduced: Sender hat auf eine Staumeldung reagiert."),
+    fl("ECE","ECE","ECN-Echo: Empfänger meldet einen Stau (oder handelt im SYN ECN aus)."),
+    fl("URG","URG","Urgent-Zeiger gültig – praktisch ausgestorben."),
+    fl("ACK","ACK","Bestätigungsnummer ist gültig. Ab dem zweiten Paket einer Verbindung immer gesetzt."),
+    fl("PSH","PSH","Push: Empfänger soll die Daten sofort an die Anwendung geben, statt zu puffern. Typisch am Ende eines zusammenhängenden Datenblocks."),
+    fl("RST","RST","Reset: Verbindung sofort abbrechen – z. B. wenn auf dem Port niemand lauscht oder ein Browser-Tab geschlossen wurde."),
+    fl("SYN","SYN","Synchronize: Verbindungsaufbau, überträgt die Start-Sequenznummer."),
+    fl("FIN","FIN","Finish: „Ich sende nichts mehr“. Jede Richtung wird einzeln geschlossen."),
+    {n:"Fenstergröße",s:"Fenster",b:16,dec:v=>v+" Byte"+(T.wsc!=null?" × "+(1<<T.wsc)+" = "+T.effwin+" Byte":""),
+      calc:v=>(T.fl&2)?"In SYN-Paketen wird das Fenster nie skaliert.":T.wsc!=null?v+" × 2^"+T.wsc+" = "+T.effwin+" Byte darf die Gegenseite noch unbestätigt schicken (Skalierung aus dem SYN).":T.scaleKnown?"Keine Skalierung vereinbart → "+v+" Byte.":"Den Verbindungsaufbau hat der Mitschnitt nicht gesehen – ein evtl. Skalierungsfaktor ist unbekannt.",
+      ex:"Flusskontrolle: Wie viele Bytes der Absender dieses Segments noch empfangen kann. Fenster 0 heißt „Stopp, mein Puffer ist voll“."},
+    {n:"Prüfsumme",s:"Prüfsumme",b:16,dec:v=>hx(v,4),calc:v=>l4csum(d,o,ipL,6,v),ex:"Wie bei UDP über Pseudokopf, TCP-Kopf und Daten – Pflicht."},
+    {n:"Urgent-Zeiger",s:"Urgent",b:16,dec:v=>String(v),ex:"Nur mit URG-Flag bedeutsam."}];
+  if(hl>20){
+    const parts=[];let p=o+20;while(p<o+hl){const k=d[p];if(k===0){parts.push("Kind 0 (Ende)");break;}if(k===1){parts.push("Kind 1 (NOP, Füller)");p++;continue;}const l=d[p+1]||2;
+      let v="";if(k===2)v="Wert "+bytesHex(d,p+2,2)+" = "+u16(d,p+2)+" Byte größtes Segment";else if(k===3)v="Wert "+d[p+2]+" → Fenster × 2^"+d[p+2]+" = ×"+(1<<d[p+2]);else if(k===8)v="TSval "+u32(d,p+2)+", TSecr "+u32(d,p+6);else v=bytesHex(d,p+2,l-2);
+      parts.push("Kind "+k+" ("+(TCPOPT[k]||"?")+"), Länge "+l+(l>2?", "+v:""));p+=l;}
+    f.push({n:"Optionen",s:"Optionen",b:(hl-20)*8,dec:()=>(hl-20)+" Byte",calc:()=>parts.join("\n"),ex:"Aufgebaut als Kind-Länge-Wert. MSS sagt der Gegenseite, wie groß ein Segment höchstens sein darf (1460 = 1500 MTU − 20 IP − 20 TCP; hinter DSL/PPPoE oft 1452)."});}
+  return {fields:f,len:hl};
+}
+
+/* Raster zeichnen */
+function gridHTML(d,o,fields,W,color,ctx){
+  let pos=0;const cells=[];const rows=[];
+  fields.forEach((fd,fi)=>{const fo=o+(pos>>3);const flen=Math.ceil((pos+fd.b)/8)-(pos>>3);
+    let v=null;if(fd.b<=32)v=gb(d,o,pos,fd.b);fd._v=v;fd._fo=fo;fd._pos=pos;fd._len=flen;
+    let rem=fd.b,p=pos,first=true;
+    while(rem>0){const row=Math.floor(p/W),col=p%W,take=Math.min(rem,W-col);cells.push({row:row,col:col,span:take,fd:fd,fi:fi,first:first});rem-=take;p+=take;first=false;}
+    pos+=fd.b;});
+  const nrows=Math.ceil(pos/W);
+  let h='<div class="gwrap"><div class="grid" style="grid-template-columns:44px repeat('+W+',minmax(19px,1fr));--c:'+color+'">';
+  h+='<div class="gh"></div>';for(let i=0;i<W;i++)h+='<div class="gh">'+(W===32||i%2===0?i:"")+"</div>";
+  for(let rr=0;rr<nrows;rr++)h+='<div class="gh go" style="grid-row:'+(rr+2)+';grid-column:1">+'+(rr*W/8)+"</div>";
+  cells.forEach(c=>{const fd=c.fd;const narrow=c.span<6;const val=fd.dec(fd._v,ctx,fd._fo);
+    const raw=fd.b<=16?bin(fd._v,fd.b):fd.b<=32?hx(fd._v,fd.b/4):bytesHex(d,fd._fo,Math.min(fd._len,16),16);
+    h+='<div class="gc'+(c.span<=2?" nar":"")+(fd.flag&&fd._v?" on1":"")+'" data-off="'+fd._fo+'" data-len="'+fd._len+'" data-fi="'+c.fi+'" title="'+esc(fd.n+": "+val)+'" style="grid-row:'+(c.row+2)+';grid-column:'+(c.col+2)+" / span "+c.span+'">'+
+      '<span class="gn">'+esc(c.first?(narrow?fd.s:fd.n):"… "+(narrow?"":fd.s))+"</span>"+
+      (c.first&&!narrow?'<span class="gv ans">'+esc(val)+"</span>":"")+
+      (c.first?'<span class="gr">'+esc(narrow&&fd.b<=4?String(fd._v):narrow?hx(fd._v||0,Math.ceil(fd.b/4)):raw)+"</span>":"")+"</div>";});
+  h+="</div></div>";
+  // Feldtabelle
+  h+='<table class="ftab">';
+  fields.forEach((fd,fi)=>{const val=fd.dec(fd._v,ctx,fd._fo);const c=fd.calc?fd.calc(fd._v,ctx,fd._fo):"";
+    const raw=fd.b<=32?bin(fd._v,fd.b)+(fd.b>=8?"  ("+hx(fd._v,Math.ceil(fd.b/4))+")":""):bytesHex(d,fd._fo,fd._len,24);
+    h+='<tr data-off="'+fd._fo+'" data-len="'+fd._len+'" data-fi="'+fi+'"><td class="tn">'+esc(fd.n)+'</td><td class="tb">Bit '+fd._pos+(fd.b>1?"–"+(fd._pos+fd.b-1):"")+" · "+fd.b+' Bit</td><td class="tr">'+esc(raw)+'</td><td class="tv"><span class="ans">'+esc(val)+"</span></td></tr>";
+    h+='<tr class="ex"><td colspan="4">'+esc(fd.ex||"")+(c?'<span class="calc ans">'+esc(c)+"</span>":"")+"</td></tr>";});
+  h+="</table>";
+  return h;
+}
+/* ===================== Schicht-Tabs: Ansichten ===================== */
+const TABS=[["ov","Übersicht"],["enc","Kapselung"],["1","1 Leitung"],["2","2 Sicherung"],["3","3 Vermittlung"],["4","4 Transport"],["5","5–7 Oben"]];
+function intro(L,txt){return '<div class="tabintro" style="--c:'+CVAR[L]+'"><b>Schicht '+L+" – "+OSI_NAMES[L]+"</b> "+txt+"</div>";}
+function findL(r,names){return r.layers.find(l=>names.includes(l.proto));}
+function renderTab(r){
+  const t=S.tab;const box=$("osibody");
+  if(t==="ov"){renderOSI(r);return;}
+  let h="";
+  try{
+    if(t==="enc")h=tabEnc(r);else if(t==="1")h=tab1(r);else if(t==="2")h=tab2(r);else if(t==="3")h=tab3(r);else if(t==="4")h=tab4(r);else h=tab5(r);
+  }catch(e){h='<p class="warn">Fehler beim Darstellen: '+esc(e.message)+"</p>";}
+  box.className="";box.innerHTML=h;
+}
+function treeOf(L){return '<div class="proto"><div class="pt">'+esc(L.title)+"</div>"+(L.note?'<div class="lnote">'+esc(L.note)+"</div>":"")+'<ul class="f">'+L.fields.map(fieldHTML).join("")+"</ul></div>";}
+
+/* ---------- Kapselung ---------- */
+function wireParts(r){
+  const p=S.raw[r.no-1];const d=p.data;const eth=p.lt===1;
+  const segs=segments(r).filter(s=>s.osi>0);let end=segs.length?segs[segs.length-1].end:d.length;
+  const trailing=Math.max(0,d.length-end);const pad=eth?Math.max(0,60-d.length):0;
+  return {eth:eth,segs:segs,trailing:trailing,pad:pad,flen:d.length};
+}
+function tabEnc(r){
+  const w=wireParts(r);const sz=b=>Math.round(34+9*Math.sqrt(b));
+  const blocks=[];if(w.eth)blocks.push({k:"pre",label:"Präambel",b:8,osi:1});
+  w.segs.forEach(s=>blocks.push({k:"seg",label:s.label,b:s.end-s.off,osi:s.osi,off:s.off}));
+  if(w.trailing)blocks.push({k:"pad",label:"Füllbytes",b:w.trailing,osi:2,off:w.flen-w.trailing});
+  if(w.pad)blocks.push({k:"pad",label:"Füllbytes (Karte)",b:w.pad,osi:2});
+  if(w.eth){blocks.push({k:"fcs",label:"FCS",b:4,osi:2});blocks.push({k:"ifg",label:"Pause",b:12,osi:1});}
+  let x=0;blocks.forEach(b=>{b.x=x;b.w=sz(b.b);x+=b.w+2;});const total=x;
+  const rowDef=[[7,"Daten (Nachricht)",b=>b.k==="seg"&&b.osi>=5],[4,"Segment / Datagramm",b=>b.k==="seg"&&b.osi>=4],[3,"Paket",b=>b.k==="seg"&&b.osi>=3],
+    [2,"Rahmen (Frame)",b=>b.k!=="pre"&&b.k!=="ifg"],[1,"Bitstrom auf der Leitung",b=>true]];
+  let h='<div class="tabintro" style="--c:var(--l4)"><b>Kapselung</b> – Jede Schicht nimmt die Daten der Schicht darüber als Nutzlast und setzt ihren eigenen Kopf davor (Ethernet zusätzlich eine Prüfsumme dahinter). Beim Empfänger wird in umgekehrter Reihenfolge ausgepackt. Breiten sind gestaucht (Wurzel der Bytezahl), damit kleine Köpfe sichtbar bleiben.</div>';
+  h+='<div class="gwrap"><div class="enc2" style="width:'+(total+170)+'px">';
+  rowDef.forEach(([L,name,pick])=>{const bs=blocks.filter(pick);const sum=bs.reduce((a,b)=>a+b.b,0);
+    h+='<div class="erow"><div class="elab" style="color:'+CVAR[L]+'"><b>'+(L===7?"5–7":L)+"</b> "+name+"<br><span>"+(bs.length?sum+" Byte":"—")+"</span></div>";
+    bs.forEach(b=>{h+='<div class="eb" style="left:'+(150+b.x)+"px;width:"+b.w+"px;background:"+(CVAR[b.osi]||"#888")+'"'+(b.off!==undefined?' data-off="'+b.off+'" data-len="'+b.b+'"':"")+' title="'+esc(b.label+": "+b.b+" Byte")+'">'+esc(b.label)+"<br>"+b.b+" B</div>";});
+    h+="</div>";});
+  h+="</div></div>";
+  const L3=findL(r,["IPv4","IPv6"]),L4=findL(r,["TCP","UDP"]);
+  h+='<div class="lnote">So liest man es: Der Rahmen ist '+w.flen+" Byte lang"+(w.eth?"; auf der Leitung kommen noch 8 Byte Präambel, "+(w.pad?w.pad+" Füllbytes, ":"")+"4 Byte FCS und 12 Byte Pause dazu":"")+". "+
+    (L3?"Der IP-Kopf ist "+L3.len+" Byte lang. ":"")+(L4?"Der "+L4.proto+"-Kopf "+L4.len+" Byte. ":"")+
+    (r.flow?"Nutzdaten der Anwendung: "+r.flow.len+" Byte – Anteil der Verwaltungsdaten an diesem Paket: "+Math.round(100-(r.flow.len/(w.flen+(w.eth?24+w.pad:0)))*100)+" %.":"")+"</div>";
+  return h;
+}
+
+/* ---------- Schicht 1 ---------- */
+const B4B5=["11110","01001","10100","10101","01010","01011","01110","01111","10010","10011","10110","10111","11010","11011","11100","11101"];
+function crc32(b){let c=~0;for(const x of b){c^=x;for(let k=0;k<8;k++)c=(c>>>1)^(0xEDB88320&-(c&1));}return (~c)>>>0;}
+function wireStream(r){
+  const d=S.raw[r.no-1].data;const pad=Math.max(0,60-d.length);
+  const fr=new Uint8Array(d.length+pad);fr.set(d);const c=crc32(fr);
+  const fcs=[0,1,2,3].map(i=>(c>>>(8*i))&255);
+  const ws=[0x55,0x55,0x55,0x55,0x55,0x55,0x55,0xd5].concat(Array.from(fr),fcs);
+  return {ws:ws,pad:pad,crc:c,fcs:fcs,flen:d.length};
+}
+function waveSVG(bits,kind,label,unit){
+  const bw=kind==="mlt"?14:22,H=34,top=12;const n=bits.length;const W=70+n*bw;
+  let path="",x=70,lvl,pts=[];
+  const y=v=>top+(1-v)*H/2+2; // v in -1..1 → y
+  if(kind==="nrz"){bits.forEach(b=>{const v=b?1:-1;pts.push([x,y(v)],[x+bw,y(v)]);x+=bw;});}
+  else if(kind==="man"){bits.forEach(b=>{const a=b?-1:1,c=b?1:-1;pts.push([x,y(a)],[x+bw/2,y(a)],[x+bw/2,y(c)],[x+bw,y(c)]);x+=bw;});}
+  else{lvl=0;const seq=[0,1,0,-1];let k=0;bits.forEach(b=>{if(b){k=(k+1)%4;}const v=seq[k];pts.push([x,y(v)],[x+bw,y(v)]);x+=bw;});}
+  path="M"+pts.map(p=>p[0].toFixed(1)+" "+p[1].toFixed(1)).join(" L");
+  let g="";for(let i=0;i<=n;i++){const xx=70+i*bw;g+='<line x1="'+xx+'" y1="'+(top-2)+'" x2="'+xx+'" y2="'+(top+H+4)+'" class="wg'+(i%(kind==="mlt"?5:8)===0?" wg8":"")+'"/>';}
+  let t="";bits.forEach((b,i)=>{t+='<text x="'+(70+i*bw+bw/2)+'" y="9" class="wt">'+b+"</text>";});
+  return '<svg class="wave" viewBox="0 0 '+W+" "+(top+H+8)+'" width="'+W+'" height="'+(top+H+8)+'" role="img" aria-label="'+esc(label)+'">'+g+t+
+    '<text x="2" y="'+(top+H/2)+'" class="wl">'+esc(label)+'</text><text x="2" y="'+(top+H/2+12)+'" class="wl wu">'+esc(unit)+'</text><path d="'+path+'" class="wp"/></svg>';
+}
+function tab1(r){
+  const p=S.raw[r.no-1];let h=intro(1,"überträgt einzelne Bits als Spannung, Licht oder Funk. Netzwerkkarten entfernen beim Empfang alles, was nur der Leitung dient – im Mitschnitt fehlen Präambel, Start-Delimiter, Prüfsumme (FCS) und Pause. Paketwerk rekonstruiert sie hier.");
+  if(p.lt!==1){return h+'<p class="lnote">Dieser Mitschnitt hat keine Ethernet-Rahmen ('+esc(LINKTYPES[p.lt]||"Linktyp "+p.lt)+") – die Leitungsebene lässt sich nicht rekonstruieren.</p>";}
+  const W=wireStream(r);const n=W.ws.length;const tot=n+12;
+  h+='<table class="ftab"><tr><td class="tn">Präambel</td><td class="tr nw">55 55 55 55 55 55 55</td><td>7 Byte 1010…-Muster: Der Empfänger synchronisiert daran seinen Takt.</td></tr>'+
+    '<tr><td class="tn">Start Frame Delimiter</td><td class="tr">d5</td><td>wie die Präambel, endet aber auf „11“ – ab hier zählt der Rahmen.</td></tr>'+
+    '<tr data-off="0" data-len="'+W.flen+'"><td class="tn">Rahmen (mitgeschnitten)</td><td class="tr">'+W.flen+' Byte</td><td>Ziel-MAC bis Nutzdaten – das, was Wireshark und Paketwerk anzeigen.</td></tr>'+
+    (W.pad?'<tr><td class="tn">Füllbytes</td><td class="tr">'+W.pad+' × 00</td><td>Ein Ethernet-Rahmen muss ohne FCS mindestens 60 Byte haben (mit FCS 64). Die sendende Karte füllt auf – deshalb sieht der Absender im Mitschnitt kürzere Rahmen als der Empfänger.</td></tr>':"")+
+    '<tr><td class="tn">FCS (CRC-32)</td><td class="tr nw ans">'+W.fcs.map(hex2).join(" ")+'</td><td>Prüfsumme über Ziel-MAC bis Füllbytes: CRC-32 = <span class="ans">'+hx(W.crc,8)+'</span>, als Bytes rückwärts gesendet. Stimmt sie beim Empfänger nicht, wird der Rahmen kommentarlos verworfen.</td></tr>'+
+    '<tr><td class="tn">Pause (IFG)</td><td class="tr">12 Byte</td><td>Mindestabstand zum nächsten Rahmen (96 Bitzeiten).</td></tr></table>';
+  const rates=[[10,"10BASE-T"],[100,"100BASE-TX"],[1000,"1000BASE-T"],[2500,"2.5GBASE-T"]];
+  h+='<p class="lnote">Auf der Leitung belegt dieser Rahmen <b>'+tot+" Byte = "+tot*8+" Bit</b>, davon "+W.flen+" Byte Inhalt ("+Math.round(W.flen/tot*100)+" %). Dauer: "+rates.map(([m,nm])=>nm+" "+(tot*8/m).toFixed(m>=1000?3:1)+" µs").join(" · ")+"</p>";
+  // Bitauswahl
+  const marks=[[6,"Präambel → SFD"],[8,"Ziel-MAC"],[8+12,"EtherType"],[n-4,"FCS"]];
+  const st=Math.min(Math.max(0,S.wireOff===undefined?6:S.wireOff),n-4);
+  h+='<h3 class="h3">Bits auf dem Kabel ab Byte '+st+" des Leitungsstroms</h3><div class=\"wbtn\">"+marks.map(([o,l])=>'<button data-wire="'+o+'"'+(o===st?' class="on"':"")+">"+l+"</button>").join("")+
+    ' <label>ab Byte <input type="number" id="wireoff" min="0" max="'+(n-4)+'" value="'+st+'" style="width:64px"></label></div>';
+  const bytes=W.ws.slice(st,st+4);const bits=[];bytes.forEach(b=>{for(let i=0;i<8;i++)bits.push((b>>i)&1);});
+  h+='<table class="ftab">'+bytes.map((b,i)=>{const o=st+i;const where=o<7?"Präambel":o===7?"SFD":o<8+W.flen?"Rahmen-Byte "+(o-8):o<8+W.flen+W.pad?"Füllbyte":"FCS";
+    let lsb="";for(let k=0;k<8;k++)lsb+=(b>>k)&1;return '<tr><td class="tn">'+hx(b)+'</td><td class="tr">'+bin(b,8)+'</td><td class="tr">→ gesendet: <b class="ans">'+lsb.replace(/(.{4})/,"$1 ")+"</b></td><td>"+where+"</td></tr>";}).join("")+"</table>";
+  h+='<p class="lnote">Ethernet sendet jedes Byte mit dem <b>niederwertigsten Bit zuerst</b> (rechts nach links gelesen). Darum ist das I/G-Bit (Multicast) das allererste Bit einer MAC-Adresse auf der Leitung.</p>';
+  h+='<div class="gwrap">'+waveSVG(bits,"nrz","Logik","Bitfolge")+waveSVG(bits,"man","10BASE-T","Manchester")+"</div>";
+  const codes=[];bytes.forEach(b=>{codes.push(B4B5[b&15],B4B5[b>>4]);});
+  const cb=codes.join("").split("").map(Number);
+  h+='<p class="lnote"><b>Manchester (10 Mbit/s):</b> In jeder Bitmitte gibt es einen Pegelwechsel – aufwärts = 1, abwärts = 0. So steckt der Takt im Signal, kostet aber doppelte Frequenz.<br>'+
+    "<b>100BASE-TX:</b> Je 4 Bit werden zu 5 Bit (4B5B, niederes Halbbyte zuerst: "+codes.map((c,i)=>'<span class="ans">'+c+"</span>").join(" ")+"), damit nie zu viele Nullen hintereinander kommen. Danach (hier weggelassen: Verwürfler) folgt MLT-3: bei jeder 1 einen Schritt weiter im Zyklus 0 → + → 0 → −, bei 0 bleibt der Pegel. 125 MBaud für 100 Mbit/s.</p>";
+  h+='<div class="gwrap">'+waveSVG(cb,"mlt","100BASE-TX","4B5B+MLT-3")+"</div>";
+  h+='<p class="lnote"><b>Gigabit (1000BASE-T)</b> überträgt über alle 4 Adernpaare gleichzeitig und in beide Richtungen, mit 5 Spannungsstufen (PAM-5) bei 125 MBaud: 4 Paare × 2 Bit × 125 M = 1000 Mbit/s. <b>WLAN</b> moduliert Bits auf viele Unterträger (OFDM, QAM) – im Mitschnitt ist davon nichts mehr zu sehen.</p>';
+  return h;
+}
+
+/* ---------- Schicht 2 ---------- */
+function tab2(r){
+  const d=S.raw[r.no-1].data;let h=intro(2,"bringt einen Rahmen von einem Gerät zum nächsten im selben Netzsegment. Adressiert wird mit MAC-Adressen; der EtherType sagt, welches Protokoll darin steckt.");
+  const E=findL(r,["Ethernet II"]);
+  if(E){h+=gridHTML(d,0,defsEthernet(d),16,CVAR[2],{});
+    const l3=r.layers.find(l=>l.osi>=2&&l!==E&&l.len>0);const used=l3?(r.layers.filter(l=>l.osi>=2&&l.len>0).reduce((a,l)=>Math.max(a,l.off+l.len),0)):d.length;
+    h+='<p class="lnote">Nach den '+E.len+" Byte Kopf folgt ab Byte "+E.len+" die Nutzlast der Schicht 3"+(d.length>used&&used>E.len?"; die letzten "+(d.length-used)+" Byte (ab "+used+") sind Füllbytes, weil der Rahmen sonst unter 60 Byte läge":"")+". Die 4 Byte FCS am Ende hat die Netzwerkkarte schon entfernt (siehe Tab 1).</p>";}
+  else r.layers.filter(l=>l.osi===2&&l.proto!=="ARP").forEach(L=>h+=treeOf(L));
+  const A=findL(r,["ARP"]);
+  if(A){h+='<h3 class="h3">ARP-Nachricht (ab Byte '+A.off+")</h3>"+intro(2,"/3: ARP verbindet beide Welten. Bevor ein Rechner ein IP-Paket ins lokale Netz schicken kann, braucht er die MAC-Adresse des Ziels – oder des Routers, wenn das Ziel woanders liegt.")+gridHTML(d,A.off,defsARP(d),16,CVAR[2],{});}
+  if(!E&&!A&&!r.layers.some(l=>l.osi===2))h+='<p class="lnote">'+esc(emptyNote(2,r))+"</p>";
+  return h;
+}
+/* ---------- Schicht 3 ---------- */
+function tab3(r){
+  const d=S.raw[r.no-1].data;let h=intro(3,"bringt Pakete über Netzgrenzen hinweg zum Ziel. Jeder Router liest die Zieladresse, entscheidet den nächsten Sprung und verpackt das Paket in einen neuen Schicht-2-Rahmen.");
+  const I4=findL(r,["IPv4"]),I6=findL(r,["IPv6"]);
+  if(I4){const D=defsIPv4(d,I4.off);h+=gridHTML(d,I4.off,D.fields,32,CVAR[3],{});
+    const s=ip4(d,I4.off+12),t=ip4(d,I4.off+16);
+    const same=s.split(".").slice(0,3).join(".")===t.split(".").slice(0,3).join(".");
+    h+='<div class="lnote"><b>Zustellung:</b> '+(ipScope4(t)==="Broadcast"||ipScope4(t)==="Multicast"?"Ziel ist eine "+ipScope4(t)+"-Adresse – geht an mehrere Empfänger im lokalen Netz.":same?"Quelle und Ziel liegen (bei einer typischen /24-Maske wie 255.255.255.0) im selben Netz → direkte Zustellung, die Ziel-MAC ist die des Empfängers.":"Ziel liegt in einem anderen Netz → das Paket geht an den Router; die Ziel-MAC im Ethernet-Kopf ist die des Routers, nicht die von "+esc(t)+".")+
+      (ipScope4(s)==="privat"&&ipScope4(t)==="öffentlich"?" Beim Weg ins Internet ersetzt die FRITZ!Box per NAT die private Quelladresse "+esc(s)+" und den Quellport durch ihre öffentliche Adresse und einen eigenen Port.":"")+"</div>";}
+  if(I6){const D=defsIPv6(d,I6.off);h+=gridHTML(d,I6.off,D.fields,32,CVAR[3],{});}
+  const IC=findL(r,["ICMP","ICMPv6"]);
+  if(IC){const D=defsICMP(d,IC.off,IC.proto==="ICMPv6");h+='<h3 class="h3">'+IC.proto+" (ab Byte "+IC.off+")</h3>"+gridHTML(d,IC.off,D.fields,32,CVAR[3],{})+treeOf(IC);}
+  const IG=findL(r,["IGMP"]);if(IG)h+=treeOf(IG);
+  if(!I4&&!I6)h+='<p class="lnote">'+esc(emptyNote(3,r))+"</p>";
+  return h;
+}
+/* ---------- Schicht 4 ---------- */
+function tab4(r){
+  const d=S.raw[r.no-1].data;let h=intro(4,"verbindet nicht mehr Rechner, sondern Programme: Ports adressieren den Dienst. TCP sorgt zusätzlich für Reihenfolge, Vollständigkeit und Tempo, UDP liefert nur einzelne Datagramme.");
+  const ipL=findL(r,["IPv4","IPv6"]);const T=findL(r,["TCP"]),U=findL(r,["UDP"]);
+  if(T){const D=defsTCP(d,T.off,r,ipL);h+=gridHTML(d,T.off,D.fields,32,CVAR[4],{});h+=ladder(r);}
+  else if(U){const D=defsUDP(d,U.off,ipL);h+=gridHTML(d,U.off,D.fields,32,CVAR[4],{});
+    h+='<p class="lnote">UDP hat keine Sequenznummern und keine Bestätigungen. Geht ein Datagramm verloren, merkt das nur die Anwendung (DNS fragt z. B. nach einer Weile einfach noch einmal).</p>';}
+  else h+='<p class="lnote">'+esc(emptyNote(4,r))+"</p>";
+  return h;
+}
+function ladder(r){
+  if(!r.flow)return "";const st=[...S.stt.streams.values()].find(s=>s.id===r.flow.id);if(!st)return "";
+  let nums=st.pkts;const ci=nums.indexOf(r.no);const from=Math.max(0,ci-25);nums=nums.slice(from,from+50);
+  const W=600,AX=110,BX=560,RH=30,top=46;const H=top+nums.length*RH+10;
+  let s='<h3 class="h3">Ablauf der TCP-Verbindung #'+st.id+'</h3><p class="lnote">Jeder Pfeil ist ein Segment. Zahlen sind relativ. Klick auf einen Pfeil wählt das Paket aus. Die Seq einer Seite wächst um die gesendeten Datenbytes (SYN und FIN zählen 1); der ACK der Gegenseite nennt das nächste erwartete Byte.</p>'+
+    '<div class="gwrap"><svg class="lad" viewBox="0 0 '+W+" "+H+'" width="'+W+'" height="'+H+'">'+
+    '<text x="'+AX+'" y="14" class="lh">A '+esc(st.a)+'</text><text x="'+BX+'" y="14" class="lh" text-anchor="end">B '+esc(st.b)+"</text>"+
+    '<line x1="'+AX+'" y1="22" x2="'+AX+'" y2="'+H+'" class="lv"/><line x1="'+BX+'" y1="22" x2="'+BX+'" y2="'+H+'" class="lv"/>'+
+    '<defs><marker id="ah" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="la"/></marker></defs>';
+  nums.forEach((no,i)=>{const x=S.rows[no-1];const t=x.tcp;if(!t)return;const y=top+i*RH;const ltr=t.dir===0;
+    const fl=["FIN","SYN","RST","PSH","ACK"].filter((n,k)=>t.fl&(1<<k)).join(",");
+    const lab="["+fl+"] Seq="+t.rs+((t.fl&16)?" Ack="+t.ra:"")+" Len="+t.plen+(x.pset.has("retrans")?" ↻":"");
+    const cur=no===r.no;
+    s+='<g class="lg'+(cur?" cur":"")+(x.pset.has("retrans")?" rt":"")+'" data-sel="'+(no-1)+'"><rect x="0" y="'+(y-14)+'" width="'+W+'" height="'+RH+'" class="lbg"/>'+
+      '<text x="4" y="'+(y+4)+'" class="lt">'+no+"  "+x.rel.toFixed(3)+'</text>'+
+      '<line x1="'+(ltr?AX:BX)+'" y1="'+(y-4)+'" x2="'+(ltr?BX:AX)+'" y2="'+(y+8)+'" class="ll" marker-end="url(#ah)"/>'+
+      '<text x="'+((AX+BX)/2)+'" y="'+(y-5)+'" class="lt" text-anchor="middle">'+esc(lab)+(x.proto!=="TCP"?" · "+esc(x.proto):"")+"</text></g>";});
+  return s+"</svg></div>";
+}
+/* ---------- Schicht 5–7 ---------- */
+function tab5(r){
+  let h=intro(7,"Im Internet-Modell (TCP/IP) gibt es über TCP/UDP nur noch die „Anwendungsschicht“. Die Aufgaben von Sitzung (5) und Darstellung (6) erledigt jedes Protokoll selbst – z. B. TLS die Verschlüsselung, HTTP-Kopfzeilen die Kodierung, Cookies den Sitzungszustand.");
+  const ls=r.layers.filter(l=>l.osi>=5).sort((a,b)=>b.osi-a.osi);
+  if(!ls.length)return h+'<p class="lnote">'+esc(emptyNote(7,r))+"</p>";
+  ls.forEach(L=>{h+='<div class="layer open" style="--c:'+CVAR[L.osi]+'"><div class="lhead"><span class="lnum">'+L.osi+'</span><span class="lname">'+OSI_NAMES[L.osi]+'</span><span class="lproto">'+esc(L.proto)+'</span></div><div class="lbody">'+treeOf(L)+"</div></div>";});
+  return h;
+}
+/* ===================== Oberfläche ===================== */
+const $=id=>document.getElementById(id);
+const S={raw:[],rows:[],view:[],sel:-1,stt:null,file:"",sortK:"no",sortD:1,fmt:"",tab:"ov",quiz:false,wireOff:undefined};
+const MAXROWS=20000;
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function load(buf,name){
+  let cap;try{cap=parseCapture(buf);}catch(e){alert("Konnte die Datei nicht lesen:\n"+e.message);return;}
+  S.raw=cap.packets;S.stt=newState();S.file=name;S.fmt=cap.format;S.sel=-1;
+  const t0=cap.packets.length?cap.packets[0].ts:0;
+  S.rows=cap.packets.map((p,i)=>dissect(p,i+1,t0,S.stt));
+  S.rows.forEach(r=>{r.search=(r.src+" "+r.dst+" "+r.proto+" "+r.info).toLowerCase();r.pset=protoSet(r);});
+  $("hint").style.display=S.rows.length?"none":"";
+  applyFilter();
+  if(S.view.length)select(S.view[0]);
+}
+function protoSet(r){
+  const s=new Set();r.stack.concat([r.proto]).forEach(p=>{const l=p.toLowerCase();s.add(l);s.add(l.split(/[ /(-]/)[0]);});
+  if(s.has("ipv4"))s.add("ip");if(s.has("ethernet"))s.add("eth");if(s.has("tlsv1.3")){s.add("tls");s.add("tls13");}
+  if(r.l4)s.add(r.l4);if(s.has("mdns")||s.has("llmnr"))s.add("dns");if(s.has("ssdp")||s.has("sip"))s.add("udp");
+  if(r.info.startsWith("[Wiederholung]"))s.add("retrans");
+  return s;
+}
+
+/* ---------- Filter ---------- */
+function compileFilter(src){
+  const toks=[];const re=/\s*("[^"]*"|\(|\)|&&|\|\||!=|==|>=|<=|>|<|!|[^\s()!=<>&|"]+)/y;let m;re.lastIndex=0;
+  while(re.lastIndex<src.length&&(m=re.exec(src)))toks.push(m[1]);
+  if(src.trim()&&re.lastIndex<src.trim().length)throw new Error("Unerwartetes Zeichen");
+  let i=0;const peek=()=>toks[i],next=()=>toks[i++];
+  function expr(){let a=term();while(peek()==="||"||peek()==="or"){next();const b=term(),x=a;a=r=>x(r)||b(r);}return a;}
+  function term(){let a=fac();while(peek()==="&&"||peek()==="and"){next();const b=fac(),x=a;a=r=>x(r)&&b(r);}return a;}
+  function fac(){const t=peek();if(t==="!"||t==="not"){next();const f=fac();return r=>!f(r);}
+    if(t==="("){next();const e=expr();if(next()!==")")throw new Error(") fehlt");return e;}return atom();}
+  function atom(){
+    const w=next();if(w===undefined)throw new Error("Ausdruck unvollständig");
+    if(w.startsWith('"')){const q=w.slice(1,-1).toLowerCase();return r=>r.search.includes(q);}
+    const ops=["==","!=",">=","<=",">","<","contains","eq","ne"];
+    if(ops.includes(peek())){let op=next();let v=next();if(v===undefined)throw new Error("Wert fehlt");v=v.replace(/^"|"$/g,"");
+      if(op==="eq")op="==";if(op==="ne")op="!=";const get=getter(w.toLowerCase());
+      const cmp=(a)=>{if(a===undefined||a===null)return false;
+        if(op==="contains")return String(a).toLowerCase().includes(v.toLowerCase());
+        const nv=Number(v),na=Number(a);const num=!isNaN(nv)&&!isNaN(na)&&v!=="";
+        if(op==="==")return num?na===nv:String(a).toLowerCase()===v.toLowerCase();
+        if(op==="!=")return num?na!==nv:String(a).toLowerCase()!==v.toLowerCase();
+        if(!num)return false;return op===">"?na>nv:op==="<"?na<nv:op===">="?na>=nv:na<=nv;};
+      return r=>{const a=get(r);if(Array.isArray(a))return op==="!="?a.every(cmp):a.some(cmp);return cmp(a);};}
+    const lw=w.toLowerCase();const KNOWN=["eth","arp","ip","ipv4","ipv6","icmp","icmpv6","igmp","tcp","udp","dns","mdns","llmnr","dhcp","ntp","http","tls","tls13","ssdp","sip","stun","quic","mqtt","ssh","pppoe","stp","retrans","syslog","smtp","ftp","pop3","imap"];
+    if(KNOWN.includes(lw))return r=>r.pset.has(lw);
+    return r=>r.search.includes(lw);
+  }
+  const f=expr();if(i<toks.length)throw new Error("Unerwartet: "+toks[i]);return f;
+}
+function getter(k){
+  switch(k){
+    case "ip.addr":case "addr":case "host":return r=>[r.src,r.dst];
+    case "ip.src":case "src":return r=>r.src;case "ip.dst":case "dst":return r=>r.dst;
+    case "eth.addr":return r=>{const l=r.layers.find(x=>x.proto==="Ethernet II");return l?[l.fields[0].value.split(" ")[0],l.fields[1].value.split(" ")[0]]:null;};
+    case "port":case "tcp.port":case "udp.port":return r=>(k==="port"||k.startsWith(r.l4))?[r.sp,r.dp]:null;
+    case "tcp.srcport":case "udp.srcport":case "sport":return r=>r.sp;case "tcp.dstport":case "udp.dstport":case "dport":return r=>r.dp;
+    case "frame.len":case "len":return r=>r.orig;case "frame.number":case "no":return r=>r.no;
+    case "tcp.stream":case "stream":return r=>r.flow?r.flow.id:null;
+    case "proto":case "protocol":return r=>r.proto;case "info":return r=>r.info;
+    case "ip.ttl":case "ttl":return r=>r.ttl;
+    default:throw new Error("Unbekanntes Feld „"+k+"“");
+  }
+}
+function applyFilter(){
+  const src=$("filter").value.trim();let f=null;
+  $("filter").classList.remove("bad","good");$("filter").title="";
+  if(src){try{f=compileFilter(src);$("filter").classList.add("good");}catch(e){$("filter").classList.add("bad");$("filter").title=e.message;f=null;}}
+  S.view=[];S.rows.forEach((r,i)=>{if(!f||f(r))S.view.push(i);});
+  sortView();renderList();
+}
+function sortView(){
+  const k=S.sortK,dd=S.sortD;const val=r=>k==="no"?r.no:k==="t"?r.rel:k==="len"?r.orig:String(r[k]||"");
+  S.view.sort((a,b)=>{const x=val(S.rows[a]),y=val(S.rows[b]);return (x<y?-1:x>y?1:S.rows[a].no-S.rows[b].no)*dd;});
+}
+function renderList(){
+  const tb=$("rows");const fr=document.createDocumentFragment();const n=Math.min(S.view.length,MAXROWS);
+  for(let j=0;j<n;j++){const i=S.view[j],r=S.rows[i];const tr=document.createElement("tr");tr.className=r.cls+(i===S.sel?" sel":"");tr.dataset.i=i;
+    tr.innerHTML="<td>"+r.no+"</td><td>"+r.rel.toFixed(6)+"</td><td>"+esc(r.src)+"</td><td>"+esc(r.dst)+"</td><td>"+esc(r.proto)+"</td><td>"+r.orig+"</td><td title=\""+esc(r.info)+"\">"+esc(r.info)+"</td>";fr.appendChild(tr);}
+  tb.replaceChildren(fr);
+  $("status").textContent=S.rows.length?(S.file+" · "+S.fmt+" · "+S.rows.length+" Pakete"+(S.view.length!==S.rows.length?" · angezeigt "+S.view.length:"")+(S.view.length>MAXROWS?" (Liste auf "+MAXROWS+" gekürzt – Filter benutzen)":"")):"kein Mitschnitt geladen";
+}
+
+/* ---------- Auswahl, OSI-Ansicht, Hex ---------- */
+function select(i){
+  if(i<0||i>=S.rows.length)return;S.sel=i;
+  document.querySelectorAll("#rows tr.sel").forEach(t=>t.classList.remove("sel"));
+  const tr=document.querySelector('#rows tr[data-i="'+i+'"]');if(tr){tr.classList.add("sel");tr.scrollIntoView({block:"nearest"});}
+  renderTab(S.rows[i]);renderHex(S.rows[i],-1,0);
+}
+function segments(r){
+  const ls=r.layers.filter(l=>l.osi>1&&l.len>0);const starts=[...new Set(ls.map(l=>l.off))].sort((a,b)=>a-b);
+  const end=Math.max(0,...ls.map(l=>l.off+l.len));const segs=[];
+  starts.forEach((s,k)=>{const at=ls.filter(l=>l.off===s);const e=k+1<starts.length?starts[k+1]:end;const osi=Math.max(...at.map(l=>l.osi));
+    if(e>s)segs.push({off:s,end:e,osi:osi,label:[...new Set(at.map(l=>l.proto))].join(" / ")});});
+  if(end<r.len)segs.push({off:end,end:r.len,osi:0,label:"Füllbytes / Rest"});
+  return segs;
+}
+const CVAR={0:"#888",1:"var(--l1)",2:"var(--l2)",3:"var(--l3)",4:"var(--l4)",5:"var(--l5)",6:"var(--l6)",7:"var(--l7)"};
+function emptyNote(L,r){
+  const st=r.stack.map(s=>s.toLowerCase());const has=x=>st.some(s=>s.startsWith(x));
+  if(L===7){if(has("arp"))return "ARP hat keine Anwendungsdaten – es arbeitet ganz unten, um Adressen aufzulösen.";if(has("icmp"))return "ICMP ist ein Hilfsprotokoll der Vermittlungsschicht und transportiert keine Anwendungsdaten.";
+    if(r.l4==="tcp")return "Dieses TCP-Segment enthält keine Nutzdaten – es dient nur der Steuerung (Aufbau, Bestätigung oder Abbau).";return "Keine Anwendungsdaten erkannt.";}
+  if(L===6){if(r.layers.some(l=>l.osi===7))return "Keine eigene Darstellungsschicht im Paket: Im Internet-Modell (TCP/IP) erledigt die Anwendung Kodierung und ggf. Verschlüsselung selbst – hier ist der Inhalt binär im Protokoll festgelegt.";return "Ohne Nutzdaten gibt es nichts darzustellen.";}
+  if(L===5){if(r.l4==="udp")return "UDP ist verbindungslos – es gibt keine Sitzung. Wenn nötig, regelt die Anwendung selbst, welche Nachrichten zusammengehören.";return "Keine Sitzung – das Protokoll arbeitet unterhalb der Sitzungsebene.";}
+  if(L===4){if(has("arp"))return "ARP liegt unter IP und braucht kein Transportprotokoll.";if(has("icmp")||has("igmp"))return "ICMP/IGMP werden direkt in IP verpackt, ohne TCP oder UDP – deshalb gibt es auch keine Ports.";return "Kein Transportprotokoll erkannt.";}
+  if(L===3){if(has("arp"))return "ARP ersetzt hier die Vermittlungsschicht: Es fragt im lokalen Netz nach der MAC-Adresse zu einer IP-Adresse (Broadcast an alle). Router leiten ARP nicht weiter.";return "Keine Vermittlungsschicht erkannt.";}
+  if(L===2)return "Dieser Mitschnitt enthält keinen Schicht-2-Kopf (z. B. „Raw IP“ oder Tunnel-Schnittstelle).";
+  return "";
+}
+function fieldHTML(f){
+  const kids=f.kids&&f.kids.length;const closed=kids&&f.kids.length>6;
+  return '<li class="'+(closed?"closed":"")+'"><span class="fl" data-off="'+f.off+'" data-len="'+f.len+'">'+(kids?'<span class="tg">'+(closed?"▸":"▾")+'</span>':'<span class="tg"></span>')+
+    '<span class="fn">'+esc(f.name)+':</span> <span class="fv'+(/✗|⚠/.test(f.value)||f.name.startsWith("⚠")?" warn":"")+'">'+esc(f.value)+'</span></span>'+
+    (kids?'<ul class="f">'+f.kids.map(fieldHTML).join("")+"</ul>":"")+"</li>";
+}
+function renderOSI(r){
+  const segs=segments(r);const tot=r.len||1;
+  let h='<div class="encap" title="Aufbau des Rahmens: jede Schicht packt die darüberliegende ein">'+segs.map(s=>'<div style="flex:'+Math.max((s.end-s.off)/tot,.05)+';background:'+CVAR[s.osi]+'" data-off="'+s.off+'" data-len="'+(s.end-s.off)+'" title="'+esc(s.label)+": Byte "+s.off+"–"+(s.end-1)+" ("+(s.end-s.off)+' Byte)">'+esc(s.label)+" "+(s.end-s.off)+"</div>").join("")+"</div>";
+  for(let L=7;L>=1;L--){
+    const ls=r.layers.filter(l=>l.osi===L);const c=CVAR[L];
+    const rng=ls.filter(l=>l.len>0);const lo=rng.length?Math.min(...rng.map(l=>l.off)):-1,hi=rng.length?Math.max(...rng.map(l=>l.off+l.len)):-1;
+    h+='<div class="layer'+(ls.length?" open":" empty")+'" style="--c:'+c+'"><div class="lhead"><span class="lnum">'+L+'</span><span class="lname">'+OSI_NAMES[L]+' <span class="fn" style="font-weight:normal;font-size:11px">'+OSI_EN[L]+'</span></span><span class="lproto">'+
+      (ls.length?esc([...new Set(ls.map(l=>l.proto))].join(" + ")):"—")+'</span><span class="lrange">'+(L===1?r.orig+" Byte":lo>=0?"Byte "+lo+"–"+(hi-1):ls.length?"abgeleitet":"")+"</span></div><div class=\"lbody\">";
+    if(!ls.length)h+='<div class="lnote">'+esc(emptyNote(L,r))+"</div>";
+    ls.forEach(l=>{h+='<div class="proto"><div class="pt">'+esc(l.title)+"</div>"+(l.note?'<div class="lnote">'+esc(l.note)+"</div>":"")+'<ul class="f">'+l.fields.map(fieldHTML).join("")+"</ul></div>";});
+    h+="</div></div>";
+  }
+  $("osibody").className="";$("osibody").innerHTML=h;
+}
+function renderHex(r,ho,hl){
+  const d=S.raw[r.no-1].data;const segs=segments(r);const cls=new Array(d.length).fill("");
+  segs.forEach(s=>{const k=s.osi===5?"L4":"L"+s.osi;for(let i=s.off;i<s.end&&i<d.length;i++)cls[i]=k;});
+  let out="";
+  for(let row=0;row<d.length;row+=16){
+    let hx="",as="";
+    for(let j=0;j<16;j++){const i=row+j;
+      if(i<d.length){const on=i>=ho&&i<ho+hl;const c=(cls[i]+(on?" h":"")).trim();const ch=d[i];
+        hx+='<b data-i="'+i+'"'+(c?' class="'+c+'"':"")+">"+hex2(ch)+"</b>"+(j===7?"  ":" ");
+        as+='<b data-i="'+i+'"'+(on?' class="h"':"")+">"+esc(ch>=32&&ch<127?String.fromCharCode(ch):".")+"</b>";}
+      else{hx+="   "+(j===7?" ":"");}}
+    out+='<span class="off">'+hex4(row)+"</span>  "+hx+" "+as+"\n";
+  }
+  $("hex").innerHTML=out;
+  if(ho>=0){const b=$("hex").querySelector('b[data-i="'+ho+'"]');if(b)b.scrollIntoView({block:"nearest"});}
+}
+function findField(r,i){
+  let best=null;const walk=(fs)=>fs.forEach(f=>{if(f.len>0&&i>=f.off&&i<f.off+f.len&&(!best||f.len<=best.len))best=f;if(f.kids)walk(f.kids);});
+  r.layers.forEach(l=>{if(l.osi>1)walk(l.fields);});return best;
+}
+
+/* ---------- Dialoge ---------- */
+function dialog(title,html){$("ovt").textContent=title;$("ovc").innerHTML=html;$("ov").classList.add("show");$("ovc").scrollTop=0;}
+function followStream(){
+  const r=S.rows[S.sel];if(!r||!r.flow){dialog("Strom folgen","<p>Bitte zuerst ein TCP-Paket auswählen.</p>");return;}
+  const id=r.flow.id;let out="",cb=0,sb=0,n=0;let tls=false;
+  S.rows.forEach(x=>{if(!x.flow||x.flow.id!==id||!x.flow.len||x.pset.has("retrans"))return;n++;if(x.pset.has("tls"))tls=true;
+    const d=S.raw[x.no-1].data;const t=utf8(d,x.flow.off,x.flow.len).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f�]/g,".");
+    if(x.flow.dir===0)cb+=x.flow.len;else sb+=x.flow.len;out+='<span class="'+(x.flow.dir===0?"cli":"srv")+'">'+esc(t)+"</span>";});
+  const st=[...S.stt.streams.values()].find(s=>s.id===id);
+  dialog("TCP-Strom #"+id,"<p><b>"+esc(st.a)+"</b> (rot, "+cb+" Byte) ⇄ <b>"+esc(st.b)+"</b> (blau, "+sb+" Byte) · "+n+" Segmente mit Daten · Filter: <code>tcp.stream=="+id+"</code> "+
+    '<button id="fs">als Filter setzen</button></p>'+(tls?'<p class="lnote">Diese Verbindung ist mit TLS verschlüsselt – lesbar sind nur Teile des Handshakes (z. B. der Servername), der Rest ist Datensalat.</p>':"")+"<pre>"+(out||"(keine Nutzdaten)")+"</pre>");
+  $("fs").onclick=()=>{$("filter").value="tcp.stream=="+id;applyFilter();$("ov").classList.remove("show");};
+}
+function stats(){
+  if(!S.rows.length){dialog("Statistik","<p>Noch kein Mitschnitt geladen.</p>");return;}
+  const pc=new Map();const conv=new Map();let bytes=0;
+  S.rows.forEach(r=>{bytes+=r.orig;const seen=new Set();r.layers.forEach(l=>{if(l.osi<2||seen.has(l.proto))return;seen.add(l.proto);const k=l.osi+"|"+l.proto;const e=pc.get(k)||{n:0,b:0};e.n++;e.b+=r.orig;pc.set(k,e);});
+    if(r.src&&r.dst){const k=[r.src,r.dst].sort().join(" ⇄ ");const e=conv.get(k)||{n:0,b:0,p:new Set()};e.n++;e.b+=r.orig;e.p.add(r.proto);conv.set(k,e);}});
+  const dur=S.rows.length>1?S.rows[S.rows.length-1].rel:0;
+  let h="<p>"+S.rows.length+" Pakete · "+bytes+" Byte · Dauer "+dur.toFixed(3)+" s"+(dur>0?" · Ø "+(bytes*8/dur/1000).toFixed(1)+" kbit/s":"")+" · "+S.stt.streams.size+" TCP-Verbindungen</p>";
+  h+="<h2>Protokolle nach Schicht</h2><table><tr><th>Schicht</th><th>Protokoll</th><th>Pakete</th><th>Byte</th><th>Anteil</th></tr>";
+  [...pc.entries()].sort((a,b)=>b[0].split("|")[0]-a[0].split("|")[0]||b[1].n-a[1].n).forEach(([k,e])=>{const [L,p]=k.split("|");
+    h+='<tr><td style="color:'+CVAR[L]+';font-weight:700">'+L+" "+OSI_NAMES[L]+"</td><td>"+esc(p)+"</td><td>"+e.n+"</td><td>"+e.b+'</td><td><span style="display:inline-block;height:8px;background:'+CVAR[L]+";width:"+Math.max(2,Math.round(e.n/S.rows.length*120))+'px"></span> '+(e.n/S.rows.length*100).toFixed(1)+" %</td></tr>";});
+  h+="</table><h2 style=\"margin-top:16px\">Gesprächspartner</h2><table><tr><th>Endpunkte</th><th>Pakete</th><th>Byte</th><th>Protokolle</th></tr>";
+  const nm=a=>S.stt.dns.get(a)?a+" ("+S.stt.dns.get(a)+")":a;
+  [...conv.entries()].sort((a,b)=>b[1].b-a[1].b).slice(0,60).forEach(([k,e])=>{h+="<tr><td>"+esc(k.split(" ⇄ ").map(nm).join(" ⇄ "))+"</td><td>"+e.n+"</td><td>"+e.b+"</td><td>"+esc([...e.p].join(", "))+"</td></tr>";});
+  h+="</table>";
+  if(S.stt.dns.size){h+='<h2 style="margin-top:16px">Per DNS aufgelöste Namen</h2><table><tr><th>Adresse</th><th>Name</th></tr>';S.stt.dns.forEach((n,a)=>{h+="<tr><td>"+esc(a)+"</td><td>"+esc(n)+"</td></tr>";});h+="</table>";}
+  dialog("Statistik",h);
+}
+function fritzHelp(){
+  dialog("Mitschnitt mit der FRITZ!Box",`<ol>
+<li>Im Browser <code>http://fritz.box/html/capture.html</code> öffnen (oder <code>http://192.168.178.1/html/capture.html</code>) und mit den FRITZ!Box-Zugangsdaten anmelden. Die Seite ist in keinem Menü verlinkt.</li>
+<li>Passende Schnittstelle wählen und auf <b>Start</b> klicken – der Browser beginnt einen „Download“, der so lange läuft, wie mitgeschnitten wird:
+ <ul><li><b>Internet / „1. Internetverbindung“</b> – alles, was ins Internet geht (bei DSL meist in PPPoE verpackt).</li>
+ <li><b>Netzwerkschnittstellen → lan</b> (bzw. <code>eth0</code>, <code>ath0</code>/<code>wifi0</code> für WLAN) – Verkehr im Heimnetz.</li>
+ <li>Für den Verkehr eines einzelnen Geräts gibt es bei neueren FRITZ!OS-Versionen auch die Auswahl nach Gerät/IP.</li></ul></li>
+<li>Gewünschte Aktion ausführen (Webseite aufrufen, telefonieren …), dann bei derselben Schnittstelle <b>Stop</b> klicken. Der Download wird abgeschlossen.</li>
+<li>Die Datei (<code>….eth</code> oder <code>.pcap</code>) hier mit „Mitschnitt öffnen“ laden oder ins Fenster ziehen. Es ist ein normales pcap-Format – die Endung ist egal.</li></ol>
+<p class="lnote">Achtung: Mitschnitte können Passwörter, Cookies und private Inhalte im Klartext enthalten. Paketwerk verarbeitet die Datei nur lokal im Browser – trotzdem den Mitschnitt nicht unbedacht weitergeben. Die meisten heutigen Verbindungen sind per TLS verschlüsselt; sichtbar bleiben dann vor allem DNS-Namen, Servernamen (SNI), Adressen und Mengen.</p>
+<p class="lnote">Alternativen am eigenen Rechner: <code>sudo tcpdump -i any -w mitschnitt.pcap</code> (Linux) oder Wireshark/dumpcap – beides erzeugt Dateien, die hier geöffnet werden können.</p>`);
+}
+
+/* ---------- Ereignisse ---------- */
+$("file").onchange=e=>{const f=e.target.files[0];if(!f)return;f.arrayBuffer().then(b=>load(b,f.name));e.target.value="";};
+$("demo").onclick=()=>load(buildDemo(),"demo.pcap");
+let ft=null;$("filter").oninput=()=>{clearTimeout(ft);ft=setTimeout(applyFilter,200);};
+$("filter").onkeydown=e=>{if(e.key==="Enter"){clearTimeout(ft);applyFilter();}};
+$("rows").onclick=e=>{const tr=e.target.closest("tr");if(tr)select(+tr.dataset.i);};
+document.querySelector("thead").onclick=e=>{const k=e.target.dataset.k;if(!k)return;if(S.sortK===k)S.sortD=-S.sortD;else{S.sortK=k;S.sortD=1;}sortView();renderList();};
+function renderTabs(){
+  $("tabs").innerHTML=TABS.map(([k,l])=>'<button data-tab="'+k+'"'+(S.tab===k?' class="on"':"")+">"+l+"</button>").join("")+
+    '<label title="Gedeutete Werte verdecken – erst selbst aus den Bytes ablesen, dann aufdecken"><input type="checkbox" id="quiz"'+(S.quiz?" checked":"")+'> Übungsmodus</label>';
+}
+renderTabs();
+$("tabs").onclick=e=>{const b=e.target.closest("button[data-tab]");if(!b)return;S.tab=b.dataset.tab;renderTabs();if(S.sel>=0){renderTab(S.rows[S.sel]);renderHex(S.rows[S.sel],-1,0);}};
+$("tabs").onchange=e=>{if(e.target.id==="quiz"){S.quiz=e.target.checked;$("osi").classList.toggle("quiz",S.quiz);}};
+function activate(el){
+  document.querySelectorAll("#osibody .act").forEach(x=>x.classList.remove("act"));
+  if(!el)return;el.classList.add("act");
+  const fi=el.dataset.fi;if(fi!==undefined){const scope=el.closest(".gwrap")?el.closest(".gwrap").nextElementSibling:el.closest("table").previousElementSibling;
+    if(scope)scope.querySelectorAll('[data-fi="'+fi+'"]').forEach(x=>x.classList.add("act"));}
+}
+$("osibody").onclick=e=>{
+  const an=e.target.closest(".ans");if(an&&S.quiz&&!an.classList.contains("shown")){an.classList.add("shown");return;}
+  const hd=e.target.closest(".lhead");if(hd){hd.parentNode.classList.toggle("open");return;}
+  const tg=e.target.closest(".tg");if(tg&&tg.textContent){const li=tg.closest("li");li.classList.toggle("closed");tg.textContent=li.classList.contains("closed")?"▸":"▾";return;}
+  const ws=e.target.closest("[data-wire]");if(ws){S.wireOff=+ws.dataset.wire;renderTab(S.rows[S.sel]);return;}
+  const sl=e.target.closest("[data-sel]");if(sl){select(+sl.dataset.sel);return;}
+  const el=e.target.closest("[data-off]");if(!el||S.sel<0)return;
+  activate(el.classList.contains("eb")||el.closest(".encap")?null:el);
+  const len=+el.dataset.len;renderHex(S.rows[S.sel],len>0?+el.dataset.off:-1,len);
+};
+$("osibody").onchange=e=>{if(e.target.id==="wireoff"){S.wireOff=+e.target.value;renderTab(S.rows[S.sel]);}};
+$("hex").onclick=e=>{const b=e.target.closest("b");if(!b||S.sel<0)return;const i=+b.dataset.i;const r=S.rows[S.sel];
+  let best=null;document.querySelectorAll("#osibody [data-off]").forEach(x=>{const o=+x.dataset.off,l=+x.dataset.len;if(l>0&&i>=o&&i<o+l&&!x.classList.contains("eb")&&(!best||l<+best.dataset.len))best=x;});
+  if(best){if(best.classList.contains("fl")){let li=best.parentNode.closest("li");while(li){li.classList.remove("closed");li=li.parentNode.closest("li");}const ly=best.closest(".layer");if(ly)ly.classList.add("open");}
+    activate(best);best.scrollIntoView({block:"nearest"});renderHex(r,+best.dataset.off,+best.dataset.len);}
+  else renderHex(r,i,1);};
+$("stream").onclick=followStream;$("stats").onclick=stats;$("fritz").onclick=fritzHelp;
+$("ovx").onclick=()=>$("ov").classList.remove("show");$("ov").onclick=e=>{if(e.target===$("ov"))$("ov").classList.remove("show");};
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){$("ov").classList.remove("show");return;}
+  if(document.activeElement===$("filter")||!S.view.length)return;
+  if(e.key==="ArrowDown"||e.key==="ArrowUp"){e.preventDefault();const j=S.view.indexOf(S.sel);const n=Math.max(0,Math.min(S.view.length-1,(j<0?0:j)+(e.key==="ArrowDown"?1:-1)));select(S.view[n]);}
+});
+let dc=0;
+document.addEventListener("dragenter",e=>{e.preventDefault();dc++;$("drop").classList.add("show");});
+document.addEventListener("dragleave",()=>{if(--dc<=0){dc=0;$("drop").classList.remove("show");}});
+document.addEventListener("dragover",e=>e.preventDefault());
+document.addEventListener("drop",e=>{e.preventDefault();dc=0;$("drop").classList.remove("show");const f=e.dataTransfer.files[0];if(f)f.arrayBuffer().then(b=>load(b,f.name));});
+</script>
+</body></html>
