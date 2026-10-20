@@ -4564,18 +4564,26 @@ function createPC(opts) {
   function ps2Waiting() { return ps2.on && !ps2.remote && !(ctlCmd & 0x20) && (Math.abs(ps2.dx) >= 0.5 || Math.abs(ps2.dy) >= 0.5 || ps2.btn !== ps2.sentBtn); }
 
   // ------------------------------------------------------------------ Maus (INT 33h)
-  const mouse = { x: 320, y: 100, btn: 0, mx: 0, my: 0, minX: 0, maxX: 639, minY: 0, maxY: 199, shown: 0, press: [0, 0, 0], release: [0, 0, 0], pressPos: [[0, 0], [0, 0], [0, 0]], relPos: [[0, 0], [0, 0], [0, 0]], enabled: true, rx: 8, ry: 16 };
+  const mouse = { x: 320, y: 100, btn: 0, mx: 0, my: 0, minX: 0, maxX: 639, minY: 0, maxY: 199, shown: 0, press: [0, 0, 0], release: [0, 0, 0], pressPos: [[0, 0], [0, 0], [0, 0]], relPos: [[0, 0], [0, 0], [0, 0]], enabled: true, rx: 8, ry: 16, cbMask: 0, cbBusy: false, ev: 0, rawX: 0, rawY: 0 };
   pc.mouseMove = function (dx, dy) {
     mouse.mx += dx; mouse.my += dy;
     if (ps2.on) { ps2.dx += dx; ps2.dy += dy; }
     mouse.x =Math.max(mouse.minX, Math.min(mouse.maxX, mouse.x + dx * 8 / mouse.rx * 1));
     mouse.y = Math.max(mouse.minY, Math.min(mouse.maxY, mouse.y + dy * 8 / mouse.ry * 1));
+    mouse.rawX = ((mouse.rawX || 0) + dx); mouse.rawY = ((mouse.rawY || 0) + dy);
+    if (dx || dy) mouseEvent(1);
   };
+  // Ereignis für die mit INT 33h/0Ch angemeldete Routine: IRQ 12 auslösen, der ROM-Handler ruft sie auf
+  function mouseEvent(bits) {
+    mouse.ev = (mouse.ev || 0) | bits;
+    if ((mouse.ev & mouse.cbMask) && !mouse.cbBusy) raiseIRQ(12);
+  }
   pc.mouseButton = function (b, down) {
     const bit = 1 << b;
     if (down) { mouse.btn |= bit; mouse.press[b]++; mouse.pressPos[b] = [mouse.x, mouse.y]; }
     else { mouse.btn &= ~bit; mouse.release[b]++; mouse.relPos[b] = [mouse.x, mouse.y]; }
     ps2.btn = mouse.btn & 7;
+    mouseEvent([[2, 4], [8, 16], [32, 64]][b][down ? 0 : 1]);
   };
 
 
@@ -5015,7 +5023,7 @@ function createPC(opts) {
   const ROMSEG = 0xF000, ROM = 0xF0000;
   const HLE_OFF = 0x1000, IRET_OFF = 0x1400, EOI1_OFF = 0x1410, EOI2_OFF = 0x1420, INT8_OFF = 0x1430, INT9_OFF = 0x1440, INT24_OFF = 0x1450, EXIT_OFF = 0x1460;
   const FONT16_OFF = 0xA000, FONT8_OFF = 0xB000;
-  const INT74_OFF = 0x1520, PS2PTR_OFF = 0x15F0, SYSCFG_OFF = 0xE6F5;
+  const INT74_OFF = 0x1520, PS2PTR_OFF = 0x15F0, M33PTR_OFF = 0x15F8, SYSCFG_OFF = 0xE6F5;
   function setVec(n, seg, off) { wr16(n * 4, off); wr16(n * 4 + 2, seg); }
   // Video-BIOS-ROM bei C000:0000 (32 KB) wie bei einer echten VGA-Karte: Signatur, Länge, Prüfsumme,
   // INT-10h-Einsprung und die Zeichensätze. Windows (VDDVGA) und Speichermanager erkennen daran
@@ -5071,7 +5079,10 @@ function createPC(opts) {
     // PUSH DX(0); CALL FAR [CS:15F0]; ADD SP,8; fertig: EOI an Slave und Master; POP ES; POP DS; POPA; IRET
     // Status und Daten werden mit echten IN-Befehlen gelesen: Unter Windows liefert erst der
     // virtualisierte Port 60h das Mausbyte, das ein VxD schon vom Controller abgeholt hat.
-    mem.set([0x60, 0x1E, 0x06, 0xE4, 0x64, 0x24, 0x21, 0x3C, 0x21, 0x75, 0x14,
+    // Davor: F1 F4 fragt, ob ein Ereignis für die INT-33h-Routine (0Ch) ansteht (BP = 1, Register wie
+    // beim Maustreiber: AX Ereignisse, BX Tasten, CX/DX Position, SI/DI Mickeys); dann CALL FAR [CS:15F8], F1 F3.
+    mem.set([0x60, 0x1E, 0x06, 0xF1, 0xF4, 0x85, 0xED, 0x74, 0x07, 0x2E, 0xFF, 0x1E, M33PTR_OFF & 0xFF, M33PTR_OFF >> 8, 0xF1, 0xF3,
+      0xE4, 0x64, 0x24, 0x21, 0x3C, 0x21, 0x75, 0x14,
       0xE4, 0x60, 0xF1, 0x74, 0x85, 0xFF, 0x74, 0x0C,
       0x50, 0x53, 0x51, 0x52, 0x2E, 0xFF, 0x1E, PS2PTR_OFF & 0xFF, PS2PTR_OFF >> 8, 0x83, 0xC4, 0x08,
       0xB0, 0x20, 0xE6, 0xA0, 0xE6, 0x20, 0x07, 0x1F, 0x61, 0xCF], ROM + INT74_OFF);
@@ -6459,6 +6470,7 @@ function createPC(opts) {
       case 0x00: case 0x21:
         if (!mouse.enabled) { R[0] = 0; return; }
         mouse.used = true;
+        mouse.cbMask = 0; mouse.ev = 0; mouse.cbBusy = false;
         R[0] = 0xFFFF; R[3] = 2; mouse.shown = -1; mouse.minX = 0; mouse.maxX = isGfx() && mem[0x449] !== 0x13 ? (cols() * 8 - 1) : 639; mouse.minY = 0; mouse.maxY = isGfx() ? (mem[0x449] === 0x12 ? 479 : mem[0x449] === 0x10 ? 349 : 199) : 199;
         mouse.x = (mouse.maxX + 1) >> 1; mouse.y = (mouse.maxY + 1) >> 1; mouse.mx = mouse.my = 0; return;
       case 0x01: mouse.shown++; if (mouse.shown > 0) mouse.shown = 0; return;
@@ -6471,6 +6483,18 @@ function createPC(opts) {
       case 0x08: mouse.minY = Math.min(CX(), DX()); mouse.maxY = Math.max(CX(), DX()); return;
       case 0x0B: { const x = Math.round(mouse.mx), y = Math.round(mouse.my); R[1] = x & 0xFFFF; R[2] = y & 0xFFFF; mouse.mx -= x; mouse.my -= y; return; }
       case 0x0F: mouse.rx = CX() || 8; mouse.ry = DX() || 16; return;
+      case 0x0C: case 0x14: { // Rückrufroutine anmelden (0Ch) bzw. tauschen (14h)
+        const om = mouse.cbMask, oo = rd16(ROM + M33PTR_OFF), os = rd16(ROM + M33PTR_OFF + 2);
+        mouse.cbMask = CX() & 0x7F; wr16(ROM + M33PTR_OFF, DX()); wr16(ROM + M33PTR_OFF + 2, S[0]);
+        mouse.ev = 0; mouse.cbBusy = false;
+        if (ax === 0x14) { R[1] = om; R[2] = oo; S[0] = os; }
+        // IRQ 12 freigeben; in einer V86-Maschine per Port, damit Windows (VPICD) es mitbekommt
+        if (mouse.cbMask) { if (vq) { vqAnd(0xA1, ~0x10); vqAnd(0x21, ~4); } else { pic2.imr &= ~0x10; pic.imr &= ~4; picUpdate(); } }
+        return;
+      }
+      case 0x15: R[3] = 64; return;                       // Größe des Treiberzustands
+      case 0x1F: case 0x20: R[0] = ax === 0x1F ? 0x1F : 0x20; return; // Treiber aus/ein
+      case 0x26: R[3] = 0; R[1] = mouse.maxX; R[2] = mouse.maxY; return;
       case 0x24: R[3] = 0x0805; B[3] = 4; B[2] = 0; return;
       default: return;
     }
@@ -6579,6 +6603,16 @@ function createPC(opts) {
   function hleMain(n) {
     switch (n) {
       case 0x74: ps2Irq(); return;
+      case 0xF4: { // IRQ 12: Ereignis für die Rückrufroutine von INT 33h/0Ch?
+        R[5] = 0;
+        const ev = mouse.ev & mouse.cbMask;
+        if (!ev || mouse.cbBusy) return;
+        mouse.ev = 0; mouse.cbBusy = true;
+        R[0] = ev; R[3] = mouse.btn; R[1] = Math.round(mouse.x); R[2] = Math.round(mouse.y);
+        R[6] = Math.round(mouse.rawX) & 0xFFFF; R[7] = Math.round(mouse.rawY) & 0xFFFF; R[5] = 1;
+        return;
+      }
+      case 0xF3: mouse.cbBusy = false; if (mouse.ev & mouse.cbMask) raiseIRQ(12); return;
       case 0xF7: vqDone(); return; // nach den Portzugriffen des Video-ROMs
       case 0xF6: cdRequest(); return; // CDWERK.SYS
       case 0xF5: cdxCall(); return;   // WERKCDX.COM (CD-Umleiter)
@@ -6913,8 +6947,11 @@ function createPC(opts) {
     const farp = a => lin(rw(a + 2), rw(a));
     const mode = rb(base + CDX_MODE);
     const pass = () => wb(base + CDX_MODE, 1);
-    const fail = code => { R[0] = code; retCF(1); };
+    const fail = code => { R[0] = code; retCF(1); if (code !== 18) cdxNote(`INT 2Fh/${hex(ah0, 2)}${hex(al0, 2)}` + (ah0 === 0x11 && fnName[al0] ? ' ' + fnName[al0] : '') + (pathOf() ? ' ' + pathOf() : '') + ` → Fehler ${code}`); };
     const ok = () => retCF(0);
+    const ah0 = AH(), al0 = AL();
+    const fnName = { 0x05: 'CD', 0x08: 'Lesen', 0x0F: 'Attribut', 0x16: 'Öffnen', 0x2E: 'Öffnen', 0x1B: 'Suchen', 0x1C: 'Weitersuchen', 0x01: 'RD', 0x03: 'MD', 0x0E: 'Attribut setzen', 0x11: 'Umbenennen', 0x13: 'Löschen', 0x17: 'Anlegen', 0x18: 'Anlegen', 0x09: 'Schreiben' };
+    const pathOf = () => [0x01, 0x03, 0x05, 0x0E, 0x0F, 0x11, 0x13, 0x16, 0x17, 0x18, 0x1B, 0x2E].includes(al0) && ah0 === 0x11 ? fn1() : '';
     if (mode === 2) return cdxInit();
     const drv = rb(base + CDX_DRV), letter = String.fromCharCode(65 + drv);
     const sda = farp(base + CDX_SDA);
@@ -6924,6 +6961,7 @@ function createPC(opts) {
 
     // ---------------- MSCDEX-Schnittstelle (INT 2Fh, AH=15h)
     if (ah === 0x15) {
+      cdxNote(`MSCDEX-Aufruf ${hex(AX())}` + ([1, 2, 3, 4, 5, 8, 0x0B, 0x10].includes(al) ? ` für Laufwerk ${String.fromCharCode(65 + (CX() & 0x1F))}:` : '') + (al === 0x10 ? ` (Gerätebefehl ${rb(lin(S[0], BX()) + 2)}${rb(lin(S[0], BX()) + 2) === 3 ? '/' + rb(lin(rw(lin(S[0], BX()) + 0x10), rw(lin(S[0], BX()) + 0x0E))) : ''})` : ''));
       const isDrv = () => CX() === drv;
       const esbx = lin(S[0], BX());
       switch (al) {
@@ -7058,7 +7096,9 @@ function createPC(opts) {
             wb(d, drv | 0x80); for (let i = 0; i < 11; i++) wb(d + 1 + i, tpl.charCodeAt(i));
             wb(d + 0x0C, attr); ww(d + 0x0D, 0xFFFF); wd(d + 0x0F, dirLba);
             const lab = (iso.label + '           ').slice(0, 11);
-            putFound(d, { attr: 0x08, time: iso.root.time, date: iso.root.date, size: 0, fcb: lab, name: lab.trim() });
+            const ln = lab.slice(0, 8).trim() + (lab.slice(8).trim() ? '.' + lab.slice(8).trim() : '');
+            cdxNote(`Datenträgername von ${letter}: abgefragt: ${ln}`);
+            putFound(d, { attr: 0x08, time: iso.root.time, date: iso.root.date, size: 0, fcb: lab, name: ln });
             return ok();
           }
         } else {
@@ -7088,7 +7128,9 @@ function createPC(opts) {
         wd(sft + 0x15, np); R[2] = Math.floor(np / 65536); R[0] = np & 0xFFFF;
         return ok();
       }
-      default: return pass();                                                      // 1100h, 1120h, 1122h, 1123h ... an DOS
+      default:                                                                     // 1100h, 1120h, 1122h, 1123h ... an DOS
+        if (![0x00, 0x20, 0x22, 0x23, 0x1D, 0x1E, 0x1F, 0x25, 0x2D].includes(al)) cdxNote(`INT 2Fh/11${hex(al, 2)} nicht bearbeitet`);
+        return pass();
     }
 
     // Fundstelle in den DTA-Bereich und in den Verzeichniseintrag der SDA schreiben
@@ -7139,6 +7181,9 @@ function createPC(opts) {
       say(`WERKCDX: CD-ROM ist Laufwerk ${String.fromCharCode(65 + n)}:` + (cd ? '' : ' (noch keine CD eingelegt)'), true);
     }
   }
+  // Meldungen zur Fehlersuche (jede nur einmal)
+  const cdxSeen = new Set();
+  function cdxNote(m) { if (cdxSeen.has(m) || cdxSeen.size > 300) return; cdxSeen.add(m); log('CD: ' + m); }
   // Text für die DOS-Ausgabe (Codeseite 437)
   function dosText(t) {
     const map = { 'ä': 0x84, 'ö': 0x94, 'ü': 0x81, 'Ä': 0x8E, 'Ö': 0x99, 'Ü': 0x9A, 'ß': 0xE1, '–': 0x2D };
@@ -7735,7 +7780,32 @@ function createPC(opts) {
     }
     audioCatchUp();
   };
-  pc.render = function () { return vga.render((Math.floor(now() / 266) & 1) === 0); };
+  pc.render = function () {
+    const r = vga.render((Math.floor(now() / 266) & 1) === 0);
+    if (mouse.used && mouse.shown === 0) drawMouse(r);
+    return r;
+  };
+  // Mauszeiger des Treibers (INT 33h/01h): im Textmodus die Zelle invertieren, in Grafik ein Pfeil
+  const ARROW = [0xC000, 0xE000, 0xB000, 0x9800, 0x8C00, 0x8600, 0x8300, 0x8180, 0x80C0, 0x8060, 0x83E0, 0x9300, 0xB180, 0xE180, 0xC0C0, 0x00C0];
+  const ARROW_IN = [0, 0, 0x4000, 0x6000, 0x7000, 0x7800, 0x7C00, 0x7E00, 0x7F00, 0x7F80, 0x7C00, 0x6C00, 0x4600, 0x0600, 0x0300, 0x0300];
+  function drawMouse(r) {
+    const { w, h, buf } = r;
+    if (!isGfx()) {
+      const C = cols(), Rn = rows(), cw = w / C, chh = h / Rn;
+      const c = Math.min(C - 1, Math.floor(mouse.x / 8)), rr = Math.min(Rn - 1, Math.floor(mouse.y / 8));
+      for (let y = 0; y < chh; y++) for (let x = 0; x < cw; x++) { const o = (rr * chh + y) * w + c * cw + x; buf[o] ^= 0x00FFFFFF; }
+      return;
+    }
+    const sx = mouse.maxX >= w * 2 - 1 ? 2 : 1;
+    const px = Math.floor(mouse.x / sx), py = Math.floor(mouse.y);
+    for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+      const X = px + x, Y = py + y;
+      if (X >= w || Y >= h) continue;
+      const bit = 0x8000 >> x;
+      if (ARROW_IN[y] & bit) buf[Y * w + X] = 0xFFFFFFFF;
+      else if (ARROW[y] & bit) buf[Y * w + X] = 0xFF000000;
+    }
+  }
   pc.textScreen = function () {
     let s = '';
     const C = cols(), Rn = rows();
@@ -7775,7 +7845,7 @@ function createPC(opts) {
       seen.add(n);
       if (f.dirty || !disk.has(n)) { disk.set(n, f.data.slice(0, f.size)); any = true; }
     }
-    for (const n of [...disk.keys()]) if (!isImage(n) && !seen.has(n)) { disk.delete(n); any = true; }
+    for (const n of [...disk.keys()]) if (!isImage(n) && !isCD(n) && !seen.has(n)) { disk.delete(n); any = true; }
     shellChanged = shellChanged.filter(f => seen.has(f.path.replace(/^C:\\/, '').replace(/\\/g, '/')));
     return any;
   }
@@ -8308,7 +8378,7 @@ function createPC(opts) {
       if (generated.has(f.path) && same(generated.get(f.path), f.data)) continue;
       if (!same(disk.get(f.path), f.data)) { disk.set(f.path, f.data); changed.push({ path: 'C:\\' + f.path.replace(/\//g, '\\'), data: f.data }); }
     }
-    for (const n of [...disk.keys()]) if (!isImage(n) && !seen.has(n)) disk.delete(n);
+    for (const n of [...disk.keys()]) if (!isImage(n) && !isCD(n) && !seen.has(n)) disk.delete(n);
     pc.disks[0x80].dirty = false;
     if (changed.length) refreshDisk();
     return changed;
