@@ -123,6 +123,7 @@ footer{
   font-size:12px; color:var(--dim); background:var(--card);
 }
 footer code{font-family:var(--mono)}
+footer a{color:var(--accent)}
 /* --- Bearbeiten --- */
 .findgrp{display:flex; align-items:center; gap:10px}
 .editwrap{flex:1; display:flex; min-height:0; background:var(--card)}
@@ -266,6 +267,8 @@ footer code{font-family:var(--mono)}
   Beim Speichern wird das Ergebnis sofort wieder entschlüsselt und Byte für Byte gegen den Editorinhalt geprüft; erst dann gibt es eine Datei.
   <em>Original überschreiben</em> erscheint nur, wenn der Browser Schreibzugriff auf die geöffnete Datei geben kann – über <code>file://</code> ist das nie der Fall.
   Passwort und Klartext liegen als JS-Objekte im Speicher; <em>Schließen &amp; leeren</em> überschreibt sie, garantiert löschen kann ein Browser sie nicht.
+  Das Passwort wird als UTF-8 verarbeitet, wie ccrypt unter Linux/macOS; ein unter Windows mit Umlauten im Latin-1-Zeichensatz gesetztes Passwort passt deshalb nicht.
+  · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
 </footer>
 
 <input type="file" id="file" hidden>
@@ -433,6 +436,13 @@ const els={
 let cipher=null, fileName='', lines=[], rows=[], matches=[], current=-1, marked=new Set();
 let rawText='', eol='\n', encName='UTF-8', dirty=false, mode='read';
 let fileHandle=null, forceUtf8=false;
+let hadBom=false, mixedEol=false;
+let normText='';      /* rawText mit \n als einzigem Zeilenende */
+let baseNorm='';      /* normText des zuletzt geladenen/gespeicherten Stands */
+let renderGen=0;      /* bricht alte Render-Ketten ab */
+let gutterLines=-1, dirtyTmr=null;
+const MAXHITS=20000;
+const norm=s=>s.replace(/\r\n?/g,'\n');
 
 function fmtBytes(n){
   if(n<1024) return n+' Byte';
@@ -498,17 +508,20 @@ async function unlock(){
   clearErr();
   els.go.disabled=true; els.go.textContent='Entschlüssele…';
   await new Promise(r=>setTimeout(r,20));   // UI atmen lassen
+  let rk=null, plain=null;
   try{
-    const rk=roundKeyFromPassword(els.pw.value);
+    rk=roundKeyFromPassword(els.pw.value);
     if(!magicOk(cipher,rk)){
       showErr('Passwort falsch – oder die Datei stammt nicht von ccrypt.');
       return;
     }
-    const plain=cfbDecrypt(cipher,rk);
-    rk.fill(0);
+    plain=cfbDecrypt(cipher,rk);
     showText(plain);
-    plain.fill(0);
+  } catch(err){
+    showErr('Entschlüsseln fehlgeschlagen: '+(err&&err.message||String(err)));
   } finally {
+    if(rk) rk.fill(0);
+    if(plain) plain.fill(0);
     els.go.disabled=false; els.go.textContent='Entsperren';
   }
 }
@@ -524,9 +537,20 @@ function decodeText(bytes){
 
 function showText(bytes){
   const {text,enc}=decodeText(bytes);
-  rawText=text.replace(/^\uFEFF/,'');
+  /* TextDecoder schluckt ein BOM stillschweigend – daher an den Bytes prüfen */
+  hadBom=(enc==='UTF-8'&&bytes.length>=3&&bytes[0]===0xEF&&bytes[1]===0xBB&&bytes[2]===0xBF);
+  rawText=text.charCodeAt(0)===0xFEFF?text.slice(1):text;
   encName=enc; forceUtf8=false;
-  eol=/\r\n/.test(rawText)?'\r\n':'\n';
+  /* Zeilenenden z\u00E4hlen; bei Mischung gewinnt das h\u00E4ufigste */
+  let crlf=0, lf=0, cr=0;
+  for(let i=0;i<rawText.length;i++){
+    const c=rawText.charCodeAt(i);
+    if(c===13){ if(rawText.charCodeAt(i+1)===10){ crlf++; i++; } else cr++; }
+    else if(c===10) lf++;
+  }
+  eol=(crlf>=lf&&crlf>=cr&&crlf)?'\r\n':(cr>lf?'\r':'\n');
+  mixedEol=((crlf?1:0)+(lf?1:0)+(cr?1:0))>1;
+  normText=norm(rawText); baseNorm=normText;
   buildLines();
   els.unlock.hidden=true; els.read.hidden=false;
   mode='read'; setDirty(false); setMode('read');
@@ -535,17 +559,25 @@ function showText(bytes){
   els.q.focus();
 }
 function buildLines(){
-  lines=rawText.replace(/\r\n?/g,'\n').split('\n');
+  lines=normText.split('\n');
   if(lines.length&&lines[lines.length-1]==='') lines.pop();
 }
 function updateStatus(){
+  const e={'\r\n':' · CRLF','\r':' · CR','\n':''}[eol];
   els.docstatus.textContent=fileName+' · '+lines.length+' Zeilen · '+
-    (forceUtf8?'UTF-8':encName)+(eol==='\r\n'?' · CRLF':'');
+    (forceUtf8?'UTF-8':encName)+(hadBom?' (BOM)':'')+e+
+    (mixedEol?' · gemischte Zeilenenden':'');
 }
 function setDirty(v){
   dirty=v;
   els.dirtyTag.hidden=!v;
   els.save.hidden=!v;
+}
+/* Dirty = aktueller Inhalt weicht vom zuletzt geladenen/gespeicherten Stand ab */
+function refreshDirty(){
+  clearTimeout(dirtyTmr); dirtyTmr=null;
+  const cur=(mode==='edit')?els.ed.value:normText;
+  setDirty(cur!==baseNorm);
 }
 
 /* --- Lesen <-> Bearbeiten --- */
@@ -558,24 +590,41 @@ function setMode(m){
   els.findgrp.hidden=editing;
   els.mode.textContent=editing?'Lesen':'Bearbeiten';
   if(editing){
-    els.ed.value=rawText.replace(/\r\n?/g,'\n');
-    syncGutter();
+    renderGen++;                       /* laufenden Aufbau stoppen */
+    els.ed.value=normText;
+    gutterLines=-1; syncGutter();
     els.ed.focus();
   } else {
     buildLines(); renderDoc(); els.q.value=''; setMatches([]);
   }
+  refreshDirty();
   updateStatus();
 }
+/* Nur wenn wirklich geändert wurde, wird rawText neu gebaut –
+   sonst bleiben BOM-freier Originaltext und gemischte Zeilenenden unangetastet. */
 function pullFromEditor(){
-  const t=els.ed.value.replace(/\n/g,eol);
-  if(t!==rawText){ rawText=t; setDirty(true); }
+  const v=els.ed.value;
+  if(v!==normText){
+    normText=v;
+    rawText=v.replace(/\n/g,eol);
+    if(mixedEol){ mixedEol=false; }   /* nach Bearbeitung einheitlich */
+  }
+  refreshDirty();
+}
+function countLines(s){
+  let n=1, p=-1;
+  while((p=s.indexOf('\n',p+1))!==-1) n++;
+  return n;
 }
 function syncGutter(){
-  const n=els.ed.value.split('\n').length;
-  els.editwrap.style.setProperty('--gw',Math.max(3,String(n).length));
-  let out='';
-  for(let i=1;i<=n;i++) out+=i+'\n';
-  els.egut.textContent=out;
+  const n=countLines(els.ed.value);
+  if(n!==gutterLines){
+    gutterLines=n;
+    els.editwrap.style.setProperty('--gw',Math.max(3,String(n).length));
+    const parts=new Array(n);
+    for(let i=0;i<n;i++) parts[i]=i+1;
+    els.egut.textContent=parts.join('\n')+'\n';
+  }
   els.egut.scrollTop=els.ed.scrollTop;
 }
 
@@ -585,7 +634,7 @@ const CP1252={0x20AC:0x80,0x201A:0x82,0x0192:0x83,0x201E:0x84,0x2026:0x85,0x2020
   0x2018:0x91,0x2019:0x92,0x201C:0x93,0x201D:0x94,0x2022:0x95,0x2013:0x96,0x2014:0x97,
   0x02DC:0x98,0x2122:0x99,0x0161:0x9A,0x203A:0x9B,0x0153:0x9C,0x017E:0x9E,0x0178:0x9F};
 function encodeText(text,enc){
-  if(enc!=='Windows-1252') return {bytes:new TextEncoder().encode(text)};
+  if(enc!=='Windows-1252') return {bytes:new TextEncoder().encode((hadBom?'﻿':'')+text)};
   const out=[];
   for(const ch of text){
     const c=ch.codePointAt(0);
@@ -601,8 +650,10 @@ function renderDoc(){
   els.doc.innerHTML=''; rows=[]; marked.clear();
   const width=Math.max(3,String(lines.length).length);
   els.doc.style.setProperty('--gw',width);
+  const gen=++renderGen;
   let i=0;
   const step=()=>{
+    if(gen!==renderGen) return;        /* überholt: neuer Aufbau oder Datei gewechselt */
     const frag=document.createDocumentFragment();
     const end=Math.min(i+1500,lines.length);
     for(;i<end;i++){
@@ -626,26 +677,41 @@ function search(){
   const q=els.q.value;
   if(!q){ setMatches([]); return; }
   const cs=els.caseBtn.getAttribute('aria-pressed')==='true';
-  const needle=cs?q:q.toLowerCase();
   const found=[];
-  for(let i=0;i<lines.length;i++){
-    const hay=cs?lines[i]:lines[i].toLowerCase();
-    let p=hay.indexOf(needle);
-    while(p!==-1){
-      found.push({line:i,start:p,end:p+q.length});
-      p=hay.indexOf(needle,p+Math.max(1,q.length));
-      if(found.length>20000) break;
+  let capped=false;
+  if(cs){
+    for(let i=0;i<lines.length&&!capped;i++){
+      let p=lines[i].indexOf(q);
+      while(p!==-1){
+        if(found.length>=MAXHITS){ capped=true; break; }
+        found.push({line:i,start:p,end:p+q.length});
+        p=lines[i].indexOf(q,p+q.length);
+      }
     }
-    if(found.length>20000) break;
+  } else {
+    /* Regex mit i+u: Positionen beziehen sich auf den Originaltext,
+       auch wenn toLowerCase() die Länge ändern würde (z. B. „İ“). */
+    const re=new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'giu');
+    for(let i=0;i<lines.length&&!capped;i++){
+      re.lastIndex=0;
+      let m;
+      while((m=re.exec(lines[i]))!==null){
+        if(found.length>=MAXHITS){ capped=true; break; }
+        found.push({line:i,start:m.index,end:m.index+m[0].length});
+      }
+    }
   }
-  setMatches(found);
+  setMatches(found,capped);
   if(found.length) goTo(0);
 }
-function setMatches(found){
+let hitsCapped=false;
+const totalLabel=()=>matches.length+(hitsCapped?'+':'');
+function setMatches(found,capped){
   for(const i of marked) if(rows[i]) rows[i].textContent=lines[i].length?lines[i]:'\u200b';
   marked.clear();
-  matches=found; current=-1;
-  els.count.textContent=found.length?('0 / '+found.length):(els.q.value?'kein Treffer':'');
+  matches=found; current=-1; hitsCapped=!!capped;
+  els.count.textContent=found.length?('0 / '+totalLabel()):(els.q.value?'kein Treffer':'');
+  els.count.title=hitsCapped?'Nur die ersten '+MAXHITS+' Treffer werden angezeigt.':'';
   els.prev.disabled=els.next.disabled=!found.length;
   if(!found.length) return;
   const byLine=new Map();
@@ -670,7 +736,7 @@ function goTo(idx){
   if(!matches.length) return;
   const old=els.doc.querySelector('mark.on'); if(old) old.classList.remove('on');
   current=(idx+matches.length)%matches.length;
-  els.count.textContent=(current+1)+' / '+matches.length;
+  els.count.textContent=(current+1)+' / '+totalLabel();
   const el=els.doc.querySelector('mark[data-m="'+current+'"]');
   if(el){ el.classList.add('on'); if(el.scrollIntoView) el.scrollIntoView({block:'center',behavior:'auto'}); }
 }
@@ -704,12 +770,23 @@ async function doSave(target){
     return;
   }
 
+  /* Schreibrecht sofort holen, solange der Klick noch als Nutzeraktion zählt –
+     nach längerem Verschlüsseln würde requestPermission sonst abgewiesen. */
+  if(target==='overwrite'){
+    try{
+      let perm=await fileHandle.queryPermission({mode:'readwrite'});
+      if(perm!=='granted') perm=await fileHandle.requestPermission({mode:'readwrite'});
+      if(perm!=='granted'){ dlgErr('Schreibrecht für die Datei wurde nicht erteilt.'); return; }
+    }catch(err){ dlgErr('Schreibrecht konnte nicht angefragt werden: '+(err.message||String(err))); return; }
+  }
+
   els.dl.disabled=els.ovwr.disabled=true;
   const label=(target==='overwrite'?els.ovwr:els.dl).textContent;
   (target==='overwrite'?els.ovwr:els.dl).textContent='Verschlüssele…';
   await new Promise(r=>setTimeout(r,20));
+  let rk=null;
   try{
-    const rk=roundKeyFromPassword(pw);
+    rk=roundKeyFromPassword(pw);
     const nonce=new Uint8Array(32);
     crypto.getRandomValues(nonce);
     const blob=cfbEncrypt(e.bytes,rk,nonce);
@@ -720,12 +797,9 @@ async function doSave(target){
     if(back.length!==e.bytes.length) throw new Error('Selbsttest fehlgeschlagen: Länge weicht ab.');
     for(let i=0;i<back.length;i++)
       if(back[i]!==e.bytes[i]) throw new Error('Selbsttest fehlgeschlagen: Abweichung bei Byte '+i+'.');
-    rk.fill(0);
+    rk.fill(0); rk=null;
 
     if(target==='overwrite'){
-      let perm=await fileHandle.queryPermission({mode:'readwrite'});
-      if(perm!=='granted') perm=await fileHandle.requestPermission({mode:'readwrite'});
-      if(perm!=='granted') throw new Error('Schreibrecht für die Datei wurde nicht erteilt.');
       const w=await fileHandle.createWritable();
       await w.write(blob); await w.close();
       finishSave(fileName+' überschrieben · '+e.bytes.length+' Byte Klartext');
@@ -741,11 +815,14 @@ async function doSave(target){
   }catch(err){
     dlgErr(err && err.name==='AbortError' ? 'Speichern abgebrochen.' : (err.message||String(err)));
   }finally{
+    if(rk) rk.fill(0);
     els.dl.disabled=els.ovwr.disabled=false;
     (target==='overwrite'?els.ovwr:els.dl).textContent=label;
   }
 }
 function finishSave(msg){
+  baseNorm=normText;
+  if(forceUtf8){ encName='UTF-8'; forceUtf8=false; }
   setDirty(false);
   closeSave();
   updateStatus();
@@ -754,9 +831,11 @@ function finishSave(msg){
 
 /* --- Aufräumen --- */
 function wipe(){
+  if(!els.read.hidden) refreshDirty();
   if(dirty && !confirm('Es gibt ungespeicherte Änderungen. Trotzdem verwerfen?')) return false;
   if(cipher) cipher.fill(0);
-  cipher=null;
+  cipher=null; renderGen++;
+  hadBom=false; mixedEol=false; normText=''; baseNorm=''; gutterLines=-1; hitsCapped=false;
   rawText=''; eol='\n'; encName='UTF-8'; forceUtf8=false; fileHandle=null; mode='read';
   els.ed.value=''; els.egut.textContent=''; els.editwrap.hidden=true; els.doc.hidden=false;
   els.findgrp.hidden=false; els.mode.textContent='Bearbeiten';
@@ -841,7 +920,10 @@ els.caseBtn.addEventListener('click',()=>{
   search();
 });
 els.mode.addEventListener('click',()=>setMode(mode==='read'?'edit':'read'));
-els.ed.addEventListener('input',()=>{ setDirty(true); syncGutter(); });
+els.ed.addEventListener('input',()=>{
+  syncGutter();
+  clearTimeout(dirtyTmr); dirtyTmr=setTimeout(refreshDirty,200);
+});
 els.ed.addEventListener('scroll',()=>{ els.egut.scrollTop=els.ed.scrollTop; });
 els.save.addEventListener('click',openSave);
 els.cancel.addEventListener('click',closeSave);
@@ -854,15 +936,20 @@ els.ovl.addEventListener('click',e=>{ if(e.target===els.ovl) closeSave(); });
 
 document.addEventListener('keydown',e=>{
   if(!els.ovl.hidden){ if(e.key==='Escape'){ e.preventDefault(); closeSave(); } return; }
-  if((e.ctrlKey||e.metaKey)&&e.key==='s'&&!els.read.hidden&&dirty){
-    e.preventDefault(); openSave(); return;
+  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'&&!els.read.hidden){
+    e.preventDefault();                /* nie den „Seite speichern“-Dialog des Browsers */
+    refreshDirty();
+    if(dirty) openSave();
+    return;
   }
   if((e.ctrlKey||e.metaKey)&&e.key==='f'&&!els.read.hidden&&mode==='read'){
     e.preventDefault(); els.q.focus(); els.q.select();
   }
   if(e.key==='F3'&&matches.length&&mode==='read'){ e.preventDefault(); goTo(current+(e.shiftKey?-1:1)); }
 });
-window.addEventListener('beforeunload',e=>{ if(dirty){ e.preventDefault(); e.returnValue=''; } });
+window.addEventListener('beforeunload',e=>{
+  if(!els.read.hidden) refreshDirty();
+  if(dirty){ e.preventDefault(); e.returnValue=''; } });
 </script>
 </body>
 </html>
