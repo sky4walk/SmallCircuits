@@ -47,6 +47,9 @@ header .local {
   margin-left: auto; font: 12px var(--mono); color: var(--amber-dim);
   border: 1px solid var(--line); border-radius: 3px; padding: 3px 8px;
 }
+header .home { font: 12px var(--mono); color: var(--amber); }
+header .home:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+.node.fhide { display: none; }
 
 /* ---- Eingabezeile ---- */
 #controls {
@@ -181,6 +184,8 @@ dialog pre {
   <h1>eCryptfs-Browser</h1>
   <span class="sub">Verschlüsselte Synology-Shares aus Hyper-Backup-Einzelversionen lesen</span>
   <span class="local">100&nbsp;% lokal · keine Daten verlassen diesen Rechner</span>
+  <a class="home" href="https://itzwieseltal.wordpress.com" target="_blank"
+     rel="noopener">itzwieseltal.wordpress.com</a>
 </header>
 
 <div id="controls">
@@ -323,9 +328,14 @@ async function buildKeyRing(password) {
     const sig = await keySignature(raw);
     const handles = {};
     for (const bytes of [16, 24, 32]) {
-      handles[bytes] = await subtle.importKey(
-        "raw", raw.slice(0, bytes), { name: "AES-CBC" }, false,
-        ["encrypt", "decrypt"]);
+      try {
+        handles[bytes] = await subtle.importKey(
+          "raw", raw.slice(0, bytes), { name: "AES-CBC" }, false,
+          ["encrypt", "decrypt"]);
+      } catch (error) {
+        // Chrome/Edge kennen in WebCrypto kein AES-192 -- nur dann fehlt es
+        if (bytes !== 24) throw error;
+      }
     }
     ring.bySig.set(sig, { raw, handles });
     ring.signatures.push(sig);
@@ -336,6 +346,8 @@ async function buildKeyRing(password) {
 /* ----------------------------------------- rohes AES via WebCrypto */
 
 async function cbcDecryptRaw(keyHandle, iv, data) {
+  if (!data.length || data.length % 16)
+    throw new Error("Chiffretext keine ganze Blockzahl (" + data.length + " Byte)");
   // Padding-Trick: E(K, iv=C_last, "") liefert genau den PKCS7-Block,
   // der die Gesamtnachricht fuer subtle.decrypt gueltig macht.
   const lastBlock = data.slice(data.length - 16);
@@ -394,6 +406,16 @@ function parseTag70(name) {
   };
 }
 
+const NO_AES192 = "AES-192 wird von diesem Browser nicht unterstützt "
+  + "(Chrome/Edge) — bitte Firefox verwenden";
+
+function handleFor(entry, bytes) {
+  const handle = entry.handles[bytes];
+  if (!handle) throw new Error(bytes === 24 ? NO_AES192
+                                            : "keine Schlüssellänge " + bytes);
+  return handle;
+}
+
 function keyBytesForCipher(code) {
   return { 7: 16, 8: 24, 9: 32 }[code] ?? 32;
 }
@@ -405,7 +427,7 @@ async function decryptFilename(name, ring) {
   if (!entry) return { name, encrypted: true, error: "sig " + parsed.sig };
   const usable = parsed.ciphertext.slice(0,
     Math.floor(parsed.ciphertext.length / 16) * 16);
-  const handle = entry.handles[keyBytesForCipher(parsed.cipherCode)];
+  const handle = handleFor(entry, keyBytesForCipher(parsed.cipherCode));
   const plain = await ecbDecrypt(handle, usable);
   let sep = -1;
   for (let i = plain.length - 1; i >= 0; i--) {
@@ -421,11 +443,22 @@ async function decryptFilename(name, ring) {
 
 /* ---------------------------------------------------- Dateiinhalte */
 
-function parseHeader(buffer) {
+/* Prueft nur die Markierung (Bytes 8..15). Liefert die Klartextgroesse
+ * oder null, wenn es keine eCryptfs-Datei ist. Braucht >= 16 Byte. */
+function sniffHeader(buffer) {
+  if (buffer.length < 16) return null;
   const dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  const size = dv.getUint32(0) * 4294967296 + dv.getUint32(4);
   const m1 = dv.getUint32(8), m2 = dv.getUint32(12);
   if (m1 !== ((m2 ^ MAGIC) >>> 0)) return null;
+  return dv.getUint32(0) * 4294967296 + dv.getUint32(4);
+}
+
+/* null = keine eCryptfs-Datei; wirft, wenn die Markierung stimmt,
+ * der Header aber unbrauchbar ist. */
+function parseHeader(buffer) {
+  const size = sniffHeader(buffer);
+  if (size === null || buffer.length < 26) return null;
+  const dv = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
   const header = {
     size,
     extentSize: dv.getUint32(20),
@@ -448,7 +481,11 @@ function parseHeader(buffer) {
       pos = body + length;
     } else break;
   }
-  return header.wrappedKey ? header : null;
+  if (!header.wrappedKey)
+    throw new Error("eCryptfs-Header ohne Schlüsselpaket (Tag 3)");
+  if (!header.extentSize || !header.headerExtents)
+    throw new Error("eCryptfs-Header mit ungültiger Extent-Angabe");
+  return header;
 }
 
 function deriveExtentIV(rootIV, extentIndex) {
@@ -471,13 +508,27 @@ class EFile {
     this.header = parseHeader(head);
     if (!this.header) throw new Error("kein eCryptfs-Header");
 
-    let entry = this.header.wrapSig ? ring.bySig.get(this.header.wrapSig) : null;
-    if (!entry) entry = ring.bySig.get(ring.signatures[0]);
-    if (!entry) throw new Error("kein passender Schluessel");
+    // Ohne Tag 11 (alte Dateien) bleibt nur der Inhaltsschluessel als Versuch;
+    // mit Tag 11 muss die Signatur passen, sonst entstuende Datenmuell.
+    let entry;
+    if (this.header.wrapSig) {
+      entry = ring.bySig.get(this.header.wrapSig);
+      if (!entry) throw new Error("Schlüssel passt nicht (Signatur "
+                                  + this.header.wrapSig + ")");
+    } else {
+      entry = ring.bySig.get(ring.signatures[0]);
+    }
 
-    const keyBytes = this.header.wrappedKey.length;
-    const sessionRaw = await ecbDecrypt(entry.handles[keyBytes] ?? entry.handles[32],
-                                        this.header.wrappedKey);
+    // Schluessellaenge aus dem Cipher-Code, nicht aus der Paketlaenge:
+    // AES-192 wird auf 32 Byte aufgefuellt gespeichert, aber mit 24 Byte
+    // des FEKEK verschluesselt.
+    const keyBytes = { 7: 16, 8: 24, 9: 32 }[this.header.cipherCode];
+    if (!keyBytes) throw new Error("Cipher-Code " + this.header.cipherCode
+                                   + " nicht unterstützt (nur AES)");
+    if (this.header.wrappedKey.length < keyBytes)
+      throw new Error("verschlüsselter Dateischlüssel zu kurz");
+    const sessionRaw = (await ecbDecrypt(handleFor(entry, keyBytes),
+                                         this.header.wrappedKey)).slice(0, keyBytes);
     this.sessionKey = await subtle.importKey("raw", sessionRaw,
       { name: "AES-CBC" }, false, ["encrypt", "decrypt"]);
     this.rootIV = md5(sessionRaw);
@@ -521,7 +572,7 @@ class EFile {
   }
 }
 
-return { buildKeyRing, decryptFilename, parseTag70, parseHeader, EFile,
+return { buildKeyRing, decryptFilename, parseTag70, parseHeader, sniffHeader, EFile,
          md5, deriveKey, keySignature, deriveExtentIV, toHex, hex,
          SALT_CONTENT, SALT_FNEK, FNEK_PREFIX };
 })();
@@ -653,7 +704,12 @@ async function ensureRing() {
   log(`Schlüssel bereit in ${((performance.now() - started) / 1000).toFixed(1)} s`, "ok");
   $("chipA").textContent = ring.signatures[0];
   $("chipB").textContent = ring.signatures[1];
-  $("chipA").className = "chip"; $("chipB").className = "chip";
+  for (const id of ["chipA", "chipB"]) {
+    $(id).className = "chip";
+    delete $(id).dataset.role;
+  }
+  foundSigs.clear();
+  $("foundLbl").textContent = "";
   $("keystrip").style.display = "flex";
   return ring;
 }
@@ -685,16 +741,22 @@ async function populate(node, container) {
   const rows = [];
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index];
-    const parsed = EC.parseTag70(entry.rawName);
     let display = entry.rawName, encrypted = false, failed = false;
-    if (parsed) {
-      encrypted = true;
-      noteFoundSig(parsed.sig, "Dateinamen");
-      const result = await EC.decryptFilename(entry.rawName, ring);
-      if (result.error) { failed = true; }
-      else display = result.name;
+    try {
+      const parsed = EC.parseTag70(entry.rawName);
+      if (parsed) {
+        encrypted = true;
+        noteFoundSig(parsed.sig, "Dateinamen");
+        const result = await EC.decryptFilename(entry.rawName, ring);
+        if (result.error) { failed = true; }
+        else display = result.name;
+      }
+    } catch (error) {
+      // Ein defekter Name darf nicht den ganzen Ordner abbrechen
+      encrypted = true; failed = true;
+      log(`Name nicht lesbar: ${entry.rawName} (${error.message})`, "err");
     }
-    rows.push({ ...entry, display, encrypted, failed });
+    rows.push({ ...entry, display, encrypted, failed, parent: node });
     if (line && (index & 511) === 511) {
       line.set(`Entschlüssele Namen: ${num(index + 1)} / ${num(entries.length)}`);
       await yield0();
@@ -726,6 +788,7 @@ async function populate(node, container) {
   }
   container.appendChild(fragment);
   if (line) line.done(`${num(rows.length)} Einträge angezeigt.`, "ok");
+  if ($("filter").value) applyFilter();
 }
 
 function render(entry, container, lazySizes) {
@@ -755,6 +818,11 @@ function render(entry, container, lazySizes) {
   name.textContent = entry.failed ? entry.rawName + "  (Schlüssel passt nicht)"
                                   : entry.display;
   name.title = entry.rawName;
+  if (entry.isDir) {
+    name.tabIndex = 0;
+    name.setAttribute("role", "button");
+    name.setAttribute("aria-expanded", "false");
+  }
 
   const size = document.createElement("span");
   size.className = "sz";
@@ -771,6 +839,7 @@ function render(entry, container, lazySizes) {
         const hidden = childBox.style.display === "none";
         childBox.style.display = hidden ? "" : "none";
         twisty.textContent = hidden ? "▾" : "▸";
+        name.setAttribute("aria-expanded", String(hidden));
         return;
       }
       busy = true;
@@ -778,12 +847,23 @@ function render(entry, container, lazySizes) {
       childBox = document.createElement("div");
       childBox.className = "children";
       node.appendChild(childBox);
-      await populate(entry, childBox);
-      twisty.textContent = "▾";
-      busy = false;
+      try {
+        await populate(entry, childBox);
+      } catch (error) {
+        log(`${entry.display}: ${error.message}`, "err");
+      } finally {
+        twisty.textContent = "▾";
+        name.setAttribute("aria-expanded", "true");
+        busy = false;
+      }
     };
     twisty.addEventListener("click", toggle);
     name.addEventListener("click", toggle);
+    name.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault(); toggle();
+      }
+    });
   } else {
     const actions = document.createElement("span");
     actions.className = "act";
@@ -801,8 +881,11 @@ function render(entry, container, lazySizes) {
     }
     row.appendChild(actions);
     if (lazySizes) {
-      row.addEventListener("mouseenter", () => fillSize(entry, size),
-                           { once: true });
+      let sized = false;
+      const once = () => { if (!sized) { sized = true; fillSize(entry, size); } };
+      row.addEventListener("mouseenter", once);
+      row.addEventListener("focusin", once);
+      row.addEventListener("touchstart", once, { passive: true });
     } else {
       fillSize(entry, size);
     }
@@ -813,11 +896,26 @@ function render(entry, container, lazySizes) {
 async function fillSize(entry, sizeEl) {
   try {
     const file = await backend.fileOf(entry);
-    if (!entry.encrypted) { sizeEl.textContent = fmtSize(file.size); return; }
-    // Verschluesselte Groesse minus 8-KiB-Header als schnelle Schaetzung;
-    // exakter Wert steht im Header und wird beim Oeffnen gelesen.
-    sizeEl.textContent = "≈ " + fmtSize(Math.max(0, file.size - 8192));
+    // Die ersten 16 Byte genuegen: Klartextgroesse + Markierung
+    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    const plainSize = EC.sniffHeader(head);
+    sizeEl.textContent = fmtSize(plainSize ?? file.size);
+    if (plainSize === null) sizeEl.title = "nicht verschlüsselt";
   } catch { /* Groesse ist Komfort, kein Muss */ }
+}
+
+/* Entschluesselte Namen koennen Zeichen enthalten, die Windows/macOS als
+ * Dateinamen ablehnen. Fuer Downloads und Zielordner ersetzen. */
+function safeName(name) {
+  let out = name.replace(/[\u0000-\u001f<>:"/\\|?*]/g, "_")
+                .replace(/[. ]+$/, m => "_".repeat(m.length));
+  if (!out || out === "." || out === "..") out = "_" + out;
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(out)) out = "_" + out;
+  return out;
+}
+
+function logRenamed(original, safe) {
+  if (original !== safe) log(`„${original}" gespeichert als „${safe}".`);
 }
 
 /* --------------------------- Entschluesseln --------------------------- */
@@ -827,7 +925,10 @@ async function openEFile(entry) {
   const readAt = async (offset, count) =>
     new Uint8Array(await file.slice(offset, offset + count).arrayBuffer());
 
-  if (!entry.encrypted) return { raw: file };
+  // Ob der INHALT verschluesselt ist, entscheidet der Header, nicht der Name
+  // (Shares ohne Dateinamenverschluesselung haben Klartextnamen).
+  const head = await readAt(0, 16);
+  if (EC.sniffHeader(head) === null) return { raw: file };
 
   const efile = new EC.EFile(readAt, file.size);
   const header = await efile.open(ring);
@@ -836,34 +937,48 @@ async function openEFile(entry) {
 }
 
 async function saveFile(entry, node, sizeEl) {
+  const fileName = safeName(entry.display);
+  let progress = null, writable = null;
   try {
+    // Den Speichern-Dialog ZUERST oeffnen: er braucht die Nutzergeste,
+    // die nach dem Lesen von einer langsamen Platte schon verfallen waere.
+    let handle = null;
+    if (window.showSaveFilePicker) {
+      handle = await window.showSaveFilePicker({ suggestedName: fileName });
+    }
+
     const opened = await openEFile(entry);
 
     if (opened.raw) {                        // unverschluesselte Datei 1:1
-      triggerDownload(opened.raw, entry.display);
+      if (handle) {
+        writable = await handle.createWritable();
+        await writable.write(opened.raw);
+        await writable.close(); writable = null;
+      } else {
+        triggerDownload(opened.raw, fileName);
+      }
+      logRenamed(entry.display, fileName);
       log(`${entry.display} unverändert gespeichert (war nicht verschlüsselt).`);
       return;
     }
 
     const { efile, header } = opened;
     sizeEl.textContent = fmtSize(header.size);
-    const progress = document.createElement("div");
+    progress = document.createElement("div");
     progress.className = "prog";
     node.appendChild(progress);
     const started = performance.now();
 
-    if (window.showSaveFilePicker) {
+    if (handle) {
       // Streaming direkt auf die Platte -- auch fuer sehr grosse Dateien
-      const handle = await window.showSaveFilePicker({
-        suggestedName: entry.display });
-      const writable = await handle.createWritable();
+      writable = await handle.createWritable();
       let written = 0;
       await efile.decrypt(async (chunk, done, total) => {
         await writable.write(chunk);
         written += chunk.length;
         progress.style.width = total ? (written / total * 100) + "%" : "100%";
       });
-      await writable.close();
+      await writable.close(); writable = null;
     } else {
       if (header.size > 1.5 * 1024 ** 3
           && !confirm("Ohne Datei-Speichern-API läuft der Download über den "
@@ -878,15 +993,19 @@ async function saveFile(entry, node, sizeEl) {
         written += chunk.length;
         progress.style.width = total ? (written / total * 100) + "%" : "100%";
       });
-      triggerDownload(new Blob(chunks), entry.display);
+      triggerDownload(new Blob(chunks), fileName);
     }
-    progress.remove();
     const secs = (performance.now() - started) / 1000;
+    logRenamed(entry.display, fileName);
     log(`${entry.display} entschlüsselt: ${fmtSize(header.size)}`
         + ` in ${secs.toFixed(1)} s`, "ok");
   } catch (error) {
+    // Halb geschriebene Datei verwerfen statt sie liegen zu lassen
+    if (writable) { try { await writable.abort(); } catch { /* egal */ } }
     if (error.name === "AbortError") return;
     log(`${entry.display}: ${error.message}`, "err");
+  } finally {
+    if (progress) progress.remove();
   }
 }
 
@@ -911,42 +1030,60 @@ function updateSelectionButton() {
 /* Datei-Eintrag in einen Zielordner (File System Access API) schreiben. */
 async function writeEntryToDir(entry, targetDir, progress, stats) {
   const opened = await openEFile(entry);
-  const fileHandle = await targetDir.getFileHandle(entry.display, { create: true });
+  const fileName = safeName(entry.display);
+  let existed = true;
+  try { await targetDir.getFileHandle(fileName); } catch { existed = false; }
+  const fileHandle = await targetDir.getFileHandle(fileName, { create: true });
   const writable = await fileHandle.createWritable();
-  if (opened.raw) {
-    await writable.write(opened.raw);
-  } else {
-    await opened.efile.decrypt(async chunk => { await writable.write(chunk); });
-    stats.bytes += opened.header.size;
+  try {
+    if (opened.raw) {
+      await writable.write(opened.raw);
+      stats.bytes += opened.raw.size;
+    } else {
+      await opened.efile.decrypt(async chunk => { await writable.write(chunk); });
+      stats.bytes += opened.header.size;
+    }
+    await writable.close();
+  } catch (error) {
+    try { await writable.abort(); } catch { /* egal */ }
+    // Nur eine von uns frisch angelegte (leere) Datei wieder entfernen
+    if (!existed) {
+      try { await targetDir.removeEntry(fileName); } catch { /* egal */ }
+    }
+    throw error;
   }
-  await writable.close();
+  logRenamed(entry.display, fileName);
   stats.files++;
   progress.set(`Speichere ${num(stats.files)} Dateien … zuletzt: ${entry.display}`);
 }
 
+/* Kind-Eintrag mit entschluesseltem Namen versehen; null = ueberspringen. */
+async function resolveChild(child, stats) {
+  try {
+    const parsed = EC.parseTag70(child.rawName);
+    if (!parsed) return { ...child, display: child.rawName, encrypted: false };
+    const result = await EC.decryptFilename(child.rawName, ring);
+    if (!result.error) return { ...child, display: result.name, encrypted: true };
+  } catch { /* unten gemeldet */ }
+  log(`Übersprungen (Name nicht entschlüsselbar): ${child.rawName}`, "err");
+  stats.errors++;
+  return null;
+}
+
 /* Ordner-Eintrag rekursiv in einen Zielordner spiegeln. */
 async function writeDirToDir(entry, targetDir, progress, stats) {
-  const subTarget = await targetDir.getDirectoryHandle(entry.display, { create: true });
+  const dirName = safeName(entry.display);
+  logRenamed(entry.display, dirName);
+  const subTarget = await targetDir.getDirectoryHandle(dirName, { create: true });
   const children = await backend.list(entry);
   for (const child of children) {
-    const parsed = EC.parseTag70(child.rawName);
-    let display = child.rawName, encrypted = false;
-    if (parsed) {
-      encrypted = true;
-      const result = await EC.decryptFilename(child.rawName, ring);
-      if (result.error) {
-        log(`Übersprungen (Name nicht entschlüsselbar): ${child.rawName}`, "err");
-        stats.errors++;
-        continue;
-      }
-      display = result.name;
-    }
-    const resolved = { ...child, display, encrypted };
+    const resolved = await resolveChild(child, stats);
+    if (!resolved) continue;
     try {
       if (child.isDir) await writeDirToDir(resolved, subTarget, progress, stats);
       else await writeEntryToDir(resolved, subTarget, progress, stats);
     } catch (error) {
-      log(`${display}: ${error.message}`, "err");
+      log(`${resolved.display}: ${error.message}`, "err");
       stats.errors++;
     }
   }
@@ -957,27 +1094,28 @@ async function downloadEntryFlat(entry, progress, stats) {
   if (entry.isDir) {
     const children = await backend.list(entry);
     for (const child of children) {
-      const parsed = EC.parseTag70(child.rawName);
-      let display = child.rawName, encrypted = false;
-      if (parsed) {
-        encrypted = true;
-        const result = await EC.decryptFilename(child.rawName, ring);
-        if (result.error) { stats.errors++; continue; }
-        display = result.name;
+      const resolved = await resolveChild(child, stats);
+      if (!resolved) continue;
+      try { await downloadEntryFlat(resolved, progress, stats); }
+      catch (error) {
+        log(`${resolved.display}: ${error.message}`, "err");
+        stats.errors++;
       }
-      await downloadEntryFlat({ ...child, display, encrypted }, progress, stats);
     }
     return;
   }
   const opened = await openEFile(entry);
+  const fileName = safeName(entry.display);
   if (opened.raw) {
-    triggerDownload(opened.raw, entry.display);
+    triggerDownload(opened.raw, fileName);
+    stats.bytes += opened.raw.size;
   } else {
     const chunks = [];
     await opened.efile.decrypt(async chunk => chunks.push(chunk.slice()));
-    triggerDownload(new Blob(chunks), entry.display);
+    triggerDownload(new Blob(chunks), fileName);
     stats.bytes += opened.header.size;
   }
+  logRenamed(entry.display, fileName);
   stats.files++;
   progress.set(`Datei ${num(stats.files)}: ${entry.display}`);
   await new Promise(resolve => setTimeout(resolve, 300));  // Downloads entzerren
@@ -987,7 +1125,11 @@ async function downloadSelection() {
   if (!selection.size) return;
   const button = $("dlSelBtn");
   button.disabled = true;
-  const entries = [...selection];
+  // Eintraege weglassen, deren Ordner selbst schon ausgewaehlt ist
+  const entries = [...selection].filter(entry => {
+    for (let p = entry.parent; p; p = p.parent) if (selection.has(p)) return false;
+    return true;
+  });
   const stats = { files: 0, bytes: 0, errors: 0 };
   const started = performance.now();
 
@@ -1058,10 +1200,13 @@ async function showPreview(entry) {
 
     const body = $("pvBody");
     body.textContent = "";
+    releasePreviewUrl();
     $("pvName").textContent = entry.display;
     if (IMAGE_RE.test(entry.display)) {
       const img = document.createElement("img");
-      img.src = URL.createObjectURL(new Blob([data]));
+      const type = /\.svg$/i.test(entry.display) ? "image/svg+xml" : "";
+      previewUrl = URL.createObjectURL(new Blob([data], { type }));
+      img.src = previewUrl;
       body.appendChild(img);
     } else {
       const pre = document.createElement("pre");
@@ -1074,33 +1219,75 @@ async function showPreview(entry) {
     log(`Vorschau ${entry.display}: ${error.message}`, "err");
   }
 }
+let previewUrl = null;
+function releasePreviewUrl() {
+  if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+}
 $("pvClose").addEventListener("click", () => $("preview").close());
+$("preview").addEventListener("close", () => {
+  releasePreviewUrl();
+  $("pvBody").textContent = "";
+});
 
 /* ------------------------------ Filter ------------------------------ */
+
+/* Treffer bleiben sichtbar, ebenso alle Ordner auf dem Weg dorthin.
+ * Durchsucht wird nur, was schon aufgeklappt (gelesen) wurde. */
+function applyFilter() {
+  const query = $("filter").value.toLowerCase();
+  const nodes = document.querySelectorAll("#tree .node");
+  if (!query) {
+    for (const node of nodes) node.classList.remove("fhide");
+    return;
+  }
+  for (const node of nodes) node.classList.add("fhide");
+  const tree = $("tree");
+  for (const row of document.querySelectorAll("#tree .row")) {
+    if (!(row.dataset.name || "").includes(query)) continue;
+    // Passender Ordner: seinen (gelesenen) Inhalt mit anzeigen
+    for (const inner of row.parentElement.querySelectorAll(".node.fhide"))
+      inner.classList.remove("fhide");
+    for (let node = row.parentElement; node && node !== tree;
+         node = node.parentElement) {
+      if (node.classList.contains("node")) {
+        if (!node.classList.contains("fhide")) break;   // Weg schon frei
+        node.classList.remove("fhide");
+      }
+    }
+  }
+}
 
 let filterTimer = null;
 $("filter").addEventListener("input", () => {
   clearTimeout(filterTimer);
-  filterTimer = setTimeout(() => {
-    const query = $("filter").value.toLowerCase();
-    for (const row of document.querySelectorAll("#tree .row")) {
-      row.parentElement.style.display =
-        !query || (row.dataset.name || "").includes(query) ? "" : "none";
-    }
-  }, 150);
+  filterTimer = setTimeout(applyFilter, 150);
 });
 
 /* ------------------------------- Start ------------------------------- */
 
-async function openDirectory() {
-  if (!(await ensureRing())) return;
-  foundSigs.clear();
-  $("foundLbl").textContent = "";
+let opening = false;
 
+async function openDirectory() {
+  if (opening) return;
+  // Nur das Vorhandensein pruefen -- die Ableitung (mehrere Sekunden) erst
+  // NACH der Ordnerwahl, sonst ist die Nutzergeste fuer den Picker verfallen.
+  if (!$("password").value) {
+    log("Bitte zuerst das Share-Passwort eingeben.", "err");
+    $("password").focus();
+    return;
+  }
+  opening = true;
+  $("openBtn").disabled = true;
+  try { await openDirectoryInner(); }
+  finally { opening = false; $("openBtn").disabled = false; }
+}
+
+async function openDirectoryInner() {
+  let newBackend;
   try {
     if (window.showDirectoryPicker) {
       const dirHandle = await window.showDirectoryPicker();
-      backend = backendFromHandle(dirHandle);
+      newBackend = backendFromHandle(dirHandle);
       log(`Ordner „${dirHandle.name}" geöffnet.`);
     } else {
       // Kompatibilitätsmodus: der Browser liest nach der Auswahl erst die
@@ -1113,16 +1300,29 @@ async function openDirectory() {
         line.set(`Browser liest den Ordner ein … ${seconds} s`
           + " — bei sehr vielen Dateien dauert dieser Schritt, es geht trotzdem voran.");
       }, 500);
+      const input = $("dirInput");
+      let cancelled = false;
       try {
         await new Promise(resolve => {
-          $("dirInput").onchange = resolve;
-          $("dirInput").click();
+          // value leeren: sonst feuert bei erneuter Wahl desselben Ordners
+          // kein change-Event. "cancel" kommt beim Abbrechen des Dialogs.
+          input.value = "";
+          input.onchange = () => resolve();
+          input.oncancel = () => { cancelled = true; resolve(); };
+          input.click();
         });
-      } finally { clearInterval(timer); }
-      const files = [...$("dirInput").files];
-      if (!files.length) { line.done("Keine Dateien übernommen.", "err"); return; }
+      } finally {
+        clearInterval(timer);
+        input.onchange = input.oncancel = null;
+      }
+      const files = [...input.files];
+      if (cancelled || !files.length) {
+        line.done(cancelled ? "Ordnerauswahl abgebrochen."
+                            : "Keine Dateien übernommen.", "err");
+        return;
+      }
       line.done(`${num(files.length)} Dateieinträge vom Browser übernommen.`, "ok");
-      backend = await backendFromFileList(files,
+      newBackend = await backendFromFileList(files,
         liveLine("Baue Verzeichnisbaum …"));
       log("Hinweis: In Chrome/Edge entfällt dieses Einlesen komplett — dort "
         + "wird ausschließlich die jeweils aufgeklappte Ebene gelesen.");
@@ -1132,8 +1332,20 @@ async function openDirectory() {
     return;
   }
 
+  try {
+    if (!(await ensureRing())) return;
+  } catch (error) {
+    ring = null; ringPassword = null;
+    log("Schlüsselableitung fehlgeschlagen: " + error.message, "err");
+    return;
+  }
+  backend = newBackend;
+  foundSigs.clear();
+  $("foundLbl").textContent = "";
+
   $("empty").style.display = "none";
-  $("filter").style.display = "";
+  $("filter").style.display = "inline-block";   // "" wuerde CSS-none greifen lassen
+  $("filter").value = "";
   selection.clear();
   updateSelectionButton();
   const tree = $("tree");
@@ -1143,6 +1355,19 @@ async function openDirectory() {
 }
 
 $("openBtn").addEventListener("click", openDirectory);
+
+/* Passwort geaendert, waehrend ein Ordner offen ist: Der Baum zeigt Namen,
+ * die mit dem alten Schluessel entschluesselt wurden -- also verwerfen. */
+$("password").addEventListener("change", () => {
+  if (!backend || $("password").value === ringPassword) return;
+  backend = null;
+  selection.clear();
+  updateSelectionButton();
+  $("tree").textContent = "";
+  $("filter").style.display = "none";
+  $("empty").style.display = "";
+  log("Passwort geändert — bitte den Ordner neu öffnen.");
+});
 $("password").addEventListener("keydown", event => {
   if (event.key === "Enter") openDirectory();
 });

@@ -298,6 +298,7 @@ footer b{color:var(--ink-2);font-weight:600}
   <span id="stIdx"></span>
   <span style="flex:1"></span>
   <span id="stHint"></span>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:inherit">itzwieseltal</a>
 </footer>
 
 <script>
@@ -384,18 +385,33 @@ function decodeRFC2047(s){
   if (!s || s.indexOf("=?") < 0) return s || "";
   const re = /=\?([^?]+)\?([BbQq])\?([^?]*)\?=/g;
   let out = "", last = 0, m, prevWasWord = false;
+  // Aufeinanderfolgende Wörter mit gleichem Zeichensatz werden erst als Bytes
+  // gesammelt und dann am Stück dekodiert — Absender teilen gern mitten in
+  // einem UTF-8-Zeichen auf.
+  let pend = [], pendCs = null;
+  const flush = () => {
+    if (!pend.length) return;
+    let n = 0; for (const p of pend) n += p.length;
+    const all = new Uint8Array(n); let o = 0;
+    for (const p of pend){ all.set(p, o); o += p.length; }
+    try { out += decoderFor(pendCs).decode(all); } catch(e){ out += LATIN1.decode(all); }
+    pend = []; pendCs = null;
+  };
   while ((m = re.exec(s)) !== null){
     let between = s.slice(last, m.index);
     // Zwischenraum zwischen zwei encoded-words entfällt laut RFC.
     if (prevWasWord && /^[ \t]*$/.test(between)) between = "";
-    out += between;
-    const cs = m[1].split("*")[0];
+    const cs = m[1].split("*")[0].toLowerCase();
+    if (between || cs !== pendCs){ flush(); out += between; }
     const enc = m[2].toUpperCase();
-    const bytes = enc === "B" ? b64ToBytes(m[3]) : qpToBytes(m[3].replace(/_/g, " "));
-    try { out += decoderFor(cs).decode(bytes); } catch(e){ out += LATIN1.decode(bytes); }
+    const txt = m[3];
+    const bytes = enc === "B" ? b64ToBytes(txt)
+      : qpToBytes(txt.replace(/_/g, " ").replace(/[^\x00-\xff]/g, "?"));
+    pend.push(bytes); pendCs = cs;
     last = m.index + m[0].length;
     prevWasWord = true;
   }
+  flush();
   return out + s.slice(last);
 }
 
@@ -404,7 +420,9 @@ function parseHeaderBlock(text){
   const list = [];
   const lines = text.split(/\r?\n/);
   let cur = null;
-  for (const line of lines){
+  for (let line of lines){
+    // Bei CRLF-Dateien bleibt an der letzten Headerzeile ein \r stehen.
+    if (line.endsWith("\r")) line = line.slice(0, -1);
     if (line === "") continue;
     if (/^[ \t]/.test(line)){
       if (cur) cur[1] += " " + line.replace(/^[ \t]+/, "");
@@ -441,8 +459,10 @@ function parseContentType(v){
     let val = seg.slice(i+1).trim();
     if (val.startsWith('"')) val = val.slice(1, val.lastIndexOf('"') > 0 ? val.lastIndexOf('"') : undefined);
     const m = /^([^*]+)\*(\d+)?(\*)?$/.exec(k);
-    if (m){                                   // RFC 2231: name*0*, name*1 …
-      const base = m[1], n = m[2] === undefined ? 0 : parseInt(m[2],10), ext = !!m[3];
+    if (m){                                   // RFC 2231: name*, name*0*, name*1 …
+      const base = m[1];
+      const n = m[2] === undefined ? 0 : parseInt(m[2],10);
+      const ext = m[2] === undefined ? true : !!m[3];   // "name*" allein = kodiert
       (cont[base] || (cont[base] = [])).push({n, val, ext});
     } else {
       out.params[k] = val;
@@ -450,7 +470,10 @@ function parseContentType(v){
   }
   for (const base in cont){
     const parts = cont[base].sort((a,b)=>a.n-b.n);
-    let cs = null, text = "";
+    // Alle Teile erst als Bytes sammeln, dann einmal dekodieren — sonst
+    // zerfallen UTF-8-Zeichen, die über eine Teilgrenze laufen.
+    let cs = null;
+    const chunks = [];
     for (const p of parts){
       let s = p.val;
       if (p.ext){
@@ -458,12 +481,22 @@ function parseContentType(v){
           const mm = /^([^']*)'([^']*)'(.*)$/.exec(s);
           if (mm){ cs = mm[1]; s = mm[3]; }
         }
-        const bytes = qpToBytes(s.replace(/%/g, "="));
-        s = decoderFor(cs || "utf-8").decode(bytes);
+        const bytes = new Uint8Array(s.length);
+        let o = 0;
+        for (let q=0;q<s.length;q++){
+          if (s[q] === "%" && /^[0-9A-Fa-f]{2}$/.test(s.substr(q+1, 2))){
+            bytes[o++] = parseInt(s.substr(q+1, 2), 16); q += 2;
+          } else bytes[o++] = s.charCodeAt(q) & 0xff;
+        }
+        chunks.push(bytes.subarray(0, o));
+      } else {
+        chunks.push(new TextEncoder().encode(s));
       }
-      text += s;
     }
-    out.params[base] = text;
+    let total = 0; for (const c of chunks) total += c.length;
+    const all = new Uint8Array(total); let o = 0;
+    for (const c of chunks){ all.set(c, o); o += c.length; }
+    out.params[base] = decoderFor(cs || "utf-8").decode(all);
   }
   return out;
 }
@@ -648,6 +681,13 @@ function splitMultipart(body, boundary){
     let hit = (i === 0) || body[i-1] === NL;
     if (hit){
       for (let k=0;k<dash.length;k++) if (body[i+k] !== dash[k]){ hit = false; break; }
+      // Nur echte Boundary-Zeilen: danach "--", Leerraum oder Zeilenende.
+      // Sonst trifft "--b1" auch "--b1_alt" einer verschachtelten Ebene.
+      if (hit){
+        const nx = body[i + dash.length];
+        if (!(nx === undefined || nx === NL || nx === CR || nx === 0x20 || nx === 0x09 ||
+              (nx === 0x2d && body[i + dash.length + 1] === 0x2d))) hit = false;
+      }
     }
     if (hit){
       // Zeilenende dieser Boundary-Zeile
@@ -703,7 +743,10 @@ function parseEntity(bytes, out, depth){
   else data = body;
 
   const name = disp.params.filename || ct.params.name || "";
+  // Weitergeleitete Mails (message/rfc822) als .eml anbieten statt sie als
+  // Rohtext in den Textkörper zu kippen.
   const isAtt = disp.type === "attachment" ||
+                type === "message/rfc822" ||
                 (!!name && !type.startsWith("text/") ) ||
                 (!type.startsWith("text/") && !type.startsWith("message/"));
 
@@ -833,12 +876,13 @@ function parseQuery(q){
   while ((m = re.exec(q)) !== null){
     const term = (m[3] !== undefined ? m[3] : m[4] || "").toLowerCase();
     if (!term) continue;
-    let f = null;
+    let f = null, t = term;
     if (m[2]){
       f = FIELDS[m[2].toLowerCase()];
-      if (f === undefined) continue;             // unbekanntes Präfix ignorieren
+      // Unbekanntes Präfix (z.B. "https:") ist Teil des Suchbegriffs.
+      if (f === undefined){ f = null; t = (m[2] + ":" + term).toLowerCase(); }
     }
-    toks.push({neg: !!m[1], field: f, term});
+    toks.push({neg: !!m[1], field: f, term: t});
   }
   return toks;
 }
@@ -945,9 +989,18 @@ async function classifyFile(f){
  * Öffnen der mbox einen vollständigen Indexlauf starten, dessen Ergebnis
  * gleich darauf wieder verworfen wird.
  */
+/** Laufenden Indexlauf oder Volltextsuche beenden und abwarten. Sonst
+    schreiben zwei Läufe gleichzeitig in denselben Index. */
+async function stopScan(){
+  if (!S.scanning) return;
+  S.cancel = true;
+  while (S.scanning) await new Promise(r => setTimeout(r, 20));
+}
+
 async function takeFiles(files){
   const list = Array.from(files || []);
   if (!list.length) return;
+  await stopScan();
   const arten = await Promise.all(list.map(classifyFile));
   const mbox = list.find((f,i) => arten[i] === "mbox");
   const index = list.find((f,i) => arten[i] === "index");
@@ -1033,11 +1086,21 @@ async function scanFrom(startOffset){
       await new Promise(r => setTimeout(r, 0));
     }
 
+    // Bei Abbruch ist das Ende der letzten gefundenen Nachricht unbekannt —
+    // sie würde sonst bis zum Dateiende reichen (bei mehreren GB tödlich
+    // beim Anklicken). Also verwerfen.
+    let tailEnd = size;
+    if (S.cancel && pos < size && S.n > before){
+      tailEnd = S.off[S.n-1];
+      S.n--; S.txt.pop();
+    }
+
     // Längen ableiten
-    for (let i=Math.max(0, before-1);i<S.n;i++) S.len[i] = (i+1 < S.n ? S.off[i+1] : size) - S.off[i];
+    for (let i=Math.max(0, before-1);i<S.n;i++) S.len[i] = (i+1 < S.n ? S.off[i+1] : tailEnd) - S.off[i];
 
     // Übergroße Headerblöcke gezielt nachlesen
     for (const i of pending){
+      if (i >= S.n) continue;
       if (S.cancel) break;
       const len = Math.min(S.len[i] || 1048576, 4*1024*1024);
       const b = new Uint8Array(await file.slice(S.off[i], S.off[i]+len).arrayBuffer());
@@ -1379,7 +1442,14 @@ async function bodySearch(){
       const raw = new Uint8Array(await S.file.slice(S.off[i], S.off[i]+S.len[i]).arrayBuffer());
       bytes += raw.length;
       const m = parseMessage(raw);
-      const hay = ((m.text || "") + "\n" + (m.html || "").replace(/<[^>]*>/g, " ")).toLowerCase();
+      // HTML über DOMParser in Text wandeln, damit Entities (&uuml; &#228; …)
+      // aufgelöst werden. Das Dokument ist inert: keine Skripte, keine Bilder.
+      let htmlText = "";
+      if (m.html){
+        try { htmlText = new DOMParser().parseFromString(m.html, "text/html").body.textContent || ""; }
+        catch(e){ htmlText = m.html.replace(/<[^>]*>/g, " "); }
+      }
+      const hay = ((m.text || "") + "\n" + htmlText).toLowerCase();
       if (hay.indexOf(needle) >= 0) hits.add(i);
     } catch(e){ /* einzelne Nachricht überspringen */ }
     done++;
@@ -1390,11 +1460,14 @@ async function bodySearch(){
       await new Promise(r => setTimeout(r, 0));
     }
   }
+  const abgebrochen = S.cancel;
   S.scanning = false;
   setProgress(false, 1, "");
   S.bodyHits = hits;
   el.stHint.textContent = 'Volltext "' + term + '" · ' + hits.size.toLocaleString("de-DE") +
-                          " Treffer · " + fmtSize(bytes) + " gelesen";
+                          " Treffer · " + fmtSize(bytes) + " gelesen" +
+                          (abgebrochen ? " · ABGEBROCHEN nach " + done.toLocaleString("de-DE") +
+                           " von " + list.length.toLocaleString("de-DE") : "");
   applyFilter();
   if (S.view.length) select(0); else renderDetail();
 }
