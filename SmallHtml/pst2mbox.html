@@ -161,7 +161,9 @@
 
   <footer>
     Eigenständige Seite ohne externe Abhängigkeiten — speicherbar und offline nutzbar.
-    Implementiert nach der Spezifikation MS-PST (NDB-, LTP- und Messaging-Layer).
+    Implementiert nach der Spezifikation MS-PST (NDB-, LTP- und Messaging-Layer, inkl. 4K-Format
+    von Outlook 2013+ mit zlib-Blöcken) und MS-OXRTFEX (HTML aus komprimiertem RTF).
+    <br>Mehr Projekte: <a href="https://itzwieseltal.wordpress.com">itzwieseltal.wordpress.com</a>
   </footer>
 </div>
 
@@ -223,6 +225,109 @@ var PSTLIB = (function () {
     return out;
   }
 
+  /* ---------- zlib/Deflate entpacken (RFC 1950/1951), synchron ---------- */
+  var INF_LBASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  var INF_LEXT  = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  var INF_DBASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  var INF_DEXT  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  var INF_CLORD = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+
+  /* kanonischer Huffman-Baum: counts[len], symbols[] */
+  function infBuild(lens, n) {
+    var counts = new Uint16Array(16), offs = new Uint16Array(16), syms = new Uint16Array(n), i;
+    for (i = 0; i < n; i++) counts[lens[i]]++;
+    counts[0] = 0;
+    for (i = 1; i < 16; i++) offs[i] = offs[i - 1] + counts[i - 1];
+    for (i = 0; i < n; i++) if (lens[i]) syms[offs[lens[i]]++] = i;
+    return { counts: counts, syms: syms };
+  }
+  var INF_FIXED_L, INF_FIXED_D;
+  (function () {
+    var l = new Uint8Array(288), i;
+    for (i = 0; i < 144; i++) l[i] = 8;
+    for (; i < 256; i++) l[i] = 9;
+    for (; i < 280; i++) l[i] = 7;
+    for (; i < 288; i++) l[i] = 8;
+    INF_FIXED_L = infBuild(l, 288);
+    var d = new Uint8Array(30); for (i = 0; i < 30; i++) d[i] = 5;
+    INF_FIXED_D = infBuild(d, 30);
+  })();
+
+  function zlibInflate(src, sizeHint) {
+    var pos = 0, bitBuf = 0, bitCnt = 0;
+    if (src.length >= 2 && (src[0] & 0x0f) === 8 && ((src[0] << 8) | src[1]) % 31 === 0) pos = 2;  /* zlib-Kopf */
+    var out = new Uint8Array(Math.max(sizeHint || 0, src.length * 4, 1024)), op = 0;
+    function need(n) {
+      if (op + n <= out.length) return;
+      var nb = new Uint8Array(Math.max(out.length * 2, op + n)); nb.set(out); out = nb;
+    }
+    function bits(n) {
+      while (bitCnt < n) {
+        if (pos >= src.length) throw new Error('Komprimierter Block ist abgeschnitten.');
+        bitBuf |= src[pos++] << bitCnt; bitCnt += 8;
+      }
+      var v = bitBuf & ((1 << n) - 1);
+      bitBuf >>>= n; bitCnt -= n;
+      return v;
+    }
+    function decode(t) {
+      var code = 0, first = 0, index = 0;
+      for (var len = 1; len < 16; len++) {
+        code |= bits(1);
+        var cnt = t.counts[len];
+        if (code - cnt < first) return t.syms[index + (code - first)];
+        index += cnt; first += cnt; first <<= 1; code <<= 1;
+      }
+      throw new Error('Ungueltiger Huffman-Code im komprimierten Block.');
+    }
+    var last;
+    do {
+      last = bits(1);
+      var type = bits(2);
+      if (type === 0) {                                   /* unkomprimiert */
+        bitBuf = 0; bitCnt = 0;
+        if (pos + 4 > src.length) throw new Error('Komprimierter Block ist abgeschnitten.');
+        var len = src[pos] | (src[pos + 1] << 8); pos += 4;
+        if (pos + len > src.length) throw new Error('Komprimierter Block ist abgeschnitten.');
+        need(len); out.set(src.subarray(pos, pos + len), op); op += len; pos += len;
+        continue;
+      }
+      var lt, dt;
+      if (type === 1) { lt = INF_FIXED_L; dt = INF_FIXED_D; }
+      else if (type === 2) {
+        var hlit = bits(5) + 257, hdist = bits(5) + 1, hclen = bits(4) + 4, i;
+        var cl = new Uint8Array(19);
+        for (i = 0; i < hclen; i++) cl[INF_CLORD[i]] = bits(3);
+        var ct = infBuild(cl, 19), lens = new Uint8Array(hlit + hdist);
+        for (i = 0; i < hlit + hdist;) {
+          var sym = decode(ct), rep, val;
+          if (sym < 16) { lens[i++] = sym; continue; }
+          if (sym === 16) { if (!i) throw new Error('Ungueltige Codelaengen.'); val = lens[i - 1]; rep = 3 + bits(2); }
+          else if (sym === 17) { val = 0; rep = 3 + bits(3); }
+          else { val = 0; rep = 11 + bits(7); }
+          while (rep-- && i < hlit + hdist) lens[i++] = val;
+        }
+        lt = infBuild(lens.subarray(0, hlit), hlit);
+        dt = infBuild(lens.subarray(hlit), hdist);
+      } else throw new Error('Ungueltiger Deflate-Blocktyp.');
+      for (;;) {
+        var s = decode(lt);
+        if (s < 256) { need(1); out[op++] = s; continue; }
+        if (s === 256) break;
+        s -= 257;
+        if (s >= 29) throw new Error('Ungueltige Laenge im komprimierten Block.');
+        var l = INF_LBASE[s] + bits(INF_LEXT[s]);
+        var ds = decode(dt);
+        if (ds >= 30) throw new Error('Ungueltige Distanz im komprimierten Block.');
+        var dist = INF_DBASE[ds] + bits(INF_DEXT[ds]);
+        if (dist > op) throw new Error('Distanz zeigt vor den Blockanfang.');
+        need(l);
+        for (var k = 0; k < l; k++, op++) out[op] = out[op - dist];
+      }
+    } while (!last);
+    return out.slice(0, op);
+  }
+
   /* ===================================================================
    * NDB-Layer
    * =================================================================== */
@@ -247,9 +352,11 @@ var PSTLIB = (function () {
     if (this.u32(0) !== 0x4e444221) throw new Error('Keine PST/OST-Datei (Signatur "!BDN" fehlt).');
     this.wVer = this.u16(10);
     this.wVerClient = this.u16(12);
-    this.unicode = this.wVer >= 23;          // 14/15 = ANSI, 23/36/37 = Unicode
-    this.isOst = this.u16(8) !== 0x4d53;     // "SM" = PST
-    var rootOff, crypt;
+    this.unicode = this.wVer >= 23;          // 14/15 = ANSI, 23 = Unicode, 36 = Unicode mit 4K-Seiten
+    this.is4k = this.wVer >= 36;             // Outlook 2013+ OST: 4-KiB-Seiten, zlib-komprimierte Bloecke
+    this.isOst = this.u16(8) !== 0x4d53;     // "SM" = PST, "SO" = OST
+    this.pageSize = this.is4k ? 4096 : 512;
+    this.pageEntryBytes = this.is4k ? 4056 : (this.unicode ? 488 : 496);    var rootOff, crypt;
     if (this.unicode) {
       rootOff = 0xb4; crypt = this.u8[0x201];
       this.nbtRoot = this.u64(rootOff + 36 + 8);
@@ -266,20 +373,20 @@ var PSTLIB = (function () {
     this.blockTrailerLen = this.unicode ? 16 : 12;
   };
 
-  /* BTree-Seiten (512 Byte) rekursiv einlesen */
+  /* BTree-Seiten (512 Byte, bei 4K-Format 4096 Byte) rekursiv einlesen */
   Pst.prototype._walkBT = function (ib, isNbt, seen, depth) {
-    if (!ib || ib + 512 > this.u8.length) return;
+    if (!ib || ib + this.pageSize > this.u8.length) return;
     if (seen.has(ib)) return;
     seen.add(ib);
     if (depth > 32) return;
-    var cEnt, cbEnt, cLevel, base = ib;
-    if (this.unicode) {
-      cEnt = this.u8[ib + 488]; cbEnt = this.u8[ib + 490]; cLevel = this.u8[ib + 491];
+    var cEnt, cbEnt, cLevel, base = ib, e = ib + this.pageEntryBytes;
+    if (this.is4k) {
+      cEnt = this.u16(e); cbEnt = this.u8[e + 4]; cLevel = this.u8[e + 5];
     } else {
-      cEnt = this.u8[ib + 496]; cbEnt = this.u8[ib + 498]; cLevel = this.u8[ib + 499];
+      cEnt = this.u8[e]; cbEnt = this.u8[e + 2]; cLevel = this.u8[e + 3];
     }
     if (!cbEnt) return;
-    var maxEnt = Math.floor((this.unicode ? 488 : 496) / cbEnt);
+    var maxEnt = Math.floor(this.pageEntryBytes / cbEnt);
     if (cEnt > maxEnt) cEnt = maxEnt;
     for (var i = 0; i < cEnt; i++) {
       var o = base + i * cbEnt;
@@ -294,10 +401,11 @@ var PSTLIB = (function () {
           this.nbt.set(nid, { nid: nid, bidData: this.u32(o + 4), bidSub: this.u32(o + 8), nidParent: this.u32(o + 12) });
         }
       } else {
-        var bid, off, cb;
+        var bid, off, cb, cbInf;
         if (this.unicode) { bid = this.u64(o); off = this.u64(o + 8); cb = this.u16(o + 16); }
         else { bid = this.u32(o); off = this.u32(o + 4); cb = this.u16(o + 8); }
-        this.bbt.set(bidKey(bid), { bid: bid, ib: off, cb: cb });
+        cbInf = this.is4k ? this.u16(o + 18) : cb;       // 4K: Groesse nach dem Entpacken
+        this.bbt.set(bidKey(bid), { bid: bid, ib: off, cb: cb, cbInf: cbInf });
       }
     }
   };
@@ -314,6 +422,9 @@ var PSTLIB = (function () {
     if (!e) throw new Error('Block ' + bid + ' nicht im Block-BTree.');
     if (e.ib + e.cb > this.u8.length) throw new Error('Block ' + bid + ' liegt ausserhalb der Datei.');
     var data = this.u8.slice(e.ib, e.ib + e.cb);
+    /* 4K-Format: zlib-komprimiert, wenn gespeicherte und entpackte Groesse abweichen.
+       Reihenfolge wie libpff: erst entpacken, dann entschluesseln. */
+    if (this.is4k && e.cbInf && e.cbInf !== e.cb) data = zlibInflate(data, e.cbInf);
     if (this.crypt && !bidIsInternal(e.bid)) decryptInPlace(data, this.crypt, e.bid % 4294967296);
     return data;
   };
@@ -584,13 +695,19 @@ var PSTLIB = (function () {
       pending.push({ id: propId, type: type, raw: raw, hnid: isVarType(type) || fixedSize(type) > 4 ? ctx.pst.u32b(r.val, 2) : 0 });
     }
     /* Codepage vorab bestimmen, damit PT_STRING8 korrekt dekodiert wird */
+    /* PT_STRING8: MessageCodepage (0x3FFD) vor InternetCodepage (0x3FDE);
+       HTML-Koerper: InternetCodepage vor MessageCodepage */
+    var cpMsg = null, cpInet = null;
     for (i = 0; i < pending.length; i++) {
       var p = pending[i];
       if ((p.id === 0x3fde || p.id === 0x3ffd) && p.raw && p.raw.length >= 4) {
-        var cp = ctx.pst.u32b(p.raw, 0);
-        if (CP_MAP[cp]) { ctx.cp = CP_MAP[cp]; break; }
+        var cp = CP_MAP[ctx.pst.u32b(p.raw, 0)];
+        if (!cp) continue;
+        if (p.id === 0x3ffd) cpMsg = cp; else cpInet = cp;
       }
     }
+    if (cpMsg || cpInet) ctx.cp = cpMsg || cpInet;
+    ctx.cpHtml = cpInet || cpMsg || null;
     for (i = 0; i < pending.length; i++) {
       var q = pending[i];
       props.set(q.id, { type: q.type, value: decodeValue(ctx, q.type, q.raw), raw: q.raw, hnid: q.hnid });
@@ -661,7 +778,9 @@ var PSTLIB = (function () {
           var vo = ro + col.ibData;
           if (vo + col.cbData > blk.length) continue;
           var raw;
-          if (isVarType(col.type) || fixedSize(col.type) > col.cbData) {
+          /* Variable Typen und 8-Byte-Werte, die nicht inline passen, liegen als HNID (4 Byte) vor;
+             Booleans haben in TCs nur cbData=1 und stehen trotzdem inline */
+          if (isVarType(col.type) || (fixedSize(col.type) > 4 && col.cbData === 4)) {
             raw = resolveHnid(ctx, P.u32b(blk, vo));
           } else {
             raw = blk.subarray(vo, vo + col.cbData);
@@ -751,6 +870,107 @@ var PSTLIB = (function () {
     return out.subarray(0, oi);
   }
 
+  /* --- RTF mit eingekapseltem HTML (\fromhtml1) -> HTML, nach MS-OXRTFEX ---
+     Liefert null, wenn das RTF kein eingekapseltes HTML enthaelt. */
+  var RTF_SKIP_DEST = /^(fonttbl|colortbl|stylesheet|info|pict|object|objdata|header|footer|headerl|headerr|headerf|footerl|footerr|footerf|listtable|listoverridetable|rsidtbl|generator|xmlnstbl|themedata|colorschememapping|latentstyles|datastore|fldinst|filetbl|revtbl|author|operator|title|subject|comment|doccomm)$/;
+  var RTF_CHARS = { emdash: '—', endash: '–', lquote: '‘', rquote: '’',
+    ldblquote: '“', rdblquote: '”', bullet: '•', emspace: ' ', enspace: ' ' };
+
+  function rtfToHtml(rtf, cpLabel) {
+    var n = rtf.length, head = '', i;
+    for (i = 0; i < Math.min(n, 2048); i++) head += String.fromCharCode(rtf[i]);
+    if (!/\\fromhtml1/.test(head)) return null;
+    var mcp = /\\ansicpg(\d+)/.exec(head);
+    var label = (mcp && CP_MAP[+mcp[1]]) || cpLabel || 'windows-1252';
+    var out = [], bytes = [];
+    function flush() { if (bytes.length) { out.push(decodeText(new Uint8Array(bytes), label)); bytes = []; } }
+    function emit(s) { flush(); out.push(s); }
+
+    var st = { skip: false, sup: false, uc: 1 }, stack = [];
+    var pos = 0, ucSkip = 0, first = false, star = false;
+    function isAlpha(b) { return (b >= 0x61 && b <= 0x7a) || (b >= 0x41 && b <= 0x5a); }
+    function isDigit(b) { return b >= 0x30 && b <= 0x39; }
+
+    while (pos < n) {
+      var c = rtf[pos];
+      if (c === 0x7b) {                                   /* { */
+        stack.push(st);
+        st = { skip: st.skip, sup: st.sup, uc: st.uc };
+        first = true; star = false; pos++; continue;
+      }
+      if (c === 0x7d) {                                   /* } */
+        if (stack.length) st = stack.pop();
+        first = false; star = false; ucSkip = 0; pos++; continue;
+      }
+      if (c === 0x0d || c === 0x0a) { pos++; continue; }
+      if (c !== 0x5c) {                                   /* Klartextzeichen */
+        first = false; star = false; pos++;
+        if (ucSkip > 0) { ucSkip--; continue; }
+        if (!st.skip && !st.sup) bytes.push(c);
+        continue;
+      }
+      /* Steuersequenz */
+      pos++;
+      if (pos >= n) break;
+      var d = rtf[pos];
+      if (d === 0x27) {                                   /* \'hh */
+        var hx = parseInt(String.fromCharCode(rtf[pos + 1] || 48, rtf[pos + 2] || 48), 16);
+        pos += 3; first = false; star = false;
+        if (ucSkip > 0) { ucSkip--; continue; }
+        if (!st.skip && !st.sup && !isNaN(hx)) bytes.push(hx & 0xff);
+        continue;
+      }
+      if (d === 0x2a) { pos++; star = true; continue; }   /* \* - Ziel folgt */
+      if (!isAlpha(d)) {                                  /* Steuersymbol */
+        pos++; first = false; star = false;
+        if (st.skip || st.sup) continue;
+        if (d === 0x5c || d === 0x7b || d === 0x7d) bytes.push(d);
+        else if (d === 0x7e) emit(' ');              /* \~ */
+        else if (d === 0x5f) emit('-');                   /* \_ */
+        continue;
+      }
+      /* Steuerwort mit optionalem Parameter */
+      var w = '';
+      while (pos < n && isAlpha(rtf[pos])) w += String.fromCharCode(rtf[pos++]);
+      var param = null, neg = false;
+      if (pos < n && rtf[pos] === 0x2d && isDigit(rtf[pos + 1])) { neg = true; pos++; }
+      if (pos < n && isDigit(rtf[pos])) {
+        param = 0;
+        while (pos < n && isDigit(rtf[pos])) param = param * 10 + (rtf[pos++] - 48);
+        if (neg) param = -param;
+      }
+      if (pos < n && rtf[pos] === 0x20) pos++;            /* Trennleerzeichen */
+
+      if (w === 'bin' && param > 0) { pos += param; first = false; star = false; continue; }
+
+      if (first) {
+        first = false;
+        if (star) {
+          star = false;
+          if (w === 'htmltag') { st.sup = false; continue; }
+          st.skip = true; continue;                       /* \*\mhtmltag und andere \*-Ziele */
+        }
+        if (RTF_SKIP_DEST.test(w)) { st.skip = true; continue; }
+      }
+      star = false;
+      if (st.skip) continue;
+
+      if (w === 'htmlrtf') { st.sup = param === null || param !== 0; continue; }
+      if (w === 'uc') { st.uc = param === null ? 1 : Math.max(0, param); continue; }
+      if (st.sup) continue;
+      if (w === 'par' || w === 'line') emit('\r\n');
+      else if (w === 'tab') emit('\t');
+      else if (w === 'u' && param !== null) {
+        emit(String.fromCharCode(param < 0 ? param + 65536 : param));
+        ucSkip = st.uc;
+      }
+      else if (RTF_CHARS[w]) emit(RTF_CHARS[w]);
+    }
+    flush();
+    var html = out.join('');
+    return /<[a-z!]/i.test(html) ? html : null;
+  }
+
   /* --- Empfaenger / Anhaenge --- */
   function readRecipients(pst, subs) {
     var out = [];
@@ -796,15 +1016,35 @@ var PSTLIB = (function () {
         embedded: null
       };
       if (rec) {
-        if (rec.type === 0x000d && rec.hnid && (rec.hnid & 0x1f) !== 0) {
-          var esn = ctx.subs.get(rec.hnid >>> 0);
-          if (esn) { try { att.embedded = readMessage(pst, esn, true); } catch (e) { } }
+        if (rec.type === 0x000d) {
+          /* PtypObject (MS-PST 2.3.3.5): die HNID zeigt auf {Nid(4), ulSize(4)} im Heap */
+          var enid = 0;
+          if (rec.hnid && (rec.hnid & 0x1f) !== 0) enid = rec.hnid >>> 0;
+          else if (rec.value instanceof Uint8Array && rec.value.length >= 4) enid = pst.u32b(rec.value, 0);
+          var esn = enid ? ctx.subs.get(enid) : null;
+          if (esn) {
+            if (att.method === 5) {
+              try { att.embedded = readMessage(pst, esn, true); } catch (e) { }
+            }
+            if (!att.embedded) {
+              /* OLE-Objekt (Methode 6) oder unlesbare Nachricht: Rohdaten ausgeben */
+              try { att.data = pst.readNodeData(esn.bidData); } catch (e) { }
+              if (att.data && att.method === 6 && !att.mime) att.mime = 'application/x-ole-storage';
+            }
+          }
         } else if (rec.value instanceof Uint8Array) {
           att.data = rec.value;
         }
       }
       if (!att.filename) {
-        att.filename = att.embedded ? 'nachricht.eml' : ('anhang-' + (i + 1) + (ps(props, P.ATTACH_EXT) || '.dat'));
+        if (att.embedded) {
+          var es = (att.embedded.subject || ps(props, P.DISPLAY_NAME) || 'nachricht')
+            .replace(/[\\/:*?"<>|\x00-\x1f]/g, '_').trim().slice(0, 80);
+          att.filename = (es || 'nachricht') + '.eml';
+        } else {
+          att.filename = ps(props, P.DISPLAY_NAME) ||
+            ('anhang-' + (i + 1) + (ps(props, P.ATTACH_EXT) || (att.method === 6 ? '.ole' : '.dat')));
+        }
       }
       out.push(att);
     }
@@ -837,13 +1077,20 @@ var PSTLIB = (function () {
     var h = props.get(P.BODY_HTML);
     if (h) {
       if (typeof h.value === 'string') m.html = h.value;
-      else if (h.value instanceof Uint8Array) m.html = decodeText(h.value, ctx.cp || 'utf-8');
+      else if (h.value instanceof Uint8Array) m.html = decodeText(h.value, ctx.cpHtml || ctx.cp || 'utf-8');
     }
-    if (!m.body && !m.html) {
+    if (!m.html) {
+      /* Outlook speichert HTML-Mails oft nur als RTF mit eingekapseltem HTML (\fromhtml1) */
       var rc = props.get(P.RTF_COMPRESSED);
       if (rc && rc.value instanceof Uint8Array) {
-        var rtf = lzfuDecompress(pst, rc.value);
-        if (rtf) m.rtf = rtf;
+        var rtf = null;
+        try { rtf = lzfuDecompress(pst, rc.value); } catch (e) { }
+        if (rtf) {
+          var eh = null;
+          try { eh = rtfToHtml(rtf, ctx.cpHtml || ctx.cp); } catch (e) { }
+          if (eh) m.html = eh;
+          else if (!m.body) m.rtf = rtf;
+        }
       }
     }
     /* Absender */
@@ -873,7 +1120,7 @@ var PSTLIB = (function () {
         name = ps(props, P.DISPLAY_NAME);
         count = pv(props, P.CONTENT_COUNT) || 0;
       } catch (e) { }
-      if (!name) name = 'Ordner_' + nidIndex(nid);
+      if (!name) name = nid === NID_ROOT_FOLDER ? 'Wurzelordner' : 'Ordner_' + nidIndex(nid);
       var f = {
         nid: nid, name: name, path: path ? path + '/' + name : name,
         children: [], messageNids: [], count: count
@@ -973,10 +1220,10 @@ var PSTLIB = (function () {
       else if (b === 32 || b === 9) t = String.fromCharCode(b);
       else if (b >= 33 && b <= 126) t = String.fromCharCode(b);
       else t = hex2(b);
-      /* "From " am Zeilenanfang maskieren, damit mbox nicht zerfaellt */
+      if (line.length + t.length > 75) { lines.push(line + '='); line = ''; }
+      /* "From " am Zeilenanfang maskieren (auch nach Soft-Umbruch), damit mbox nicht zerfaellt */
       if (line.length === 0 && b === 70 && bytes[i + 1] === 114 && bytes[i + 2] === 111 &&
           bytes[i + 3] === 109 && bytes[i + 4] === 32) t = '=46';
-      if (line.length + t.length > 75) { lines.push(line + '='); line = ''; }
       line += t;
     }
     lines.push(line);
@@ -987,10 +1234,12 @@ var PSTLIB = (function () {
 
   function encodeWord(s) {
     if (!needsEncoding(s)) return s;
-    var parts = [], cur = '';
-    for (var i = 0; i < s.length; i++) {
-      cur += s[i];
-      if (utf8(cur).length > 30) { parts.push(cur); cur = ''; }
+    /* nach Codepoints teilen, damit Surrogatpaare (Emojis) nicht zerrissen werden */
+    var chars = Array.from(String(s)), parts = [], cur = '', curLen = 0;
+    for (var i = 0; i < chars.length; i++) {
+      var cl = utf8(chars[i]).length;
+      if (curLen && curLen + cl > 33) { parts.push(cur); cur = ''; curLen = 0; }
+      cur += chars[i]; curLen += cl;
     }
     if (cur) parts.push(cur);
     return parts.map(function (p) { return '=?UTF-8?B?' + base64(utf8(p), 0) + '?='; }).join('\n ');
@@ -998,10 +1247,11 @@ var PSTLIB = (function () {
 
   function formatAddress(name, addr) {
     name = (name || '').replace(/[\r\n]/g, ' ').trim();
-    addr = (addr || '').replace(/[\r\n\s]/g, '').trim();
+    addr = (addr || '').replace(/[\r\n\s<>]/g, '').trim();
+    /* Exchange-DN (/O=.../CN=...) o. ae. ist keine Internetadresse */
+    if (addr.indexOf('@') < 1 || addr.charAt(0) === '/') addr = '';
     if (!addr && !name) return '';
-    if (!addr) return encodeWord(name) + ' <>';
-    if (!name || name === addr) return addr;
+    if (addr && (!name || name === addr)) return addr;
     var n = needsEncoding(name) ? encodeWord(name)
       : (/[",:;<>@\[\]\\()]/.test(name) ? '"' + name.replace(/(["\\])/g, '\\$1') + '"' : name);
     return n + ' <' + addr + '>';
@@ -1048,6 +1298,21 @@ var PSTLIB = (function () {
       eml: 'message/rfc822', msg: 'application/vnd.ms-outlook', xml: 'text/xml', json: 'application/json'
     };
     return m[e] || 'application/octet-stream';
+  }
+
+  /* name=/filename=-Parameter; Nicht-ASCII nach RFC 2231 (filename*) plus RFC-2047-name fuer aeltere Leser */
+  function rfc2231(s) {
+    return encodeURIComponent(s).replace(/[!'()*]/g, function (ch) {
+      return '%' + ch.charCodeAt(0).toString(16).toUpperCase();
+    });
+  }
+  function nameParams(fn) {
+    fn = String(fn).replace(/[\r\n"\\]/g, '_');
+    if (!needsEncoding(fn)) return { name: '; name="' + fn + '"', filename: '; filename="' + fn + '"' };
+    return {
+      name: '; name="' + encodeWord(fn).replace(/\n /g, ' ') + '"',
+      filename: "; filename*=UTF-8''" + rfc2231(fn)
+    };
   }
 
   var _bcount = 0;
@@ -1112,7 +1377,7 @@ var PSTLIB = (function () {
     if (msg.messageId) add('Message-ID', msg.messageId);
     if (msg.inReplyTo) add('In-Reply-To', msg.inReplyTo);
     if (msg.references) add('References', msg.references);
-    if (opts.folderPath) hdr.push(foldHeader('X-PST-Folder', opts.folderPath));
+    if (opts.folderPath) hdr.push(foldHeader('X-PST-Folder', encodeWord(opts.folderPath)));
 
     /* 3) Koerper */
     var textPart = null, htmlPart = null, extraParts = [];
@@ -1142,21 +1407,22 @@ var PSTLIB = (function () {
         var fn = String(at.filename || 'anhang.dat').replace(/[\r\n"]/g, '_');
         var part;
         if (at.embedded) {
+          var efn = (/\.eml$/i.test(fn) ? fn : (fn.replace(/\.msg$/i, '') || 'nachricht') + '.eml');
           part = {
-            headers: ['Content-Type: message/rfc822', 'Content-Disposition: attachment; filename="' +
-                      (fn.replace(/\.[^.]*$/, '') || 'nachricht') + '.eml"'],
-            body: buildMessage(at.embedded, { useOriginalHeaders: opts.useOriginalHeaders, includeAttachments: opts.includeAttachments })
+            headers: ['Content-Type: message/rfc822' + nameParams(efn).name,
+                      'Content-Disposition: attachment' + nameParams(efn).filename],
+            body: buildMessage(at.embedded, { useOriginalHeaders: opts.useOriginalHeaders,
+                                              includeAttachments: opts.includeAttachments, includeBcc: opts.includeBcc })
           };
         } else if (at.data) {
-          var ct = at.mime || guessMime(fn);
-          var nameParam = needsEncoding(fn) ? '' : '; name="' + fn + '"';
-          var fnParam = needsEncoding(fn) ? "; filename*=UTF-8''" + encodeURIComponent(fn) : '; filename="' + fn + '"';
+          var ct = String(at.mime || guessMime(fn)).replace(/[\r\n]/g, '').trim() || 'application/octet-stream';
+          var np = nameParams(fn);
           var isInline = !!at.cid;
           part = {
-            headers: ['Content-Type: ' + ct + nameParam,
+            headers: ['Content-Type: ' + ct + np.name,
                       'Content-Transfer-Encoding: base64',
-                      'Content-Disposition: ' + (isInline ? 'inline' : 'attachment') + fnParam]
-              .concat(at.cid ? ['Content-ID: <' + at.cid.replace(/[<>]/g, '') + '>'] : []),
+                      'Content-Disposition: ' + (isInline ? 'inline' : 'attachment') + np.filename]
+              .concat(at.cid ? ['Content-ID: <' + at.cid.replace(/[<>\s]/g, '') + '>'] : []),
             body: utf8(base64(at.data, 76))
           };
           if (isInline) { inlineAtts.push(part); continue; }
@@ -1191,7 +1457,8 @@ var PSTLIB = (function () {
     var head = hdr.slice();
     head.push('MIME-Version: 1.0');
     head = head.concat(root.headers);
-    return concatBytes([utf8(head.join('\n') + '\n\n'), root.body]);
+    var rb = root.body, tail = (rb.length && rb[rb.length - 1] === 10) ? [] : [utf8('\n')];
+    return concatBytes([utf8(head.join('\n') + '\n\n'), rb].concat(tail));
   }
 
   /* mbox-Trennzeile im Stil von readpst */
@@ -1214,18 +1481,33 @@ var PSTLIB = (function () {
     }
     return t;
   })();
-  function crc32(buf) {
+  /* CRC-32 ueber eine Liste von Teilpuffern */
+  function crc32(parts) {
+    if (parts instanceof Uint8Array) parts = [parts];
     var c = 0xffffffff;
-    for (var i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    for (var p = 0; p < parts.length; p++) {
+      var buf = parts[p];
+      for (var i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    }
     return (c ^ 0xffffffff) >>> 0;
   }
+  /* files: [{name, data: Uint8Array | Uint8Array[]}] -> Liste von Teilen fuer new Blob(...)
+     (kein grosser Gesamtpuffer, damit auch grosse Archive in den Speicher passen) */
   function makeZip(files) {
     var chunks = [], central = [], offset = 0;
     var now = new Date();
     var dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xffff;
     var dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
+    if (files.length > 0xffff) throw new Error('Zu viele Ordner fuer ein ZIP (max. 65535).');
     for (var i = 0; i < files.length; i++) {
-      var name = utf8(files[i].name), data = files[i].data, crc = crc32(data);
+      var name = utf8(files[i].name), parts = files[i].data;
+      if (parts instanceof Uint8Array) parts = [parts];
+      var size = 0;
+      for (var q = 0; q < parts.length; q++) size += parts[q].length;
+      var crc = crc32(parts);
+      if (size > 0xffffffff || offset + 30 + name.length + size > 0xffffffff)
+        throw new Error('ZIP wuerde groesser als 4 GB - bitte ohne ZIP oder mit weniger Ordnern konvertieren.');
+      var data = { length: size };
       var lh = new Uint8Array(30 + name.length);
       var dv = new DataView(lh.buffer);
       dv.setUint32(0, 0x04034b50, true); dv.setUint16(4, 20, true); dv.setUint16(6, 0x0800, true);
@@ -1233,7 +1515,8 @@ var PSTLIB = (function () {
       dv.setUint32(14, crc, true); dv.setUint32(18, data.length, true); dv.setUint32(22, data.length, true);
       dv.setUint16(26, name.length, true); dv.setUint16(28, 0, true);
       lh.set(name, 30);
-      chunks.push(lh, data);
+      chunks.push(lh);
+      for (q = 0; q < parts.length; q++) chunks.push(parts[q]);
       var ch = new Uint8Array(46 + name.length), cv = new DataView(ch.buffer);
       cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true);
       cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true);
@@ -1250,14 +1533,15 @@ var PSTLIB = (function () {
     ev.setUint32(0, 0x06054b50, true);
     ev.setUint16(8, files.length, true); ev.setUint16(10, files.length, true);
     ev.setUint32(12, cdSize, true); ev.setUint32(16, offset, true);
-    return concatBytes(chunks.concat(central).concat([eocd]));
+    return chunks.concat(central).concat([eocd]);
   }
 
   return {
     Pst: Pst, readFolders: readFolders, readMessage: readMessage,
     buildMessage: buildMessage, mboxFromLine: mboxFromLine,
     makeZip: makeZip, concatBytes: concatBytes, utf8: utf8,
-    nidType: nidType, NT_NORMAL_MESSAGE: NT_NORMAL_MESSAGE
+    nidType: nidType, NT_NORMAL_MESSAGE: NT_NORMAL_MESSAGE,
+    rtfToHtml: rtfToHtml, lzfuDecompress: lzfuDecompress, zlibInflate: zlibInflate
   };
 })();
 
@@ -1286,6 +1570,13 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
   });
   drop.addEventListener('drop', function (e) {
     if (e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
+  });
+  /* Datei neben die Zone fallen lassen: Browser soll die PST nicht selbst oeffnen */
+  ['dragover', 'drop'].forEach(function (t) {
+    window.addEventListener(t, function (e) { if (!drop.contains(e.target)) e.preventDefault(); });
+  });
+  window.addEventListener('drop', function (e) {
+    if (!drop.contains(e.target) && e.dataTransfer && e.dataTransfer.files[0]) load(e.dataTransfer.files[0]);
   });
 
   function showError(msg) {
@@ -1322,7 +1613,8 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
       $('result').classList.remove('hidden');
       $('bar').style.width = '0';
     }).catch(function (e) {
-      showError('Datei konnte nicht gelesen werden: ' + e);
+      drop.querySelector('span').textContent = 'oder klicken zum Auswählen';
+      showError('Datei konnte nicht gelesen werden: ' + (e && e.message ? e.message : e));
     });
   }
 
@@ -1338,7 +1630,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
     var total = 0;
     (function w(f) { total += f.messageNids.length; f.children.forEach(w); })(root);
     $('readout').innerHTML =
-      '<span><i>Format</i><b>' + (pst.unicode ? 'Unicode' : 'ANSI') + ' · wVer ' + pst.wVer + '</b></span>' +
+      '<span><i>Format</i><b>' + (pst.isOst ? 'OST' : 'PST') + ' · ' + (pst.is4k ? 'Unicode 4K' : pst.unicode ? 'Unicode' : 'ANSI') + ' · wVer ' + pst.wVer + '</b></span>' +
       '<span><i>Verschlüsselung</i><b>' + crypt + '</b></span>' +
       '<span><i>Knoten</i><b>' + pst.nbt.size + '</b></span>' +
       '<span><i>Blöcke</i><b>' + pst.bbt.size + '</b></span>' +
@@ -1394,7 +1686,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
     renderTree();
   }
 
-  function eachFolder(fn) { (function w(f) { fn(f); f.children.forEach(w); })(root); }
+  function eachFolder(fn) { if (root) (function w(f) { fn(f); f.children.forEach(w); })(root); }
 
   $('showEmpty').addEventListener('change', renderTree);
   $('selAll').addEventListener('click', function () { eachFolder(function (f) { if (f.messageNids.length) f._sel = true; }); renderTree(); });
@@ -1418,7 +1710,22 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
   }
   function sleep() { return new Promise(function (r) { setTimeout(r, 0); }); }
 
-  $('run').addEventListener('click', function () { convert(); });
+  /* "Nur E-Mails": normale Mails, Besprechungsanfragen/-antworten, Berichte (NDR, Lesebestaetigung) */
+  function isMailClass(c) {
+    if (!c) return true;
+    return /^(IPM\.Note|IPM\.Schedule\.Meeting|REPORT\.IPM\.Note|IPM\.Post)(\.|$)/i.test(c);
+  }
+
+  $('run').addEventListener('click', function () {
+    convert().catch(function (e) {
+      $('bar').style.width = '0';
+      $('status').textContent = 'Abgebrochen';
+      var msg = e && e.message ? e.message : String(e);
+      if (e && e.name === 'RangeError') msg = 'Zu wenig Speicher für die Ausgabe (' + msg + '). ' +
+        'Bitte weniger Ordner auf einmal konvertieren oder „ZIP mit Ordnerstruktur“ abwählen.';
+      showWarn('Fehler bei der Konvertierung: ' + msg);
+    }).then(function () { $('run').disabled = !selected().length; });
+  });
 
   async function convert() {
     var sel = selected();
@@ -1439,7 +1746,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
     var total = 0;
     sel.forEach(function (f) { total += f.messageNids.length; });
     var done = 0, failed = 0, skipped = 0;
-    var zipFiles = [], allChunks = [];
+    var zipFiles = [], allChunks = [], usedNames = new Set();
 
     for (var s = 0; s < sel.length; s++) {
       var folder = sel[s];
@@ -1449,7 +1756,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
         try {
           var node = pst.nbt.get(nid);
           var msg = PSTLIB.readMessage(pst, node);
-          if (onlyMail && msg.msgClass && msg.msgClass.indexOf('IPM.Note') !== 0) { skipped++; }
+          if (onlyMail && !isMailClass(msg.msgClass)) { skipped++; }
           else {
             var o = Object.create(opts); o.folderPath = folder.path;
             chunks.push(PSTLIB.utf8(PSTLIB.mboxFromLine(msg)));
@@ -1466,8 +1773,12 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
       }
       if (asZip && chunks.length) {
         var parts = folder.path.split('/').map(sanitize);
-        var name = parts.pop();
-        zipFiles.push({ name: parts.concat(name + '.mbox').join('/'), data: PSTLIB.concatBytes(chunks) });
+        var name = parts.pop(), dir = parts.length ? parts.join('/') + '/' : '';
+        /* gleichnamige Ordner nicht ueberschreiben */
+        var zname = dir + name + '.mbox', k = 2;
+        while (usedNames.has(zname.toLowerCase())) zname = dir + name + ' (' + (k++) + ').mbox';
+        usedNames.add(zname.toLowerCase());
+        zipFiles.push({ name: zname, data: chunks });
       }
     }
 
@@ -1477,7 +1788,7 @@ if (typeof module !== 'undefined' && module.exports) module.exports = PSTLIB;
     var results = [];
     if (asZip) {
       if (!zipFiles.length) { $('run').disabled = false; showWarn('Keine Nachrichten zum Schreiben — Auswahl oder Filter prüfen.'); return; }
-      results.push({ name: sanitize(fileName) + '-mbox.zip', blob: new Blob([PSTLIB.makeZip(zipFiles)], { type: 'application/zip' }) });
+      results.push({ name: sanitize(fileName) + '-mbox.zip', blob: new Blob(PSTLIB.makeZip(zipFiles), { type: 'application/zip' }) });
     } else {
       if (!allChunks.length) { $('run').disabled = false; showWarn('Keine Nachrichten zum Schreiben \u2014 Auswahl oder Filter pr\u00fcfen.'); return; }
       results.push({ name: sanitize(fileName) + '.mbox', blob: new Blob(allChunks, { type: 'application/mbox' }) });

@@ -43,6 +43,9 @@
 
 * { box-sizing: border-box; }
 
+/* Sonst gewinnt z. B. "display: flex" von #assign gegen das hidden-Attribut. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
@@ -100,6 +103,8 @@ button.primary:hover { filter: brightness(1.1); }
 
 #brand { display: flex; align-items: baseline; gap: 10px; }
 #brand b { color: var(--chrome-ink); font-size: 14px; font-weight: 600; letter-spacing: -.01em; }
+#brand a.blog { font-family: var(--mono); font-size: 11px; color: var(--chrome-dim); text-decoration: none; }
+#brand a.blog:hover { color: var(--chrome-ink); text-decoration: underline; }
 
 #archives { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 200px; }
 
@@ -405,6 +410,7 @@ dialog .anon {
     <div id="brand">
       <b>Threema-Archiv</b>
       <span class="eyebrow">lokal · offline</span>
+      <a class="blog" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
     </div>
     <div id="archives"></div>
     <button id="add-btn">Archiv hinzufügen</button>
@@ -648,12 +654,7 @@ async function inflateRaw(bytes) {
   return out;
 }
 
-/* Im Browser stammt ZipError aus core.js, das nach dieser Datei laeuft — zur
-   Aufrufzeit ist es da. Unter Node steht es nicht zur Verfuegung. */
-if (typeof module !== 'undefined') {
-  if (typeof ZipError === 'undefined') globalThis.ZipError = Error;
-  module.exports = { inflateRaw, inflateRawJS, INFLATE_STATS };
-}
+/* ZipError wird im naechsten Skriptblock definiert; zur Aufrufzeit existiert es. */
 
 </script>
 <script>
@@ -1024,9 +1025,14 @@ class ZipArchive {
       `${e.name}: Kompressionsverfahren ${method} (${METHOD_NAMES[method] || 'unbekannt'}) `
       + 'wird nicht unterstuetzt. Threema packt mit Deflate — das Archiv wurde vermutlich umgepackt.');
 
+    // Eine abweichende Laenge ist selbst ein Fehler — sonst wuerde gerade ein
+    // abgeschnittener Eintrag ungeprueft durchrutschen.
+    if (opts.verify !== false && plain.length !== e.size)
+      throw new ZipError(`${e.name}: ${plain.length} statt ${e.size} Bytes entpackt`);
+
     // Bei AES buergt bereits der HMAC; die Pruefsumme lohnt nur dort, wo es
     // keine Authentifizierung gibt (unverschluesselt oder ZipCrypto).
-    if (opts.verify !== false && !e.aes && e.crc32 && plain.length === e.size) {
+    if (opts.verify !== false && !e.aes && e.crc32) {
       const got = crc32(plain);
       if (got !== e.crc32)
         throw new ZipError(`Pruefsumme weicht ab: ${e.name} (erwartet ${e.crc32.toString(16)}, `
@@ -1036,16 +1042,6 @@ class ZipArchive {
   }
 
   async text(name) { return new TextDecoder('utf-8').decode(await this.extract(name)); }
-}
-
-if (typeof module !== 'undefined') {
-  if (typeof inflateRaw === 'undefined') {
-    const inf = require('./inflate.js');
-    globalThis.inflateRaw = inf.inflateRaw;
-    globalThis.inflateRawJS = inf.inflateRawJS;
-    globalThis.INFLATE_STATS = inf.INFLATE_STATS;
-  }
-  module.exports = { AES, ZipArchive, fileReader, ZipError, deriveKeys, crc32, decodeName, METHOD_NAMES };
 }
 
 </script>
@@ -1267,8 +1263,19 @@ function parseExportText(text, ctx, diag) {
   diag.dateOrder.push({ file: ctx.file, order: dmy ? 'T.M.J' : 'M/T/J', reason: why });
 
   const names = [...new Set(items.map(it => it.who))];
-  const selfName = names.find(n => SELF_NAMES.has(n.trim().toLowerCase()))
-                ?? (names.length === 2 ? null : null);
+  // Eigener Name: zuerst die ueblichen Bezeichnungen ("Ich", "Me" ...). Steht
+  // stattdessen der eigene Nickname im Export, hilft der Dateiname weiter:
+  // messages-<Gegenueber>.txt — bei genau zwei Absendern ist der andere man selbst.
+  let selfName = names.find(n => SELF_NAMES.has(n.trim().toLowerCase())) ?? null;
+  if (selfName == null && names.length === 2 && ctx.peerLabel) {
+    const pl = ctx.peerLabel.trim().toLowerCase();
+    const peerIdx = names.findIndex(n => n.trim().toLowerCase() === pl);
+    if (peerIdx >= 0) selfName = names[1 - peerIdx];
+  }
+  if (selfName == null && ctx.selfHints) {
+    selfName = names.find(n => ctx.selfHints.has(n.trim().toLowerCase())) ?? null;
+  }
+  diag.exportSelf.push({ file: ctx.file, self: selfName });
 
   const fileSet = ctx.fileSet || new Set();
   const out = [];
@@ -1335,7 +1342,7 @@ function contactLabel(c) {
   return n || c.nickname || c.identity;
 }
 
-async function readArchive(zip, archiveName, diag) {
+async function readArchive(zip, archiveName, diag, selfHints = null) {
   const entries = zip.entries.filter(e => !e.dir);
   const byName = new Map(entries.map(e => [e.name, e]));
   const base = n => n.split('/').pop();
@@ -1438,22 +1445,20 @@ async function readArchive(zip, archiveName, diag) {
   // Medien: Zuordnung ueber uid, egal in welchem Verzeichnis sie liegen.
   // Die Benennung von Medien wechselt zwischen Threema-Versionen: mal heisst
   // die Datei genau wie die uid, mal mit Endung, mal mit Praefix davor.
-  const mediaFor = uid => {
-    if (!uid) return null;
-    const hit = baseSet.get(uid);
-    if (hit && !isThumb(hit.name)) return hit;
-    for (const [b, e] of baseSet) {
-      if (isThumb(e.name)) continue;
-      if (b.startsWith(uid + '.') || b.endsWith('_' + uid) || b.endsWith('-' + uid)) return e;
-    }
-    return null;
-  };
-  const thumbFor = uid => {
-    if (!uid) return null;
-    for (const e of entries)
-      if (isThumb(e.name) && (base(e.name) === uid || base(e.name).startsWith(uid + '.'))) return e;
-    return null;
-  };
+  // Einmal einen Index bauen statt fuer jede Nachricht alle Dateinamen
+  // abzulaufen. Vorrang wie gehabt: exakter Name, dann "<uid>.ext", dann
+  // "..._<uid>" / "...-<uid>". Der erste Eintrag je Schluessel gewinnt.
+  const mediaIdx = new Map();
+  const media = [...baseSet].filter(([, e]) => !isThumb(e.name));
+  const putIdx = (k, e) => { if (k && !mediaIdx.has(k)) mediaIdx.set(k, e); };
+  for (const [b, e] of media) putIdx(b, e);
+  for (const [b, e] of media) { const dot = b.indexOf('.'); if (dot > 0) putIdx(b.slice(0, dot), e); }
+  // uids sind UUIDs mit Bindestrichen — deshalb jede Endung nach einem "_"
+  // oder "-" ablegen, nicht nur die nach dem letzten Trenner.
+  for (const [b, e] of media)
+    for (let i = 0; i < b.length; i++)
+      if (b[i] === '_' || b[i] === '-') putIdx(b.slice(i + 1), e);
+  const mediaFor = uid => (uid ? mediaIdx.get(uid) || null : null);
 
   // Nur was wie eine Kennung aussieht, ist ein Chat. Sonst landen Dateien wie
   // message_reactions.csv oder message_edit_history.csv als Geisterthreads
@@ -1469,15 +1474,18 @@ async function readArchive(zip, archiveName, diag) {
     for (const m of msgs) {
       const me = mediaFor(m.uid);
       if (me) m.attachment = { name: base(me.name), entry: me.name, size: me.size };
-      const te = thumbFor(m.uid);
-      if (te) m.thumb = te.name;
     }
     result.kind = 'backup';
     const contact = lookup(result.contacts, peer);
     if (!contact)
       diag.unmatchedThreads.push({ archive: archiveName, file: e.name, key: peer });
+    // Neuere Sicherungen benennen Chats numerisch. Fuer den Abgleich mit
+    // Exporten und anderen Sicherungen zaehlt aber die Threema-ID.
+    const ident = contact && /^[0-9A-Z*][0-9A-Z]{7}$/.test(contact.identity || '')
+      ? contact.identity : peer;
+    for (const m of msgs) if (!m.out && m.senderId === peer) m.senderId = ident;
     result.threads.push({
-      key: 'id:' + peer, kind: 'contact', identity: peer,
+      key: 'id:' + ident, kind: 'contact', identity: ident,
       title: contact ? contactLabel(contact) : peer,
       messages: msgs, archive: archiveName, source: 'backup',
     });
@@ -1507,10 +1515,18 @@ async function readArchive(zip, archiveName, diag) {
   }
 
   // Chatexporte
+  const exportFileSet = new Set(baseSet.keys());
+  const hints = new Set([...(selfHints || []), ...(result.self ? [result.self] : [])]
+    .map(s => String(s).trim().toLowerCase()).filter(Boolean));
   for (const e of entries.filter(x => /\.txt$/i.test(x.name))) {
     const txt = await zip.text(e);
-    if (!LINE_RE.test(txt.split('\n')[0] || '')) { diag.skipped.push(e.name); continue; }
-    const ctx = { archive: archiveName, file: e.name, fileSet: new Set([...baseSet.keys()]) };
+    // BOM entfernen und einen Vorspann zulassen: parseExportText kommt mit
+    // beidem zurecht, die Erkennung darf daran nicht scheitern.
+    const head = txt.replace(/^﻿/, '').split(/\r?\n/, 30);
+    if (!head.some(l => LINE_RE.test(l))) { diag.skipped.push(e.name); continue; }
+    const fileLabel = base(e.name).replace(/^messages-?/i, '').replace(/\.txt$/i, '');
+    const ctx = { archive: archiveName, file: e.name, fileSet: exportFileSet,
+                  peerLabel: fileLabel, selfHints: hints };
     const { messages, senders, selfName } = parseExportText(txt, ctx, diag);
     for (const m of messages)
       if (m.attachment?.entry) {
@@ -1518,7 +1534,7 @@ async function readArchive(zip, archiveName, diag) {
         if (me) { m.attachment.entry = me.name; m.attachment.size = me.size; }
       }
     const other = senders.find(s => s !== selfName) || base(e.name).replace(/\.txt$/i, '');
-    const label = base(e.name).replace(/^messages-?/i, '').replace(/\.txt$/i, '') || other;
+    const label = fileLabel || other;
     result.kind = result.kind || 'export';
     result.threads.push({
       key: /^[0-9A-Z*][0-9A-Z]{7}$/.test(other) ? 'id:' + other : 'name:' + label.toLowerCase(),
@@ -1535,7 +1551,10 @@ async function readArchive(zip, archiveName, diag) {
 /* ---------- Merge ----------------------------------------------------- */
 
 const normText = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase();
-const minuteOf = ts => (ts == null ? 0 : Math.floor(ts / 60000));
+const minuteOf = ts => (ts == null ? 'x' : Math.floor(ts / 60000));
+const MEDIA_KINDS = new Set(['image', 'video', 'audio', 'file']);
+/* Nachrichten ohne Zeitstempel ans Ende statt auf den 1.1.1970. */
+const tsCmp = (a, b) => (a.ts == null) - (b.ts == null) || (a.ts ?? 0) - (b.ts ?? 0) || a.order - b.order;
 
 /* Zwei Schluessel: apiid, wenn vorhanden; sonst Minute + Absender + Text.
    Beim Minutenschluessel wird nicht dedupliziert, sondern abgeglichen —
@@ -1580,14 +1599,23 @@ function mergeThreads(archives) {
       // Minutenweise Zaehlung der bereits vorhandenen Nachrichten
       const pending = new Map();
       for (const m of t.messages) {
-        stat.from = stat.from == null ? m.ts : Math.min(stat.from, m.ts);
-        stat.to = stat.to == null ? m.ts : Math.max(stat.to, m.ts);
+        if (m.ts != null) {
+          stat.from = stat.from == null ? m.ts : Math.min(stat.from, m.ts);
+          stat.to = stat.to == null ? m.ts : Math.max(stat.to, m.ts);
+        }
 
         if (m.apiid && th.byApiId.has(m.apiid)) {
           enrich(th.byApiId.get(m.apiid), m, arch.name); stat.dup++; continue;
         }
+        // Anhaenge heissen in Sicherung (message_media_<uid>) und Export
+        // (...-threema-YYYYMMDD-....jpg) verschieden. Verglichen wird deshalb
+        // nur, DASS es ein Anhang ist. Mehrere Anhaenge in derselben Minute
+        // werden ueber den Zaehler in `pending` der Reihe nach abgeglichen.
+        // (Die Bildunterschrift steckt in Sicherungen teils im JSON-Body und
+        // taugt daher nicht als Schluessel.)
+        const isMedia = m.attachment || MEDIA_KINDS.has(m.type);
         const bkey = [minuteOf(m.ts), m.out ? '>' : '<',
-                      m.attachment?.name || normText(m.caption || m.body)].join('|');
+                      isMedia ? '#att' : normText(m.caption || m.body)].join('|');
         const have = th.buckets.get(bkey) || [];
         const seen = (pending.get(bkey) || 0);
         if (seen < have.length) {
@@ -1624,9 +1652,10 @@ function mergeThreads(archives) {
 
   const list = [...threads.values()];
   for (const th of list) {
-    th.messages.sort((a, b) => (a.ts - b.ts) || (a.order - b.order));
-    th.from = th.messages.length ? th.messages[0].ts : null;
-    th.to = th.messages.length ? th.messages[th.messages.length - 1].ts : null;
+    th.messages.sort(tsCmp);
+    const dated = th.messages.filter(m => m.ts != null);
+    th.from = dated.length ? dated[0].ts : null;
+    th.to = dated.length ? dated[dated.length - 1].ts : null;
     th.sourceList = [...th.sources.values()];
   }
   list.sort((a, b) => (b.to ?? 0) - (a.to ?? 0));
@@ -1636,12 +1665,22 @@ function mergeThreads(archives) {
 function newDiag() {
   return { unknownColumns: [], unknownTypes: new Set(), schemas: [], skipped: [],
            missingMedia: [], emptyArchives: [], exportPreamble: [], dateOrder: [],
-           contactKeys: [], unmatchedThreads: [] };
+           contactKeys: [], unmatchedThreads: [], exportSelf: [] };
 }
 
-if (typeof module !== 'undefined')
-  module.exports = { parseCSV, parseMessageCSV, parseExportText, readArchive,
-                     mergeThreads, newDiag, parseTs, buildMapping, LINE_RE };
+/* Jedes Archiv fuehrt seine eigene Diagnose; angezeigt wird die Summe der
+   aktuell geladenen. So verschwindet ein entferntes Archiv auch aus der Diagnose. */
+function combineDiag(list) {
+  const d = newDiag();
+  for (const x of list) {
+    if (!x) continue;
+    for (const k of Object.keys(d)) {
+      if (k === 'unknownTypes') x.unknownTypes.forEach(t => d.unknownTypes.add(t));
+      else d[k].push(...(x[k] || []));
+    }
+  }
+  return d;
+}
 
 </script>
 <script>
@@ -1793,7 +1832,8 @@ async function inspectArchive(file, password) {
       for (const e of probe) {
         try {
           const bytes = await zip.extract(e);
-          stage(`Probeentpacken: ${e.name}`, 'ok', `${bytes.length} Bytes`);
+          // Mit Tausenderpunkten, sonst haelt der Anonymisierer grosse Zahlen fuer Kennungen.
+          stage(`Probeentpacken: ${e.name}`, 'ok', `${bytes.length.toLocaleString('de-DE')} Bytes`);
         } catch (err) {
           stage(`Probeentpacken: ${e.name}`, 'fehler', err.message);
           R.notes.push(`Der Eintrag ${e.name} liess sich nicht entpacken: ${err.message}`);
@@ -1850,7 +1890,6 @@ function reportText(R, anonymize) {
   L.push(new Date().toISOString());
   L.push(`Browser: ${navigator.userAgent}`);
   L.push(`Zeitzone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
-  L.push(`DecompressionStream: ${typeof DecompressionStream !== 'undefined' ? 'vorhanden' : 'FEHLT'}`);
   L.push(`Entpackt: ${INFLATE_STATS.calls} Einträge, ${INFLATE_STATS.bytesIn} → ${INFLATE_STATS.bytesOut} Bytes (eigene Implementierung)`);
   L.push(`crypto.subtle: ${window.crypto?.subtle ? 'vorhanden' : 'FEHLT'}`);
   L.push('');
@@ -1953,7 +1992,7 @@ const S = {
   passwords: [],       // im Speicher, nur fuer diese Sitzung
   threads: [],
   current: null,
-  diag: null,
+  colorSeq: 0,
   manual: {},          // Titel eines Exports -> Zielthread
   failed: [],
   blobs: new Map(),
@@ -1981,11 +2020,24 @@ const yieldUI = () => new Promise(r => requestAnimationFrame(() => setTimeout(r,
 
 /* ---------- Archive laden -------------------------------------------- */
 
+/* Der Archivname ist ueberall Schluessel (Herkunft, Farbe, Medien-Cache).
+   Zwei verschiedene Dateien gleichen Namens bekommen deshalb einen Zusatz. */
+function uniqueArchiveName(name) {
+  if (!S.archives.some(a => a.name === name)) return name;
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name, ext = dot > 0 ? name.slice(dot) : '';
+  for (let n = 2; ; n++) {
+    const cand = `${stem} (${n})${ext}`;
+    if (!S.archives.some(a => a.name === cand)) return cand;
+  }
+}
+
 async function addFiles(files) {
   const list = [...files].filter(f => /\.zip$/i.test(f.name) || f.size > 22);
   if (!list.length) return;
   for (const file of list) {
-    if (S.archives.some(a => a.name === file.name && a.size === file.size)) {
+    if (S.archives.some(a => a.file.name === file.name && a.size === file.size
+                          && a.file.lastModified === file.lastModified)) {
       toast(`${file.name} ist bereits geladen`); continue;
     }
     try {
@@ -1996,20 +2048,28 @@ async function addFiles(files) {
       if (!unlocked) {
         for (const pw of S.passwords) if (await zip.checkPassword(pw)) { unlocked = true; break; }
       }
+      let skipped = false;
       while (!unlocked) {
+        busy(null);
         const pw = await askPassword(file.name);
-        if (pw == null) { busy(null); return; }
+        // Nur DIESES Archiv ueberspringen — die uebrigen der Auswahl laufen weiter.
+        if (pw == null) { skipped = true; break; }
         if (await zip.checkPassword(pw)) { unlocked = true; if (!S.passwords.includes(pw)) S.passwords.push(pw); }
         else askPassword.error = 'Passwort passt nicht zu diesem Archiv.';
       }
+      if (skipped) { toast(`${file.name} übersprungen`); continue; }
       busy(`${file.name} wird ausgewertet …`);
       await yieldUI();
-      const data = await readArchive(zip, file.name, S.diag);
+      const name = uniqueArchiveName(file.name);
+      const diag = newDiag();
+      const selfHints = S.archives.map(a => a.data.self).filter(Boolean);
+      const data = await readArchive(zip, name, diag, selfHints);
       S.archives.push({
-        name: file.name, size: file.size, file, zip, data,
+        name, size: file.size, file, zip, data, diag,
         kind: data.threads.every(t => t.source === 'export') ? 'export' : 'backup',
-        color: `var(${PALETTE[S.archives.length % PALETTE.length]})`,
+        color: `var(${PALETTE[S.colorSeq++ % PALETTE.length]})`,
       });
+      S.failed = S.failed.filter(f => !(f.file.name === file.name && f.file.size === file.size));
     } catch (err) {
       console.error(err);
       S.failed = S.failed.filter(f => f.name !== file.name);
@@ -2018,6 +2078,19 @@ async function addFiles(files) {
     }
   }
   busy(null);
+  rebuild();
+}
+
+/* Archiv entfernen: auch seine Medien-URLs freigeben und manuelle
+   Zuordnungen vergessen, sonst liefert ein spaeter gleichnamiges Archiv
+   noch Bilder des alten. */
+function removeArchive(a) {
+  S.archives = S.archives.filter(v => v !== a);
+  const prefix = a.name + '\u0000';
+  for (const [k, url] of [...S.blobs]) if (k.startsWith(prefix)) {
+    URL.revokeObjectURL(url); S.blobs.delete(k); S.mimes.delete(k);
+  }
+  for (const k of Object.keys(S.manual)) if (k.startsWith(prefix)) delete S.manual[k];
   rebuild();
 }
 
@@ -2078,7 +2151,7 @@ function renderArchives() {
     c.append(el('span', 'ct', `${n}`));
     const x = el('button', null, '×');
     x.title = 'Archiv entfernen';
-    x.onclick = () => { S.archives = S.archives.filter(v => v !== a); rebuild(); };
+    x.onclick = () => removeArchive(a);
     c.append(x);
     box.append(c);
   }
@@ -2108,7 +2181,7 @@ function renderThreadList() {
     list = S.threads.filter(t =>
       t.title.toLowerCase().includes(q) ||
       (t.identity || '').toLowerCase().includes(q) ||
-      t.messages.some(m => (m.body || '').toLowerCase().includes(q) || (m.caption || '').toLowerCase().includes(q)));
+      t.messages.some(m => matchesQuery(m, q)));
   }
   if (!list.length) {
     box.append(el('div', 'rail-empty', S.archives.length
@@ -2258,13 +2331,17 @@ const URL_RE = /\bhttps?:\/\/[^\s<>"')]+/g;
 
 function textNodes(text, q) {
   const frag = document.createDocumentFragment();
+  // Regex statt toLowerCase()+indexOf: toLowerCase kann die Laenge aendern
+  // (z. B. "İ"), dann saessen die Markierungen versetzt.
+  const qre = q ? new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'giu') : null;
   const pushPlain = s => {
-    if (!q) { frag.append(document.createTextNode(s)); return; }
-    const lc = s.toLowerCase(); let i = 0, k;
-    while ((k = lc.indexOf(q, i)) >= 0) {
-      if (k > i) frag.append(document.createTextNode(s.slice(i, k)));
-      frag.append(el('mark', null, s.slice(k, k + q.length)));
-      i = k + q.length;
+    if (!qre) { frag.append(document.createTextNode(s)); return; }
+    let i = 0;
+    for (const mm of s.matchAll(qre)) {
+      if (!mm[0]) break;
+      if (mm.index > i) frag.append(document.createTextNode(s.slice(i, mm.index)));
+      frag.append(el('mark', null, mm[0]));
+      i = mm.index + mm[0].length;
     }
     frag.append(document.createTextNode(s.slice(i)));
   };
@@ -2280,7 +2357,7 @@ function textNodes(text, q) {
   return frag;
 }
 
-function renderMessages() {
+function renderMessages(opts = {}) {
   const t = S.current, log = $('#log');
   log.textContent = '';
   if (!t) return showEmpty();
@@ -2288,28 +2365,39 @@ function renderMessages() {
   const q = S.query.trim().toLowerCase();
 
   if (S.windowStart > 0) {
-    const more = el('button', null, `${S.windowStart} ältere Nachrichten laden`);
+    // Treffer der Suche, die oberhalb des sichtbaren Ausschnitts liegen
+    let hidden = 0;
+    if (q) for (let i = 0; i < S.windowStart; i++) if (matchesQuery(msgs[i], q)) hidden++;
+    const more = el('button', null, `${S.windowStart} ältere Nachrichten laden`
+      + (hidden ? ` (darin ${hidden} Treffer)` : ''));
     more.id = 'more';
     more.onclick = () => {
-      const anchor = log.children[1];
-      const before = anchor?.offsetTop ?? 0;
+      // Abstand zum unteren Rand halten: der bisher sichtbare Inhalt bleibt
+      // stehen, die aelteren Nachrichten wachsen oben dazu.
+      const fromBottom = log.scrollHeight - log.scrollTop;
       S.windowStart = Math.max(0, S.windowStart - 500);
-      renderMessages();
-      const after = log.children[1]?.offsetTop ?? 0;
-      log.scrollTop += (after - before);
+      renderMessages({ keepScroll: true });
+      log.scrollTop = log.scrollHeight - fromBottom;
     };
     log.append(more);
   }
 
-  let lastDay = null;
+  let lastDay;
   const byApiId = new Map(msgs.filter(m => m.apiid).map(m => [m.apiid, m]));
   for (let i = S.windowStart; i < msgs.length; i++) {
     const m = msgs[i];
-    const dk = dayKey(m.ts);
-    if (dk !== lastDay) { log.append(el('div', 'daysep', fmtDay.format(new Date(m.ts)))); lastDay = dk; }
+    const dk = m.ts == null ? 'none' : dayKey(m.ts);
+    if (dk !== lastDay) {
+      log.append(el('div', 'daysep', m.ts == null ? 'ohne Zeitangabe' : fmtDay.format(new Date(m.ts))));
+      lastDay = dk;
+    }
     log.append(messageNode(m, t, q, byApiId));
   }
-  log.scrollTop = log.scrollHeight;
+  if (!opts.keepScroll) log.scrollTop = log.scrollHeight;
+}
+
+function matchesQuery(m, q) {
+  return (m.body || '').toLowerCase().includes(q) || (m.caption || '').toLowerCase().includes(q);
 }
 
 function messageNode(m, t, q, byApiId) {
@@ -2350,7 +2438,8 @@ function messageNode(m, t, q, byApiId) {
   }
 
   const foot = el('div', 'foot');
-  const time = m.tsPrecision === 'minute' ? fmtTime.format(new Date(m.ts)) : fmtTimeS.format(new Date(m.ts));
+  const time = m.ts == null ? '–:–'
+    : m.tsPrecision === 'minute' ? fmtTime.format(new Date(m.ts)) : fmtTimeS.format(new Date(m.ts));
   foot.append(el('span', null, time));
   if (m.tsPrecision === 'minute') { const s = el('span', 'flag', '~'); s.title = 'Nur minutengenau — aus einem Chatexport'; foot.append(s); }
   if (m.starred) { const s = el('span', 'star', '★'); s.title = 'Markiert'; foot.append(s); }
@@ -2375,10 +2464,23 @@ function messageNode(m, t, q, byApiId) {
 function bodyFor(m) {
   if (m.type === 'text') return m.body || '';
   if (m.type === 'location') {
-    const [head, ...rest] = (m.body || '').split('\n');
-    const [lat, lng] = head.split(',');
-    const name = rest.filter(Boolean).join(', ');
-    return `Standort${name ? ': ' + name : ''}\n${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}`;
+    const body = m.body || '';
+    let lat, lng, name = '';
+    // Je nach Version: "lat,lng\nName\nAdresse" oder JSON
+    try {
+      const j = JSON.parse(body);
+      if (j && typeof j === 'object') {
+        lat = j.lat ?? j.latitude; lng = j.lon ?? j.lng ?? j.longitude;
+        name = [j.name, j.address].filter(Boolean).join(', ');
+      }
+    } catch {
+      const [head, ...rest] = body.split('\n');
+      [lat, lng] = head.split(',');
+      name = rest.filter(Boolean).join(', ');
+    }
+    const la = parseFloat(lat), lo = parseFloat(lng);
+    const coords = Number.isFinite(la) && Number.isFinite(lo) ? `\n${la.toFixed(5)}, ${lo.toFixed(5)}` : '';
+    return `Standort${name ? ': ' + name : ''}${coords}` || 'Standort';
   }
   if (m.type === 'call') {
     try {
@@ -2465,7 +2567,11 @@ function sniffMime(b) {
 
 async function blobFor(archiveName, entry, fname) {
   const key = archiveName + '\u0000' + entry;
-  if (S.blobs.has(key)) return S.blobs.get(key);
+  if (S.blobs.has(key)) {
+    // ans Ende ruecken: Map-Reihenfolge = Alter, so wird es ein echter LRU
+    const hit = S.blobs.get(key); S.blobs.delete(key); S.blobs.set(key, hit);
+    return hit;
+  }
   const arch = S.archives.find(a => a.name === archiveName);
   if (!arch) throw new Error('Archiv nicht mehr geladen');
   const bytes = await arch.zip.extract(entry);
@@ -2473,9 +2579,16 @@ async function blobFor(archiveName, entry, fname) {
   const type = sniffMime(bytes) || MIME[ext] || 'application/octet-stream';
   const url = URL.createObjectURL(new Blob([bytes], { type }));
   S.mimes.set(key, type);
-  if (S.blobs.size > 60) {
-    const [old, oldUrl] = S.blobs.entries().next().value;
-    URL.revokeObjectURL(oldUrl); S.blobs.delete(old); S.mimes.delete(old);
+  // Aelteste URL freigeben — aber keine, die gerade ein <img>, <video> oder
+  // <audio> im Verlauf nutzt; sonst bricht z. B. eine laufende Wiedergabe ab.
+  if (S.blobs.size >= 60) {
+    const inUse = new Set([...document.querySelectorAll('#log [src], #log a[download]')]
+      .map(n => n.getAttribute('src') || n.getAttribute('href')));
+    for (const [old, oldUrl] of S.blobs) {
+      if (inUse.has(oldUrl)) continue;
+      URL.revokeObjectURL(oldUrl); S.blobs.delete(old); S.mimes.delete(old);
+      break;
+    }
   }
   S.blobs.set(key, url);
   return url;
@@ -2551,7 +2664,7 @@ function showInspect() {
 
 function showDiag() {
   const b = $('#diag-body'); b.textContent = '';
-  const d = S.diag;
+  const d = combineDiag(S.archives.map(a => a.diag));
   const sec = (title, node) => { b.append(el('h4', null, title)); b.append(node); };
   const table = (head, rows) => {
     const t = el('table');
@@ -2589,6 +2702,15 @@ function showDiag() {
     ? table(['Datei', 'gelesen als', 'Begründung'], d.dateOrder.map(x => [x.file, x.order, x.reason]))
     : el('div', 'good', 'Keine Chatexporte geladen.'));
 
+  if (d.exportSelf.length) {
+    const unknownSelf = d.exportSelf.filter(x => x.self == null);
+    sec('Eigene Nachrichten in Chatexporten', table(['Datei', 'eigener Name'],
+      d.exportSelf.map(x => [x.file, x.self ?? '— nicht erkannt —'])));
+    if (unknownSelf.length)
+      b.append(el('div', 'warn', 'Wo der eigene Name nicht erkannt wurde, gelten alle Nachrichten des '
+        + 'Exports als empfangen. Gegenüber einer Datensicherung erscheinen eigene Nachrichten dann doppelt.'));
+  }
+
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
   const note = el('div');
   note.append(el('div', null, `Zeitzone dieses Rechners: ${tz}`));
@@ -2608,7 +2730,6 @@ function showDiag() {
 /* ---------- Start ------------------------------------------------------ */
 
 function init() {
-  S.diag = newDiag();
 
   if (!window.crypto?.subtle) {
     document.body.innerHTML = '<p style="color:#fff;font-family:sans-serif;padding:40px;max-width:60ch;line-height:1.6">'
