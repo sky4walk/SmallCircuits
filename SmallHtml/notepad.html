@@ -273,6 +273,42 @@
     outline: 1px solid var(--accent);
   }
 
+  #highlight-inner {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    will-change: transform;
+  }
+
+  /* ── Mirror for exact match positions (same box model as #editor) ── */
+  #mirror {
+    position: absolute;
+    top: 0; left: 0;
+    visibility: hidden;
+    pointer-events: none;
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-wrap: break-word;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    line-height: 1.65;
+    padding: 16px 20px;
+    border: none;
+    tab-size: 4;
+  }
+
+  /* ── Status bar buttons & link ── */
+  .stat-btn {
+    background: none;
+    border: none;
+    color: var(--muted);
+    font: inherit;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+  .stat-btn:hover { color: var(--accent); }
+  #status-bar a { color: var(--muted); text-decoration: none; }
+  #status-bar a:hover { color: var(--accent); }
+
   /* ── Confirm modal ── */
   #modal-backdrop {
     display: none;
@@ -362,7 +398,8 @@
   <div id="line-numbers"></div>
   <div id="line-ruler" aria-hidden="true"></div>
   <textarea id="editor" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="Hier tippen oder Datei öffnen …"></textarea>
-  <div id="highlight-overlay"></div>
+  <div id="mirror" aria-hidden="true"></div>
+  <div id="highlight-overlay"><div id="highlight-inner"></div></div>
 </div>
 
 <div id="status-bar">
@@ -379,7 +416,9 @@
     <span id="stat-pos-val">Z 1, S 1</span>
   </span>
   <div class="spacer"></div>
-  <span>UTF-8</span>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  <button class="stat-btn" id="stat-eol" title="Zeilenende umschalten (LF / CRLF)">LF</button>
+  <button class="stat-btn" id="stat-enc" title="Kodierung zum Speichern umschalten">UTF-8</button>
 </div>
 
 <!-- Dateiname-Dialog -->
@@ -396,7 +435,7 @@
   </div>
 </div>
 
-<input type="file" id="file-input" accept=".txt,.md,.csv,.log,.json,.xml,.yaml,.yml,.js,.ts,.py,.css,.html,.htm,.ini,.cfg,.conf">
+<input type="file" id="file-input">
 
 <div id="modal-backdrop">
   <div id="modal">
@@ -421,72 +460,139 @@ const filenameLbl = document.getElementById('filename-display');
 const statLines = document.getElementById('stat-lines-val');
 const statChars = document.getElementById('stat-chars-val');
 const statPos = document.getElementById('stat-pos-val');
+const statEol = document.getElementById('stat-eol');
+const statEnc = document.getElementById('stat-enc');
 const overlay = document.getElementById('highlight-overlay');
+const overlayInner = document.getElementById('highlight-inner');
+const mirror = document.getElementById('mirror');
+const ruler = document.getElementById('line-ruler');
 const modalBackdrop = document.getElementById('modal-backdrop');
+const modalTitle = document.getElementById('modal-title');
+const modalMsg = document.getElementById('modal-msg');
 const modalConfirm = document.getElementById('modal-confirm');
 const modalCancel = document.getElementById('modal-cancel');
+const saveasBackdrop = document.getElementById('saveas-backdrop');
+const saveasInput = document.getElementById('saveas-input');
 
-let currentFilename = 'unbenannt.txt';
+const DEFAULT_NAME = 'unbenannt.txt';
+const MAX_HIGHLIGHTS = 2000;   // so many match boxes are drawn at most
+
+let currentFilename = DEFAULT_NAME;
 let savedContent = '';
 let modified = false;
-let matches = [];
+let matches = [];              // [start, end] pairs
 let matchIndex = 0;
 let pendingAction = null;
+
+let fileEncoding = 'utf-8';    // utf-8 | utf-8-bom | windows-1252 | utf-16le | utf-16be
+let fileEol = '\n';            // '\n' or '\r\n'
+let savedEncoding = fileEncoding;
+let savedEol = fileEol;
+
+const ENC_LABELS = {
+  'utf-8': 'UTF-8', 'utf-8-bom': 'UTF-8 BOM', 'windows-1252': 'ANSI (1252)',
+  'utf-16le': 'UTF-16 LE', 'utf-16be': 'UTF-16 BE'
+};
+const ENC_CYCLE = ['utf-8', 'utf-8-bom', 'windows-1252', 'utf-16le', 'utf-16be'];
 
 /* ── Helpers ── */
 function setModified(val) {
   modified = val;
   filenameLbl.className = val ? 'modified' : '';
 }
-
-const ruler = document.getElementById('line-ruler');
-
-function getVisualLineCount(text) {
-  // Measure how many visual lines a piece of text takes in the editor
-  ruler.style.width = editor.clientWidth + 'px';
-  ruler.textContent = text || ' '; // empty line still takes 1 row
-  const lineH = parseFloat(getComputedStyle(editor).lineHeight);
-  return Math.round(ruler.scrollHeight / lineH);
+function updateModified() {
+  setModified(editor.value !== savedContent || fileEncoding !== savedEncoding || fileEol !== savedEol);
 }
+function markSaved() {
+  savedContent = editor.value;
+  savedEncoding = fileEncoding;
+  savedEol = fileEol;
+  setModified(false);
+}
+function updateFormatDisplay() {
+  statEol.textContent = fileEol === '\r\n' ? 'CRLF' : 'LF';
+  statEnc.textContent = ENC_LABELS[fileEncoding];
+}
+function lineHeightPx() {
+  return parseFloat(getComputedStyle(editor).lineHeight);
+}
+
+/* ── Character width (monospace) ── */
+let charW = 7.8;
+function measureChar() {
+  const sp = document.createElement('span');
+  sp.textContent = '0'.repeat(100);
+  ruler.style.width = '100000px';
+  ruler.textContent = '';
+  ruler.appendChild(sp);
+  const w = sp.getBoundingClientRect().width / 100;
+  if (w > 0) charW = w;
+  ruler.textContent = '';
+}
+
+/* ── Line numbers ──
+   Short lines (fit into one visual row, no tabs/wide chars) are counted as 1
+   without measuring; only long lines go through the ruler. All reads happen
+   before all writes to avoid layout thrashing. */
+const NEEDS_MEASURE = /[\tᄀ-￿]/;
 
 function updateLineNumbers() {
   const lines = editor.value.split('\n');
-  const lineH = parseFloat(getComputedStyle(editor).lineHeight);
-  const children = lineNumbers.children;
+  const n = lines.length;
 
-  // Rebuild only what changed for performance
-  const needed = lines.length;
-
-  // Add missing divs
-  while (lineNumbers.children.length < needed) {
-    const d = document.createElement('div');
-    lineNumbers.appendChild(d);
-  }
-  // Remove extra divs
-  while (lineNumbers.children.length > needed) {
-    lineNumbers.removeChild(lineNumbers.lastChild);
+  // Gutter width grows with the number of digits
+  const digits = Math.max(2, String(n).length);
+  const gw = Math.ceil(digits * charW) + 18;
+  if (lineNumbers.style.width !== gw + 'px') {
+    lineNumbers.style.width = gw + 'px';
+    overlay.style.left = gw + 'px';
   }
 
-  // Set height of each number div to match visual rows of that line
+  const lineH = lineHeightPx();
+  const cols = Math.max(1, Math.floor((editor.clientWidth - 40) / charW));
   ruler.style.width = editor.clientWidth + 'px';
-  for (let i = 0; i < needed; i++) {
-    const visual = getVisualLineCount(lines[i]);
-    children[i].textContent = i + 1;
-    children[i].style.height = (visual * lineH) + 'px';
-    children[i].style.lineHeight = lineH + 'px'; // number sits at top of block
+
+  // Read pass
+  const rows = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const l = lines[i];
+    if (l.length < cols && !NEEDS_MEASURE.test(l)) { rows[i] = 1; continue; }
+    ruler.textContent = l || ' ';
+    rows[i] = Math.max(1, Math.round(ruler.scrollHeight / lineH));
   }
+  ruler.textContent = '';
+
+  // Write pass
+  while (lineNumbers.children.length < n) lineNumbers.appendChild(document.createElement('div'));
+  while (lineNumbers.children.length > n) lineNumbers.removeChild(lineNumbers.lastChild);
+  const children = lineNumbers.children;
+  for (let i = 0; i < n; i++) {
+    const c = children[i];
+    const h = (rows[i] * lineH) + 'px';
+    if (c.textContent !== String(i + 1)) c.textContent = i + 1;
+    if (c.style.height !== h) c.style.height = h;
+    c.style.lineHeight = lineH + 'px';
+  }
+  syncScroll();
+}
+
+let lnScheduled = false;
+function scheduleLineNumbers() {
+  if (lnScheduled) return;
+  lnScheduled = true;
+  requestAnimationFrame(() => { lnScheduled = false; updateLineNumbers(); });
 }
 
 function syncScroll() {
   lineNumbers.scrollTop = editor.scrollTop;
+  overlayInner.style.transform = 'translateY(' + (-editor.scrollTop) + 'px)';
 }
 
 function updateStats() {
   const val = editor.value;
   const lines = (val.match(/\n/g) || []).length + 1;
-  const chars = val.length;
   statLines.textContent = lines === 1 ? '1 Zeile' : lines + ' Zeilen';
-  statChars.textContent = chars + ' Zeichen';
+  statChars.textContent = val.length + ' Zeichen';
 }
 
 function updateCursorPos() {
@@ -497,85 +603,180 @@ function updateCursorPos() {
   statPos.textContent = 'Z ' + line + ', S ' + col;
 }
 
-/* ── Line numbers sync ── */
+/* ── Editor events ── */
 editor.addEventListener('input', () => {
-  updateLineNumbers();
+  scheduleLineNumbers();
   updateStats();
-  setModified(editor.value !== savedContent);
-  if (searchBar.classList.contains('visible')) runSearch();
+  updateCursorPos();
+  updateModified();
+  if (searchBar.classList.contains('visible')) runSearch('edit');
 });
 
 editor.addEventListener('scroll', syncScroll);
 editor.addEventListener('keyup', updateCursorPos);
 editor.addEventListener('click', updateCursorPos);
-
-/* ── New file ── */
-document.getElementById('btn-new').addEventListener('click', () => {
-  if (modified) { pendingAction = doNew; showModal(); } else doNew();
+editor.addEventListener('select', updateCursorPos);
+document.addEventListener('selectionchange', () => {
+  if (document.activeElement === editor) updateCursorPos();
 });
-function doNew() {
-  editor.value = '';
-  savedContent = '';
-  currentFilename = 'unbenannt.txt';
-  filenameLbl.textContent = currentFilename;
-  setModified(false);
+
+/* Tab key: insert via execCommand so undo (Ctrl+Z) keeps working */
+editor.addEventListener('keydown', e => {
+  if (e.key === 'Tab' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    e.preventDefault();
+    if (!document.execCommand('insertText', false, '    ')) {
+      editor.setRangeText('    ', editor.selectionStart, editor.selectionEnd, 'end');
+      editor.dispatchEvent(new Event('input'));
+    }
+  }
+});
+
+/* ── Load text into editor ── */
+function loadText(text, filename, enc, eol) {
+  editor.value = text;
+  currentFilename = filename;
+  fileEncoding = enc;
+  fileEol = eol;
+  filenameLbl.textContent = filename;
+  markSaved();
+  updateFormatDisplay();
+  editor.setSelectionRange(0, 0);
+  editor.scrollTop = 0;
   updateLineNumbers();
   updateStats();
   updateCursorPos();
-  clearSearch();
+  if (searchBar.classList.contains('visible')) runSearch('edit'); else clearSearch();
   editor.focus();
 }
 
+/* ── New file ── */
+document.getElementById('btn-new').addEventListener('click', () => guardUnsaved(doNew));
+function doNew() {
+  loadText('', DEFAULT_NAME, 'utf-8', '\n');
+}
+
 /* ── Open file ── */
-document.getElementById('btn-open').addEventListener('click', () => {
-  if (modified) { pendingAction = () => fileInput.click(); showModal(); }
-  else fileInput.click();
-});
+function requestOpen() { guardUnsaved(() => fileInput.click()); }
+document.getElementById('btn-open').addEventListener('click', requestOpen);
 
 fileInput.addEventListener('change', () => {
   const file = fileInput.files[0];
+  fileInput.value = '';
   if (!file) return;
   const reader = new FileReader();
   reader.onload = e => {
-    editor.value = e.target.result;
-    savedContent = editor.value;
-    currentFilename = file.name;
-    filenameLbl.textContent = currentFilename;
-    setModified(false);
-    updateLineNumbers();
-    updateStats();
-    updateCursorPos();
-    clearSearch();
-    editor.focus();
+    const { text, enc } = decodeBuffer(e.target.result);
+    const crlf = (text.match(/\r\n/g) || []).length;
+    const lf = (text.match(/\n/g) || []).length - crlf;
+    const eol = crlf > lf ? '\r\n' : '\n';
+    loadText(text.replace(/\r\n?/g, '\n'), file.name, enc, eol);
   };
-  reader.readAsText(file, 'UTF-8');
-  fileInput.value = '';
+  reader.onerror = () => showModal('Fehler', 'Die Datei konnte nicht gelesen werden.', 'OK', null);
+  reader.readAsArrayBuffer(file);
+});
+
+/* ── Encoding ── */
+const CP1252 = {
+  0x20AC:0x80, 0x201A:0x82, 0x0192:0x83, 0x201E:0x84, 0x2026:0x85, 0x2020:0x86, 0x2021:0x87,
+  0x02C6:0x88, 0x2030:0x89, 0x0160:0x8A, 0x2039:0x8B, 0x0152:0x8C, 0x017D:0x8E, 0x2018:0x91,
+  0x2019:0x92, 0x201C:0x93, 0x201D:0x94, 0x2022:0x95, 0x2013:0x96, 0x2014:0x97, 0x02DC:0x98,
+  0x2122:0x99, 0x0161:0x9A, 0x203A:0x9B, 0x0153:0x9C, 0x017E:0x9E, 0x0178:0x9F,
+  0x81:0x81, 0x8D:0x8D, 0x8F:0x8F, 0x90:0x90, 0x9D:0x9D
+};
+
+function decodeBuffer(buf) {
+  const b = new Uint8Array(buf);
+  if (b[0] === 0xEF && b[1] === 0xBB && b[2] === 0xBF)
+    return { text: new TextDecoder('utf-8').decode(b.subarray(3)), enc: 'utf-8-bom' };
+  if (b[0] === 0xFF && b[1] === 0xFE)
+    return { text: new TextDecoder('utf-16le').decode(b.subarray(2)), enc: 'utf-16le' };
+  if (b[0] === 0xFE && b[1] === 0xFF)
+    return { text: new TextDecoder('utf-16be').decode(b.subarray(2)), enc: 'utf-16be' };
+  try {
+    return { text: new TextDecoder('utf-8', { fatal: true }).decode(b), enc: 'utf-8' };
+  } catch (_) {
+    return { text: new TextDecoder('windows-1252').decode(b), enc: 'windows-1252' };
+  }
+}
+
+function encodeText(text, enc) {
+  if (enc === 'utf-8') return { bytes: new TextEncoder().encode(text), lost: 0 };
+  if (enc === 'utf-8-bom') {
+    const b = new TextEncoder().encode(text);
+    const out = new Uint8Array(b.length + 3);
+    out.set([0xEF, 0xBB, 0xBF]);
+    out.set(b, 3);
+    return { bytes: out, lost: 0 };
+  }
+  if (enc === 'utf-16le' || enc === 'utf-16be') {
+    const le = enc === 'utf-16le';
+    const out = new Uint8Array(2 + text.length * 2);
+    out[0] = le ? 0xFF : 0xFE;
+    out[1] = le ? 0xFE : 0xFF;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i), o = 2 + i * 2;
+      out[o]     = le ? c & 0xFF : c >> 8;
+      out[o + 1] = le ? c >> 8 : c & 0xFF;
+    }
+    return { bytes: out, lost: 0 };
+  }
+  // windows-1252
+  const out = [];
+  let lost = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    if (c < 0x80 || (c >= 0xA0 && c <= 0xFF)) out.push(c);
+    else if (CP1252[c] !== undefined) out.push(CP1252[c]);
+    else { out.push(0x3F); lost++; }
+  }
+  return { bytes: new Uint8Array(out), lost };
+}
+
+statEol.addEventListener('click', () => {
+  fileEol = fileEol === '\n' ? '\r\n' : '\n';
+  updateFormatDisplay();
+  updateModified();
+});
+statEnc.addEventListener('click', () => {
+  fileEncoding = ENC_CYCLE[(ENC_CYCLE.indexOf(fileEncoding) + 1) % ENC_CYCLE.length];
+  updateFormatDisplay();
+  updateModified();
 });
 
 /* ── Save file ── */
-document.getElementById('btn-save').addEventListener('click', () => {
-  if (currentFilename === 'unbenannt.txt') openSaveAs();
+function save() {
+  if (currentFilename === DEFAULT_NAME) openSaveAs();
   else saveFile(currentFilename);
-});
-
+}
+document.getElementById('btn-save').addEventListener('click', save);
 document.getElementById('btn-saveas').addEventListener('click', openSaveAs);
 
 function saveFile(filename) {
-  const blob = new Blob([editor.value], { type: 'text/plain;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-  currentFilename = filename;
-  filenameLbl.textContent = filename;
-  savedContent = editor.value;
-  setModified(false);
+  const text = fileEol === '\r\n' ? editor.value.replace(/\n/g, '\r\n') : editor.value;
+  const { bytes, lost } = encodeText(text, fileEncoding);
+  const doSave = () => {
+    const blob = new Blob([bytes], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    currentFilename = filename;
+    filenameLbl.textContent = filename;
+    markSaved();
+  };
+  if (lost > 0) {
+    showModal('Zeichen nicht darstellbar',
+      lost + ' Zeichen gibt es in ' + ENC_LABELS[fileEncoding] +
+      ' nicht. Sie werden als „?“ gespeichert. Trotzdem speichern?', 'Speichern', doSave);
+  } else doSave();
 }
 
 /* ── Save As dialog ── */
-const saveasBackdrop = document.getElementById('saveas-backdrop');
-const saveasInput = document.getElementById('saveas-input');
+function saveAsOpen() { return saveasBackdrop.style.display === 'flex'; }
 
 function openSaveAs() {
   saveasInput.value = currentFilename;
@@ -599,7 +800,6 @@ document.getElementById('saveas-confirm').addEventListener('click', () => {
 
 saveasInput.addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('saveas-confirm').click();
-  if (e.key === 'Escape') closeSaveAs();
 });
 
 /* ── Search ── */
@@ -612,72 +812,152 @@ function toggleSearch() {
 }
 
 function openSearch() {
+  // Pre-fill with a single-line selection from the editor
+  const sel = editor.value.substring(editor.selectionStart, editor.selectionEnd);
+  if (sel && !sel.includes('\n') && sel.length < 200) searchInput.value = sel;
   searchBar.classList.add('visible');
   searchToggle.classList.add('active');
   searchInput.focus();
   searchInput.select();
-  runSearch();
+  runSearch('query');
 }
 
 function closeSearch() {
   searchBar.classList.remove('visible');
   searchToggle.classList.remove('active');
   clearSearch();
-  editor.focus();
+  editor.focus();   // current match stays selected
 }
 
-searchInput.addEventListener('input', runSearch);
+searchInput.addEventListener('input', () => runSearch('query'));
 
-document.getElementById('btn-next').addEventListener('click', () => navigate(1));
-document.getElementById('btn-prev').addEventListener('click', () => navigate(-1));
+document.getElementById('btn-next').addEventListener('click', () => { navigate(1); searchInput.focus(); });
+document.getElementById('btn-prev').addEventListener('click', () => { navigate(-1); searchInput.focus(); });
 
 searchInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter') { navigate(e.shiftKey ? -1 : 1); e.preventDefault(); }
-  if (e.key === 'Escape') closeSearch();
+  if (e.key === 'Enter') { e.preventDefault(); navigate(e.shiftKey ? -1 : 1); }
 });
 
-function runSearch() {
-  clearHighlights();
+function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+/* mode: 'query' = search term changed (jump to first match after cursor)
+         'edit'  = text changed (keep position, do not scroll) */
+function runSearch(mode) {
   const q = searchInput.value;
-  if (!q) { searchCount.textContent = '–'; searchCount.className = ''; matches = []; return; }
   matches = [];
+  if (!q) {
+    searchCount.textContent = '–';
+    searchCount.className = '';
+    clearHighlights();
+    return;
+  }
+  // Regex with i-flag keeps indices in the original string (toLowerCase can change lengths)
+  const re = new RegExp(escapeRe(q), 'giu');
   const text = editor.value;
-  const ql = q.toLowerCase();
-  const tl = text.toLowerCase();
-  let idx = 0;
-  while ((idx = tl.indexOf(ql, idx)) !== -1) {
-    matches.push(idx);
-    idx += q.length;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    matches.push([m.index, m.index + m[0].length]);
+    if (m[0].length === 0) re.lastIndex++;
   }
   if (matches.length === 0) {
     searchCount.textContent = 'Nicht gefunden';
     searchCount.className = 'notfound';
+    clearHighlights();
     return;
   }
-  if (matchIndex >= matches.length) matchIndex = 0;
-  searchCount.textContent = (matchIndex + 1) + ' / ' + matches.length;
+  if (mode === 'query') {
+    const caret = editor.selectionStart;
+    matchIndex = matches.findIndex(([s]) => s >= caret);
+    if (matchIndex < 0) matchIndex = 0;
+  } else if (matchIndex >= matches.length) {
+    matchIndex = matches.length - 1;
+  }
   searchCount.className = 'found';
-  scrollToMatch(matchIndex);
+  updateCount();
+  if (mode === 'query') scrollToMatch(matchIndex);
+  else scheduleHighlights();
+}
+
+function updateCount() {
+  searchCount.textContent = (matchIndex + 1) + ' / ' + matches.length;
 }
 
 function navigate(dir) {
   if (!matches.length) return;
   matchIndex = (matchIndex + dir + matches.length) % matches.length;
-  searchCount.textContent = (matchIndex + 1) + ' / ' + matches.length;
+  updateCount();
   scrollToMatch(matchIndex);
 }
 
+/* Select the match in the editor WITHOUT moving focus away from the search field,
+   then scroll it into the middle of the view (wrap-aware via the mirror). */
 function scrollToMatch(idx) {
-  const pos = matches[idx];
-  const q = searchInput.value;
-  editor.focus();
-  editor.setSelectionRange(pos, pos + q.length);
-  // Scroll into view via selection
-  const linesBefore = editor.value.substring(0, pos).split('\n').length - 1;
-  const lineHeight = parseFloat(getComputedStyle(editor).lineHeight);
-  const scrollTo = linesBefore * lineHeight - editor.clientHeight / 2;
-  editor.scrollTop = Math.max(0, scrollTo);
+  const [s, e] = matches[idx];
+  const keepFocus = document.activeElement;
+  editor.setSelectionRange(s, e);
+  const top = renderHighlights();
+  if (top !== null) {
+    const lineH = lineHeightPx();
+    editor.scrollTop = Math.max(0, top - editor.clientHeight / 2 + lineH / 2);
+  }
+  syncScroll();
+  if (keepFocus && keepFocus !== editor && keepFocus !== document.body) keepFocus.focus();
   updateCursorPos();
+}
+
+/* Draws match boxes; returns the y position of the current match (or null). */
+function renderHighlights() {
+  overlayInner.innerHTML = '';
+  if (!matches.length || !searchBar.classList.contains('visible')) return null;
+
+  const text = editor.value;
+  let from = 0;
+  if (matches.length > MAX_HIGHLIGHTS)
+    from = Math.max(0, Math.min(matchIndex - MAX_HIGHLIGHTS / 2, matches.length - MAX_HIGHLIGHTS));
+  const to = Math.min(matches.length, from + MAX_HIGHLIGHTS);
+
+  mirror.style.width = editor.clientWidth + 'px';
+  mirror.textContent = '';
+  const frag = document.createDocumentFragment();
+  const spans = [];
+  let last = 0;
+  for (let i = from; i < to; i++) {
+    const [s, e] = matches[i];
+    frag.appendChild(document.createTextNode(text.substring(last, s)));
+    const sp = document.createElement('span');
+    sp.textContent = text.substring(s, e);
+    frag.appendChild(sp);
+    spans.push([i, sp]);
+    last = e;
+  }
+  mirror.appendChild(frag);
+
+  const base = mirror.getBoundingClientRect();
+  const boxes = document.createDocumentFragment();
+  let currentTop = null;
+  for (const [i, sp] of spans) {
+    for (const r of sp.getClientRects()) {
+      const d = document.createElement('div');
+      d.className = i === matchIndex ? 'search-match current' : 'search-match';
+      d.style.left = (r.left - base.left) + 'px';
+      d.style.top = (r.top - base.top) + 'px';
+      d.style.width = r.width + 'px';
+      d.style.height = r.height + 'px';
+      boxes.appendChild(d);
+      if (i === matchIndex && currentTop === null) currentTop = r.top - base.top;
+    }
+  }
+  overlayInner.appendChild(boxes);
+  mirror.textContent = '';
+  syncScroll();
+  return currentTop;
+}
+
+let hlScheduled = false;
+function scheduleHighlights() {
+  if (hlScheduled) return;
+  hlScheduled = true;
+  requestAnimationFrame(() => { hlScheduled = false; renderHighlights(); });
 }
 
 function clearSearch() {
@@ -689,53 +969,85 @@ function clearSearch() {
 }
 
 function clearHighlights() {
-  overlay.innerHTML = '';
+  overlayInner.innerHTML = '';
 }
 
 /* ── Modal ── */
-function showModal() {
+function modalOpen() { return modalBackdrop.classList.contains('visible'); }
+
+function showModal(title, msg, confirmLabel, action) {
+  modalTitle.textContent = title;
+  modalMsg.textContent = msg;
+  modalConfirm.textContent = confirmLabel;
+  modalCancel.style.display = action ? '' : 'none';
+  pendingAction = action;
   modalBackdrop.classList.add('visible');
+  modalConfirm.focus();
 }
-modalCancel.addEventListener('click', () => {
+function closeModal() {
   modalBackdrop.classList.remove('visible');
   pendingAction = null;
-});
+  editor.focus();
+}
+function guardUnsaved(action) {
+  if (modified) {
+    showModal('Nicht gespeicherte Änderungen',
+      'Die aktuelle Datei hat ungespeicherte Änderungen. Trotzdem fortfahren?', 'Verwerfen', action);
+  } else action();
+}
+modalCancel.addEventListener('click', closeModal);
 modalConfirm.addEventListener('click', () => {
-  modalBackdrop.classList.remove('visible');
-  if (pendingAction) { pendingAction(); pendingAction = null; }
+  const act = pendingAction;
+  closeModal();
+  if (act) act();
 });
 
 /* ── Keyboard shortcuts ── */
 document.addEventListener('keydown', e => {
-  const ctrl = e.ctrlKey || e.metaKey;
-  if (ctrl && e.shiftKey && e.key === 'S') { e.preventDefault(); openSaveAs(); }
-  if (ctrl && !e.shiftKey && e.key === 's') { e.preventDefault(); if (currentFilename === 'unbenannt.txt') openSaveAs(); else saveFile(currentFilename); }
-  if (ctrl && e.key === 'o') { e.preventDefault();
-    if (modified) { pendingAction = () => fileInput.click(); showModal(); }
-    else fileInput.click();
+  if (e.key === 'Escape') {
+    if (modalOpen()) closeModal();
+    else if (saveAsOpen()) closeSaveAs();
+    else if (searchBar.classList.contains('visible')) closeSearch();
+    return;
   }
-  if (ctrl && e.key === 'f') { e.preventDefault(); openSearch(); }
-  if (e.key === 'Escape' && searchBar.classList.contains('visible')) closeSearch();
+  const ctrl = e.ctrlKey || e.metaKey;
+  if (!ctrl || e.altKey) return;
+  const k = e.key.toLowerCase();            // works with Caps Lock too
+  if (k !== 's' && k !== 'o' && k !== 'f') return;
+  e.preventDefault();
+  if (modalOpen() || saveAsOpen()) return;  // no shortcuts while a dialog is open
+  if (k === 's') { if (e.shiftKey) openSaveAs(); else save(); }
+  else if (k === 'o') requestOpen();
+  else if (k === 'f') openSearch();
 });
 
-/* Tab key in editor */
-editor.addEventListener('keydown', e => {
-  if (e.key === 'Tab') {
-    e.preventDefault();
-    const s = editor.selectionStart, end = editor.selectionEnd;
-    editor.value = editor.value.substring(0, s) + '    ' + editor.value.substring(end);
-    editor.selectionStart = editor.selectionEnd = s + 4;
-  }
+/* ── Warn before leaving with unsaved changes ── */
+window.addEventListener('beforeunload', e => {
+  if (modified) { e.preventDefault(); e.returnValue = ''; }
 });
 
 /* ── Init ── */
+measureChar();
+updateFormatDisplay();
 updateLineNumbers();
 updateStats();
 updateCursorPos();
 editor.focus();
 
-// Re-measure line numbers when editor width changes (window resize)
-new ResizeObserver(() => updateLineNumbers()).observe(editor);
+// Re-measure once the web font is loaded
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => {
+    measureChar();
+    updateLineNumbers();
+    if (matches.length) scheduleHighlights();
+  });
+}
+
+// Re-measure when editor width changes (window resize, scrollbar appears)
+new ResizeObserver(() => {
+  scheduleLineNumbers();
+  if (matches.length) scheduleHighlights();
+}).observe(editor);
 </script>
 </body>
 </html>

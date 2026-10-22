@@ -400,6 +400,9 @@
   .preview-frame.dec { padding: 8px; display: inline-block; }
   #decCanvas { display: block; max-width: 100%; max-height: 260px; }
   .busy { color: var(--accent); font-size: 12px; }
+  .footer { padding: 10px 16px 14px; font-size: 11px; color: var(--text-dim); text-align: right; border-top: 1px solid var(--line); }
+  .footer a { color: var(--accent); text-decoration: none; }
+  .footer a:hover { text-decoration: underline; }
 
 </style>
 </head>
@@ -575,6 +578,9 @@
       </div>
     </div>
   </div>
+  <div class="footer">
+    <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  </div>
 </div>
 
 <script>
@@ -645,7 +651,7 @@ function handleFile() {
   const reader = new FileReader();
   reader.onload = e => {
     logoDataUrl = e.target.result;
-    if (hasGenerated) generate();
+    if (hasGenerated) generate(true);
   };
   reader.readAsDataURL(file);
 }
@@ -656,15 +662,15 @@ clearLogo.addEventListener('click', () => {
   fileName.textContent = '';
   dropLabel.textContent = 'Datei wählen oder hierher ziehen';
   clearLogo.style.display = 'none';
-  if (hasGenerated) generate();
+  if (hasGenerated) generate(true);
 });
 
 // Live-Update bei Stil-/Farbänderung, sobald einmal erzeugt wurde
 [dotStyle, cornerSquareStyle, cornerDotStyle, frameStyle, dotColor, bgColor, frameColor, logoSizeRange]
-  .forEach(el => el.addEventListener('input', () => { if (hasGenerated) generate(); }));
-frameText.addEventListener('input', () => { if (hasGenerated && frameStyle.value === 'text') generate(); });
+  .forEach(el => el.addEventListener('input', () => { if (hasGenerated) generate(true); }));
+frameText.addEventListener('input', () => { if (hasGenerated && frameStyle.value === 'text') generate(true); });
 
-genBtn.addEventListener('click', generate);
+genBtn.addEventListener('click', () => generate(false));
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -688,14 +694,19 @@ function blobToImage(blob) {
 
 let genToken = 0;
 
-async function generate() {
+async function generate(silent) {
   const url = urlInput.value.trim();
   if (!url) {
-    alert('Bitte eine URL eingeben.');
+    /* bei Live-Updates (Farbe ziehen usw.) keine Alert-Flut */
+    if (!silent) alert('Bitte eine URL eingeben.');
     return;
   }
 
-  const qrSize = parseInt(sizeInput.value) || 800;
+  /* Groesse begrenzen: negative/Null-Werte und riesige Canvas vermeiden */
+  let qrSize = parseInt(sizeInput.value, 10);
+  if (!(qrSize > 0)) qrSize = 800;
+  qrSize = Math.max(100, Math.min(4000, qrSize));
+  sizeInput.value = qrSize;
   const myToken = ++genToken;
 
   const options = {
@@ -741,21 +752,26 @@ async function generate() {
     if (!blob) throw new Error('Kein Bild von der QR-Bibliothek erhalten.');
 
     const img = await blobToImage(blob);
+    if (myToken !== genToken) return; // auch nach dem Laden des Bildes pruefen
     const srcCanvas = document.createElement('canvas');
     srcCanvas.width = qrSize;
     srcCanvas.height = qrSize;
     srcCanvas.getContext('2d').drawImage(img, 0, 0, qrSize, qrSize);
 
-    composeFinal(srcCanvas, qrSize);
+    /* Modulanzahl fuer die Ruhezone (4 Module laut Norm) */
+    let modules = 0;
+    try { modules = qrCode._qr ? qrCode._qr.getModuleCount() : 0; } catch (e) { modules = 0; }
+    composeFinal(srcCanvas, qrSize, modules);
   } catch (err) {
     console.error(err);
     alert('QR-Code konnte nicht erzeugt werden: ' + err.message);
   }
 }
 
-function composeFinal(srcCanvas, qrSize) {
+function composeFinal(srcCanvas, qrSize, modules) {
   const style = frameStyle.value;
-  const quietZone = Math.round(qrSize * 0.06);
+  /* Ruhezone: mindestens 4 Module breit (ISO/IEC 18004), sonst 6 % als Rueckfall */
+  const quietZone = Math.max(Math.round(qrSize * 0.06), modules ? Math.ceil(4 * qrSize / modules) : 0);
 
   let finalCanvas;
 
@@ -822,7 +838,9 @@ function composeFinal(srcCanvas, qrSize) {
     ctx.font = `600 ${Math.round(bandHeight * 0.42)}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(frameText.value || 'Scan mich', finalCanvas.width / 2, finalCanvas.height - bandHeight / 2 - border / 2);
+    /* maxWidth: langer Text wird gestaucht statt ueber den Rand zu laufen */
+    ctx.fillText(frameText.value || 'Scan mich', finalCanvas.width / 2, finalCanvas.height - bandHeight / 2 - border / 2,
+                 finalCanvas.width - border * 2 - bandHeight * 0.4);
   }
 
   canvas.width = finalCanvas.width;
@@ -1147,7 +1165,7 @@ function decodeBits(data, version) {
   const flushBytes = () => {
     if (!byteBuf.length) return;
     let s = null;
-    if (eci === 3) s = latin1Decode(byteBuf);           /* ISO-8859-1 */
+    if (eci === 1 || eci === 3) s = latin1Decode(byteBuf); /* ISO-8859-1 */
     else s = utf8Decode(byteBuf);
     if (s === null) s = latin1Decode(byteBuf);
     text += s; byteBuf.length = 0;
@@ -1156,13 +1174,15 @@ function decodeBits(data, version) {
     const mode = br.read(4);
     if (mode === 0) break;                                 /* Terminator */
     if (mode === 7) { /* ECI */
+      flushBytes(); /* bisherige Bytes noch mit der alten Kodierung umwandeln */
       const b0 = br.read(8);
       if ((b0 & 0x80) === 0) eci = b0 & 0x7f;
       else if ((b0 & 0xc0) === 0x80) eci = ((b0 & 0x3f) << 8) | br.read(8);
       else eci = ((b0 & 0x1f) << 16) | br.read(16);
       continue;
     }
-    if (mode === 5 || mode === 9) continue;                /* FNC1 */
+    if (mode === 5) continue;                              /* FNC1, erste Position */
+    if (mode === 9) { br.read(8); continue; }              /* FNC1, zweite Position: 8 Bit Application Indicator */
     if (mode === 3) { br.read(16); continue; }             /* Structured Append */
     const n = br.read(ccLen(mode, version));
     if (mode === 1) {
@@ -1625,6 +1645,30 @@ function sampleGrid(bits, w, h, transform, dim, single) {
   return m;
 }
 
+/* Modulgroesse entlang der Verbindungslinie zweier Finder messen (wie ZXing):
+   vom Zentrum aus dunkel-hell-dunkel bis zum Rand = 3,5 Module je Richtung.
+   Unabhaengig vom Drehwinkel, anders als die Zeilen-/Spaltenlaeufe. */
+function runToEdge(bits, w, h, fx, fy, dx, dy) {
+  let state = 0, prev = 1;
+  for (let k = 0; k < 4000; k++) {
+    const x = Math.round(fx + dx * k), y = Math.round(fy + dy * k);
+    if (x < 0 || y < 0 || x >= w || y >= h) return state === 2 ? k : NaN;
+    const v = bits[y * w + x];
+    if (v !== prev) { state++; prev = v; if (state === 3) return k; }
+  }
+  return NaN;
+}
+function moduleAlong(bits, w, h, a, b) {
+  const L = dist(a, b); if (!L) return NaN;
+  const dx = (b.x - a.x) / L, dy = (b.y - a.y) / L;
+  const est = (p, sx, sy) => {
+    const r1 = runToEdge(bits, w, h, p.x, p.y, sx, sy), r2 = runToEdge(bits, w, h, p.x, p.y, -sx, -sy);
+    return (isNaN(r1) || isNaN(r2)) ? NaN : (r1 + r2) / 7;
+  };
+  const v = [est(a, dx, dy), est(b, -dx, -dy)].filter(x => !isNaN(x));
+  return v.length ? v.reduce((s, x) => s + x, 0) / v.length : NaN;
+}
+
 function extractMatrix(bits, w, h, triple, dimOverride, single, noAlign) {
   const o = orderPatterns(triple);
   const tl = o.topLeft, tr = o.topRight, bl = o.bottomLeft;
@@ -1663,32 +1707,99 @@ function extractMatrix(bits, w, h, triple, dimOverride, single, noAlign) {
   return sampleGrid(bits, w, h, t, dim, single);
 }
 
+/* Versionsinformation (ab Version 7) lesen: 18 Bit, BCH(18,6), Generator 0x1F25 */
+const VERSION_CODES = [];
+for (let v = 7; v <= 40; v++) {
+  let r = v << 12;
+  for (let i = 5; i >= 0; i--) if (r & (1 << (i + 12))) r ^= 0x1F25 << i;
+  VERSION_CODES.push({ v: v, code: (v << 12) | r });
+}
+function readVersionInfo(m) {
+  const dim = m.dim;
+  if (dim < 45) return 0;
+  const decode = raw => {
+    let best = 0, bestD = 4;
+    for (const e of VERSION_CODES) {
+      const d = bchFormatDist(e.code, raw);
+      if (d < bestD) { bestD = d; best = e.v; }
+    }
+    return best;
+  };
+  let a = 0;
+  for (let y = 5; y >= 0; y--) for (let x = dim - 9; x >= dim - 11; x--) a = (a << 1) | m.get(x, y);
+  let v = decode(a);
+  if (v) return v;
+  let b = 0;
+  for (let x = 5; x >= 0; x--) for (let y = dim - 9; y >= dim - 11; y--) b = (b << 1) | m.get(x, y);
+  return decode(b);
+}
+
+/* Kandidaten fuer die Matrixgroesse: Schaetzung aus den Zeilenlaeufen (bei gedrehten
+   Codes zu gross) und aus der Messung entlang der Finder-Verbindungslinie */
+function dimCandidates(bits, w, h, triple) {
+  const o = orderPatterns(triple);
+  const tl = o.topLeft, tr = o.topRight, bl = o.bottomLeft;
+  const snap = d => { d = Math.round(d); const r = d & 3; return r === 0 ? d + 1 : r === 2 ? d - 1 : r === 3 ? d - 2 : d; };
+  const out = [];
+  const add = d => { if (d >= 21 && d <= 177 && (d - 17) % 4 === 0 && out.indexOf(d) < 0) out.push(d); };
+  const modScan = (tl.mod + tr.mod + bl.mod) / 3;
+  const mTR = moduleAlong(bits, w, h, tl, tr), mBL = moduleAlong(bits, w, h, tl, bl);
+  const est = [];
+  est.push(snap((dist(tl, tr) + dist(tl, bl)) / 2 / modScan + 7));
+  if (mTR > 0 && mBL > 0) est.push(snap((dist(tl, tr) / mTR + dist(tl, bl) / mBL) / 2 + 7));
+  est.forEach(add);
+  est.forEach(d => { add(d + 4); add(d - 4); });
+  return out;
+}
+
+function boxBlur3(g, w, h) {
+  const o = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let s = 0, n = 0;
+    for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= h) continue;
+      for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= w) continue; s += g[yy * w + xx]; n++; } }
+    o[y * w + x] = (s / n) | 0;
+  }
+  return o;
+}
+
 /* --- Einstiegspunkt --- */
 function decodeImageData(rgba, w, h) {
   const gray = toGray(rgba, w, h);
-  const variants = [];
-  variants.push(binarizeHybrid(gray, w, h));
-  variants.push(binarizeGlobal(gray, w, h));
+  /* Binarisierungen erst bei Bedarf berechnen; die geglaettete Variante hilft
+     bei verrauschten Fotos */
+  const variants = [
+    () => binarizeHybrid(gray, w, h),
+    () => binarizeGlobal(gray, w, h),
+    () => binarizeHybrid(boxBlur3(gray, w, h), w, h)
+  ];
   const errs = [];
   for (let vi = 0; vi < variants.length; vi++) {
+    const vbits = variants[vi]();
     for (let inv = 0; inv < 2; inv++) {
-      let bits = variants[vi];
+      let bits = vbits;
       if (inv) { const b2 = new Uint8Array(bits.length); for (let i = 0; i < bits.length; i++) b2[i] = bits[i] ^ 1; bits = b2; }
       const centers = findFindersBoth(bits, w, h);
       if (centers.length < 3) continue;
       const triples = pickTriples(centers, 4);
       for (let ti = 0; ti < triples.length; ti++) {
+        let dims;
+        try { dims = dimCandidates(bits, w, h, triples[ti]); } catch (e) { continue; }
+        /* Versionsinfo aus der ersten Abtastung kann die Groesse direkt festlegen */
+        for (let k = 0; k < dims.length && k < 2; k++) {
+          try {
+            const probe = extractMatrix(bits, w, h, triples[ti], dims[k], false, true);
+            const v = probe ? (readVersionInfo(probe) || readVersionInfo(probe.mirror())) : 0;
+            if (v) { const d = 17 + 4 * v; const p = dims.indexOf(d); if (p >= 0) dims.splice(p, 1); dims.unshift(d); break; }
+          } catch (e) { /* weiter */ }
+        }
         for (let aMode = 0; aMode < 2; aMode++)
         for (let sMode = 0; sMode < 2; sMode++)
-        for (let dOff = 0; dOff < 3; dOff++) {
+        for (let dIdx = 0; dIdx < dims.length; dIdx++) {
           let m;
           const single = sMode === 1, noAlign = aMode === 1;
-          try {
-            const base = extractMatrix(bits, w, h, triples[ti], null, single, noAlign);
-            if (!base) continue;
-            m = dOff === 0 ? base
-                           : extractMatrix(bits, w, h, triples[ti], base.dim + (dOff === 1 ? 4 : -4), single, noAlign);
-          } catch (e) { continue; }
+          try { m = extractMatrix(bits, w, h, triples[ti], dims[dIdx], single, noAlign); }
+          catch (e) { continue; }
           if (!m) continue;
           for (let mir = 0; mir < 2; mir++) {
             const mm = mir ? m.mirror() : m;
@@ -1822,14 +1933,19 @@ global.QRDecode = { decodeImageData: decodeImageData };
     const seen = {}, tries = [];
     steps.forEach(s => { const v = Math.round(s); if (v >= 60 && !seen[v]) { seen[v] = 1; tries.push(v); } });
 
-    let last = null;
-    for (let i = 0; i < tries.length; i++) {
+    let last = null, res = null;
+    for (let i = 0; i < tries.length && !res; i++) {
       try {
         const idata = imageDataAt(img, tries[i]);
-        const res = window.QRDecode.decodeImageData(idata.data, idata.width, idata.height);
-        showResult(res);
-        return;
+        res = window.QRDecode.decodeImageData(idata.data, idata.width, idata.height);
       } catch (e) { last = e; }
+    }
+    /* showResult ausserhalb des try: ein Fehler bei der Anzeige (z. B. kaputte
+       %-Kodierung in einer mailto-Adresse) ist kein Lesefehler */
+    if (res) {
+      try { showResult(res); }
+      catch (e) { console.error(e); showResult(Object.assign({}, res, { _plain: true })); }
+      return;
     }
     showError(last ? last.message : 'Kein QR-Code gefunden.', [
       'Der Code sollte m\u00f6glichst vollst\u00e4ndig und gerade im Bild liegen.',
@@ -1858,7 +1974,9 @@ global.QRDecode = { decodeImageData: decodeImageData };
   }
 
   function showResult(res) {
-    const info = analyse(res.text);
+    let info;
+    try { info = res._plain ? null : analyse(res.text); } catch (e) { info = null; }
+    if (!info) info = { type: 'Text', fields: [] };
     typeEl.textContent = info.type;
     const bytes = new TextEncoder().encode(res.text).length;
     metaEl.textContent = 'Version ' + res.version + ' \u00b7 Fehlerkorrektur ' + res.ecLevel +
@@ -1940,7 +2058,8 @@ global.QRDecode = { decodeImageData: decodeImageData };
 
     if (/^mailto:/i.test(s)) {
       const rest = s.slice(7), q = rest.indexOf('?');
-      const addr = decodeURIComponent(q < 0 ? rest : rest.slice(0, q));
+      const raw = q < 0 ? rest : rest.slice(0, q);
+      let addr; try { addr = decodeURIComponent(raw); } catch (e) { addr = raw; }
       const f = [['E-Mail', addr]];
       if (q >= 0) new URLSearchParams(rest.slice(q + 1)).forEach((v, k) => f.push([k, v]));
       return { type: 'E-Mail', link: s, linkLabel: 'E-Mail schreiben', fields: f };
@@ -1953,6 +2072,8 @@ global.QRDecode = { decodeImageData: decodeImageData };
     }
     if (/^geo:/i.test(s)) {
       const p = s.slice(4).split(/[,;?]/);
+      if (p.length < 2 || isNaN(parseFloat(p[0])) || isNaN(parseFloat(p[1])))
+        return { type: 'Geokoordinate', fields: [['Angabe', s.slice(4)]] };
       return {
         type: 'Geokoordinate',
         link: 'https://www.openstreetmap.org/?mlat=' + encodeURIComponent(p[0]) + '&mlon=' + encodeURIComponent(p[1]) + '#map=17/' + p[0] + '/' + p[1],
