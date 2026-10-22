@@ -149,6 +149,7 @@ table.data th{color:var(--muted);font-weight:500}
   .row > .lbl{width:100%}
   main{padding:.9rem .7rem 4rem}
 }
+footer.foot{max-width:1180px;margin:0 auto;padding:0 1rem 2rem;color:var(--muted);font-size:.85rem;text-align:center}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>
@@ -244,7 +245,7 @@ table.data th{color:var(--muted);font-weight:500}
   </div>
   <div class="panel">
     <div class="scroller" id="gb-board"></div>
-    <p class="hint">Positionen anklicken, um sie zu hören. Doppelklick auf eine Saite links spielt die Leersaite.</p>
+    <p class="hint">Positionen anklicken, um sie zu hören. Ein Klick auf den Saitennamen links spielt die Leersaite.</p>
   </div>
   <div class="panel">
     <h4>Lagen üben</h4>
@@ -455,6 +456,7 @@ Köpfchen in das Wasser</textarea>
 </section>
 
 </main>
+<footer class="foot">Gitarrenwerkstatt · mehr Projekte auf <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 <script>
 "use strict";
 /* ======================================================================
@@ -477,6 +479,16 @@ function parseNote(txt){
   return flats[t] !== undefined ? flats[t] : -1;
 }
 const IVNAME = {0:'1',1:'\u266d9',2:'9',3:'\u266d3',4:'3',5:'11',6:'\u266d5',7:'5',8:'\u266f5',9:'6',10:'\u266d7',11:'7'};
+/* Tonleiterstufen: 2 und 4 statt 9 und 11 */
+const SCALE_IVNAME = {0:'1',1:'\u266d2',2:'2',3:'\u266d3',4:'3',5:'4',6:'\u266d5',7:'5',8:'\u266d6',9:'6',10:'\u266d7',11:'7'};
+/* Akkordspezifische Namen, wo die allgemeine Tabelle falsch wäre */
+const CHORD_IVNAME = {
+  sus2:{2:'2'}, sus4:{5:'4'}, '7sus4':{5:'4'}, dim7:{9:'\ud834\udd2b7'}
+};
+function ivName(semis, chordId){
+  const d = pcMod(semis), o = chordId && CHORD_IVNAME[chordId];
+  return (o && o[d]) || IVNAME[d];
+}
 
 const CHORDS = [
   {id:'maj',   sym:'',      name:'Dur',              iv:[0,4,7]},
@@ -541,7 +553,7 @@ const Audio = {
       const AC = window.AudioContext || window.webkitAudioContext;
       this.ctx = new AC();
       this.master = this.ctx.createGain();
-      this.master.gain.value = 0.75;
+      this.master.gain.value = (+document.getElementById('g-vol').value || 0) / 100;
       this.master.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
@@ -738,8 +750,23 @@ function evaluateShape(frets, base, rootPc, required, tun, minStrings){
   const bassPc = pcMod(tun[first] + frets[first]);
   const rootBass = bassPc === rootPc;
   /* Leersaiten sind in der ersten Lage ein Gewinn, in hohen Lagen eher unpraktisch */
-  const openWeight = base <= 2 ? 0.9 : -1.6;
+  /* Leersaiten nur belohnen, wenn alle gegriffenen Töne in den ersten drei Bünden liegen
+     (klassische Leersaitengriffe); Mischgriffe wie x20402 werden abgewertet */
+  let maxF = 0;
+  for (let s = first; s <= last; s++) if (frets[s] > maxF) maxF = frets[s];
+  const openWeight = maxF <= 3 ? 0.9 : maxF <= 5 ? -1.6 : -4;   /* Leersaite neben Bund 6+ klingt kaum je so gemeint */
   let score = played * 2 - fingers * 2 - base * 1.1 + open * openWeight;
+  /* Griff wie 8-6-8-8-8-8: tiefster Bund auf einer Innensaite, umgeben von höheren Bünden
+     auf beiden Seiten – das verlangt einen Barré hinter dem Zeigefinger */
+  const fr = frets.filter(f => f > 0), minF = fr.length ? Math.min.apply(null, fr) : 0;
+  if (minF > 0){
+    const atMin = [];
+    frets.forEach((f, s) => { if (f === minF) atMin.push(s); });
+    const leftHi  = frets.slice(0, atMin[0]).some(f => f > minF);
+    const rightHi = frets.slice(atMin[atMin.length - 1] + 1).filter(f => f > minF).length >= 2;
+    const span = Math.max.apply(null, fr) - minF;
+    if (leftHi && rightHi && span >= 2) score -= 6;
+  }
   if (rootBass) score += 10;
   if (played === frets.length) score += 1.5;
   if (required.length <= 2) score -= Math.max(0, played - 3) * 3;   /* Powerchords bleiben schlank */
@@ -810,12 +837,19 @@ function barreSpan(frets){
   return {fret:min, from:lo, to:hi};
 }
 
+/* Erster angezeigter Bund: bis Bund 5 ab dem Sattel, sonst ab dem tiefsten gegriffenen Bund */
+function frettedRange(v){
+  const f = v.frets.filter(x => x > 0);
+  return f.length ? {min:Math.min.apply(null, f), max:Math.max.apply(null, f)} : {min:0, max:0};
+}
+function diagramStart(v){ const r = frettedRange(v); return r.max <= 5 ? 1 : r.min; }
+
 /* Ein Akkorddiagramm als SVG */
 function chordSVG(v, opts){
   const o = opts || {};
   const tun = strings(), n = v.frets.length;
   const W = 22, H = 24, x0 = 20, y0 = 34, rows = 5;
-  const start = v.base <= 1 ? 1 : v.base;
+  const start = diagramStart(v);
   const width = x0 * 2 + (n - 1) * W, height = y0 + rows * H + 12;
   let s = '<svg viewBox="0 0 ' + width + ' ' + height + '" width="' + width + '" height="' + height + '" role="img">';
   /* Sattel oder Lagenzahl */
@@ -845,7 +879,7 @@ function chordSVG(v, opts){
     }
     if (o.labels){
       const pc = pcMod(tun[i] + f);
-      const txt = o.labels === 'iv' ? IVNAME[pcMod(pc - o.rootPc)] : noteName(pc);
+      const txt = o.labels === 'iv' ? ivName(pc - o.rootPc, o.type) : noteName(pc);
       const y = f === 0 ? y0 + rows*H + 10 : y0 + (f - start) * H + H/2 + 3.5;
       const col = f === 0 ? 'var(--muted)' : '#1a1409';
       s += '<text x="' + x + '" y="' + y + '" fill="' + col + '" font-size="9.5" font-weight="600" text-anchor="middle">' + txt + '</text>';
@@ -881,7 +915,7 @@ function fretboardSVG(nFrets, marker){
   for (let st = 0; st < n; st++){
     const y = yOf(st);
     s += '<line x1="' + left + '" y1="' + y + '" x2="' + (left + nFrets*fw) + '" y2="' + y + '" stroke="var(--nickel)" stroke-width="' + (2.4 - st*0.28) + '" opacity=".85"/>';
-    s += '<text x="' + (left - 40) + '" y="' + (y + 4) + '" fill="var(--muted)" font-size="12">' + noteName(tun[st]) + '</text>';
+    s += '<g class="fb-dot" data-midi="' + tun[st] + '" style="cursor:pointer"><text x="' + (left - 40) + '" y="' + (y + 4) + '" fill="var(--muted)" font-size="12">' + noteName(tun[st]) + '</text></g>';
   }
   for (let st = 0; st < n; st++){
     for (let f = 0; f <= nFrets; f++){
@@ -979,7 +1013,7 @@ function akRender(){
   el('ak-tones').innerHTML = c.iv.map(function(i){
     const pc = pcMod(AK.root + i);
     return '<span class="chip' + (i === 0 ? ' on' : '') + '" style="cursor:default">' + noteName(pc) +
-           ' <span style="opacity:.65">' + IVNAME[pcMod(i)] + '</span></span>';
+           ' <span style="opacity:.65">' + ivName(i, AK.type) + '</span></span>';
   }).join(' ');
   el('ak-info').textContent = 'Intervalle in Halbtönen: ' + c.iv.join(', ') +
     '. Stimmung: ' + TUNINGS[tuningId].name + '.';
@@ -991,9 +1025,10 @@ function akRender(){
   AK.voicings = findVoicings(AK.root, c.iv, {rootBass: el('ak-rootbass').checked, limit:12});
   const labels = el('ak-iv').checked ? 'iv' : null;
   el('ak-grid').innerHTML = AK.voicings.length ? AK.voicings.map(function(v, i){
-    const pos = v.base === 0 ? 'Leersaiten-Lage' : v.base + '. Lage';
+    const fr = frettedRange(v);
+    const pos = (fr.max <= 4 && v.frets.indexOf(0) >= 0) || fr.min === 0 ? 'Leersaiten-Lage' : fr.min + '. Lage';
     return '<div class="card" data-i="' + i + '" title="anklicken zum Hören">' +
-      chordSVG(v, {rootPc:AK.root, labels:labels}) +
+      chordSVG(v, {rootPc:AK.root, labels:labels, type:AK.type}) +
       '<div class="tabtxt">' + voicingText(v) + '</div>' +
       '<div class="cap">' + pos + ' \u00b7 ' + v.fingers + ' Finger' + (v.rootBass ? '' : ' \u00b7 Umkehrung') + '</div></div>';
   }).join('') : '<p class="hint">Für diese Stimmung findet sich kein spielbarer Griff. Haken bei „nur Grundton im Bass“ entfernen.</p>';
@@ -1020,7 +1055,7 @@ function gbBuild(){
   el('gb-scale').onchange = e => { GB.scale = e.target.value; gbRender(); };
   el('gb-chord').onchange = e => { GB.chord = e.target.value; gbRender(); };
   el('gb-iv').onchange = gbRender;
-  el('gb-frets').onchange = e => { GB.frets = Math.max(12, Math.min(24, +e.target.value || 15)); gbRender(); };
+  el('gb-frets').onchange = e => { GB.frets = Math.max(12, Math.min(24, +e.target.value || 15)); e.target.value = GB.frets; gbRender(); };
   el('gb-from').onchange = gbRender;
   el('gb-to').onchange = gbRender;
   el('gb-play').onclick = gbPlayAll;
@@ -1047,7 +1082,8 @@ function gbRender(){
     const d = pcMod(midi - GB.root);
     if (iv.indexOf(d) < 0) return null;
     if (f < from || f > to) return null;
-    return {label: useIv ? IVNAME[d] : noteName(midi), root: d === 0, soft: GB.mode === 'all' && d !== 0};
+    const ivl = GB.mode === 'chord' ? ivName(d, GB.chord) : SCALE_IVNAME[d];
+    return {label: useIv ? ivl : noteName(midi), root: d === 0, soft: GB.mode === 'all' && d !== 0};
   });
 }
 
@@ -1058,9 +1094,9 @@ function gbPlayAll(){
   for (let st = 0; st < tun.length; st++)
     for (let f = Math.max(0, from); f <= Math.min(GB.frets, to); f++)
       if (iv.indexOf(pcMod(tun[st] + f - GB.root)) >= 0) list.push(tun[st] + f);
-  list.sort((a, b) => a - b);
+  const uniq = Array.from(new Set(list)).sort((a, b) => a - b);   /* gleiche Töne auf mehreren Saiten nur einmal */
   const t0 = Audio.now() + 0.05;
-  list.slice(0, 60).forEach((m, i) => Audio.note(m, t0 + i * 0.22, 0.45));
+  uniq.slice(0, 60).forEach((m, i) => Audio.note(m, t0 + i * 0.22, 0.45));
 }
 
 /* ======================================================================
@@ -1096,7 +1132,7 @@ function taBuild(){
   el('ta-prog').innerHTML = PROGS.map((p, i) => '<option value="' + i + '">' + esc(p.name) + '</option>').join('');
   el('ta-key').onchange = e => { TA.key = +e.target.value; taRender(); };
   el('ta-mode').onchange = e => { TA.mode = e.target.value; taRender(); };
-  el('ta-prog').onchange = taRenderProg;
+  el('ta-prog').onchange = () => { if (TA.playing) taStopProg(); taRenderProg(); };
   el('ta-progplay').onclick = taToggleProg;
   el('qz-wrap').addEventListener('click', function(e){
     const g = e.target.closest('[data-pc]'); if (!g) return;
@@ -1143,6 +1179,7 @@ function taDegrees(){
 }
 
 function taRender(){
+  if (TA.playing) taStopProg();
   el('ta-key').value = TA.key; el('ta-mode').value = TA.mode;
   el('qz-wrap').innerHTML = circleSVG();
   const degs = taDegrees();
@@ -1206,7 +1243,7 @@ function taStopProg(){
    ====================================================================== */
 const MT = {
   bpm:100, beats:4, sub:1, sound:'click', style:'rock', accent:true,
-  running:false, step:0, bar:0, nextTime:0, timer:null, queue:[], lampBeat:-1, trainerBars:0
+  running:false, step:0, bar:0, nextTime:0, timer:null, raf:0, queue:[], lampBeat:-1, trainerBars:0
 };
 
 function stepsPerBeat(){
@@ -1316,14 +1353,13 @@ function mtAnimate(){
       lamps[i].classList.toggle('acc', i === q.beat && q.accent);
     }
   }
-  requestAnimationFrame(mtAnimate);
+  MT.raf = requestAnimationFrame(mtAnimate);
 }
 
 function setBpm(v){
   MT.bpm = Math.max(30, Math.min(260, Math.round(v)));
   el('mt-bpm').value = MT.bpm;
   el('mt-bpmnum').textContent = MT.bpm;
-  save('bpm', MT.bpm);
 }
 
 function mtStart(){
@@ -1332,10 +1368,11 @@ function mtStart(){
   MT.nextTime = Audio.ctx.currentTime + 0.08;
   MT.timer = setInterval(mtLoop, 25);
   el('mt-toggle').textContent = 'Stopp';
-  requestAnimationFrame(mtAnimate);
+  cancelAnimationFrame(MT.raf);
+  MT.raf = requestAnimationFrame(mtAnimate);
 }
 function mtStop(){
-  MT.running = false; clearInterval(MT.timer);
+  MT.running = false; clearInterval(MT.timer); cancelAnimationFrame(MT.raf);
   el('mt-toggle').textContent = 'Start';
   Array.prototype.forEach.call(el('mt-lamps').children, c => c.classList.remove('on', 'acc'));
 }
@@ -1368,18 +1405,20 @@ function mtBuild(){
     } else el('mt-taphint').textContent = 'weiter tippen …';
   };
   mtLamps();
-  setBpm(+load('bpm', 100));
+  setBpm(100);
+  el('tr-on').onchange = e => { MT.trainerBars = 0; el('tr-state').textContent = e.target.checked ? 'aktiv' : 'aus'; };
 
   /* Übungsuhr */
-  let ptLeft = 0, ptTimer = null;
+  let ptLeft = 0, ptTimer = null, ptEnd = 0;
   const fmt = s => Math.floor(s/60) + ':' + String(s % 60).padStart(2, '0');
   el('pt-start').onclick = function(){
     if (ptTimer){ clearInterval(ptTimer); ptTimer = null; el('pt-start').textContent = 'Start'; return; }
     ptLeft = (+el('pt-min').value) * 60;
+    ptEnd = Date.now() + ptLeft * 1000;   /* nach Uhrzeit rechnen – Hintergrund-Tabs drosseln Timer */
     el('pt-time').textContent = fmt(ptLeft);
     el('pt-start').textContent = 'Abbrechen';
     ptTimer = setInterval(function(){
-      ptLeft--;
+      ptLeft = Math.ceil((ptEnd - Date.now()) / 1000);
       el('pt-time').textContent = fmt(Math.max(0, ptLeft));
       if (ptLeft <= 0){
         clearInterval(ptTimer); ptTimer = null;
@@ -1387,18 +1426,18 @@ function mtBuild(){
         const t = Audio.now();
         [0, 0.25, 0.5].forEach((d, i) => Audio.beep(t + d, 660 + i * 220, 0.18));
       }
-    }, 1000);
+    }, 250);
   };
 }
 
 /* ======================================================================
    9. Reiter "Stimmgerät"
    ====================================================================== */
-const ST = {stream:null, analyser:null, buf:null, raf:null, running:false};
+const ST = {stream:null, src:null, analyser:null, buf:null, raf:null, running:false};
 
 function stBuild(){
   stRefs();
-  el('st-a4').onchange = e => { A4 = Math.max(415, Math.min(460, +e.target.value || 440)); Audio.cache.clear(); };
+  el('st-a4').onchange = e => { A4 = Math.max(415, Math.min(460, +e.target.value || 440)); e.target.value = A4; Audio.cache.clear(); };
   el('st-all').onclick = function(){
     const tun = strings(), t0 = Audio.now() + 0.05;
     tun.forEach((m, i) => Audio.pluck(m, t0 + i * 1.1, 0.5));
@@ -1449,10 +1488,10 @@ function stToggleMic(){
     .then(function(stream){
       const ctx = Audio.init();
       ST.stream = stream;
-      const src = ctx.createMediaStreamSource(stream);
+      ST.src = ctx.createMediaStreamSource(stream);
       ST.analyser = ctx.createAnalyser();
       ST.analyser.fftSize = 2048;
-      src.connect(ST.analyser);
+      ST.src.connect(ST.analyser);
       ST.buf = new Float32Array(ST.analyser.fftSize);
       ST.running = true;
       el('st-mic').textContent = 'Mikrofon stoppen';
@@ -1465,7 +1504,8 @@ function stToggleMic(){
 function stStopMic(){
   ST.running = false;
   if (ST.raf) cancelAnimationFrame(ST.raf);
-  if (ST.stream) ST.stream.getTracks().forEach(t => t.stop());
+  if (ST.src){ ST.src.disconnect(); ST.src = null; }
+  if (ST.stream){ ST.stream.getTracks().forEach(t => t.stop()); ST.stream = null; }
   el('st-mic').textContent = 'Mikrofon starten';
   el('st-note').textContent = '\u2013';
   el('st-needle').style.left = 'calc(50% - 4px)';
@@ -1488,7 +1528,7 @@ function stTick(){
     const tun = strings();
     let best = null, bd = 99;
     tun.forEach(function(m, i){ const d = Math.abs(m - midi); if (d < bd){ bd = d; best = i; } });
-    el('st-target').textContent = bd <= 2 ? 'nächste Saite: ' + (best + 1) + ' (' + midiName(tun[best]) + ')' : '';
+    el('st-target').textContent = bd <= 2 ? 'nächste Saite: ' + (tun.length - best) + ' (' + midiName(tun[best]) + ')' : '';
   }
   ST.raf = requestAnimationFrame(stTick);
 }
@@ -1499,7 +1539,7 @@ function stTick(){
 const INTERVALS = ['Prime','kleine Sekunde','große Sekunde','kleine Terz','große Terz','Quarte',
   'Tritonus','Quinte','kleine Sexte','große Sexte','kleine Septime','große Septime','Oktave'];
 const EAR_CHORDS = ['maj','min','7','maj7','m7','dim','aug','sus4'];
-const GE = {mode:'interval', task:null, right:0, total:0};
+const GE = {mode:'interval', task:null, right:0, total:0, timer:null};
 
 function geBuild(){
   el('ge-mode').addEventListener('click', function(e){
@@ -1508,17 +1548,18 @@ function geBuild(){
     document.querySelectorAll('#ge-mode .chip').forEach(c => c.classList.toggle('on', c === b));
     geNew();
   });
-  el('ge-new').onclick = geNew;
+  el('ge-new').onclick = () => geNew();
   el('ge-repeat').onclick = gePlay;
   el('ge-answers').addEventListener('click', function(e){
     const b = e.target.closest('button'); if (!b || !GE.task) return;
     geCheck(b.dataset.a, b);
   });
-  geNew();
+  geNew(false);   /* beim Laden noch nichts abspielen (Autoplay-Sperre) */
 }
 const rnd = n => Math.floor(Math.random() * n);
 
-function geNew(){
+function geNew(play){
+  clearTimeout(GE.timer); GE.timer = null;
   el('ge-feedback').textContent = '';
   el('ge-extra').innerHTML = '';
   const t = {};
@@ -1552,7 +1593,7 @@ function geNew(){
     }) + '</div>';
   }
   GE.task = t;
-  gePlay();
+  if (play !== false) gePlay();
 }
 function gePlay(){
   const t = GE.task; if (!t) return;
@@ -1586,21 +1627,47 @@ function geCheck(ans, btn){
     ? '<span class="ok">Richtig: ' + esc(right) + '</span>'
     : '<span class="bad">Es war ' + esc(right) + '</span>';
   GE.task = null;
-  setTimeout(geNew, ok ? 900 : 2200);
+  GE.timer = setTimeout(() => geNew(), ok ? 900 : 2200);
 }
 
 /* ======================================================================
    11. Reiter "Werkzeuge"
    ====================================================================== */
+/* Offene Standardgriffe als Fingersatz (tiefe Saite zuerst, -1 = nicht gespielt).
+   Der Klang wird immer aus der gewählten Stimmung berechnet. */
 const OPEN_SHAPES = [
-  {label:'C',  pc:0,  type:'maj'}, {label:'A',  pc:9,  type:'maj'},
-  {label:'G',  pc:7,  type:'maj'}, {label:'E',  pc:4,  type:'maj'},
-  {label:'D',  pc:2,  type:'maj'}, {label:'Am', pc:9,  type:'min'},
-  {label:'Em', pc:4,  type:'min'}, {label:'Dm', pc:2,  type:'min'},
-  {label:'A7', pc:9,  type:'7'},   {label:'E7', pc:4,  type:'7'},
-  {label:'D7', pc:2,  type:'7'},   {label:'G7', pc:7,  type:'7'},
-  {label:'C7', pc:0,  type:'7'},   {label:'Cmaj7', pc:0, type:'maj7'}
+  {label:'C',     frets:[-1,3,2,0,1,0]},  {label:'A',     frets:[-1,0,2,2,2,0]},
+  {label:'G',     frets:[3,2,0,0,0,3]},   {label:'E',     frets:[0,2,2,1,0,0]},
+  {label:'D',     frets:[-1,-1,0,2,3,2]}, {label:'Am',    frets:[-1,0,2,2,1,0]},
+  {label:'Em',    frets:[0,2,2,0,0,0]},   {label:'Dm',    frets:[-1,-1,0,2,3,1]},
+  {label:'A7',    frets:[-1,0,2,0,2,0]},  {label:'E7',    frets:[0,2,0,1,0,0]},
+  {label:'D7',    frets:[-1,-1,0,2,1,2]}, {label:'G7',    frets:[3,2,0,0,0,1]},
+  {label:'C7',    frets:[-1,3,2,3,1,0]},  {label:'Cmaj7', frets:[-1,3,2,0,0,0]}
 ];
+
+/* Akkord aus klingenden MIDI-Tönen bestimmen */
+function identifyChord(sounding){
+  const pcs = Array.from(new Set(sounding.map(m => pcMod(m)))).sort((a,b) => a-b);
+  const bass = pcMod(Math.min.apply(null, sounding));
+  const hits = [];
+  for (let root = 0; root < 12; root++){
+    CHORDS.forEach(function(c){
+      const want = Array.from(new Set(c.iv.map(i => pcMod(root + i)))).sort((a,b) => a-b);
+      if (want.length !== pcs.length) return;
+      for (let i = 0; i < want.length; i++) if (want[i] !== pcs[i]) return;
+      let label = chordLabel(root, c.id);
+      if (bass !== root) label += '/' + noteName(bass);
+      hits.push({label:label, exact: bass === root, root:root, type:c.id});
+    });
+  }
+  hits.sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0));
+  return {pcs:pcs, bass:bass, hits:hits};
+}
+function shapeSounding(shape, capo){
+  const tun = strings(), out = [];
+  shape.frets.forEach((f, s) => { if (f >= 0 && s < tun.length) out.push(tun[s] + capo + f); });
+  return out;
+}
 
 function wzBuild(){
   el('wz-frets').innerHTML = strings().map((m, i) =>
@@ -1622,9 +1689,16 @@ function wzBuild(){
   el('wz-capowant').onchange = wzCapo;
   el('wz-trans').onclick = wzTranspose;
   el('wz-copy').onclick = function(){
-    el('wz-out').select();
-    try { document.execCommand('copy'); el('wz-transinfo').textContent = 'kopiert'; }
-    catch(e){ el('wz-transinfo').textContent = 'Bitte von Hand markieren und kopieren.'; }
+    if (!el('wz-out').value) wzTranspose();
+    const txt = el('wz-out').value;
+    const fallback = function(){
+      el('wz-out').select();
+      try { document.execCommand('copy'); el('wz-transinfo').textContent = 'kopiert'; }
+      catch(e){ el('wz-transinfo').textContent = 'Bitte von Hand markieren und kopieren.'; }
+    };
+    if (navigator.clipboard && window.isSecureContext)
+      navigator.clipboard.writeText(txt).then(() => { el('wz-transinfo').textContent = 'kopiert'; }, fallback);
+    else fallback();
   };
   wzCapo();
 }
@@ -1641,20 +1715,7 @@ function wzIdentify(){
   const sounding = [];
   frets.forEach((f, s) => { if (f >= 0) sounding.push(tun[s] + f); });
   if (sounding.length < 2){ el('wz-idout').innerHTML = '<p class="hint">Mindestens zwei Saiten eintragen.</p>'; return; }
-  const pcs = Array.from(new Set(sounding.map(m => pcMod(m)))).sort((a,b) => a-b);
-  const bass = pcMod(Math.min.apply(null, sounding));
-  const hits = [];
-  for (let root = 0; root < 12; root++){
-    CHORDS.forEach(function(c){
-      const want = Array.from(new Set(c.iv.map(i => pcMod(root + i)))).sort((a,b) => a-b);
-      if (want.length !== pcs.length) return;
-      for (let i = 0; i < want.length; i++) if (want[i] !== pcs[i]) return;
-      let label = chordLabel(root, c.id);
-      if (bass !== root) label += '/' + noteName(bass);
-      hits.push({label:label, exact: bass === root, root:root, type:c.id});
-    });
-  }
-  hits.sort((a, b) => (b.exact ? 1 : 0) - (a.exact ? 1 : 0));
+  const r = identifyChord(sounding), pcs = r.pcs, hits = r.hits;
   el('wz-idout').innerHTML = hits.length
     ? '<p>Das ist: <strong style="font-size:1.2rem;color:var(--brass)">' + esc(hits[0].label) + '</strong>' +
       (hits.length > 1 ? ' <span class="hint">(auch lesbar als ' + hits.slice(1).map(h => esc(h.label)).join(', ') + ')</span>' : '') +
@@ -1664,27 +1725,38 @@ function wzIdentify(){
 function wzCapo(){
   const capo = Math.max(0, Math.min(11, +el('wz-capo').value || 0));
   const shape = OPEN_SHAPES[+el('wz-capochord').value || 0];
-  const sound = pcMod(shape.pc + capo);
-  el('wz-capoout').innerHTML = '<p>Griff <strong>' + esc(shape.label) + '</strong> mit Kapo im ' + capo +
-    '. Bund klingt wie <strong style="color:var(--brass)">' + esc(chordLabel(sound, shape.type)) + '</strong>.</p>';
+  const std = tuningId === 'standard';
+  const res = identifyChord(shapeSounding(shape, capo));
+  const sound = res.hits.length ? res.hits[0].label
+    : res.pcs.map(p => noteName(p)).join(' \u00b7 ') + ' (kein Standardakkord)';
+  el('wz-capoout').innerHTML = '<p>Griff <strong>' + esc(shape.label) + '</strong> (' +
+    shape.frets.map(f => f < 0 ? 'x' : f).join(' ') + ') mit Kapo im ' + capo +
+    '. Bund klingt ' + (std ? '' : 'in dieser Stimmung ') + 'wie <strong style="color:var(--brass)">' + esc(sound) + '</strong>.</p>';
   const wants = JSON.parse(el('wz-capowant').dataset.list);
   const want = wants[+el('wz-capowant').value || 0];
-  const found = [];
+  const found = [], slash = [];
   for (let c = 0; c <= 7; c++){
     OPEN_SHAPES.forEach(function(s){
-      if (s.type === want.type && pcMod(s.pc + c) === want.pc) found.push('Kapo ' + c + '. Bund \u2192 Griff ' + s.label);
+      const h = identifyChord(shapeSounding(s, c)).hits.find(x => x.root === want.pc && x.type === want.type);
+      if (!h) return;
+      const txt = 'Kapo ' + c + '. Bund \u2192 Griff ' + s.label;
+      if (h.exact) found.push(txt); else slash.push(txt + ' (klingt als ' + h.label + ')');
     });
   }
-  el('wz-capoout2').innerHTML = found.length
-    ? '<p class="hint">' + found.map(esc).join('<br>') + '</p>'
-    : '<p class="hint">Mit den offenen Griffen nicht erreichbar – hier hilft nur ein Barré.</p>';
+  const all = found.concat(slash);
+  el('wz-capoout2').innerHTML = (all.length
+    ? '<p class="hint">' + all.map(esc).join('<br>') + '</p>'
+    : '<p class="hint">Mit den offenen Griffen nicht erreichbar – hier hilft nur ein Barré.</p>') +
+    (std ? '' : '<p class="hint">Griffe sind die üblichen Fingersätze der Standardstimmung, der Klang ist für „' +
+      esc(TUNINGS[tuningId].name) + '“ berechnet.</p>');
 }
 
 /* Songtext transponieren: nur Zeilen, die ausschließlich aus Akkorden bestehen */
 const SUFFIXES = new Set(['','m','m7','maj7','7','9','maj9','m9','6','m6','sus2','sus4','7sus4','add9',
   'dim','dim7','aug','m7b5','5','11','13','7sus2','min','maj','\u00b0','+','7b9','7#9','69','m11','13sus4']);
 function parseChordToken(tok){
-  const m = tok.match(/^([A-H])(#|b|is|es|s)?([^\/]*)(?:\/([A-H])(#|b|is|es|s)?)?$/);
+  /* "s" nur als Vorzeichen (As, Es), nicht als Anfang von "sus" */
+  const m = tok.match(/^([A-H])(#|b|is|es|s(?!us))?([^\/]*)(?:\/([A-H])(#|b|is|es|s)?)?$/);
   if (!m) return null;
   const base = accPc(m[1], m[2]);
   if (base < 0) return null;
@@ -1710,7 +1782,13 @@ function wzTranspose(){
   for (const line of lines){
     const t = line.trim().split(/\s+/)[0];
     const c = t && parseChordToken(t);
-    if (c){ flats = [1,3,8,10].indexOf(pcMod(c.pc + steps)) >= 0; break; }
+    if (c){
+      const target = pcMod(c.pc + steps);
+      const minor = /^m(?!aj)/.test(c.suffix);
+      /* b-Tonarten: F Bb Eb Ab Db bzw. Dm Gm Cm Fm Bbm Ebm */
+      flats = (minor ? [2,7,0,5,10,3] : [5,10,3,8,1]).indexOf(target) >= 0;
+      break;
+    }
   }
   const nm = p => flats ? noteNameFlat(p) : noteName(p);
   const out = lines.map(function(line){
@@ -1719,13 +1797,23 @@ function wzTranspose(){
     const chords = tokens.filter(t => t === '|' || t === '-' || t === ':' || parseChordToken(t));
     if (chords.length !== tokens.length) return line;
     changed++;
-    return line.replace(/\S+/g, function(tok){
-      const c = parseChordToken(tok);
-      if (!c) return tok;
-      let s = nm(c.pc + steps) + c.suffix;
-      if (c.bass !== null) s += '/' + nm(c.bass + steps);
-      return s;
-    });
+    /* Jeder Akkord bleibt in seiner Spalte über dem Text; wird ein Akkord länger,
+       rücken nur die folgenden nach, bis wieder Platz ist */
+    let res = '';
+    const re = /\S+/g;
+    let mt;
+    while ((mt = re.exec(line)) !== null){
+      const c = parseChordToken(mt[0]);
+      let tok = mt[0];
+      if (c){
+        tok = nm(c.pc + steps) + c.suffix;
+        if (c.bass !== null) tok += '/' + nm(c.bass + steps);
+      }
+      if (res.length < mt.index) res += ' '.repeat(mt.index - res.length);
+      else if (res.length) res += ' ';
+      res += tok;
+    }
+    return res;
   });
   el('wz-out').value = out.join('\n');
   el('wz-transinfo').textContent = changed + ' Akkordzeile(n) um ' + steps + ' Halbtöne verschoben';
@@ -1734,8 +1822,10 @@ function wzTranspose(){
 /* ======================================================================
    12. Rahmen: Reiter, Einstellungen, Start
    ====================================================================== */
-function save(k, v){ try { localStorage.setItem('gw_' + k, JSON.stringify(v)); } catch(e){} }
-function load(k, d){ try { const v = localStorage.getItem('gw_' + k); return v === null ? d : JSON.parse(v); } catch(e){ return d; } }
+/* Einstellungen nur für die laufende Sitzung (bewusst ohne localStorage) */
+const SETTINGS = {};
+function save(k, v){ SETTINGS[k] = v; }
+function load(k, d){ return SETTINGS[k] === undefined ? d : SETTINGS[k]; }
 
 function showTab(name){
   document.querySelectorAll('.tab').forEach(s => s.classList.toggle('active', s.id === 'tab-' + name));
@@ -1744,8 +1834,18 @@ function showTab(name){
   window.scrollTo({top:0, behavior:'instant'});
 }
 
+/* Beschriftungen, die beim Aufbau einmal erzeugt wurden, neu setzen */
+function relabel(){
+  document.querySelectorAll('#ak-roots .chip, #gb-roots .chip').forEach(b => { b.textContent = noteName(+b.dataset.pc); });
+  Array.prototype.forEach.call(el('ta-key').options, o => { o.textContent = noteName(+o.value); });
+  const wants = JSON.parse(el('wz-capowant').dataset.list);
+  Array.prototype.forEach.call(el('wz-capowant').options, o => { const w = wants[+o.value]; o.textContent = chordLabel(w.pc, w.type); });
+}
+
 function renderAll(){
-  akRender(); gbRender(); taRender(); stRefs();
+  relabel();
+  akRender(); gbRender(); taRender(); stRefs(); wzCapo();
+  if (GE.mode === 'fret') geNew(false);   /* Aufgabe hängt von Stimmung und Notennamen ab */
   el('wz-frets').innerHTML = strings().map((m, i) =>
     '<label class="check">' + (strings().length - i) + '<input type="text" class="wzf" data-s="' + i +
     '" value="' + (i === 0 ? 'x' : '0') + '" style="width:3rem;text-align:center"></label>').join('');
@@ -1779,7 +1879,10 @@ function init(){
     if (e.code === 'Space' && document.activeElement.tagName !== 'INPUT' &&
         document.activeElement.tagName !== 'TEXTAREA' && document.activeElement.tagName !== 'SELECT'){
       if (document.querySelector('#tab-metronom').classList.contains('active')){
-        e.preventDefault(); MT.running ? mtStop() : mtStart();
+        e.preventDefault();
+        /* fokussierten Knopf lösen, sonst löst die Leertaste ihn beim Loslassen zusätzlich aus */
+        if (document.activeElement.tagName === 'BUTTON') document.activeElement.blur();
+        MT.running ? mtStop() : mtStart();
       }
     }
   });
