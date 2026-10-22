@@ -98,11 +98,15 @@
     border-radius:5px; font-size:13px; }
   #drop .open:hover{ background:var(--ink-2); }
   #drop code{ background:#eae7df; padding:.05rem .35rem; border-radius:3px; font-size:12px; }
+  #drop .home a{ color:var(--brass-dim); font-size:12px; text-decoration:none; }
+  #drop .home a:hover{ text-decoration:underline; }
+  a.btn.home{ text-decoration:none; color:var(--brass); }
 
   body.dragging #drop{ display:flex; }
   body.dragging #reader{ outline:2px dashed var(--brass); outline-offset:-8px; }
 
-  #err{ position:absolute; left:50%; bottom:1rem; transform:translateX(-50%);
+  /* Fehler oben, Hinweise unten – so überdecken sie sich nicht */
+  #err{ position:absolute; left:50%; top:4.2rem; transform:translateX(-50%);
     background:#7a2b2b; color:#fff; padding:.5rem .8rem; border-radius:5px;
     font-size:12px; max-width:80%; z-index:10; display:none; }
 
@@ -115,6 +119,7 @@
     #toc{ position:absolute; z-index:6; top:0; bottom:0; left:0; box-shadow:0 0 30px rgba(0,0,0,.4); }
     #author{ display:none; }
     .edge{ display:none; }
+    a.btn.home{ display:none; }
   }
 </style>
 </head>
@@ -145,6 +150,8 @@
       <button class="btn" id="next" title="Weiter (→)">›</button>
     </span>
     <span id="pos">–/–</span>
+    <a class="btn home" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener"
+       title="IT Zwieseltal – itzwieseltal.wordpress.com">IT·ZT</a>
   </div>
 
   <div id="stage">
@@ -160,7 +167,8 @@
            Läuft komplett offline &amp; ohne externe Bibliotheken.</p>
         <label class="file"><button class="open" type="button"
           onclick="this.parentNode.querySelector('input').click()">Datei wählen</button>
-          <input type="file" accept=".epub,application/epub+zip" onchange="window.__openFile(this.files[0])"></label>
+          <input type="file" accept=".epub,application/epub+zip" onchange="const f=this.files[0]; this.value=''; if(f) window.__openFile(f)"></label>
+        <p class="home"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></p>
       </div>
     </div>
   </div>
@@ -176,7 +184,10 @@
 const $ = (s) => document.querySelector(s);
 const utf8 = (b) => new TextDecoder("utf-8").decode(b);
 const dirname = (p) => { const i = p.lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); };
-const normHref = (h) => decodeURIComponent(String(h).split("#")[0].split("?")[0]);
+/* Pfadanteil ohne #Fragment/?Query, URL-dekodiert. Ein einzelnes „%“
+   (z. B. „100%.html“) lässt decodeURIComponent werfen – dann roh weiter. */
+const safeDecode = (s) => { try { return decodeURIComponent(s); } catch (_) { return s; } };
+const normHref = (h) => safeDecode(String(h).split("#")[0].split("?")[0]);
 
 function resolvePath(base, rel){
   if (rel.startsWith("/")) rel = rel.slice(1);
@@ -196,6 +207,8 @@ function guessMime(path){
     svg:"image/svg+xml", webp:"image/webp", bmp:"image/bmp",
     css:"text/css", xhtml:"application/xhtml+xml", html:"text/html",
     ttf:"font/ttf", otf:"font/otf", woff:"font/woff", woff2:"font/woff2",
+    mp3:"audio/mpeg", m4a:"audio/mp4", ogg:"audio/ogg", oga:"audio/ogg",
+    wav:"audio/wav", mp4:"video/mp4", m4v:"video/mp4", webm:"video/webm",
     js:"text/javascript", json:"application/json",
     ncx:"application/x-dtbncx+xml", opf:"application/oebps-package+xml"
   })[ext] || "application/octet-stream";
@@ -324,37 +337,40 @@ async function dataURLFor(path){
    Beim normalen Lesen liefern assetRef/cssRef genau das, was sie früher
    auch geliefert haben: eine data:-URL bzw. den fertigen CSS-Text.
 
-   Während des Exports (bake ≠ null) wandern Bilder, Schriften und
+   Während des Exports (bk ≠ null) wandern Bilder, Schriften und
    Stylesheets stattdessen EINMAL in gemeinsame Tabellen; das Kapitel
    bekommt nur eine kurze Marke. Sonst läge ein 4-MB-Schriftpaket in
    jedem einzelnen Kapitel erneut in der Datei.
+
+   bk = { assets[], assetIdx, styles[], styleIdx } wird als Parameter
+   durchgereicht (nicht global), damit gleichzeitiges Blättern während
+   des Exports normale Kapitel mit echten data:-URLs bekommt.
    ------------------------------------------------------------------ */
-let bake = null;   // { assets[], assetIdx, styles[], styleIdx } – nur während des Exports
 
 /* Marken aus dem Private-Use-Bereich: gültige XML-Zeichen (Steuerzeichen
    wären es nicht) und in echtem Buchtext praktisch ausgeschlossen. */
 const MARK_A = (i) => "\uE000A" + i + "\uE001";   // Asset (data:-URL)
 const MARK_S = (i) => "\uE000S" + i + "\uE001";   // Stylesheet (CSS-Text)
 
-async function assetRef(path){
+async function assetRef(path, bk){
   const url = await dataURLFor(path);
-  if (!bake) return url;
-  let i = bake.assetIdx.get(path);
-  if (i === undefined){ i = bake.assets.push(url) - 1; bake.assetIdx.set(path, i); }
+  if (!bk) return url;
+  let i = bk.assetIdx.get(path);
+  if (i === undefined){ i = bk.assets.push(url) - 1; bk.assetIdx.set(path, i); }
   return MARK_A(i);
 }
 
-async function cssRef(path){
-  if (!bake){
+async function cssRef(path, bk){
+  if (!bk){
     if (cssCache.has(path)) return cssCache.get(path);
-    const css = await inlineCss(path);
+    const css = await inlineCss(path, null);
     cssCache.set(path, css);
     return css;
   }
-  let i = bake.styleIdx.get(path);
+  let i = bk.styleIdx.get(path);
   if (i === undefined){
-    i = bake.styles.push(await inlineCss(path)) - 1;
-    bake.styleIdx.set(path, i);
+    i = bk.styles.push(await inlineCss(path, bk)) - 1;
+    bk.styleIdx.set(path, i);
   }
   return MARK_S(i);
 }
@@ -368,19 +384,27 @@ function expandBaked(html){
     .replace(/\uE000A(\d+)\uE001/g, (m, i) => A[+i] !== undefined ? A[+i] : m);
 }
 
-async function inlineCss(path, seen){
+async function inlineCss(path, bk, seen){
   seen = seen || new Set();
   if (seen.has(path)) return "";
   seen.add(path);
-  let css = utf8(await book.zip.getBytes(path));
-  const base = dirname(path);
+  return rewriteCss(utf8(await book.zip.getBytes(path)), dirname(path), bk, seen);
+}
+
+/* CSS-Text umschreiben: @import einbetten, url() -> data:/Marke.
+   base = Verzeichnis, gegen das relative Pfade aufgelöst werden
+   (Stylesheet-Datei oder – bei <style>/style="" – das Kapitel). */
+async function rewriteCss(css, base, bk, seen){
+  seen = seen || new Set();
 
   // @import (url() oder "…") rekursiv einbetten
   for (const m of [...css.matchAll(/@import\s+(?:url\(\s*)?(['"]?)([^'")]+)\1\s*\)?\s*;/g)]){
     const raw = m[2].trim();
     if (/^(data:|https?:)/i.test(raw)) continue;
     const t = resolvePath(base, normHref(raw));
-    css = css.replace(m[0], book.zip.entries.has(t) ? await inlineCss(t, seen) : "");
+    const sub = book.zip.entries.has(t) ? await inlineCss(t, bk, seen) : "";
+    // Ersatz als Funktion: sonst würden $&, $` und $' im CSS interpretiert
+    css = css.replace(m[0], () => sub);
   }
   // url(...) -> data:
   const reps = [];
@@ -388,7 +412,7 @@ async function inlineCss(path, seen){
     const raw = m[2].trim();
     if (/^(data:|https?:)/i.test(raw)) continue;
     const t = resolvePath(base, normHref(raw));
-    if (book.zip.entries.has(t)) reps.push([m[0], `url("${await assetRef(t)}")`]);
+    if (book.zip.entries.has(t)) reps.push([m[0], `url("${await assetRef(t, bk)}")`]);
   }
   for (const [f, to] of reps) css = css.split(f).join(to);
   return css;
@@ -398,7 +422,7 @@ const READER_BASE = `
   html{ -webkit-text-size-adjust:100%; }
   body{ margin:0 auto !important; max-width:40rem;
         padding:2.2rem 1.5rem 30vh !important;
-        line-height:1.65; font-size:var(--rfs,18px);
+        line-height:1.65;
         font-family:Georgia,"Iowan Old Style",serif; }
   img,svg,image{ max-width:100% !important; height:auto; }
   pre,code{ white-space:pre-wrap; word-break:break-word; }
@@ -413,7 +437,20 @@ const THEMES = {
 };
 const READER_BG = { paper:"#faf9f6", sepia:"#f4ecd8", night:"#000" };
 
-async function buildChapterHTML(path){
+/* Schriftgröße: steht als letzter Block im Kapitel und mit !important,
+   sonst gewinnt das Buch-CSS (z. B. body{font-size:11pt}) und A+/A−
+   bewirkt nichts. Absätze in em/rem/% skalieren damit mit. */
+const FONT_CSS = `html{ font-size:var(--rfs,18px) !important; }
+                  body{ font-size:1rem !important; }`;
+
+/* Inhaltsrichtlinie fürs Kapitel: nur eingebettete Inhalte (data:) und
+   Inline-Stile. Externe Bilder, Schriften, @imports oder Tracking-Pixel
+   aus dem Buch werden so nicht geladen – der Viewer bleibt offline. */
+const CHAPTER_CSP = "default-src 'none'; img-src data:; media-src data:; " +
+                    "font-src data:; style-src 'unsafe-inline' data:";
+
+async function buildChapterHTML(path, bk){
+  bk = bk || null;
   const raw = utf8(await book.zip.getBytes(path));
   let d = xml(raw, "application/xhtml+xml") || xml(raw, "text/html")
         || new DOMParser().parseFromString(raw, "text/html");
@@ -422,7 +459,16 @@ async function buildChapterHTML(path){
   // <img src>
   for (const img of d.querySelectorAll("img[src]")){
     const t = resolvePath(base, normHref(img.getAttribute("src")));
-    if (book.zip.entries.has(t)) img.setAttribute("src", await assetRef(t));
+    if (book.zip.entries.has(t)) img.setAttribute("src", await assetRef(t, bk));
+  }
+  // srcset hat Vorrang vor src und zeigt mit relativen Pfaden in
+  // about:srcdoc ins Leere -> entfernen, das eingebettete src genügt.
+  for (const img of d.querySelectorAll("img[srcset]")){
+    if (img.hasAttribute("src")){ img.removeAttribute("srcset"); img.removeAttribute("sizes"); }
+  }
+  // <picture><source srcset> ebenso: dann greift das <img> darin
+  for (const src of [...d.querySelectorAll("picture > source")]){
+    if (src.parentNode.querySelector("img[src]")) src.remove();
   }
   // SVG <image href / xlink:href>
   for (const im of d.querySelectorAll("image")){
@@ -430,17 +476,40 @@ async function buildChapterHTML(path){
     if (!href) continue;
     const t = resolvePath(base, normHref(href));
     if (book.zip.entries.has(t)){
-      const u = await assetRef(t);
+      const u = await assetRef(t, bk);
       im.setAttribute("href", u); im.setAttribute("xlink:href", u);
     }
   }
+  // <audio>/<video>/<source> src und <video poster>
+  for (const el of d.querySelectorAll("audio[src], video[src], source[src], track[src]")){
+    const t = resolvePath(base, normHref(el.getAttribute("src")));
+    if (book.zip.entries.has(t)) el.setAttribute("src", await assetRef(t, bk));
+  }
+  for (const v of d.querySelectorAll("video[poster]")){
+    const t = resolvePath(base, normHref(v.getAttribute("poster")));
+    if (book.zip.entries.has(t)) v.setAttribute("poster", await assetRef(t, bk));
+  }
+  // Vorhandene <style>-Blöcke und style="" im Kapitel: url() relativ zum Kapitel
+  for (const st of d.querySelectorAll("style")){
+    if (/url\(|@import/i.test(st.textContent))
+      st.textContent = await rewriteCss(st.textContent, base, bk);
+  }
+  for (const el of d.querySelectorAll("[style]")){
+    const s = el.getAttribute("style");
+    if (/url\(/i.test(s)) el.setAttribute("style", await rewriteCss(s, base, bk));
+  }
+  // Umleitungen (<meta http-equiv="refresh">) und <base> haben im Viewer nichts verloren
+  for (const m of [...d.querySelectorAll("meta[http-equiv], base")]){
+    if (m.localName === "base" || /refresh/i.test(m.getAttribute("http-equiv"))) m.remove();
+  }
+
   // <link stylesheet> -> inline <style>
   for (const link of [...d.querySelectorAll('link[rel~="stylesheet"], link[href$=".css"]')]){
     const href = link.getAttribute("href"); if (!href){ link.remove(); continue; }
     const t = resolvePath(base, normHref(href));
     if (!book.zip.entries.has(t)){ link.remove(); continue; }
     const style = d.createElement("style");
-    style.textContent = await cssRef(t);
+    style.textContent = await cssRef(t, bk);
     link.replaceWith(style);
   }
 
@@ -449,10 +518,23 @@ async function buildChapterHTML(path){
   if (!head){ head = d.createElement("head"); d.documentElement.prepend(head); }
   const base0 = d.createElement("style"); base0.textContent = READER_BASE;
   head.prepend(base0);
+  // CSP ganz an den Anfang, vor jede Ressource
+  const csp = d.createElement("meta");
+  csp.setAttribute("http-equiv", "Content-Security-Policy");
+  csp.setAttribute("content", CHAPTER_CSP);
+  head.prepend(csp);
   const themeEl = d.createElement("style"); themeEl.id = "__theme";
   themeEl.textContent = THEMES[state.theme]; head.appendChild(themeEl);
+  const fontEl = d.createElement("style"); fontEl.id = "__font";
+  fontEl.textContent = FONT_CSS; head.appendChild(fontEl);
 
-  return "<!DOCTYPE html>" + d.documentElement.outerHTML;
+  // Als HTML serialisieren, nicht als XML: Im XML-Modus würden Textknoten
+  // escaped („p > em“ -> „p &gt; em“). Das srcdoc wird aber als HTML
+  // geparst, wo <style> Rohtext ist – das &gt; bliebe stehen und der
+  // Selektor wäre kaputt. Darum ins HTML-Dokument importieren.
+  const h = document.implementation.createHTMLDocument("");
+  h.replaceChild(h.importNode(d.documentElement, true), h.documentElement);
+  return "<!DOCTYPE html>" + h.documentElement.outerHTML;
 }
 
 /* ========================================================================
@@ -462,6 +544,8 @@ async function loadBook(zip){
   const container = xml(utf8(await zip.getBytes("META-INF/container.xml")), "application/xml");
   if (!container) throw new Error("META-INF/container.xml unlesbar.");
   const rootfile = container.getElementsByTagNameNS("*", "rootfile")[0];
+  if (!rootfile || !rootfile.getAttribute("full-path"))
+    throw new Error("container.xml nennt keine OPF-Paketdatei (rootfile fehlt).");
   const opfPath = normHref(rootfile.getAttribute("full-path"));
   const opfDir = dirname(opfPath);
 
@@ -477,9 +561,12 @@ async function loadBook(zip){
   }
   const spine = [];
   const spineEl = opf.getElementsByTagNameNS("*", "spine")[0];
+  if (!spineEl) throw new Error("OPF ohne <spine> – keine Lesereihenfolge vorhanden.");
+  // Bewusst ALLE itemrefs, auch linear="no" (Fußnoten, Anhänge): sonst
+  // wären Links und TOC-Einträge dorthin tot, weil sie nicht im Spine liegen.
   for (const ir of spineEl.getElementsByTagNameNS("*", "itemref")){
     const m = manifest.get(ir.getAttribute("idref"));
-    if (m && (ir.getAttribute("linear") !== "no" || spine.length === 0 || true)) spine.push(m);
+    if (m) spine.push(m);
   }
   if (!spine.length) throw new Error("Leerer Spine – nichts zum Anzeigen.");
 
@@ -504,8 +591,9 @@ async function parseNav(path){
   const x = xml(utf8(await book.zip.getBytes(path)), "application/xhtml+xml");
   if (!x) return [];
   const base = dirname(path), navs = [...x.getElementsByTagName("nav")];
+  // epub:type kann mehrere Tokens enthalten („toc landmarks“)
   const nav = navs.find(n => (n.getAttributeNS("http://www.idpf.org/2007/ops","type")
-                            || n.getAttribute("epub:type")) === "toc") || navs[0];
+                            || n.getAttribute("epub:type") || "").split(/\s+/).includes("toc")) || navs[0];
   if (!nav) return [];
   const out = [];
   for (const a of nav.querySelectorAll("a[href]")){
@@ -555,14 +643,23 @@ async function chapterHTML(index){
   return await buildChapterHTML(book.spine[index].path);
 }
 
+let navToken = 0;   // nur der jüngste goTo-Aufruf darf das Kapitel anzeigen
+
 async function goTo(index, frag){
   if (!book) return;
   index = Math.max(0, Math.min(book.spine.length - 1, index));
   cur = index;
+  const token = ++navToken;
   frame.classList.add("fade");
+  updateChrome();
   let html;
   try { html = await chapterHTML(index); }
-  catch (e){ showError("Kapitel konnte nicht geladen werden: " + e.message); frame.classList.remove("fade"); return; }
+  catch (e){
+    if (token !== navToken) return;
+    showError("Kapitel konnte nicht geladen werden: " + e.message); frame.classList.remove("fade"); return;
+  }
+  // Inzwischen wurde weitergeblättert – dieses Ergebnis ist veraltet
+  if (token !== navToken) return;
 
   frame.onload = () => {
     frame.classList.remove("fade");
@@ -573,17 +670,39 @@ async function goTo(index, frag){
     const th = idoc.getElementById("__theme");
     if (th) th.textContent = THEMES[state.theme];
     // Sprungmarke
-    if (frag){ try { idoc.getElementById(frag)?.scrollIntoView(); } catch(_){} }
+    if (frag) scrollToFrag(idoc, frag);
     else { try { idoc.documentElement.scrollTop = 0; idoc.body && (idoc.body.scrollTop = 0); } catch(_){} }
     wireIframe(idoc);
   };
   frame.srcdoc = html;
 
   $("#reader").style.background = READER_BG[state.theme];
-  updateChrome();
+}
+
+/* Anker finden: id (roh und URL-dekodiert) oder alte <a name="…"> */
+function scrollToFrag(idoc, frag){
+  try {
+    const cand = [frag, safeDecode(frag)];
+    let el = null;
+    for (const f of cand){
+      el = idoc.getElementById(f) || idoc.getElementsByName(f)[0];
+      if (el) break;
+    }
+    if (el) el.scrollIntoView();
+  } catch(_){}
 }
 
 function wireIframe(idoc){
+  // Datei direkt über das Buch gezogen: Die Ereignisse landen im iframe,
+  // nicht in der Elternseite. Overlay einblenden, dann übernimmt es.
+  ["dragenter","dragover"].forEach(ev => idoc.addEventListener(ev, (e) => {
+    e.preventDefault(); document.body.classList.add("dragging");
+  }));
+  idoc.addEventListener("drop", (e) => {
+    e.preventDefault(); document.body.classList.remove("dragging");
+    const f = e.dataTransfer?.files?.[0]; if (f) openFile(f);
+  });
+
   // interne Links abfangen
   idoc.addEventListener("click", (e) => {
     const a = e.target.closest && e.target.closest("a[href]");
@@ -594,8 +713,9 @@ function wireIframe(idoc){
     const frag = href.includes("#") ? href.split("#")[1] : null;
     const target = resolvePath(dirname(book.spine[cur].path), normHref(href));
     const idx = spineIndexForPath(target);
-    if (idx >= 0) goTo(idx, frag);
-    else if (frag){ try { idoc.getElementById(frag)?.scrollIntoView(); } catch(_){} }
+    // Sprung innerhalb des aktuellen Kapitels: nur scrollen, nicht neu laden
+    if (frag && (idx < 0 || idx === cur)) scrollToFrag(idoc, frag);
+    else if (idx >= 0) goTo(idx, frag);
   });
   // Pfeiltasten auch bei Fokus im iframe
   idoc.addEventListener("keydown", onKey);
@@ -628,7 +748,9 @@ function renderToc(){
     a.onclick = (e) => {
       e.preventDefault();
       const idx = spineIndexForPath(t.path);
-      if (idx >= 0) goTo(idx, t.frag);
+      if (idx >= 0 && idx === cur && t.frag && frame.contentDocument)
+        scrollToFrag(frame.contentDocument, t.frag);      // gleiches Kapitel: nur scrollen
+      else if (idx >= 0) goTo(idx, t.frag);
       if (window.matchMedia("(max-width:640px)").matches) el.classList.add("hidden");
     };
     el.appendChild(a);
@@ -699,7 +821,7 @@ function buildStandaloneParts(data){
   const shell = "<!DOCTYPE html>\n" + root.outerHTML + "\n";
   const payload = "window.__BAKED=" + jsLiteral(data) + ";";
   const i = shell.indexOf(MARK);
-  if (i < 0) return [shell.replace(MARK, payload)];        // Notnagel
+  if (i < 0) return [shell.replace(MARK, () => payload)];  // Notnagel ($ im Buchtext!)
   return [shell.slice(0, i), payload, shell.slice(i + MARK.length)];
 }
 
@@ -724,7 +846,7 @@ async function exportHTML(){
       assets   = baked.assets || [];
       styles   = baked.styles || [];
     } else {
-      bake = { assets:[], assetIdx:new Map(), styles:[], styleIdx:new Map() };
+      const bk = { assets:[], assetIdx:new Map(), styles:[], styleIdx:new Map() };
       chapters = [];
       const n = book.spine.length;
       for (let i = 0; i < n; i++){
@@ -732,10 +854,9 @@ async function exportHTML(){
         showNote("Kapitel werden eingebettet … " + (i + 1) + " / " + n, 0);
         await breathe();                              // UI atmen lassen
         chapters.push({ path: book.spine[i].path,
-                        html: await buildChapterHTML(book.spine[i].path) });
+                        html: await buildChapterHTML(book.spine[i].path, bk) });
       }
-      assets = bake.assets; styles = bake.styles;
-      bake = null;
+      assets = bk.assets; styles = bk.styles;
     }
 
     showNote("HTML wird zusammengesetzt …", 0);
@@ -765,7 +886,6 @@ async function exportHTML(){
     showNote(null);
     showError("Speichern fehlgeschlagen: " + (e.message || e));
   } finally {
-    bake = null;
     btn.textContent = label;
     btn.disabled = false;
     exportHTML._busy = false;
@@ -835,7 +955,11 @@ document.querySelectorAll(".btn.theme").forEach(b => {
   };
 });
 
-$("#file").onchange = (e) => e.target.files[0] && openFile(e.target.files[0]);
+$("#file").onchange = (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";          // sonst feuert onchange bei derselben Datei nicht erneut
+  if (f) openFile(f);
+};
 
 // Drag & Drop
 ["dragenter","dragover"].forEach(ev => document.addEventListener(ev, (e) => {

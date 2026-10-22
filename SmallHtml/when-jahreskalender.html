@@ -165,7 +165,10 @@ label.f{display:block; font-family:var(--mono); font-size:10.5px; letter-spacing
 .row .btn{background:var(--ink); border-color:var(--ink); color:#fff}
 .row .btn:hover{background:#22304b}
 .filestat{font-family:var(--mono); font-size:11px; color:var(--ink-faint); margin-bottom:8px; line-height:1.6}
-.warn{border-left:3px solid #c58b1e; background:#f6efdf; padding:7px 9px; font-family:var(--mono); font-size:11px; margin-bottom:6px}
+.fwarn{border-left:3px solid #c58b1e; background:#f6efdf; padding:7px 9px; font-family:var(--mono); font-size:11px; margin-bottom:6px; white-space:pre-wrap; word-break:break-word}
+.legend .sw.today{background:var(--card); box-shadow:inset 0 0 0 2px var(--accent)}
+.foot{font-family:var(--mono); font-size:11px; color:var(--ink-faint); padding:10px 2px 0}
+.foot a{color:var(--ink-soft)}
 
 /* ---------- Hinweisleiste, solange keine Datei geladen ist ---------- */
 .hint{
@@ -200,7 +203,7 @@ label.f{display:block; font-family:var(--mono); font-size:10.5px; letter-spacing
   @page{ size:A4 landscape; margin:7mm; }
   html,body{height:100%; background:#fff; color:#000;
     -webkit-print-color-adjust:exact; print-color-adjust:exact}
-  header,aside,.hint,.legend,#overlay{display:none !important}
+  header,aside,.hint,.legend,.foot,#overlay{display:none !important}
   main{display:flex; flex-direction:column; align-items:stretch;
        width:100%; height:100%; padding:0; gap:0}
   .gridwrap{display:flex; flex-direction:column; flex:1 1 auto;
@@ -267,9 +270,10 @@ label.f{display:block; font-family:var(--mono); font-size:10.5px; letter-spacing
       <span><i class="sw" style="background:var(--we)"></i> Samstag</span>
       <span><i class="sw" style="background:var(--su)"></i> Sonntag</span>
       <span><b style="color:var(--accent); font-size:14px; line-height:1">*</b> Eintrag vorhanden — anklicken</span>
-      <span><i class="sw" style="background:var(--accent)"></i> heute</span>
+      <span><i class="sw today"></i> heute</span>
       <span>Pfeiltasten: Auswahl bewegen</span>
     </div>
+    <div class="foot">Mehr Selbstgebautes: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></div>
   </div>
 
   <aside>
@@ -295,6 +299,7 @@ const MON_EN_FULL = ["january","february","march","april","may","june","july",
                      "august","september","october","november","december"];
 const MON_CAP = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const WD_EN = ["sun","mon","tue","wed","thu","fri","sat"];
+const WD_EN_FULL = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
 
 function jdn(y,m,d){
   const a=Math.floor((14-m)/12), yy=y+4800-a, mm=m+12*a-3;
@@ -303,13 +308,17 @@ function jdn(y,m,d){
 function isLeap(y){ return (y%4===0 && y%100!==0) || y%400===0; }
 function daysInMonth(y,m){ return [31, isLeap(y)?29:28,31,30,31,30,31,31,30,31,30,31][m-1]; }
 function dayOfYear(y,m,d){ let n=d; for(let i=1;i<m;i++) n+=daysInMonth(y,i); return n; }
-function weekday(y,m,d){ return new Date(y,m-1,d).getDay(); }           // 0 = Sonntag
+/* Rein arithmetisch über die JDN, damit auch die Jahre 1–99 stimmen
+   (new Date(50,0,1) wäre der 1.1.1950). */
+function fromJDN(J){
+  const a=J+32044, b=Math.floor((4*a+3)/146097), c=a-Math.floor(146097*b/4),
+        d=Math.floor((4*c+3)/1461), e=c-Math.floor(1461*d/4), m=Math.floor((5*e+2)/153);
+  return { d:e-Math.floor((153*m+2)/5)+1, m:m+3-12*Math.floor(m/10), y:100*b+d-4800+Math.floor(m/10) };
+}
+function weekday(y,m,d){ return (jdn(y,m,d)+1)%7; }                    // 0 = Sonntag
 function isoWeek(y,m,d){
-  const t=new Date(Date.UTC(y,m-1,d));
-  const dn=t.getUTCDay()||7;
-  t.setUTCDate(t.getUTCDate()+4-dn);
-  const y0=new Date(Date.UTC(t.getUTCFullYear(),0,1));
-  return Math.ceil(((t-y0)/86400000+1)/7);
+  const J=jdn(y,m,d), thu=J-((weekday(y,m,d)+6)%7)+3;                    // Donnerstag derselben ISO-Woche
+  return Math.floor((thu-jdn(fromJDN(thu).y,1,1))/7)+1;
 }
 function easterJDN(y){
   const a=y%19,b=Math.floor(y/100),c=y%100,d=Math.floor(b/4),e=b%4,
@@ -320,13 +329,18 @@ function easterJDN(y){
   return jdn(y,month,day);
 }
 
-/* Umgebung der Variablen für einen Tag — analog zu when:
-   y Jahr, m Monat, d Tag, w Wochentag, j Julianische Tageszahl,
-   z Tag im Jahr, e Abstand zu Ostersonntag (0 = Ostersonntag), a = w */
+/* Umgebung der Variablen für einen Tag — wie in when:
+   y Jahr, m Monat, d Tag, w Wochentag (0 = Sonntag)
+   j modifizierte julianische Tageszahl (MJD), z Tag im Jahr (1 = Neujahr)
+   e Tage bis Ostersonntag (0 = Ostern, 2 = Karfreitag, -1 = Ostermontag)
+   a 1 für Tag 1–7 des Monats, 2 für 8–14, ...   (w=sun & m=may & a=2 → Muttertag)
+   b 1 für die letzten 7 Tage des Monats, 2 für die 7 davor, ...
+   c Mo/Fr: Monatstag des nächstgelegenen Wochenendtags, sonst -1 */
 function envFor(y,m,d){
-  const J=jdn(y,m,d);
-  return { y, m, d, w:weekday(y,m,d), a:weekday(y,m,d), j:J,
-           z:dayOfYear(y,m,d), e:J-easterJDN(y) };
+  const J=jdn(y,m,d), w=weekday(y,m,d);
+  const c = w===1 ? fromJDN(J-1).d : w===5 ? fromJDN(J+1).d : -1;
+  return { y, m, d, w, j:J-2400001, z:dayOfYear(y,m,d), e:easterJDN(y)-J,
+           a:Math.floor((d-1)/7)+1, b:Math.floor((daysInMonth(y,m)-d)/7)+1, c };
 }
 
 /* ---- Ausdrucks-Parser: & | ! = != < > <= >= + - * / % ( ) ---- */
@@ -377,10 +391,11 @@ function evalAst(n,env){
   switch(n.k){
     case "num": return n.v;
     case "id": {
-      if(n.v in env) return env[n.v];
+      if(Object.prototype.hasOwnProperty.call(env,n.v)) return env[n.v];
       const mi=MON_EN.indexOf(n.v); if(mi>=0) return mi+1;
       const mf=MON_EN_FULL.indexOf(n.v); if(mf>=0) return mf+1;
-      const wi=WD_EN.indexOf(n.v.slice(0,3)); if(wi>=0 && n.v.length<=9) return wi;
+      const wi=WD_EN.indexOf(n.v.slice(0,3));
+      if(wi>=0 && (n.v.length===3 || WD_EN_FULL[wi].startsWith(n.v))) return wi;
       throw new Error("unbekannter Name: "+n.v);
     }
     case "neg": return -evalAst(n.l,env);
@@ -467,6 +482,7 @@ function parseLine(raw, idx){
   }
   try{
     line.ast=parseExpr(datePart);
+    evalAst(line.ast, envFor(2000,1,1));      // unbekannte Namen (Tippfehler) gleich hier melden
     line.kind="expr";
   }catch(e){
     line.kind="error"; line.err=e.message;
@@ -526,12 +542,14 @@ const WD_DE_L = ["Sonntag","Montag","Dienstag","Mittwoch","Donnerstag","Freitag"
 const state = { lines:[], year:new Date().getFullYear(), index:{}, sel:null, filename:"calendar", loaded:false };
 const $ = s => document.querySelector(s);
 const el = (t,c,txt) => { const e=document.createElement(t); if(c)e.className=c; if(txt!=null)e.textContent=txt; return e; };
-const todayKey = (()=>{ const t=new Date(); return t.getFullYear()+"-"+(t.getMonth()+1)+"-"+t.getDate(); })();
+/* Funktion statt Konstante: bleibt die Seite über Mitternacht offen, wandert "heute" mit. */
+const todayKey = ()=>{ const t=new Date(); return t.getFullYear()+"-"+(t.getMonth()+1)+"-"+t.getDate(); };
 
 /* ---------- Raster ---------- */
 function renderGrid(){
   const cal=$("#cal"); cal.innerHTML="";
-  const y=state.year;
+  const y=state.year, tk=todayKey();
+  state.shownToday=tk;
 
   for(let m=1;m<=12;m++) cal.appendChild(el("div","mhead", MON_DE_S[m-1]+" "+String(m).padStart(2,"0")));
 
@@ -543,7 +561,7 @@ function renderGrid(){
       cell.type="button";
       cell.dataset.m=m; cell.dataset.d=d;
       cell.setAttribute("aria-label", d+". "+MON_DE[m-1]+" "+y+", "+WD_DE_L[w]);
-      if(y+"-"+m+"-"+d===todayKey) cell.classList.add("today");
+      if(y+"-"+m+"-"+d===tk) cell.classList.add("today");
 
       cell.appendChild(el("span","dm", String(d)));
       cell.appendChild(el("span","wd", WD_DE[w]));
@@ -592,7 +610,8 @@ function renderDay(){
   pane.appendChild(el("h2","daytitle", WD_DE[env.w]+" "+d+". "+MON_DE[m-1]+" "+y));
   const meta=el("div","daymeta");
   meta.innerHTML = "KW "+isoWeek(y,m,d)+" &middot; Tag "+env.z+" von "+(isLeap(y)?366:365)+"<br>"+
-     "<b>j</b>="+env.j+" &nbsp; <b>w</b>="+env.w+" &nbsp; <b>e</b>="+(env.e>0?"+":"")+env.e;
+     "<b>w</b>="+env.w+" &nbsp; <b>a</b>="+env.a+" &nbsp; <b>b</b>="+env.b+" &nbsp; <b>c</b>="+env.c+"<br>"+
+     "<b>j</b>="+env.j+" &nbsp; <b>z</b>="+env.z+" &nbsp; <b>e</b>="+(env.e>0?"+":"")+env.e;
   pane.appendChild(meta);
 
   pane.appendChild(el("h3","sec","Einträge"));
@@ -646,12 +665,19 @@ function entryCard(line,m,d){
   edit.addEventListener("click",()=>{
     const inp=el("input"); inp.type="text"; inp.value=line.text;
     txt.replaceWith(inp); inp.focus(); inp.select();
+    /* done verhindert, dass das blur beim Entfernen des Feldes (Chrome) nach
+       Enter ein zweites Mal speichert oder nach Escape doch noch speichert. */
+    let done=false;
     const save=()=>{
+      if(done) return; done=true;
       const v=inp.value.trim();
       if(v){ line.text=v; line.raw=line.datePart+", "+v; }
       reindex(); renderGrid(); renderDay(); renderFile();
     };
-    inp.addEventListener("keydown",e=>{ if(e.key==="Enter") save(); if(e.key==="Escape") renderDay(); });
+    inp.addEventListener("keydown",e=>{
+      if(e.key==="Enter") save();
+      if(e.key==="Escape"){ done=true; renderDay(); }
+    });
     inp.addEventListener("blur",save);
     acts.remove();
   });
@@ -675,12 +701,13 @@ function renderFile(){
   const errs=state.lines.filter(l=>l.kind==="error");
   const cnt=state.lines.filter(l=>l.kind==="ymd"||l.kind==="expr").length;
   const stat=el("div","filestat");
-  stat.innerHTML = state.filename+" &middot; "+state.lines.length+" Zeilen &middot; "+cnt+" Einträge"+
-                   (errs.length?" &middot; "+errs.length+" nicht verstanden":"");
+  stat.textContent = state.filename+" · "+state.lines.length+" Zeilen · "+cnt+" Einträge"+
+                     (errs.length?" · "+errs.length+" nicht verstanden":"");
   pane.appendChild(stat);
   errs.slice(0,8).forEach(e=>{
-    pane.appendChild(el("div","warn","Zeile "+(e.idx+1)+": "+e.err+"\n"+e.raw.trim()));
+    pane.appendChild(el("div","fwarn","Zeile "+(e.idx+1)+": "+e.err+"\n"+e.raw.trim()));
   });
+  if(errs.length>8) pane.appendChild(el("div","filestat","… und "+(errs.length-8)+" weitere"));
 
   const ta=el("textarea"); ta.rows=22; ta.value=serialize(state.lines); ta.spellcheck=false;
   pane.appendChild(ta);
@@ -693,12 +720,16 @@ function renderFile(){
 }
 
 /* ---------- Rahmen ---------- */
-function reindex(){ state.index = buildIndex(state.lines, state.year); }
+function reindex(){
+  state.index = buildIndex(state.lines, state.year);
+  // Hinweis "Leerer Kalender" nur, solange weder Datei noch eigene Einträge da sind
+  const h=$("#hint"); if(h) h.hidden = state.loaded || state.lines.some(l=>l.kind!=="other");
+}
 function loadText(text, name){
   state.lines = parseFile(text);
   if(name) state.filename = name;
+  state.loaded=true;
   reindex(); renderGrid(); renderDay(); renderFile();
-  state.loaded=true; $("#hint").hidden=true;
   $("#fname").textContent=state.filename;
 }
 function doExport(){
@@ -717,7 +748,7 @@ function showTab(which){
   $("#pane-file").hidden = which!=="file";
 }
 function setYear(y){
-  if(!Number.isFinite(y) || y<1 || y>9999) return;
+  if(!Number.isFinite(y) || y<1 || y>9999){ $("#year").value=state.year; return; }
   state.year=y; $("#year").value=y;
   if(state.sel && state.sel.d>daysInMonth(y,state.sel.m)) state.sel=null;
   reindex(); renderGrid(); renderDay();
@@ -763,6 +794,8 @@ $("#year").value=state.year;
 reindex(); renderGrid(); renderFile();
 const now=new Date();
 if(now.getFullYear()===state.year) select(now.getMonth()+1, now.getDate()); else renderDay();
+/* Tageswechsel bemerken (Seite bleibt über Mitternacht offen) */
+setInterval(()=>{ if(todayKey()!==state.shownToday) renderGrid(); }, 60000);
 </script>
 </body>
 </html>

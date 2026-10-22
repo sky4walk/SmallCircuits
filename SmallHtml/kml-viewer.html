@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Track Viewer – KML &amp; GPX</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+      onerror="this.onerror=null;this.href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';">
 <style>
   :root{
     --bg-deep:#14181B;
@@ -107,7 +108,24 @@
   .angle-btn{padding:9px 0;text-align:center;font-family:var(--font-mono);}
   .angle-btn.active{background:var(--accent-info);border-color:var(--accent-info);color:#0D1416;font-weight:700;}
 
-  #mapOuter.custom-pan{cursor:grab;}
+  /* --- Status-/Fehlerleiste über der Karte --- */
+  .map-status{
+    position:absolute;top:64px;left:50%;transform:translateX(-50%);z-index:1500;
+    display:none;align-items:center;gap:10px;max-width:min(560px,92vw);
+    font-size:12.5px;line-height:1.45;color:var(--text-primary);
+    background:rgba(28,34,38,.95);border:1px solid var(--panel-border);border-left:3px solid var(--accent-info);
+    border-radius:8px;padding:8px 10px 8px 12px;
+  }
+  .map-status.visible{display:flex;}
+  .map-status.error{border-left-color:var(--accent-end);}
+  .map-status.warn{border-left-color:var(--accent-track);}
+  .map-status .msg{flex:1;}
+  .map-status .btn{padding:4px 10px;font-size:12px;}
+
+  .blog-link{font-size:11.5px;color:var(--accent-info);text-decoration:none;margin-left:4px;}
+  .blog-link:hover{text-decoration:underline;}
+
+  #mapOuter.custom-pan{cursor:grab;touch-action:none;}
   #mapOuter.custom-pan.grabbing{cursor:grabbing;user-select:none;}
 
   /* --- Empty / drop state --- */
@@ -183,9 +201,12 @@
       <circle cx="22" cy="15" r="1.6" fill="var(--accent-end)" stroke="none"/>
     </svg>
     <span class="brand-name">track<b>•</b>viewer</span>
+    <a class="blog-link" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal</a>
   </div>
   <select class="btn" id="basemapSelect" aria-label="Kartendienst wählen">
     <option value="voyager">CARTO Voyager (hell)</option>
+    <option value="osm">OpenStreetMap Standard</option>
+    <option value="osmde">OpenStreetMap Deutschland</option>
     <option value="positron">CARTO Positron (minimal)</option>
     <option value="dark">CARTO Dark Matter (dunkel)</option>
     <option value="topo">OpenTopoMap (Relief)</option>
@@ -242,6 +263,12 @@
 
 <div class="map-attribution" id="mapAttribution"></div>
 
+<div class="map-status" id="mapStatus" role="status" aria-live="polite">
+  <span class="msg" id="mapStatusMsg"></span>
+  <button class="btn" id="mapStatusAction" style="display:none;"></button>
+  <button class="btn" id="mapStatusClose" aria-label="Meldung schließen">×</button>
+</div>
+
 <div class="modal-backdrop" id="rotateModalBackdrop">
   <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rotateModalTitle">
     <div class="modal-card-head">
@@ -264,8 +291,19 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script>
+  // Falls cdnjs blockiert/nicht erreichbar ist: Leaflet von unpkg nachladen.
+  if (!window.L) document.write('<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"><\/script>');
+</script>
+<script>
 (function(){
   "use strict";
+
+  if (!window.L){
+    var eb = document.getElementById('errorBox');
+    eb.innerHTML = '<div class="error-msg"></div>';
+    eb.firstChild.textContent = 'Die Kartenbibliothek Leaflet konnte nicht geladen werden (keine Internetverbindung oder CDN durch Werbe-/Trackingblocker gesperrt). Bitte Verbindung prüfen und Seite neu laden.';
+    return;
+  }
 
   var map = null;
   var trackLayer = null;
@@ -275,41 +313,162 @@
 
   var cartoAttr = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>';
 
+  var osmAttr = '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende';
+
+  // Alle Dienste bekommen maxZoom 20 und ein eigenes maxNativeZoom: oberhalb
+  // der echten Kachelstufe des Dienstes vergrößert Leaflet die letzte
+  // vorhandene Stufe, statt leere/graue Kacheln anzufordern bzw. beim
+  // Dienstwechsel den Zoom springen zu lassen.
   var basemaps = {
     voyager: {
+      name: 'CARTO Voyager',
       url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+      options: { subdomains:['a','b','c','d'], maxZoom:20, maxNativeZoom:20, attribution: cartoAttr }
+    },
+    osm: {
+      name: 'OpenStreetMap Standard',
+      url: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+      options: { maxZoom:20, maxNativeZoom:19, attribution: osmAttr }
+    },
+    osmde: {
+      name: 'OpenStreetMap Deutschland',
+      url: 'https://tile.openstreetmap.de/{z}/{x}/{y}.png',
+      options: { maxZoom:20, maxNativeZoom:18, attribution: osmAttr + ' | Kacheln: <a href="https://www.openstreetmap.de" target="_blank" rel="noopener">openstreetmap.de</a>' }
     },
     positron: {
+      name: 'CARTO Positron',
       url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+      options: { subdomains:['a','b','c','d'], maxZoom:20, maxNativeZoom:20, attribution: cartoAttr }
     },
     dark: {
+      name: 'CARTO Dark Matter',
       url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-      options: { subdomains:['a','b','c','d'], maxZoom:20, attribution: cartoAttr }
+      options: { subdomains:['a','b','c','d'], maxZoom:20, maxNativeZoom:20, attribution: cartoAttr }
     },
     topo: {
+      name: 'OpenTopoMap',
       url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
-      options: { subdomains:['a','b','c'], maxZoom:17, attribution:
+      options: { subdomains:['a','b','c'], maxZoom:20, maxNativeZoom:17, attribution:
         'Kartendaten: &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>-Mitwirkende, SRTM | Darstellung: &copy; <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a> (CC-BY-SA)' }
     },
     esriTopo: {
+      name: 'Esri World Topo',
       url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
-      options: { maxZoom:19, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>' }
+      options: { maxZoom:20, maxNativeZoom:18, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a>' }
     },
     esriSat: {
+      name: 'Esri Satellit',
       url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      options: { maxZoom:19, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> — Esri, Maxar, Earthstar Geographics, GIS-Community' }
+      options: { maxZoom:20, maxNativeZoom:18, attribution: 'Tiles &copy; <a href="https://www.esri.com" target="_blank" rel="noopener">Esri</a> — Esri, Maxar, Earthstar Geographics, GIS-Community' }
     }
   };
 
-  function setBasemap(key){
+  // Reihenfolge, in der bei Totalausfall automatisch ausgewichen wird
+  // (verschiedene Betreiber hintereinander, damit nicht derselbe CDN folgt).
+  var fallbackOrder = ['voyager', 'osm', 'esriTopo', 'osmde', 'topo', 'positron', 'esriSat', 'dark'];
+  var failedBasemaps = {};
+  var baseLayerStats = null;
+
+  // --- Statusleiste ------------------------------------------------------------
+  var statusTimer = null;
+  function showStatus(msg, kind, actionLabel, actionFn, autoHideMs){
+    var box = document.getElementById('mapStatus');
+    var act = document.getElementById('mapStatusAction');
+    document.getElementById('mapStatusMsg').textContent = msg;
+    box.className = 'map-status visible' + (kind ? ' ' + kind : '');
+    if (actionLabel){
+      act.textContent = actionLabel;
+      act.style.display = '';
+      act.onclick = function(){ hideStatus(); actionFn(); };
+    } else {
+      act.style.display = 'none';
+      act.onclick = null;
+    }
+    clearTimeout(statusTimer);
+    if (autoHideMs) statusTimer = setTimeout(hideStatus, autoHideMs);
+  }
+  function hideStatus(){
+    clearTimeout(statusTimer);
+    document.getElementById('mapStatus').className = 'map-status';
+  }
+  document.getElementById('mapStatusClose').addEventListener('click', hideStatus);
+
+  function nextFallback(fromKey){
+    for (var i = 0; i < fallbackOrder.length; i++){
+      var k = fallbackOrder[i];
+      if (k !== fromKey && !failedBasemaps[k]) return k;
+    }
+    return null;
+  }
+
+  function setBasemap(key, auto){
     var cfg = basemaps[key];
     if (!cfg) return;
+    if (!auto) failedBasemaps = {};          // manuelle Wahl: neuer Anlauf für alle
     if (baseLayer) map.removeLayer(baseLayer);
-    baseLayer = L.tileLayer(cfg.url, cfg.options).addTo(map);
+
+    var layer = L.tileLayer(cfg.url, cfg.options);
+    var st = { key: key, ok: 0, err: 0, warned: false };
+    baseLayerStats = st;
+
+    layer.on('tileload', function(){
+      st.ok++;
+      if (st.ok === 1 && !auto) hideStatus();
+    });
+
+    layer.on('tileerror', function(ev){
+      if (layer !== baseLayer) return;
+      var tile = ev.tile;
+      // Ein Wiederholversuch pro Kachel (hilft bei überlasteten Servern, z. B. OpenTopoMap).
+      if (tile && !tile._retried && navigator.onLine !== false){
+        tile._retried = true;
+        var src = tile.src;
+        setTimeout(function(){
+          if (layer === baseLayer && tile.parentNode){
+            tile.src = src + (src.indexOf('?') < 0 ? '?' : '&') + 'retry=' + Date.now();
+          }
+        }, 1200 + Math.random() * 800);
+        return;
+      }
+      st.err++;
+
+      if (navigator.onLine === false){
+        showStatus('Keine Internetverbindung – Kartenkacheln können nicht geladen werden.', 'error');
+        return;
+      }
+      // Dienst liefert gar nichts → automatisch auf anderen Dienst ausweichen.
+      if (st.ok === 0 && st.err >= 4){
+        failedBasemaps[key] = true;
+        var alt = nextFallback(key);
+        if (alt){
+          document.getElementById('basemapSelect').value = alt;
+          setBasemap(alt, true);
+          showStatus(cfg.name + ' ist gerade nicht erreichbar (Server, Netz oder Werbe-/Trackingblocker). Weiche auf ' + basemaps[alt].name + ' aus.', 'warn', null, null, 8000);
+        } else {
+          showStatus('Kein Kartendienst erreichbar. Häufige Ursache: Tracking-Schutz des Browsers oder ein Werbeblocker sperrt die Kachelserver.', 'error',
+            'Erneut versuchen', function(){ setBasemap(fallbackOrder[0]); document.getElementById('basemapSelect').value = fallbackOrder[0]; });
+        }
+        return;
+      }
+      // Teilweise Ausfälle: einmalig Hinweis mit Neuladen-Knopf.
+      if (st.ok > 0 && st.err >= 3 && !st.warned){
+        st.warned = true;
+        showStatus('Einige Kacheln von ' + cfg.name + ' konnten nicht geladen werden.', 'warn',
+          'Neu laden', function(){ if (baseLayer) baseLayer.redraw(); });
+      }
+    });
+
+    baseLayer = layer.addTo(map);
     document.getElementById('mapAttribution').innerHTML = cfg.options.attribution;
   }
+
+  window.addEventListener('online', function(){
+    hideStatus();
+    if (map && baseLayer) baseLayer.redraw();
+  });
+  window.addEventListener('offline', function(){
+    showStatus('Keine Internetverbindung – Karte wird nicht aktualisiert.', 'error');
+  });
 
   function syncZoomInput(){
     var zi = document.getElementById('zoomInput');
@@ -359,7 +518,10 @@
       currentAngle = 0;
       applyMapFrame();
     }
-    map.fitBounds(bounds, { padding:[40,40] });
+    // animate:false ist wichtig: sonst liefert getCenter() in applyMapFrame()
+    // noch den alten Mittelpunkt, und bei gedrehter Karte springt die Ansicht
+    // nach dem Laden zurück an die vorherige Position.
+    map.fitBounds(bounds, { padding:[40,40], animate:false });
     if (savedAngle !== 0){
       currentAngle = savedAngle;
       applyMapFrame();
@@ -378,7 +540,10 @@
   // map is rotated. While rotated, we disable Leaflet's own handlers and
   // drive panBy()/setZoomAround() ourselves, rotating the screen-space
   // vectors back into the map's own (unrotated) coordinate frame first.
-  var dragState = { active:false, lastX:0, lastY:0 };
+  // Pointer-Events statt Mouse-Events: so funktioniert das Verschieben der
+  // gedrehten Karte auch mit Finger/Stift (vorher war sie auf Touchgeräten
+  // bei aktiver Drehung komplett unbeweglich).
+  var dragState = { active:false, lastX:0, lastY:0, pointerId:null };
   var customListenersAttached = false;
 
   function toLocalVector(dx, dy){
@@ -390,25 +555,28 @@
   }
 
   function onCustomMouseDown(e){
-    if (e.button !== 0) return;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (dragState.active) return;            // nur ein Finger verschiebt
     dragState.active = true;
+    dragState.pointerId = e.pointerId;
     dragState.lastX = e.clientX;
     dragState.lastY = e.clientY;
     document.getElementById('mapOuter').classList.add('grabbing');
     e.preventDefault();
   }
   function onCustomMouseMove(e){
-    if (!dragState.active) return;
+    if (!dragState.active || e.pointerId !== dragState.pointerId) return;
     var dx = e.clientX - dragState.lastX;
     var dy = e.clientY - dragState.lastY;
     dragState.lastX = e.clientX;
     dragState.lastY = e.clientY;
     var v = toLocalVector(dx, dy);
-    map.panBy([v.x, v.y], { animate:false });
+    map.panBy([-v.x, -v.y], { animate:false });
   }
-  function onCustomMouseUp(){
-    if (dragState.active){
+  function onCustomMouseUp(e){
+    if (dragState.active && (!e || e.pointerId === dragState.pointerId)){
       dragState.active = false;
+      dragState.pointerId = null;
       document.getElementById('mapOuter').classList.remove('grabbing');
     }
   }
@@ -421,7 +589,10 @@
     var size = map.getSize();
     var localPoint = L.point(size.x / 2 + v.x, size.y / 2 + v.y);
     var latlng = map.containerPointToLatLng(localPoint);
-    var delta = Math.max(-1, Math.min(1, -e.deltaY / 250));
+    // deltaMode 1 (Zeilen, Firefox) bzw. 2 (Seiten) in Pixel umrechnen,
+    // sonst zoomt das Rad in Firefox kaum merklich.
+    var dy = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1);
+    var delta = Math.max(-1, Math.min(1, -dy / 250));
     var newZoom = Math.max(map.getMinZoom(), Math.min(map.getMaxZoom(), map.getZoom() + delta));
     map.setZoomAround(latlng, newZoom, { animate:false });
   }
@@ -429,16 +600,18 @@
   function setCustomInteraction(enable){
     var mo = document.getElementById('mapOuter');
     if (enable && !customListenersAttached){
-      mo.addEventListener('mousedown', onCustomMouseDown);
-      document.addEventListener('mousemove', onCustomMouseMove);
-      document.addEventListener('mouseup', onCustomMouseUp);
+      mo.addEventListener('pointerdown', onCustomMouseDown);
+      document.addEventListener('pointermove', onCustomMouseMove);
+      document.addEventListener('pointerup', onCustomMouseUp);
+      document.addEventListener('pointercancel', onCustomMouseUp);
       mo.addEventListener('wheel', onCustomWheel, { passive:false });
       mo.classList.add('custom-pan');
       customListenersAttached = true;
     } else if (!enable && customListenersAttached){
-      mo.removeEventListener('mousedown', onCustomMouseDown);
-      document.removeEventListener('mousemove', onCustomMouseMove);
-      document.removeEventListener('mouseup', onCustomMouseUp);
+      mo.removeEventListener('pointerdown', onCustomMouseDown);
+      document.removeEventListener('pointermove', onCustomMouseMove);
+      document.removeEventListener('pointerup', onCustomMouseUp);
+      document.removeEventListener('pointercancel', onCustomMouseUp);
       mo.removeEventListener('wheel', onCustomWheel);
       mo.classList.remove('custom-pan', 'grabbing');
       dragState.active = false;
@@ -591,21 +764,23 @@
   function drawVectorOverlay(ctx){
     if (trackLayer){
       var latlngs = trackLayer.getLatLngs();
-      if (latlngs && latlngs.length > 1){
-        ctx.save();
-        ctx.strokeStyle = '#FF6600';
-        ctx.lineWidth = 4;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.globalAlpha = 0.95;
-        ctx.beginPath();
-        latlngs.forEach(function(ll, i){
+      // Mehrteilige Linie (mehrere Segmente) → Array von Arrays.
+      var parts = (latlngs.length && Array.isArray(latlngs[0])) ? latlngs : [latlngs];
+      ctx.save();
+      ctx.strokeStyle = '#FF6600';
+      ctx.lineWidth = 4;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.globalAlpha = 0.95;
+      ctx.beginPath();
+      parts.forEach(function(part){
+        part.forEach(function(ll, i){
           var p = map.latLngToContainerPoint(ll);
           if (i === 0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
         });
-        ctx.stroke();
-        ctx.restore();
-      }
+      });
+      ctx.stroke();
+      ctx.restore();
     }
     if (markerLayer){
       markerLayer.eachLayer(function(layer){
@@ -736,8 +911,9 @@
   // <trk>/<trkseg>/<trkpt lat lon> mit optionalem <ele> und <time>.
   // Fallback: <rte>/<rtept>, danach lose <wpt>.
 
-  function gpxPointsFrom(elements){
+  function gpxPointsFrom(elements, seg){
     var pts = [];
+    seg = seg || 0;
     for (var i=0; i<elements.length; i++){
       var el = elements[i];
       var lat = parseFloat(el.getAttribute('lat'));
@@ -754,7 +930,7 @@
       var timeEl = el.getElementsByTagNameNS('*','time')[0];
       var time = timeEl ? timeEl.textContent.trim() : null;
 
-      pts.push({ lat: lat, lon: lon, alt: alt, time: time || null });
+      pts.push({ lat: lat, lon: lon, alt: alt, time: time || null, seg: seg });
     }
     return pts;
   }
@@ -763,24 +939,32 @@
     var points = [];
     var detail = null;
 
-    // 1) Tracks: alle Segmente aller Tracks in Dokumentreihenfolge aneinanderhängen.
+    // 1) Tracks: jedes <trkseg> wird ein eigenes Segment (keine Verbindungslinie,
+    //    keine Distanz über Aufnahmelücken hinweg).
     var trkpts = xml.getElementsByTagNameNS('*','trkpt');
     if (trkpts.length >= 2){
-      points = gpxPointsFrom(trkpts);
-      var segCount = xml.getElementsByTagNameNS('*','trkseg').length;
+      var segEls = xml.getElementsByTagNameNS('*','trkseg');
       var trkCount = xml.getElementsByTagNameNS('*','trk').length;
+      if (segEls.length){
+        for (var s = 0; s < segEls.length; s++){
+          points = points.concat(gpxPointsFrom(segEls[s].getElementsByTagNameNS('*','trkpt'), s));
+        }
+      } else {
+        points = gpxPointsFrom(trkpts, 0);
+      }
       detail = 'Track';
       if (trkCount > 1) detail += ' ×' + trkCount;
-      if (segCount > 1) detail += ', ' + segCount + ' Segmente';
+      if (segEls.length > 1) detail += ', ' + segEls.length + ' Segmente';
     }
 
-    // 2) Fallback: Route
+    // 2) Fallback: Route(n), jede <rte> ein Segment
     if (points.length < 2){
-      var rtepts = xml.getElementsByTagNameNS('*','rtept');
-      if (rtepts.length >= 2){
-        points = gpxPointsFrom(rtepts);
-        detail = 'Route';
+      points = [];
+      var rtes = xml.getElementsByTagNameNS('*','rte');
+      for (var r = 0; r < rtes.length; r++){
+        points = points.concat(gpxPointsFrom(rtes[r].getElementsByTagNameNS('*','rtept'), r));
       }
+      if (points.length >= 2) detail = 'Route' + (rtes.length > 1 ? ' ×' + rtes.length : '');
     }
 
     // 3) Fallback: lose Wegpunkte
@@ -797,6 +981,13 @@
 
   // --- KML ---------------------------------------------------------------------------
 
+  // Zerlegt einen <coordinates>-Text in "lon,lat[,alt]"-Tupel. Leerzeichen
+  // rund um Kommas (kommt bei manchen Exporten vor) werden vorher entfernt,
+  // sonst zerfiele "11.5, 49.4" in zwei kaputte Tupel.
+  function coordTokens(text){
+    return text.trim().replace(/\s*,\s*/g, ',').split(/\s+/).filter(Boolean);
+  }
+
   function parseKML(xml){
     var points = [];
     var detail = null;
@@ -804,6 +995,7 @@
     // Primary: gx:Track (gx:coord [+ optional <when> timestamps])
     var trackEls = xml.getElementsByTagNameNS('*', 'Track');
     var usedTrack = false;
+    var segNo = 0;
     for (var t=0; t<trackEls.length; t++){
       var track = trackEls[t];
       var whens = Array.prototype.map.call(track.getElementsByTagNameNS('*','when'), function(e){ return e.textContent.trim(); });
@@ -815,38 +1007,53 @@
             points.push({
               lon: parts[0], lat: parts[1],
               alt: (parts.length >= 3 && !isNaN(parts[2])) ? parts[2] : null,
-              time: whens[i] || null
+              time: whens[i] || null,
+              seg: segNo
             });
           }
         }
+        segNo++;
         usedTrack = true;
-        detail = 'gx:Track';
       }
     }
+    if (usedTrack) detail = 'gx:Track' + (segNo > 1 ? ' ×' + segNo : '');
 
-    // Fallback: standard <coordinates> (LineString / Track / Point), take the longest one
+    // Fallback: alle <LineString>-Elemente als eigene Segmente (vorher wurde nur
+    // das längste genommen – bei MultiGeometry/mehreren Etappen fehlte der Rest).
+    // Gibt es keine LineStrings, wird das längste <coordinates> verwendet.
     if (!usedTrack){
-      var coordinatesEls = xml.getElementsByTagNameNS('*', 'coordinates');
-      var best = null;
-      for (var c=0; c<coordinatesEls.length; c++){
-        var tokens = coordinatesEls[c].textContent.trim().split(/\s+/).filter(Boolean);
-        if (tokens.length >= 2 && (!best || tokens.length > best.length)){
-          best = tokens;
+      var tokenLists = [];
+      var lineEls = xml.getElementsByTagNameNS('*', 'LineString');
+      for (var l=0; l<lineEls.length; l++){
+        var ce = lineEls[l].getElementsByTagNameNS('*', 'coordinates')[0];
+        if (ce){
+          var tk = coordTokens(ce.textContent);
+          if (tk.length >= 2) tokenLists.push(tk);
         }
       }
-      if (best){
-        for (var k=0; k<best.length; k++){
-          var p = best[k].split(',').map(Number);
+      if (!tokenLists.length){
+        var coordinatesEls = xml.getElementsByTagNameNS('*', 'coordinates');
+        var best = null;
+        for (var c=0; c<coordinatesEls.length; c++){
+          var tokens = coordTokens(coordinatesEls[c].textContent);
+          if (tokens.length >= 2 && (!best || tokens.length > best.length)) best = tokens;
+        }
+        if (best) tokenLists.push(best);
+      }
+      tokenLists.forEach(function(list, segIdx){
+        for (var k=0; k<list.length; k++){
+          var p = list[k].split(',').map(Number);
           if (p.length >= 2 && !isNaN(p[0]) && !isNaN(p[1])){
             points.push({
               lon: p[0], lat: p[1],
               alt: (p.length >= 3 && !isNaN(p[2])) ? p[2] : null,
-              time: null
+              time: null,
+              seg: segIdx
             });
           }
         }
-        detail = 'LineString';
-      }
+      });
+      if (tokenLists.length) detail = 'LineString' + (tokenLists.length > 1 ? ' ×' + tokenLists.length : '');
     }
 
     return { points: points, format: 'KML', detail: detail };
@@ -855,6 +1062,7 @@
   function computeStats(points){
     var distanceKm = 0;
     for (var i=1; i<points.length; i++){
+      if (points[i].seg !== points[i-1].seg) continue;   // Lücke zwischen Segmenten nicht mitzählen
       distanceKm += haversineKm(points[i-1].lat, points[i-1].lon, points[i].lat, points[i].lon);
     }
 
@@ -868,6 +1076,7 @@
     var ascent = 0, descent = 0, hasAlt = false;
     for (var j=1; j<points.length; j++){
       var a0 = points[j-1].alt, a1 = points[j].alt;
+      if (points[j].seg !== points[j-1].seg) continue;
       if (a0 !== null && a1 !== null){
         hasAlt = true;
         var diff = a1 - a0;
@@ -892,9 +1101,16 @@
     return m + ' min ' + s + ' s';
   }
 
+  // Die errorBox sitzt in der Dropzone. Ist schon ein Track geladen, ist die
+  // Dropzone ausgeblendet – dann erscheint der Fehler in der Statusleiste,
+  // sonst ginge er unsichtbar verloren.
   function showError(msg){
     var box = document.getElementById('errorBox');
-    box.innerHTML = '<div class="error-msg">' + msg + '</div>';
+    box.innerHTML = '<div class="error-msg"></div>';
+    box.firstChild.textContent = msg;       // textContent: kein HTML aus Dateinamen/Meldungen
+    if (document.getElementById('dropzone').style.display === 'none'){
+      showStatus(msg, 'error', null, null, 10000);
+    }
   }
   function clearError(){
     document.getElementById('errorBox').innerHTML = '';
@@ -914,7 +1130,17 @@
 
     var latlngs = points.map(function(p){ return [p.lat, p.lon]; });
 
-    trackLayer = L.polyline(latlngs, { color:'#FF6600', weight:4, opacity:0.95 }).addTo(map);
+    // Pro Segment eine eigene Teillinie (Multi-Polyline).
+    var segLines = [], cur = null, curSeg;
+    points.forEach(function(p, i){
+      if (!cur || p.seg !== curSeg){ cur = []; segLines.push(cur); curSeg = p.seg; }
+      cur.push(latlngs[i]);
+    });
+    segLines = segLines.filter(function(s){ return s.length >= 2; });
+    if (!segLines.length) segLines = [latlngs];
+
+    trackLayer = L.polyline(segLines.length === 1 ? segLines[0] : segLines,
+                            { color:'#FF6600', weight:4, opacity:0.95 }).addTo(map);
 
     markerLayer = L.layerGroup([
       L.circleMarker(latlngs[0], { radius:8, color:'#00CC44', fillColor:'#00CC44', fillOpacity:1, weight:2 })
@@ -967,6 +1193,10 @@
 
   function handleFile(file){
     if (!file) return;
+    if (/\.kmz$/i.test(file.name)){
+      showError('KMZ ist ein ZIP-Archiv. Bitte entpacken und die enthaltene doc.kml laden.');
+      return;
+    }
     var reader = new FileReader();
     reader.onload = function(e){
       try {
@@ -983,11 +1213,15 @@
   }
 
   // Wiring: file inputs
+  // value zurücksetzen, damit dieselbe Datei (z. B. nach Bearbeitung) erneut
+  // gewählt werden kann – sonst feuert der Browser kein 'change'.
   document.getElementById('fileInput').addEventListener('change', function(e){
     handleFile(e.target.files[0]);
+    e.target.value = '';
   });
   document.getElementById('fileInputHeader').addEventListener('change', function(e){
     handleFile(e.target.files[0]);
+    e.target.value = '';
   });
 
   // Wiring: drag & drop on dropzone

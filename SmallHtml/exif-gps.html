@@ -183,6 +183,7 @@
     font-family:var(--mono);font-size:11.5px;color:var(--ink-soft);
     letter-spacing:.03em;
   }
+  footer a{color:var(--contour)}
   @media (prefers-reduced-motion: reduce){
     *{animation:none !important;transition:none !important}
   }
@@ -222,7 +223,8 @@
 
   <div class="cards" id="cards"></div>
 
-  <footer>Dateien bleiben lokal · Netzwerkzugriff nur für eingegebene Adressen · keine Bibliotheken</footer>
+  <footer>Dateien bleiben lokal · Netzwerkzugriff nur für eingegebene Adressen · keine Bibliotheken
+    · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 </div>
 
 <script>
@@ -232,7 +234,7 @@
    EXIF-Parser (JPEG APP1 / TIFF-IFD) — ohne Abhängigkeiten
    ============================================================ */
 
-const TYPE_SIZE = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8};
+const TYPE_SIZE = {1:1,2:1,3:2,4:4,5:8,6:1,7:1,8:2,9:4,10:8,11:4,12:8,13:4};   // 13 = IFD-Zeiger
 
 function readValue(view, tiff, entry, little){
   const type  = view.getUint16(entry+2, little);
@@ -259,7 +261,7 @@ function readValue(view, tiff, entry, little){
     switch(type){
       case 1: case 7: out.push(view.getUint8(p)); break;
       case 3:  out.push(view.getUint16(p, little)); break;
-      case 4:  out.push(view.getUint32(p, little)); break;
+      case 4: case 13: out.push(view.getUint32(p, little)); break;
       case 6:  out.push(view.getInt8(p)); break;
       case 8:  out.push(view.getInt16(p, little)); break;
       case 9:  out.push(view.getInt32(p, little)); break;
@@ -284,6 +286,7 @@ function readIFD(view, tiff, dir, little){
 }
 
 function parseTiff(view, tiff){
+  if(tiff + 8 > view.byteLength) return null;              // Kopf abgeschnitten
   const bo = view.getUint16(tiff);
   if(bo !== 0x4949 && bo !== 0x4D4D) return null;
   const little = bo === 0x4949;
@@ -296,7 +299,19 @@ function parseTiff(view, tiff){
   return res;
 }
 
+/* Abgeschnittene oder beschädigte Dateien sollen eine verständliche Meldung
+   liefern statt eines rohen RangeError aus dem DataView. */
 function parseJpeg(buffer){
+  try{
+    return parseJpegRaw(buffer);
+  }catch(e){
+    if(e instanceof RangeError)
+      throw new Error("Die EXIF-Daten sind unvollständig — die Datei ist beschädigt oder wurde abgeschnitten.");
+    throw e;
+  }
+}
+
+function parseJpegRaw(buffer){
   const view = new DataView(buffer);
   if(view.byteLength < 4) throw new Error("Datei ist zu klein.");
 
@@ -350,8 +365,8 @@ function extractPosition(exif){
   if(typeof g[6] === "number" && isFinite(g[6])){
     pos.alt = (g[5] === 1 ? -g[6] : g[6]);
   }
-  if(Array.isArray(g[7]) && g[29]){
-    const p = n => String(Math.round(n)).padStart(2,"0");
+  if(Array.isArray(g[7]) && g[7].length >= 3 && typeof g[29] === "string" && g[29]){
+    const p = n => String(Math.floor(n)).padStart(2,"0");   // 59,6 s bleibt 59, nicht 60
     pos.utc = g[29].replace(/:/g,"-") + " " + p(g[7][0])+":"+p(g[7][1])+":"+p(g[7][2]) + " UTC";
   }
   return pos;
@@ -359,11 +374,11 @@ function extractPosition(exif){
 
 function fmtDMS(v, isLat){
   const ref = isLat ? (v < 0 ? "S" : "N") : (v < 0 ? "W" : "E");
-  const a = Math.abs(v);
-  const d = Math.floor(a);
-  const mF = (a - d) * 60;
-  const m = Math.floor(mF);
-  const s = ((mF - m) * 60).toFixed(2);
+  // Erst die Gesamtsekunden runden, dann zerlegen — sonst entsteht 26'60.00"
+  const cs = Math.round(Math.abs(v) * 360000);       // Hundertstelsekunden, ganzzahlig
+  const d = Math.floor(cs / 360000);
+  const m = Math.floor((cs % 360000) / 6000);
+  const s = ((cs % 6000) / 100).toFixed(2);
   return `${d}°${String(m).padStart(2,"0")}'${String(s).padStart(5,"0")}"${ref}`;
 }
 
@@ -408,6 +423,13 @@ function el(tag, cls, text){
   return n;
 }
 
+/* Leeres Vorschaufeld — ein <div>, damit kein Symbol für ein kaputtes Bild erscheint */
+function blankThumb(){
+  const d = el("div", "thumb blank");
+  d.setAttribute("aria-hidden", "true");
+  return d;
+}
+
 function makeButton(label, fn){
   const b = el("button", null, label);
   b.type = "button";
@@ -440,7 +462,7 @@ function place(card, replaceNode){
 function pendingCard(name, origin){
   const card = el("div", "card pending");
   const head = el("div", "head");
-  head.appendChild(el("img", "thumb blank"));
+  head.appendChild(blankThumb());
   const meta = el("div", "meta");
   meta.appendChild(el("p", "fname", name));
   meta.appendChild(el("p", "sub", (origin ? origin + "  ·  " : "") + "wird geladen …"));
@@ -460,8 +482,13 @@ function renderCard(src, exif, pos, error, replaceNode){
   img.referrerPolicy = "no-referrer";
   if(src.thumb){
     img.src = src.thumb;
-    if(src.revoke) img.addEventListener("load", () => URL.revokeObjectURL(img.src), { once:true });
-    img.addEventListener("error", () => img.classList.add("blank"), { once:true });
+    const url = src.thumb;
+    if(src.revoke) img.addEventListener("load", () => URL.revokeObjectURL(url), { once:true });
+    img.addEventListener("error", () => {
+      img.classList.add("blank");
+      img.removeAttribute("src");                // kein Symbol für kaputtes Bild
+      if(src.revoke) URL.revokeObjectURL(url);   // z. B. TIFF, das der Browser nicht anzeigt
+    }, { once:true });
   }else{
     img.classList.add("blank");
   }
@@ -494,7 +521,7 @@ function renderCard(src, exif, pos, error, replaceNode){
 
   if(!pos){
     const n = el("p", "note");
-    n.innerHTML = "Keine GPS-Daten im Bild. Häufige Ursachen: Ortungsdienste waren in der Kamera-App aus, "
+    n.textContent = "Keine GPS-Daten im Bild. Häufige Ursachen: Ortungsdienste waren in der Kamera-App aus, "
                 + "das Bild kam über einen Messenger (WhatsApp, Signal und Instagram entfernen Metadaten), "
                 + "oder es wurde durch eine Bildbearbeitung neu gespeichert.";
     card.appendChild(n);
@@ -550,27 +577,32 @@ function renderCard(src, exif, pos, error, replaceNode){
    ============================================================ */
 
 function handleFiles(list){
-  [...list].forEach(file => {
+  // Rückwärts, damit nach dem Voranstellen die erste Datei oben steht
+  [...list].reverse().forEach(file => {
+    if(!/^image\//.test(file.type) && !/\.(jpe?g|tiff?)$/i.test(file.name)){
+      renderCard({ name: file.name, sizeLabel: kb(file.size) }, null, null,
+        "Kein Bildformat — bitte eine JPG-Datei wählen.");
+      return;
+    }
     const src = {
       name: file.name,
       sizeLabel: kb(file.size),
       thumb: URL.createObjectURL(file),
       revoke: true
     };
-    if(!/^image\//.test(file.type) && !/\.(jpe?g|tiff?)$/i.test(file.name)){
-      renderCard(src, null, null, "Kein Bildformat — bitte eine JPG-Datei wählen.");
-      return;
-    }
+    // Platzhalter sofort setzen — so bleibt die Reihenfolge erhalten,
+    // egal welche Datei zuerst fertig gelesen ist.
+    const node = pendingCard(file.name, kb(file.size));
     const r = new FileReader();
     r.onload = () => {
       try{
         const exif = parseJpeg(r.result);
-        renderCard(src, exif, extractPosition(exif), null);
+        renderCard(src, exif, extractPosition(exif), null, node);
       }catch(e){
-        renderCard(src, null, null, e.message);
+        renderCard(src, null, null, e.message, node);
       }
     };
-    r.onerror = () => renderCard(src, null, null, "Die Datei konnte nicht gelesen werden.");
+    r.onerror = () => renderCard(src, null, null, "Die Datei konnte nicht gelesen werden.", node);
     r.readAsArrayBuffer(file);
   });
 }
@@ -591,10 +623,14 @@ const PROXIES = [
 
 /* WordPress/Photon liefert mit Größen- oder strip-Parametern eine neu kodierte
    Kopie ohne EXIF. Ohne diese Parameter kommt die Originaldatei. */
+function isWordPressHost(hostname){
+  return /(^|\.)(wp\.com|wordpress\.com)$/i.test(hostname);
+}
+
 function cleanImageUrl(u){
   if(u.protocol !== "http:" && u.protocol !== "https:") return { url:u, note:null };
   const v = new URL(u.href);
-  const wp = /(^|\.)(wp\.com|wordpress\.com)$/i.test(v.hostname);
+  const wp = isWordPressHost(v.hostname);
   const junk = ["strip","quality","resize","fit","zoom","crop","w","h","ssl"];
   let hit = false;
   junk.forEach(k => {
@@ -617,13 +653,19 @@ function originalSizeUrl(u){
   return v;
 }
 
-function normalizeUrl(raw){
+/* strict: nur Adressen mit ausdrücklichem Schema (für Einfügen/Ziehen außerhalb
+   des Eingabefelds — sonst würde jedes eingefügte Wort zu https://wort/).
+   Ohne Schema muss der Rechnername wenigstens einen Punkt enthalten. */
+function normalizeUrl(raw, strict){
   const s = String(raw).trim().replace(/^["'<]+|["'>]+$/g, "");
   if(!s) return null;
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(s);
+  if(strict && !hasScheme) return null;
   let u;
-  try{ u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(s) ? s : "https://" + s); }
+  try{ u = new URL(hasScheme ? s : "https://" + s); }
   catch(_){ return null; }
   if(!/^(https?|data|blob):$/.test(u.protocol)) return null;
+  if(!hasScheme && !/\./.test(u.hostname) && u.hostname !== "localhost") return null;
   return u;
 }
 
@@ -640,23 +682,29 @@ async function fetchHead(target){
   if(typeof AbortSignal !== "undefined" && AbortSignal.timeout) opt.signal = AbortSignal.timeout(25000);
 
   const res = await fetch(target, opt);
-  if(!res.ok) throw new Error("Der Server antwortete mit " + res.status + " " + (res.statusText || "") + ".");
+  if(!res.ok){
+    const st = res.status + (res.statusText ? " " + res.statusText : "");
+    throw Object.assign(new Error("antwortete mit HTTP " + st + "."), { httpFail:true, status:res.status });
+  }
 
   const type = (res.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
-  const declared = parseInt(res.headers.get("content-length") || "", 10);
+  // Bei komprimierter Übertragung nennt Content-Length die gepackte Größe — dann nicht verwenden
+  const packed = !!res.headers.get("content-encoding");
+  const declared = packed ? NaN : parseInt(res.headers.get("content-length") || "", 10);
 
-  let bytes;
+  let bytes, cut = false;
   if(res.body && typeof res.body.getReader === "function"){
     const reader = res.body.getReader();
     const chunks = [];
     let total = 0;
-    while(total < MAX_BYTES){
+    for(;;){
+      if(total >= MAX_BYTES){ cut = true; break; }
       const { done, value } = await reader.read();
       if(done) break;
       chunks.push(value);
       total += value.length;
     }
-    try{ await reader.cancel(); }catch(_){}
+    if(cut){ try{ await reader.cancel(); }catch(_){} }
     bytes = new Uint8Array(total);
     let o = 0;
     for(const c of chunks){ bytes.set(c, o); o += c.length; }
@@ -664,8 +712,8 @@ async function fetchHead(target){
     bytes = new Uint8Array(await res.arrayBuffer());
   }
 
-  const size = Number.isFinite(declared) && declared > 0 ? declared : bytes.length;
-  return { buffer: bytes.buffer, type, size, truncated: size > bytes.length, status: res.status };
+  const size = Number.isFinite(declared) && declared > 0 ? Math.max(declared, bytes.length) : bytes.length;
+  return { buffer: bytes.buffer, type, size, truncated: cut || size > bytes.length, status: res.status };
 }
 
 /* Was liegt wirklich im Puffer? Content-Type lügt regelmäßig — Proxys setzen
@@ -710,7 +758,10 @@ function textPreview(buffer){
   return out.length > 140 ? out.slice(0, 137) + "…" : out;
 }
 
-async function loadFromUrl(raw, proxyIdx, replaceNode){
+/* carry: { hint?, keepParams? } — wird bei Neuversuchen weitergereicht,
+   damit Hinweise (z. B. „Bildparameter entfernt“) nicht verloren gehen. */
+async function loadFromUrl(raw, proxyIdx, replaceNode, carry){
+  carry = carry || {};
   const u0 = normalizeUrl(raw);
   if(!u0){
     renderCard({ name: String(raw).slice(0,90) }, null, null,
@@ -718,13 +769,21 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
     return;
   }
 
+  // WordPress/Photon: Größenparameter sofort entfernen (die Kopie hat nie EXIF).
+  // Andere Server: zuerst das Original — Parameter können Teil einer Signatur sein
+  // (S3, CloudFront, imgix); die bereinigte Fassung wird nur als Zusatzversuch angeboten.
+  const web = u0.protocol === "http:" || u0.protocol === "https:";
   const cleaned = cleanImageUrl(u0);
-  const u = cleaned.url;
+  const wpHost = web && isWordPressHost(u0.hostname);
+  const u = (wpHost && !carry.keepParams) ? cleaned.url : u0;
+  const altClean = (!wpHost && cleaned.note) ? cleaned.url : null;
+  let hint = carry.hint || ((u !== u0 && cleaned.note) ? cleaned.note + "." : null);
 
   const proxy = proxyIdx >= 0 ? PROXIES[proxyIdx] : null;
-  const host  = (u.protocol === "http:" || u.protocol === "https:") ? u.host : u.protocol;
+  const host  = web ? u.host : u.protocol;
   const origin = host + (proxy ? "  ·  über " + proxy.name : "  ·  direkt");
   const node = replaceNode && replaceNode.isConnected ? replaceNode : pendingCard(nameFromUrl(u), origin);
+  const again = (idx, n) => loadFromUrl(u.href, idx, n, { hint, keepParams: carry.keepParams });
 
   const base = {
     name: nameFromUrl(u),
@@ -732,7 +791,7 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
     href: u.href,
     origin
   };
-  if(cleaned.note) base.hint = cleaned.note + ".";
+  if(hint) base.hint = hint;
 
   try{
     const r = await fetchHead(proxy ? proxy.url(u.href) : u.href);
@@ -749,7 +808,7 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
       if(proxyIdx >= 0 && nxt < PROXIES.length && autoProxy()){
         const sub = node.querySelector(".sub");
         if(sub) sub.textContent = PROXIES[proxyIdx].name + " lieferte kein Bild — Versuch über " + PROXIES[nxt].name + " …";
-        return loadFromUrl(u.href, nxt, node);
+        return again(nxt, node);
       }
 
       const who = proxy ? "Der Proxy " + proxy.name : "Der Server";
@@ -761,37 +820,41 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
         + "Beitragsseite statt der Datei. In der Seite Rechtsklick auf das Bild → „Grafikadresse kopieren“.";
 
       if(nxt < PROXIES.length)
-        base.tries = [{ label: "Über " + PROXIES[nxt].name + " versuchen", run: n => loadFromUrl(u.href, nxt, n) }];
-      throw Object.assign(new Error(msg), { handled:true });
+        base.tries = [{ label: "Über " + PROXIES[nxt].name + " versuchen", run: n => again(nxt, n) }];
+      throw new Error(msg);
     }
 
     if(s.kind === "other"){
-      throw Object.assign(new Error("Die Datei ist ein " + s.label + ". Ausgelesen werden kann nur JPEG und TIFF — "
-        + "PNG und GIF speichern keine GPS-Daten, HEIC nutzt ein anderes Containerformat."), { handled:true });
+      throw new Error("Die Datei ist ein " + s.label + ". Ausgelesen werden kann nur JPEG und TIFF — "
+        + "PNG und GIF speichern keine GPS-Daten, HEIC nutzt ein anderes Containerformat.");
     }
 
     if(s.kind === "unknown" && !/^image\//.test(r.type)){
-      throw Object.assign(new Error("Der Inhalt ist kein erkennbares Bildformat (Typangabe: "
-        + (r.type || "keine") + ")."), { handled:true });
+      throw new Error("Der Inhalt ist kein erkennbares Bildformat (Typangabe: " + (r.type || "keine") + ").");
     }
 
     const exif = parseJpeg(r.buffer);
     const pos  = extractPosition(exif);
-    base.sizeLabel = kb(r.size);
+    base.sizeLabel = kb(r.size) + (r.truncated ? " (Anfang gelesen)" : "");
 
     if(!pos){
       const tries = [];
       const orig = originalSizeUrl(u);
-      if(orig) tries.push({ label: "Originaldatei ohne Größenzusatz probieren", run: n => loadFromUrl(orig.href, -1, n) });
+      if(orig) tries.push({ label: "Originaldatei ohne Größenzusatz probieren",
+                            run: n => loadFromUrl(orig.href, -1, n, { hint }) });
+      if(altClean) tries.push({ label: "Ohne Bildparameter probieren",
+                                run: n => loadFromUrl(altClean.href, -1, n, { hint: cleaned.note + "." }) });
       if(tries.length) base.tries = tries;
 
       const hints = [];
-      if(base.hint) hints.push(base.hint);
+      if(hint) hints.push(hint);
       if(orig) hints.push("Der Dateiname endet auf eine Bildgröße — das ist eine von WordPress erzeugte Kopie, "
                         + "und beim Verkleinern gehen die EXIF-Daten verloren. Die Originaldatei heißt genauso, nur ohne den Zusatz.");
-      else if(/wordpress\.com$|wp\.com$/i.test(host))
+      else if(wpHost)
         hints.push("Bei WordPress.com wird das Bild im Beitrag oft über den Bild-CDN ausgeliefert, der Metadaten entfernt. "
                  + "Die Datei unter /wp-content/uploads/ sollte sie noch enthalten — falls nicht, hat schon der Upload sie verworfen.");
+      if(altClean) hints.push("Die Adresse enthält Bildparameter (strip/resize/quality), die oft eine neu kodierte Kopie "
+                            + "ohne EXIF erzeugen — ohne sie liefert der Server eventuell die Originaldatei.");
       if(r.truncated) hints.push("Es wurden nur die ersten " + kb(MAX_BYTES) + " geladen; EXIF steht normalerweise am Dateianfang.");
       base.hint = hints.join(" ") || null;
     }
@@ -799,14 +862,24 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
     renderCard(base, exif, pos, null, node);
 
   }catch(e){
-    const netFail = (e instanceof TypeError) || e.name === "TimeoutError" || e.name === "AbortError";
+    const netFail  = (e instanceof TypeError) || e.name === "TimeoutError" || e.name === "AbortError";
+    const httpFail = !!e.httpFail;
+    const status   = e.status || 0;
     const next = proxyIdx + 1;
+    const canNext = next < PROXIES.length;
 
-    // Automatischer Weiterversuch über den nächsten Proxy, falls gewünscht
-    if(netFail && next < PROXIES.length && autoProxy()){
+    // Direkt 404/410: Adresse falsch — ein Proxy hilft da nicht.
+    // Sonst (403 Hotlink-Schutz, 429, 5xx, Proxy-Fehler) lohnt der nächste Weg.
+    const proxyMayHelp = netFail || (httpFail && (proxyIdx >= 0 || (status !== 404 && status !== 410)));
+
+    // Automatischer Weiterversuch: bei Netzsperre immer, bei HTTP-Fehlern nur
+    // innerhalb der Proxy-Kette (ein direktes 403 soll nicht ungefragt an Dritte gehen).
+    if(canNext && autoProxy() && (netFail || (httpFail && proxyIdx >= 0))){
       const sub = node.querySelector(".sub");
-      if(sub) sub.textContent = (proxy ? proxy.name : "Direktzugriff") + " blockiert — Versuch über " + PROXIES[next].name + " …";
-      return loadFromUrl(u.href, next, node);
+      if(sub) sub.textContent = (proxy ? proxy.name : "Direktzugriff")
+                              + (httpFail ? " meldet HTTP " + status : " blockiert")
+                              + " — Versuch über " + PROXIES[next].name + " …";
+      return again(next, node);
     }
 
     let msg;
@@ -820,20 +893,30 @@ async function loadFromUrl(raw, proxyIdx, replaceNode){
           + (location.protocol === "file:" ? " Hinweis: Die Seite läuft als lokale Datei (file://) — über einen kleinen "
             + "lokalen Webserver klappen solche Abrufe deutlich zuverlässiger." : "")
           + " Sicherster Weg: das Bild speichern und die Datei hier ablegen.";
+    }else if(httpFail){
+      msg = (proxy ? "Der Proxy " + proxy.name : "Der Server") + " " + e.message;
+      if(!proxy && (status === 404 || status === 410))
+        msg += " Die Adresse stimmt vermutlich nicht (mehr).";
+      else if(!proxy && status === 403)
+        msg += " Möglicherweise sperrt der Server Abrufe von fremden Seiten (Hotlink-Schutz).";
+      else if(proxy && status === 403)
+        msg += " Der Proxy verweigert den Dienst — manche verlangen inzwischen einen Zugangsschlüssel.";
     }else{
       msg = e.message;
     }
 
-    if(netFail && next < PROXIES.length){
-      base.tries = [{ label: "Über " + PROXIES[next].name + " versuchen", run: n => loadFromUrl(u.href, next, n) }];
+    if(proxyMayHelp && canNext && !base.tries){
+      base.tries = [{ label: "Über " + PROXIES[next].name + " versuchen", run: n => again(next, n) }];
     }
     renderCard(base, null, null, msg, node);
   }
 }
 
 function handleUrlInput(text){
-  const parts = String(text).split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-  parts.forEach(p => loadFromUrl(p, -1, null));
+  // Nur an Leerraum trennen — Kommas kommen in Bild-Adressen vor (?fit=800,600, w_300,h_200)
+  const parts = String(text).split(/\s+/).map(s => s.trim()).filter(Boolean);
+  // Rückwärts, damit nach dem Voranstellen die erste Adresse oben steht
+  parts.slice().reverse().forEach(p => loadFromUrl(p, -1, null));
   return parts.length;
 }
 
@@ -861,6 +944,7 @@ async function probe(target){
     }
     return { ok:false, txt };
   }catch(e){
+    if(e.httpFail)              return { ok:false, txt:"Fehler: HTTP " + e.status };
     if(e instanceof TypeError)  return { ok:false, txt:"vom Browser blockiert (CORS oder nicht erreichbar)" };
     if(e.name === "TimeoutError" || e.name === "AbortError") return { ok:false, txt:"Zeitüberschreitung" };
     return { ok:false, txt:e.message };
@@ -870,11 +954,13 @@ async function probe(target){
 async function diagnose(raw){
   const u0 = normalizeUrl(raw);
   if(!u0){ renderCard({ name:String(raw).slice(0,90) }, null, null, "Keine gültige Adresse.", null); return; }
-  const u = cleanImageUrl(u0).url;
+  // wie beim Auslesen: Parameter nur bei WordPress/Photon vorab entfernen
+  const u = ((u0.protocol === "http:" || u0.protocol === "https:") && isWordPressHost(u0.hostname))
+          ? cleanImageUrl(u0).url : u0;
 
   const card = el("div", "card");
   const head = el("div", "head");
-  head.appendChild(el("img", "thumb blank"));
+  head.appendChild(blankThumb());
   const meta = el("div", "meta");
   meta.appendChild(el("p", "fname", "Diagnose · " + nameFromUrl(u)));
   meta.appendChild(el("p", "sub", u.host));
@@ -885,8 +971,10 @@ async function diagnose(raw){
   card.appendChild(box);
   cards.prepend(card);
 
+  // Proxys nur, wenn erlaubt — sonst ginge die Adresse ungefragt an Dritte
+  const useProxies = autoProxy();
   const targets = [{ name:"direkt", url:u.href }]
-    .concat(PROXIES.map(p => ({ name:p.name, url:p.url(u.href) })));
+    .concat(useProxies ? PROXIES.map(p => ({ name:p.name, url:p.url(u.href) })) : []);
 
   let anyOk = false;
   for(const t of targets){
@@ -905,7 +993,8 @@ async function diagnose(raw){
   const n = el("p", "note");
   n.textContent = anyOk
     ? "Mindestens ein Weg liefert echte Bilddaten — über „Auslesen“ wird dieser genutzt."
-    : "Kein Weg liefert Bilddaten. Zuverlässig bleibt: das Bild im Browser speichern und die Datei hier ablegen.";
+    : "Kein Weg liefert Bilddaten. Zuverlässig bleibt: das Bild im Browser speichern und die Datei hier ablegen."
+      + (useProxies ? "" : " (Proxys wurden nicht geprüft, weil der Proxy-Versuch abgeschaltet ist.)");
   card.appendChild(n);
 }
 
@@ -921,15 +1010,21 @@ input.addEventListener("change", () => { handleFiles(input.files); input.value =
 
 ["dragenter","dragover"].forEach(t =>
   drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("hot"); }));
-["dragleave","drop"].forEach(t =>
-  drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("hot"); }));
+// dragleave feuert auch beim Wechsel auf Kindelemente (Fadenkreuz, Text) — nur
+// wirklich verlassen zählt, sonst flackert die Hervorhebung.
+drop.addEventListener("dragleave", e => {
+  e.preventDefault();
+  if(e.relatedTarget && drop.contains(e.relatedTarget)) return;
+  drop.classList.remove("hot");
+});
+drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("hot"); });
 /* Ein aus einem anderen Tab gezogenes Bild liefert keine Datei, sondern eine Adresse. */
 function handleDataTransfer(dt){
   if(!dt) return;
   if(dt.files && dt.files.length){ handleFiles(dt.files); return; }
   const text = dt.getData("text/uri-list") || dt.getData("text/plain") || "";
   const first = text.split(/\r?\n/).map(s => s.trim()).filter(s => s && !s.startsWith("#"))[0];
-  if(first && normalizeUrl(first)) loadFromUrl(first, -1, null);
+  if(first && normalizeUrl(first, true)) loadFromUrl(first, -1, null);
 }
 
 drop.addEventListener("drop", e => {
@@ -951,8 +1046,11 @@ window.addEventListener("paste", e => {
   if(!cd) return;
   if(cd.files && cd.files.length){ handleFiles(cd.files); return; }
   if(e.target === urlField) return;          // im Eingabefeld normal einfügen lassen
+  if(e.target && e.target.isContentEditable) return;
   const text = (cd.getData("text/plain") || "").trim();
-  if(text && normalizeUrl(text)){
+  // Außerhalb des Feldes nur echte Adressen (mit http:, https:, data:, blob:) übernehmen
+  const parts = text.split(/\s+/).filter(Boolean);
+  if(parts.length && parts.every(p => normalizeUrl(p, true))){
     e.preventDefault();
     urlField.value = text;
     handleUrlInput(text);
