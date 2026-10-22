@@ -313,7 +313,8 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11px;color:var(--graphi
         <tr><td>entweder(Anja = Tee, Bernd = Espresso)</td><td>genau eine der beiden Aussagen stimmt</td></tr>
       </table>
       <p>Bei <code>-</code> sind Leerzeichen Pflicht, damit Werte mit Bindestrich nicht zerfallen.
-         Vergleiche brauchen genau eine geordnete Kategorie.</p>
+         Vergleiche brauchen genau eine geordnete Kategorie. Abstände zählen in Plätzen –
+         bei <code>Alter: 20, 30, 40</code> sind 20 und 30 also Nachbarn.</p>
 
       <h3>Beim Tippen</h3>
       <p>Solange <em>Beim Tippen mitrechnen</em> aktiv ist, läuft der Solver nach jeder Pause neu.
@@ -331,7 +332,8 @@ footer{margin-top:26px;font-family:var(--mono);font-size:11px;color:var(--graphi
     </div>
   </details>
 
-  <footer>Läuft vollständig im Browser · keine Daten verlassen die Seite</footer>
+  <footer>Läuft vollständig im Browser · keine Daten verlassen die Seite ·
+    <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 </div>
 
 <script>
@@ -365,7 +367,8 @@ function parsePuzzle(text){
   if(sepIdx>=0){ catLines=lines.slice(0,sepIdx); clueLines=lines.slice(sepIdx+1); }
   else{
     let k=0;
-    while(k<lines.length && /^[^=<>!|]+\*?:\s*\S/.test(lines[k].t)) k++;
+    // Kategoriezeile: Name ohne Klammern/Operatoren, Rest ohne Vergleichs-/Oder-Zeichen
+    while(k<lines.length && /^[^=<>!|(),:]+\*?:\s*[^=<>|]+$/.test(lines[k].t)) k++;
     catLines=lines.slice(0,k); clueLines=lines.slice(k);
   }
   if(catLines.length<2) throw new ParseError("Mindestens 2 Kategorien nötig.",1);
@@ -386,10 +389,21 @@ function parsePuzzle(text){
       } else values.push(part);
     }
     if(values.length<2) throw new ParseError('Kategorie "'+name+'" braucht mindestens 2 Werte.',n);
+    const seen=new Set();
+    for(const v of values){
+      const k=v.toLowerCase();
+      if(seen.has(k)) throw new ParseError('Kategorie "'+name+'" enthält "'+v+'" doppelt.',n);
+      seen.add(k);
+    }
+    if(categories.some(c=>c.name.toLowerCase()===name.toLowerCase()))
+      throw new ParseError('Kategorie "'+name+'" ist doppelt vorhanden.',n);
     const numeric=values.every(v=>/^-?\d+(\.\d+)?$/.test(v));
+    const ordVals=numeric? values.map(Number) : values.map((_,i)=>i+1);
+    // rank = Platznummer in der Ordnung (0..N-1) – für Abstände in „Plätzen“
+    const sorted=ordVals.slice().sort((a,b)=>a-b);
+    const rank=ordVals.map(v=>sorted.indexOf(v));
     categories.push({name,values,line:n,forcedOrdinal,
-      ordinal:forcedOrdinal||numeric,
-      ordVals:numeric? values.map(Number) : values.map((_,i)=>i+1)});
+      ordinal:forcedOrdinal||numeric, ordVals, rank});
   }
   if(categories.some(c=>c.forcedOrdinal)) categories.forEach(c=>{c.ordinal=!!c.forcedOrdinal;});
 
@@ -413,7 +427,8 @@ function parsePuzzle(text){
   function resolve(tok,line){
     const s=tok.trim();
     if(!s) throw new ParseError("Leerer Wert in einem Hinweis.",line);
-    const q=byQual.get(s.toLowerCase()); if(q) return q;
+    const q=byQual.get(s.toLowerCase())||byQual.get(s.toLowerCase().replace(/\s*:\s*/,":"));
+    if(q) return q;
     const hits=byValue.get(s.toLowerCase());
     if(!hits) throw new ParseError('Unbekannter Wert "'+s+'".',line);
     if(hits.length>1)
@@ -502,7 +517,7 @@ function evalConstraint(c,pos,perm,model){
     case "ONEOF":{ const s=slot(c.a); return c.bs.some(r=>slot(r)===s); }
     case "LT":{ const o=model.categories[c.ord].ordVals;
       return o[perm[c.ord][slot(c.a)]] < o[perm[c.ord][slot(c.b)]]; }
-    case "DIST":{ const o=model.categories[c.ord].ordVals;
+    case "DIST":{ const o=model.categories[c.ord].rank;
       const d=o[perm[c.ord][slot(c.a)]]-o[perm[c.ord][slot(c.b)]];
       return c.abs? Math.abs(d)===c.n : d===c.n; }
     case "XOR": return evalConstraint(c.a,pos,perm,model)!==evalConstraint(c.b,pos,perm,model);
@@ -638,6 +653,34 @@ function deduce(model,solutions){
           else if(row[j]!==eq) row[j]=-1;
         }
       }
+  }
+  return grid;
+}
+/* Nach abgebrochener Suche stammen die Ableitungen nur aus einer Stichprobe.
+   Jedes scheinbar feste Feld wird mit dem Gegenteil als Zusatzhinweis gegengeprüft;
+   jede dabei gefundene Lösung öffnet gleich alle Felder, denen sie widerspricht.
+   Lässt sich ein Feld nicht entscheiden (Knotenlimit), bleibt es vorsichtshalber offen. */
+function verifyGrid(model,grid,budget){
+  const K=model.categories.length, N=model.N;
+  const t0=performance.now();
+  const merge=sol=>{
+    const pos=sol.map(p=>{ const q=new Array(N); p.forEach((v,s)=>q[v]=s); return q; });
+    for(let a=0;a<K;a++) for(let b=0;b<K;b++) for(let i=0;i<N;i++) for(let j=0;j<N;j++){
+      const eq=pos[a][i]===pos[b][j]?1:0;
+      if(grid[a][b][i][j]!==eq) grid[a][b][i][j]=-1;
+    }
+  };
+  const open=(a,b,i,j)=>{ grid[a][b][i][j]=-1; grid[b][a][j][i]=-1; };
+  for(let a=0;a<K;a++) for(let b=a+1;b<K;b++) for(let i=0;i<N;i++) for(let j=0;j<N;j++){
+    const v=grid[a][b][i][j];
+    if(v===-1) continue;
+    if(performance.now()-t0>budget){ open(a,b,i,j); continue; }
+    const A={cat:a,idx:i}, B={cat:b,idx:j};
+    const neg= v===1 ? {type:"NEQ",a:A,bs:[B],ord:null} : {type:"EQ",refs:[A,B]};
+    const r=solve({categories:model.categories,N,constraints:model.constraints.concat([neg])},
+                  {maxSolutions:1,maxNodes:3e5});
+    if(r.solutions.length) merge(r.solutions[0]);
+    else if(r.nodeLimit) open(a,b,i,j);
   }
   return grid;
 }
@@ -778,7 +821,7 @@ const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",
 /* laufender Zustand */
 let model=null, result=null, grid=null, facts=[], hintCount=0;
 let prevGrid=null, structureKey="", cellRefs=null, flashed=[], fxMarked=[];
-let solveTimer=null, culpritTimer=null, fxTimer=null, lastMs=0;
+let solveTimer=null, culpritTimer=null, fxTimer=null, lastMs=0, culpritGen=0;
 
 /* ---------- Eingaben ---------- */
 document.querySelectorAll(".chip[data-ex]").forEach(btn=>{
@@ -807,6 +850,7 @@ document.addEventListener("selectionchange",()=>{
 
 $("#btn-solve").addEventListener("click",()=>schedule(0));
 $("#btn-reset").addEventListener("click",()=>{
+  clearTimeout(solveTimer); clearTimeout(culpritTimer); clearTimeout(fxTimer); culpritGen++;
   src.value=""; hintCount=0; prevGrid=null; structureKey="";
   document.querySelectorAll(".chip[data-ex]").forEach(b=>b.setAttribute("aria-pressed","false"));
   updateShape(); showEmpty(); src.focus();
@@ -829,7 +873,7 @@ function applyVisibility(){
 
 /* ---------- Taktung ---------- */
 function schedule(delay){
-  clearTimeout(solveTimer); clearTimeout(culpritTimer);
+  clearTimeout(solveTimer); clearTimeout(culpritTimer); culpritGen++;
   if(delay===undefined) delay=Math.min(650,Math.max(140,Math.round(lastMs*1.5)));
   solveTimer=setTimeout(doSolve,delay);
 }
@@ -878,6 +922,7 @@ function doSolve(){
   model=m; result=r;
   prevGrid=grid;
   grid=r.solutions.length? deduce(m,r.solutions) : null;
+  if(grid && r.aborted) verifyGrid(m,grid,1500);
   facts=grid? positiveFacts(m,grid) : [];
   if(hintCount>facts.length) hintCount=facts.length;
 
@@ -890,7 +935,7 @@ function doSolve(){
   renderSolution();
   applyVisibility();
 
-  if(!r.solutions.length && !r.nodeLimit && m.constraints.length<=45)
+  if(culpritSearchApplies())
     culpritTimer=setTimeout(showCulprits,800);
   scheduleFx();
 }
@@ -904,7 +949,7 @@ function renderStatus(){
   } else if(r.solutions.length===0){
     statusEl.className="status err";
     statusEl.innerHTML='<b>Keine Lösung.</b> Die Hinweise widersprechen sich.'+
-      '<span class="meta">Suche nach der Ursache läuft …</span>';
+      (culpritSearchApplies()?'<span class="meta">Suche nach der Ursache läuft …</span>':'');
   } else if(r.solutions.length===1){
     statusEl.className="status ok";
     statusEl.innerHTML='<b>Eindeutig lösbar.</b><span class="meta">'+
@@ -925,9 +970,28 @@ function countOpen(){
   }
   return {done,total};
 }
+function culpritSearchApplies(){
+  return !!result && !result.solutions.length && !result.nodeLimit && model.constraints.length<=45;
+}
 function showCulprits(){
-  if(result.solutions.length) return;
-  const list=findCulprits(model);
+  if(!result||!model||result.solutions.length) return;
+  // Hinweis für Hinweis in eigenen Takten prüfen, damit die Seite bedienbar bleibt
+  const gen=++culpritGen, m=model, list=[];
+  let i=0;
+  (function step(){
+    if(gen!==culpritGen) return;
+    const t0=performance.now();
+    while(i<m.constraints.length && list.length<4 && performance.now()-t0<40){
+      const sub={categories:m.categories,N:m.N,constraints:m.constraints.filter((_,j)=>j!==i)};
+      const r=solve(sub,{maxSolutions:1,maxNodes:4e5});
+      if(!r.nodeLimit && r.solutions.length>0) list.push(m.constraints[i]);
+      i++;
+    }
+    if(i<m.constraints.length && list.length<4){ culpritTimer=setTimeout(step,0); return; }
+    renderCulprits(list);
+  })();
+}
+function renderCulprits(list){
   if(!list.length){
     statusEl.innerHTML='<b>Keine Lösung.</b> Die Hinweise widersprechen sich.'+
       '<div style="margin-top:6px;font-family:var(--sans);font-size:13px">'+
@@ -938,15 +1002,6 @@ function showCulprits(){
     '<div style="margin-top:6px;font-family:var(--sans);font-size:13px">'+
     'Ohne einen dieser Hinweise wird es lösbar – dort steckt vermutlich der Fehler:</div><ul>'+
     list.map(c=>'<li>Zeile '+c.line+': <code>'+esc(c.text)+'</code></li>').join("")+'</ul>';
-}
-function findCulprits(m){
-  const out=[];
-  for(let i=0;i<m.constraints.length && out.length<4;i++){
-    const sub={categories:m.categories,N:m.N,constraints:m.constraints.filter((_,j)=>j!==i)};
-    const r=solve(sub,{maxSolutions:1,maxNodes:4e5});
-    if(!r.nodeLimit && r.solutions.length>0) out.push(m.constraints[i]);
-  }
-  return out;
 }
 
 /* ---------- Hinweise ---------- */

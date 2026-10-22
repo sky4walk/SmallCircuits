@@ -333,6 +333,13 @@
     font-size: 10px;
   }
 
+  .blog-link {
+    font-size: 11px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .blog-link:hover { text-decoration: underline; }
+
   kbd {
     background: var(--surface2);
     border: 1px solid var(--border);
@@ -359,8 +366,8 @@
     <div class="stat-item">Größe<span id="stat-size">—</span></div>
   </div>
   <div class="header-controls">
-    <button class="btn" id="btn-reset" title="Kamera zurücksetzen">Reset</button>
-    <button class="btn" id="btn-fit" title="Modell einpassen">Einpassen</button>
+    <button class="btn" id="btn-reset" title="Standardansicht (R)">Reset</button>
+    <button class="btn" id="btn-fit" title="Modell einpassen, Blickwinkel bleibt (F)">Einpassen</button>
     <button class="btn primary" id="btn-open">STL öffnen</button>
     <input type="file" class="file-input" id="file-input" accept=".stl">
   </div>
@@ -386,10 +393,10 @@
         <span class="control-label">Modus</span>
       </div>
       <select id="sel-render">
-        <option value="solid">Solid</option>
+        <option value="solid">Solid (glatt)</option>
         <option value="wireframe">Drahtgitter</option>
         <option value="both">Solid + Draht</option>
-        <option value="flat">Flat Shading</option>
+        <option value="flat">Facetten (flach)</option>
       </select>
     </div>
 
@@ -425,6 +432,14 @@
         <span class="control-label" style="font-size:11px">Auto-Rotation</span>
         <div class="toggle" id="tog-rot"></div>
       </div>
+      <div class="toggle-row">
+        <span class="control-label" style="font-size:11px">Schatten</span>
+        <div class="toggle on" id="tog-shadow"></div>
+      </div>
+      <div class="toggle-row" title="STL aus CAD/Slicer haben Z als Hochachse">
+        <span class="control-label" style="font-size:11px">Z nach oben</span>
+        <div class="toggle on" id="tog-zup"></div>
+      </div>
       <div class="control-row" style="margin-top:6px">
         <span class="control-label">Hintergrund</span>
         <input type="color" id="col-bg" value="#0d0e12">
@@ -450,18 +465,26 @@
       <div class="info-row"><span class="info-key">X</span><span class="info-val" id="inf-x">—</span></div>
       <div class="info-row"><span class="info-key">Y</span><span class="info-val" id="inf-y">—</span></div>
       <div class="info-row"><span class="info-key">Z</span><span class="info-val" id="inf-z">—</span></div>
+      <div class="info-row"><span class="info-key">Raster</span><span class="info-val" id="inf-grid">—</span></div>
     </div>
 
     <div class="panel">
       <div class="panel-title">Tastenkürzel</div>
       <div class="shortcut-row"><span>Einpassen</span><kbd>F</kbd></div>
-      <div class="shortcut-row"><span>Reset</span><kbd>R</kbd></div>
+      <div class="shortcut-row"><span>Standardansicht</span><kbd>R</kbd></div>
       <div class="shortcut-row"><span>Rotation</span><kbd>Space</kbd></div>
       <div class="shortcut-row"><span>Gitter</span><kbd>G</kbd></div>
       <div class="shortcut-row"><span>Drahtgitter</span><kbd>W</kbd></div>
       <div class="shortcut-row"><span>Von oben</span><kbd>Num7</kbd></div>
       <div class="shortcut-row"><span>Von vorne</span><kbd>Num1</kbd></div>
-      <div class="shortcut-row"><span>Von links</span><kbd>Num3</kbd></div>
+      <div class="shortcut-row"><span>Von rechts</span><kbd>Num3</kbd></div>
+      <div class="shortcut-row"><span>Persp./Ortho</span><kbd>Num5</kbd></div>
+      <div class="shortcut-row"><span>Verschieben</span><kbd>Shift+Ziehen</kbd></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">Mehr</div>
+      <a class="blog-link" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
     </div>
 
   </div>
@@ -476,13 +499,15 @@
 </script>
 <script>
 (function() {
+'use strict';
 
-const container = document.getElementById('canvas-container');
-const dropZone = document.getElementById('drop-zone');
-const loading  = document.getElementById('loading');
-const fileInput = document.getElementById('file-input');
+const $ = id => document.getElementById(id);
+const container = $('canvas-container');
+const dropZone  = $('drop-zone');
+const loading   = $('loading');
+const fileInput = $('file-input');
 
-// Three.js setup
+// ── Renderer / Szene ─────────────────────────────────────────────
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.shadowMap.enabled = true;
@@ -495,561 +520,618 @@ container.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d0e12);
 
-// Cameras
+// ── Kameras (beide werden immer synchron geführt) ────────────────
 let usePerspective = true;
-const aspect = () => container.clientWidth / container.clientHeight;
+const HALF_FOV = THREE.MathUtils.degToRad(22.5);
+const aspect = () => Math.max(1, container.clientWidth) / Math.max(1, container.clientHeight);
 
-const camPersp = new THREE.PerspectiveCamera(45, aspect(), 0.01, 10000);
-camPersp.position.set(5, 4, 5);
-
-const camOrtho = new THREE.OrthographicCamera(-5,5,5,-5, 0.01, 10000);
-camOrtho.position.set(5,4,5);
-
+const camPersp = new THREE.PerspectiveCamera(45, aspect(), 0.01, 1000);
+const camOrtho = new THREE.OrthographicCamera(-5, 5, 5, -5, 0.01, 1000);
 const activeCamera = () => usePerspective ? camPersp : camOrtho;
 
-// Lights
-const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
-scene.add(ambientLight);
+// ── Licht ────────────────────────────────────────────────────────
+scene.add(new THREE.AmbientLight(0xffffff, 0.4));
 
 const dirLight1 = new THREE.DirectionalLight(0xffffff, 0.9);
 dirLight1.position.set(5, 10, 7);
 dirLight1.castShadow = true;
 dirLight1.shadow.mapSize.set(2048, 2048);
+dirLight1.shadow.bias = -0.0005;
 scene.add(dirLight1);
+scene.add(dirLight1.target);
 
 const dirLight2 = new THREE.DirectionalLight(0x8ab4f8, 0.4);
 dirLight2.position.set(-5, -3, -5);
 scene.add(dirLight2);
 
-const hemi = new THREE.HemisphereLight(0x334455, 0x111111, 0.3);
-scene.add(hemi);
+scene.add(new THREE.HemisphereLight(0x334455, 0x111111, 0.3));
 
-// Grid
-const gridHelper = new THREE.GridHelper(20, 20, 0x333344, 0x222233);
-scene.add(gridHelper);
+// ── Gitter, Achsen, Schattenfläche ───────────────────────────────
+let gridHelper = null;
+let gridVisible = true;
+let gridStep = 1;
+function buildGrid(step) {
+  if (gridHelper) {
+    scene.remove(gridHelper);
+    gridHelper.geometry.dispose();
+    gridHelper.material.dispose();
+  }
+  gridStep = step;
+  gridHelper = new THREE.GridHelper(step * 20, 20, 0x333344, 0x222233);
+  gridHelper.visible = gridVisible;
+  scene.add(gridHelper);
+}
+buildGrid(1);
 
-// Axes
-const axesHelper = new THREE.AxesHelper(3);
+const axesHelper = new THREE.AxesHelper(1);
+axesHelper.scale.setScalar(3);
 axesHelper.visible = false;
 scene.add(axesHelper);
 
-// State
+const shadowPlane = new THREE.Mesh(
+  new THREE.PlaneGeometry(1, 1),
+  new THREE.ShadowMaterial({ opacity: 0.3 })
+);
+shadowPlane.rotation.x = -Math.PI / 2;
+shadowPlane.receiveShadow = true;
+shadowPlane.visible = false;
+scene.add(shadowPlane);
+
+// ── Zustand ──────────────────────────────────────────────────────
 let mesh = null;
-let wireMesh = null;
+let edgeLines = null;
+let modelRadius = 5;          // Radius der Bounding-Sphere, steuert Clipping/Zoom
 let autoRotate = false;
-let modelColor = new THREE.Color(0x4f8ef7);
-let metalness = 0.3;
-let roughness = 0.6;
 let renderMode = 'solid';
+let zUp = true;               // STL aus CAD/Slicer: Z zeigt nach oben
+let shadowsOn = true;
+let raw = null;               // { positions, format, name, bytes }
 
-// Materials
+// Ein gemeinsames Material: Regler wirken auch auf später geladene Modelle
 const solidMat = new THREE.MeshStandardMaterial({
-  color: modelColor, metalness, roughness,
-  side: THREE.DoubleSide
+  color: 0x4f8ef7, metalness: 0.3, roughness: 0.6,
+  side: THREE.DoubleSide,
+  shadowSide: THREE.BackSide,       // verhindert Schattenakne bei geschlossenen Körpern
+  polygonOffset: true,              // Kanten-Overlay flimmert nicht
+  polygonOffsetFactor: 1,
+  polygonOffsetUnits: 1
 });
-// wireframe overlay uses LineSegments with EdgesGeometry (no separate wireMat)
 
-// ── Orbit Controls (inline, no import) ──────────────────────────
+// ── Orbit-Steuerung ──────────────────────────────────────────────
+// Die Kugelkoordinaten sind die einzige Wahrheit; Kameras werden daraus gesetzt.
 const controls = (function() {
-  const STATE = { NONE: -1, ROTATE: 0, PAN: 1, ZOOM: 2 };
-  let state = STATE.NONE;
-  let target = new THREE.Vector3();
-  let lastMouse = new THREE.Vector2();
-  let spherical = new THREE.Spherical(10, Math.PI/3, Math.PI/4);
-  let sphericalDelta = new THREE.Spherical(0,0,0);
-  let panOffset = new THREE.Vector3();
-  let scale = 1;
+  const target = new THREE.Vector3();
+  const spherical = new THREE.Spherical().setFromVector3(new THREE.Vector3(5, 4, 5));
+  const PHI_MIN = 0.01, PHI_MAX = Math.PI - 0.01;
+  const DEFAULT_PHI = Math.PI / 3.5, DEFAULT_THETA = Math.PI / 4;
+  const offset = new THREE.Vector3();
 
-  function getAzimuthalAngle() { return spherical.theta; }
-  function getPolarAngle() { return spherical.phi; }
-
-  function rotateLeft(angle) { sphericalDelta.theta -= angle; }
-  function rotateUp(angle) { sphericalDelta.phi -= angle; }
-
-  function panLeft(distance) {
-    const cam = activeCamera();
-    const v = new THREE.Vector3();
-    v.setFromMatrixColumn(cam.matrix, 0);
-    v.multiplyScalar(-distance);
-    panOffset.add(v);
-  }
-
-  function panUp(distance) {
-    const cam = activeCamera();
-    const v = new THREE.Vector3();
-    v.setFromMatrixColumn(cam.matrix, 1);
-    v.multiplyScalar(distance);
-    panOffset.add(v);
-  }
-
-  function dollyIn(s) { scale /= s; }
-  function dollyOut(s) { scale *= s; }
-
-  function update() {
-    const cam = activeCamera();
-    const offset = new THREE.Vector3();
-    const quat = new THREE.Quaternion().setFromUnitVectors(cam.up, new THREE.Vector3(0,1,0));
-    const quatInverse = quat.clone().invert();
-    const lastPosition = new THREE.Vector3();
-    const lastQuaternion = new THREE.Quaternion();
-
-    offset.copy(cam.position).sub(target);
-    offset.applyQuaternion(quat);
-    spherical.setFromVector3(offset);
-    spherical.theta += sphericalDelta.theta;
-    spherical.phi += sphericalDelta.phi;
-    spherical.phi = Math.max(0.05, Math.min(Math.PI - 0.05, spherical.phi));
-    spherical.radius *= scale;
-    spherical.radius = Math.max(0.01, spherical.radius);
-
-    target.add(panOffset);
+  function apply() {
+    spherical.phi = Math.max(PHI_MIN, Math.min(PHI_MAX, spherical.phi));
+    spherical.radius = Math.max(modelRadius * 0.02, Math.min(modelRadius * 200, spherical.radius));
     offset.setFromSpherical(spherical);
-    offset.applyQuaternion(quatInverse);
-    cam.position.copy(target).add(offset);
-    cam.lookAt(target);
 
-    sphericalDelta.set(0,0,0);
-    panOffset.set(0,0,0);
-    scale = 1;
+    const r = spherical.radius;
+    const near = Math.max(r / 1000, r - modelRadius * 4);
+    const far  = r + modelRadius * 4;
+    const a = aspect();
+    const h = r * Math.tan(HALF_FOV);
 
-    // sync ortho
-    if (!usePerspective) {
-      const s2 = spherical.radius * Math.tan(THREE.MathUtils.degToRad(22.5));
-      const a = aspect();
-      camOrtho.left = -s2 * a; camOrtho.right = s2 * a;
-      camOrtho.top = s2; camOrtho.bottom = -s2;
-      camOrtho.updateProjectionMatrix();
+    camPersp.aspect = a;
+    camOrtho.left = -h * a; camOrtho.right = h * a;
+    camOrtho.top = h;       camOrtho.bottom = -h;
+
+    for (const cam of [camPersp, camOrtho]) {
+      cam.position.copy(target).add(offset);
+      cam.up.set(0, 1, 0);
+      cam.lookAt(target);
+      cam.near = near;
+      cam.far = far;
+      cam.updateProjectionMatrix();
+      cam.updateMatrixWorld();
     }
   }
 
-  function getElement() { return renderer.domElement; }
+  function rotate(dTheta, dPhi) {
+    spherical.theta -= dTheta;
+    spherical.phi -= dPhi;
+    apply();
+  }
 
+  function pan(dxPx, dyPx) {
+    const f = 2 * spherical.radius * Math.tan(HALF_FOV) / Math.max(1, container.clientHeight);
+    const cam = activeCamera();
+    const right = new THREE.Vector3().setFromMatrixColumn(cam.matrix, 0);
+    const up    = new THREE.Vector3().setFromMatrixColumn(cam.matrix, 1);
+    target.addScaledVector(right, -dxPx * f).addScaledVector(up, dyPx * f);
+    apply();
+  }
+
+  function zoom(factor) {        // factor < 1 = näher heran
+    spherical.radius *= factor;
+    apply();
+  }
+
+  function fitToModel(box, resetAngles) {
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    target.copy(center);
+    const a = Math.min(1, aspect());
+    const R = modelRadius * 1.1;
+    const hFov = Math.min(HALF_FOV, Math.atan(Math.tan(HALF_FOV) * aspect()));
+    const distPersp = R / Math.sin(hFov);
+    const distOrtho = R / (Math.tan(HALF_FOV) * a);
+    spherical.radius = Math.max(distPersp, distOrtho);
+    if (resetAngles) {
+      spherical.phi = DEFAULT_PHI;
+      spherical.theta = DEFAULT_THETA;
+    }
+    apply();
+  }
+
+  function resetDefault() {      // ohne Modell
+    target.set(0, 0, 0);
+    spherical.setFromVector3(new THREE.Vector3(5, 4, 5));
+    apply();
+  }
+
+  function setView(phi, theta) {
+    spherical.phi = phi;
+    spherical.theta = theta;
+    apply();
+  }
+
+  // Maus
   const el = renderer.domElement;
-  el.addEventListener('mousedown', onMouseDown);
-  el.addEventListener('wheel', onWheel, { passive: false });
-  el.addEventListener('contextmenu', e => e.preventDefault());
-  el.addEventListener('touchstart', onTouchStart, { passive: false });
-  el.addEventListener('touchmove', onTouchMove, { passive: false });
+  let mode = null;
+  let lastX = 0, lastY = 0;
 
-  let touchStart = [];
-
-  function onTouchStart(e) {
-    e.preventDefault();
-    touchStart = Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
-  }
-
-  function onTouchMove(e) {
-    e.preventDefault();
-    const touches = Array.from(e.touches);
-    if (touches.length === 1 && touchStart.length === 1) {
-      const dx = (touches[0].clientX - touchStart[0].x) / container.clientWidth;
-      const dy = (touches[0].clientY - touchStart[0].y) / container.clientHeight;
-      rotateLeft(2 * Math.PI * dx * 0.8);
-      rotateUp(2 * Math.PI * dy * 0.8);
-      touchStart = touches.map(t => ({ x: t.clientX, y: t.clientY }));
-      update();
-    } else if (touches.length === 2 && touchStart.length === 2) {
-      const d0 = Math.hypot(touchStart[0].x - touchStart[1].x, touchStart[0].y - touchStart[1].y);
-      const d1 = Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
-      if (d0 > 0) { if (d1 > d0) dollyIn(d1/d0); else dollyOut(d0/d1); }
-      touchStart = touches.map(t => ({ x: t.clientX, y: t.clientY }));
-      update();
-    }
-  }
-
-  function onMouseDown(e) {
-    if (e.button === 0) state = STATE.ROTATE;
-    if (e.button === 1 || e.button === 2) state = STATE.PAN;
-    lastMouse.set(e.clientX, e.clientY);
+  el.addEventListener('mousedown', e => {
+    mode = (e.button === 0 && !e.shiftKey) ? 'rotate' : 'pan';
+    lastX = e.clientX; lastY = e.clientY;
     window.addEventListener('mousemove', onMouseMove);
     window.addEventListener('mouseup', onMouseUp);
-  }
+  });
 
   function onMouseMove(e) {
-    const dx = e.clientX - lastMouse.x;
-    const dy = e.clientY - lastMouse.y;
-    if (state === STATE.ROTATE) {
-      rotateLeft(2 * Math.PI * dx / container.clientWidth * 0.8);
-      rotateUp(2 * Math.PI * dy / container.clientHeight * 0.8);
-    } else if (state === STATE.PAN) {
-      const f = spherical.radius * Math.tan(THREE.MathUtils.degToRad(22.5)) / container.clientHeight * 2;
-      panLeft(dx * f);
-      panUp(dy * f);
+    const dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    if (mode === 'rotate') {
+      rotate(2 * Math.PI * dx / Math.max(1, container.clientWidth) * 0.8,
+             2 * Math.PI * dy / Math.max(1, container.clientHeight) * 0.8);
+    } else if (mode === 'pan') {
+      pan(dx, dy);
     }
-    lastMouse.set(e.clientX, e.clientY);
-    update();
   }
 
   function onMouseUp() {
     window.removeEventListener('mousemove', onMouseMove);
     window.removeEventListener('mouseup', onMouseUp);
-    state = STATE.NONE;
+    mode = null;
   }
 
-  function onWheel(e) {
+  el.addEventListener('wheel', e => {
     e.preventDefault();
-    if (e.deltaY < 0) dollyIn(0.95);
-    else dollyOut(0.95);
-    update();
-  }
+    if (e.deltaY < 0) zoom(0.95);       // Rad nach oben = heranzoomen
+    else if (e.deltaY > 0) zoom(1 / 0.95);
+  }, { passive: false });
 
-  function fitToModel(box) {
-    const size = new THREE.Vector3();
-    const center = new THREE.Vector3();
-    box.getSize(size);
-    box.getCenter(center);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    // Reset target and spherical directly (not via delta)
-    target.copy(center);
-    spherical.set(maxDim * 2.2, Math.PI / 3.5, Math.PI / 4);
-    sphericalDelta.set(0, 0, 0);
-    panOffset.set(0, 0, 0);
-    scale = 1;
-    // Apply directly without going through delta system
-    const cam = activeCamera();
-    const quat = new THREE.Quaternion().setFromUnitVectors(cam.up, new THREE.Vector3(0,1,0));
-    const quatInverse = quat.clone().invert();
-    const offset = new THREE.Vector3();
-    offset.setFromSpherical(spherical);
-    offset.applyQuaternion(quatInverse);
-    cam.position.copy(target).add(offset);
-    cam.lookAt(target);
-    cam.updateProjectionMatrix && cam.updateProjectionMatrix();
-  }
+  el.addEventListener('contextmenu', e => e.preventDefault());
 
-  function setView(phi, theta) {
-    const size = mesh ? new THREE.Vector3() : null;
-    spherical.phi = phi;
-    spherical.theta = theta;
-    update();
-  }
+  // Touch: 1 Finger drehen, 2 Finger zoomen + verschieben
+  let tPrev = [];
+  const pts = e => Array.from(e.touches).map(t => ({ x: t.clientX, y: t.clientY }));
 
-  update();
-  return { update, fitToModel, setView, target,
-    get radius() { return spherical.radius; },
-    set radius(v) { spherical.radius = v; } };
+  el.addEventListener('touchstart', e => { e.preventDefault(); tPrev = pts(e); }, { passive: false });
+  el.addEventListener('touchmove', e => {
+    e.preventDefault();
+    const t = pts(e);
+    if (t.length === 1 && tPrev.length === 1) {
+      rotate(2 * Math.PI * (t[0].x - tPrev[0].x) / Math.max(1, container.clientWidth) * 0.8,
+             2 * Math.PI * (t[0].y - tPrev[0].y) / Math.max(1, container.clientHeight) * 0.8);
+    } else if (t.length >= 2 && tPrev.length >= 2) {
+      const d0 = Math.hypot(tPrev[0].x - tPrev[1].x, tPrev[0].y - tPrev[1].y);
+      const d1 = Math.hypot(t[0].x - t[1].x, t[0].y - t[1].y);
+      if (d0 > 0 && d1 > 0) zoom(d0 / d1);
+      pan((t[0].x + t[1].x - tPrev[0].x - tPrev[1].x) / 2,
+          (t[0].y + t[1].y - tPrev[0].y - tPrev[1].y) / 2);
+    }
+    tPrev = t;
+  }, { passive: false });
+  const onTouchEnd = e => { tPrev = pts(e); };   // Finger abheben: Startpunkte neu setzen
+  el.addEventListener('touchend', onTouchEnd);
+  el.addEventListener('touchcancel', onTouchEnd);
+
+  apply();
+  return { apply, rotate, zoom, pan, fitToModel, resetDefault, setView };
 })();
 
-// ── STL Loader ────────────────────────────────────────────────────
-function loadSTL(buffer) {
-  // Detect binary vs ASCII
-  const text = new TextDecoder().decode(new Uint8Array(buffer, 0, 80));
-  const isBinary = isBinarySTL(buffer);
-  const format = isBinary ? 'Binary' : 'ASCII';
-
-  let positions, normals;
-  if (isBinary) {
-    ({ positions, normals } = parseBinarySTL(buffer));
-  } else {
-    ({ positions, normals } = parseASCIISTL(buffer));
-  }
-
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
-  geo.computeBoundingBox();
-  geo.computeBoundingSphere();
-
-  return { geo, format, triCount: positions.length / 9 };
+// ── STL einlesen ─────────────────────────────────────────────────
+function headText(buffer, n) {
+  return new TextDecoder().decode(new Uint8Array(buffer, 0, Math.min(n, buffer.byteLength)));
 }
 
 function isBinarySTL(buffer) {
   if (buffer.byteLength < 84) return false;
-  const header = new Uint8Array(buffer, 0, 5);
-  const magic = String.fromCharCode(...header);
-  if (magic === 'solid') {
-    // Check if actually ASCII by looking past header
-    const dataView = new DataView(buffer);
-    const numTri = dataView.getUint32(80, true);
-    const expectedSize = 84 + numTri * 50;
-    if (buffer.byteLength === expectedSize && numTri > 0) return true;
-    return false;
-  }
-  return true;
+  const n = new DataView(buffer).getUint32(80, true);
+  const expected = 84 + n * 50;
+  if (n > 0 && expected === buffer.byteLength) return true;          // exakt passend: sicher binär
+  const head = headText(buffer, 1024).replace(/^﻿/, '').trimStart();
+  if (/^solid/i.test(head) && /facet|endsolid/i.test(head)) return false; // echtes ASCII
+  return n > 0 && expected <= buffer.byteLength;                     // binär mit Füllbytes am Ende
 }
 
 function parseBinarySTL(buffer) {
   const dv = new DataView(buffer);
-  const triCount = dv.getUint32(80, true);
-  const positions = new Float32Array(triCount * 9);
-  const normals = new Float32Array(triCount * 9);
-
-  let offset = 84;
-  for (let i = 0; i < triCount; i++) {
-    const nx = dv.getFloat32(offset, true);
-    const ny = dv.getFloat32(offset+4, true);
-    const nz = dv.getFloat32(offset+8, true);
-    offset += 12;
-
-    for (let v = 0; v < 3; v++) {
-      const base = i * 9 + v * 3;
-      positions[base]   = dv.getFloat32(offset, true);
-      positions[base+1] = dv.getFloat32(offset+4, true);
-      positions[base+2] = dv.getFloat32(offset+8, true);
-      normals[base] = nx; normals[base+1] = ny; normals[base+2] = nz;
-      offset += 12;
-    }
-    offset += 2; // attribute byte count
+  const n = dv.getUint32(80, true);
+  if (n === 0 || 84 + n * 50 > buffer.byteLength) {
+    throw new Error('Datei ist abgeschnitten oder keine gültige STL.');
   }
-  return { positions, normals };
+  const positions = new Float32Array(n * 9);
+  let o = 84;
+  for (let i = 0; i < n; i++) {
+    o += 12;                                   // Normale wird ignoriert und neu berechnet
+    for (let k = 0; k < 9; k++, o += 4) positions[i * 9 + k] = dv.getFloat32(o, true);
+    o += 2;                                    // Attribut-Bytes
+  }
+  return positions;
 }
 
 function parseASCIISTL(buffer) {
   const text = new TextDecoder().decode(buffer);
-  const lines = text.split('\n');
-  const posArr = [];
-  const norArr = [];
-  let curNormal = [0,0,0];
-
-  for (const line of lines) {
-    const l = line.trim();
-    if (l.startsWith('facet normal')) {
-      const p = l.split(/\s+/);
-      curNormal = [parseFloat(p[2]), parseFloat(p[3]), parseFloat(p[4])];
-    } else if (l.startsWith('vertex')) {
-      const p = l.split(/\s+/);
-      posArr.push(parseFloat(p[1]), parseFloat(p[2]), parseFloat(p[3]));
-      norArr.push(...curNormal);
-    }
-  }
-
-  return {
-    positions: new Float32Array(posArr),
-    normals: new Float32Array(norArr)
-  };
+  const re = /vertex\s+(\S+)\s+(\S+)\s+(\S+)/gi;
+  const arr = [];
+  let m;
+  while ((m = re.exec(text)) !== null) arr.push(+m[1], +m[2], +m[3]);
+  const usable = arr.length - (arr.length % 9);
+  if (usable === 0) throw new Error('Keine Dreiecke gefunden – ist das eine STL-Datei?');
+  return new Float32Array(arr.slice(0, usable));
 }
 
-// ── Load model ───────────────────────────────────────────────────
-function loadModel(buffer, fileName) {
-  loading.style.display = 'flex';
+function parseSTL(buffer) {
+  const binary = isBinarySTL(buffer);
+  if (!binary && !/^solid/i.test(headText(buffer, 256).replace(/^﻿/, '').trimStart())) {
+    throw new Error('Datei ist abgeschnitten oder keine gültige STL.');
+  }
+  const positions = binary ? parseBinarySTL(buffer) : parseASCIISTL(buffer);
+  for (let i = 0; i < positions.length; i++) {
+    if (!Number.isFinite(positions[i])) throw new Error('Ungültige Koordinaten in der Datei.');
+  }
+  return { positions, format: binary ? 'Binary' : 'ASCII' };
+}
 
-  setTimeout(() => {
-    try {
-      const { geo, format, triCount } = loadSTL(buffer);
+// Glatte Normalen mit Knickwinkel: Kanten über dem Winkel bleiben scharf.
+// Die Normalen aus der Datei werden nicht verwendet (oft 0/0/0 oder falsch).
+function computeCreaseNormals(pos, creaseDeg) {
+  const nTri = pos.length / 9;
+  const nCorner = nTri * 3;
+  const fn = new Float32Array(nTri * 3);
+  for (let t = 0; t < nTri; t++) {
+    const o = t * 9;
+    const ax = pos[o + 3] - pos[o], ay = pos[o + 4] - pos[o + 1], az = pos[o + 5] - pos[o + 2];
+    const bx = pos[o + 6] - pos[o], by = pos[o + 7] - pos[o + 1], bz = pos[o + 8] - pos[o + 2];
+    let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const l = Math.hypot(nx, ny, nz);
+    if (l > 0) { nx /= l; ny /= l; nz /= l; }
+    fn[t * 3] = nx; fn[t * 3 + 1] = ny; fn[t * 3 + 2] = nz;
+  }
 
-      // Remove old mesh
-      if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); mesh.material.dispose(); }
-      if (wireMesh) { scene.remove(wireMesh); wireMesh.geometry.dispose(); }
+  const out = new Float32Array(nCorner * 3);
+  for (let i = 0; i < nCorner; i++) {
+    const t = ((i / 3) | 0) * 3;
+    out[i * 3] = fn[t]; out[i * 3 + 1] = fn[t + 1]; out[i * 3 + 2] = fn[t + 2];
+  }
 
-      // Center geometry
-      geo.computeBoundingBox();
-      const box = geo.boundingBox;
-      const center = new THREE.Vector3();
-      box.getCenter(center);
-      geo.translate(-center.x, -center.y, -center.z);
+  const groups = new Map();
+  for (let i = 0; i < nCorner; i++) {
+    const k = pos[i * 3] + ',' + pos[i * 3 + 1] + ',' + pos[i * 3 + 2];
+    const g = groups.get(k);
+    if (g === undefined) groups.set(k, i);
+    else if (typeof g === 'number') groups.set(k, [g, i]);
+    else g.push(i);
+  }
 
-      // Translate so bottom sits on grid
-      geo.computeBoundingBox();
-      const minY = geo.boundingBox.min.y;
-      geo.translate(0, -minY, 0);
-      // IMPORTANT: recompute after translate so fitToModel gets correct box
-      geo.boundingBox = null;
-      geo.computeBoundingBox();
-
-      mesh = new THREE.Mesh(geo, solidMat.clone());
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      applyRenderMode();
-      scene.add(mesh);
-
-      // Wireframe overlay: LineSegments on EdgesGeometry sits exactly on mesh
-      const edges = new THREE.EdgesGeometry(geo);
-      wireMesh = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({
-        color: 0x8899bb, transparent: true, opacity: 0.35
-      }));
-      wireMesh.visible = renderMode === 'both';
-      scene.add(wireMesh);
-
-      // Fit camera
-      controls.fitToModel(geo.boundingBox);
-
-      // Update info
-      const size = new THREE.Vector3();
-      geo.boundingBox.getSize(size);
-      const fileSize = (buffer.byteLength / 1024).toFixed(1) + ' KB';
-
-      document.getElementById('inf-name').textContent = fileName.length > 18 ? fileName.slice(0,15)+'…' : fileName;
-      document.getElementById('inf-fmt').textContent = format;
-      document.getElementById('inf-tris').textContent = triCount.toLocaleString('de-DE');
-      document.getElementById('inf-x').textContent = size.x.toFixed(2) + ' mm';
-      document.getElementById('inf-y').textContent = size.y.toFixed(2) + ' mm';
-      document.getElementById('inf-z').textContent = size.z.toFixed(2) + ' mm';
-
-      document.getElementById('stat-tris').textContent = triCount.toLocaleString('de-DE');
-      document.getElementById('stat-verts').textContent = (triCount * 3).toLocaleString('de-DE');
-      document.getElementById('stat-size').textContent = fileSize;
-      document.getElementById('header-stats').style.display = 'flex';
-
-      dropZone.style.display = 'none';
-
-    } catch(e) {
-      alert('Fehler beim Laden: ' + e.message);
-      console.error(e);
+  const cosT = Math.cos(creaseDeg * Math.PI / 180);
+  for (const g of groups.values()) {
+    if (typeof g === 'number' || g.length > 512) continue;   // Einzelpunkt oder Riesenfächer: Facettennormale
+    for (const i of g) {
+      const ti = ((i / 3) | 0) * 3;
+      const ax = fn[ti], ay = fn[ti + 1], az = fn[ti + 2];
+      let sx = 0, sy = 0, sz = 0;
+      for (const j of g) {
+        const tj = ((j / 3) | 0) * 3;
+        const bx = fn[tj], by = fn[tj + 1], bz = fn[tj + 2];
+        if (ax * bx + ay * by + az * bz >= cosT) { sx += bx; sy += by; sz += bz; }
+      }
+      const l = Math.hypot(sx, sy, sz);
+      if (l > 0) { out[i * 3] = sx / l; out[i * 3 + 1] = sy / l; out[i * 3 + 2] = sz / l; }
     }
+  }
+  return out;
+}
 
-    loading.style.display = 'none';
-  }, 50);
+// ── Modell aufbauen ──────────────────────────────────────────────
+function niceStep(x) {
+  if (!(x > 0)) return 1;
+  const p = Math.pow(10, Math.floor(Math.log10(x)));
+  const m = x / p;
+  return (m >= 5 ? 5 : m >= 2 ? 2 : 1) * p;
+}
+
+function fmtNum(v) {
+  return v.toLocaleString('de-DE', { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+}
+
+function disposeModel() {
+  if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); mesh = null; }
+  if (edgeLines) { scene.remove(edgeLines); edgeLines.geometry.dispose(); edgeLines.material.dispose(); edgeLines = null; }
+}
+
+function buildModel(resetAngles) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(raw.positions), 3));
+
+  // Maße in den Originalachsen der Datei
+  geo.computeBoundingBox();
+  const origSize = new THREE.Vector3();
+  geo.boundingBox.getSize(origSize);
+
+  if (zUp) geo.rotateX(-Math.PI / 2);      // CAD-Z wird Three-Y (oben)
+
+  geo.computeBoundingBox();
+  const c = new THREE.Vector3();
+  geo.boundingBox.getCenter(c);
+  geo.translate(-c.x, -geo.boundingBox.min.y, -c.z);   // mittig, Unterseite auf dem Gitter
+
+  geo.setAttribute('normal', new THREE.BufferAttribute(
+    computeCreaseNormals(geo.attributes.position.array, 30), 3));
+  geo.computeBoundingBox();
+  geo.computeBoundingSphere();
+
+  disposeModel();
+  mesh = new THREE.Mesh(geo, solidMat);
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+
+  modelRadius = geo.boundingSphere.radius > 0 ? geo.boundingSphere.radius : 1;
+  fitSceneToModel(geo);
+  applyRenderMode();
+  controls.fitToModel(geo.boundingBox, resetAngles);
+  return origSize;
+}
+
+function fitSceneToModel(geo) {
+  const box = geo.boundingBox;
+  const size = new THREE.Vector3(), center = new THREE.Vector3();
+  box.getSize(size); box.getCenter(center);
+  const maxDim = Math.max(size.x, size.y, size.z) || 1;
+  const R = modelRadius;
+
+  buildGrid(niceStep(maxDim / 8));
+  axesHelper.scale.setScalar(maxDim * 0.6);
+
+  shadowPlane.scale.set(R * 8, R * 8, 1);
+  shadowPlane.position.set(0, -maxDim * 0.001, 0);
+
+  dirLight1.target.position.copy(center);
+  dirLight1.position.copy(center).add(new THREE.Vector3(-0.6, 1, 0.4).normalize().multiplyScalar(R * 3));
+  const sc = dirLight1.shadow.camera;
+  sc.left = -R * 2.5; sc.right = R * 2.5; sc.top = R * 2.5; sc.bottom = -R * 2.5;
+  sc.near = R * 0.5;  sc.far = R * 6;
+  sc.updateProjectionMatrix();
+  dirLight1.shadow.normalBias = R * 0.003;
+
+  $('inf-grid').textContent = fmtNum(gridStep) + ' mm';
 }
 
 function applyRenderMode() {
+  solidMat.wireframe   = renderMode === 'wireframe';
+  solidMat.flatShading = renderMode === 'flat';
+  solidMat.needsUpdate = true;
   if (!mesh) return;
-  const mode = renderMode;
-  // solid mesh: hidden in wireframe-only mode
-  mesh.visible = mode !== 'wireframe';
-  mesh.material.wireframe = false;
-  if (mesh.material.flatShading !== undefined) {
-    mesh.material.flatShading = mode === 'flat';
-    mesh.material.needsUpdate = true;
+
+  const solid = renderMode !== 'wireframe';
+  mesh.castShadow = solid && shadowsOn;
+  dirLight1.castShadow = shadowsOn;
+  shadowPlane.visible = solid && shadowsOn;
+
+  if (renderMode === 'both') {
+    if (!edgeLines) {
+      edgeLines = new THREE.LineSegments(
+        new THREE.EdgesGeometry(mesh.geometry),
+        new THREE.LineBasicMaterial({ color: 0x8899bb, transparent: true, opacity: 0.35 })
+      );
+      scene.add(edgeLines);
+    }
+    edgeLines.visible = true;
+  } else if (edgeLines) {
+    edgeLines.visible = false;
   }
-  // wireframe-only: use the solid mesh's built-in wireframe
-  if (mode === 'wireframe') {
-    mesh.visible = true;
-    mesh.material.wireframe = true;
-    mesh.material.flatShading = false;
-    mesh.material.needsUpdate = true;
-  }
-  // edge overlay (LineSegments): only in 'both' mode
-  if (wireMesh) wireMesh.visible = mode === 'both';
 }
 
-// ── Resize ────────────────────────────────────────────────────────
+function updateInfo(origSize) {
+  const triCount = raw.positions.length / 9;
+  const kb = raw.bytes / 1024;
+  const nameEl = $('inf-name');
+  nameEl.textContent = raw.name.length > 18 ? raw.name.slice(0, 15) + '…' : raw.name;
+  nameEl.title = raw.name;
+  $('inf-fmt').textContent  = raw.format;
+  $('inf-tris').textContent = triCount.toLocaleString('de-DE');
+  $('inf-x').textContent = fmtNum(origSize.x) + ' mm';
+  $('inf-y').textContent = fmtNum(origSize.y) + ' mm';
+  $('inf-z').textContent = fmtNum(origSize.z) + ' mm';
+  $('stat-tris').textContent  = triCount.toLocaleString('de-DE');
+  $('stat-verts').textContent = (triCount * 3).toLocaleString('de-DE');
+  $('stat-size').textContent  = kb >= 1024 ? (kb / 1024).toFixed(1) + ' MB' : kb.toFixed(1) + ' KB';
+  $('header-stats').style.display = 'flex';
+}
+
+function updateDropZone() {
+  dropZone.classList.remove('drag-over');
+  dropZone.style.display = mesh ? 'none' : 'flex';
+}
+
+function loadModel(buffer, fileName) {
+  loading.style.display = 'flex';
+  setTimeout(() => {
+    try {
+      const { positions, format } = parseSTL(buffer);
+      const prev = raw;
+      raw = { positions, format, name: fileName, bytes: buffer.byteLength };
+      try {
+        updateInfo(buildModel(true));
+      } catch (err) {
+        raw = prev;
+        throw err;
+      }
+    } catch (e) {
+      alert('Fehler beim Laden: ' + e.message);
+      console.error(e);
+    } finally {
+      loading.style.display = 'none';
+      updateDropZone();
+    }
+  }, 50);
+}
+
+function readFile(f) {
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload  = ev => loadModel(ev.target.result, f.name);
+  reader.onerror = () => alert('Datei konnte nicht gelesen werden: ' + f.name);
+  reader.readAsArrayBuffer(f);
+}
+
+// ── Größe / Animation ────────────────────────────────────────────
 function resize() {
-  const w = container.clientWidth;
-  const h = container.clientHeight;
-  renderer.setSize(w, h);
-  camPersp.aspect = w / h;
-  camPersp.updateProjectionMatrix();
-  controls.update();
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setSize(Math.max(1, container.clientWidth), Math.max(1, container.clientHeight));
+  controls.apply();
 }
 window.addEventListener('resize', resize);
+if (window.ResizeObserver) new ResizeObserver(resize).observe(container);
 resize();
 
-// ── Animate ───────────────────────────────────────────────────────
-const clock = new THREE.Clock();
 function animate() {
   requestAnimationFrame(animate);
-  if (autoRotate && mesh) {
-    mesh.rotation.y += 0.005;
-    if (wireMesh) wireMesh.rotation.y = mesh.rotation.y;
-  }
+  if (autoRotate && mesh) controls.rotate(-0.005, 0);   // Kamera kreist, Modell bleibt stehen
   renderer.render(scene, activeCamera());
 }
 animate();
 
-// ── Drop / File ───────────────────────────────────────────────────
-document.getElementById('btn-open').addEventListener('click', () => fileInput.click());
+// ── Datei öffnen / Drag & Drop ───────────────────────────────────
+$('btn-open').addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', e => {
-  const f = e.target.files[0];
-  if (!f) return;
-  const reader = new FileReader();
-  reader.onload = ev => loadModel(ev.target.result, f.name);
-  reader.readAsArrayBuffer(f);
+  readFile(e.target.files[0]);
   fileInput.value = '';
 });
 
 dropZone.addEventListener('click', () => fileInput.click());
-container.addEventListener('dragover', e => { e.preventDefault(); dropZone.style.display = 'flex'; dropZone.classList.add('drag-over'); });
-container.addEventListener('dragleave', e => { if (!container.contains(e.relatedTarget)) dropZone.classList.remove('drag-over'); });
+const showDrop = e => {
+  e.preventDefault();
+  dropZone.style.display = 'flex';
+  dropZone.classList.add('drag-over');
+};
+container.addEventListener('dragenter', showDrop);
+container.addEventListener('dragover', showDrop);
+container.addEventListener('dragleave', e => {
+  if (!container.contains(e.relatedTarget)) updateDropZone();
+});
 container.addEventListener('drop', e => {
   e.preventDefault();
-  dropZone.classList.remove('drag-over');
-  const f = e.dataTransfer.files[0];
-  if (!f) return;
-  const reader = new FileReader();
-  reader.onload = ev => loadModel(ev.target.result, f.name);
-  reader.readAsArrayBuffer(f);
+  updateDropZone();
+  readFile(e.dataTransfer.files[0]);
 });
+// Daneben abgelegte Dateien nicht vom Browser öffnen lassen
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => e.preventDefault());
 
-// ── Controls ──────────────────────────────────────────────────────
-document.getElementById('btn-reset').addEventListener('click', () => {
-  if (mesh) controls.fitToModel(mesh.geometry.boundingBox);
-  else { camPersp.position.set(5,4,5); controls.update(); }
-});
+// ── Bedienelemente ───────────────────────────────────────────────
+function resetView() {
+  if (mesh) controls.fitToModel(mesh.geometry.boundingBox, true);
+  else controls.resetDefault();
+}
+function fitView() {
+  if (mesh) controls.fitToModel(mesh.geometry.boundingBox, false);
+  else controls.resetDefault();
+}
 
-document.getElementById('btn-fit').addEventListener('click', () => {
-  if (mesh) controls.fitToModel(mesh.geometry.boundingBox);
-});
+$('btn-reset').addEventListener('click', resetView);
+$('btn-fit').addEventListener('click', fitView);
 
-document.getElementById('sel-render').addEventListener('change', e => {
+$('sel-render').addEventListener('change', e => {
   renderMode = e.target.value;
   applyRenderMode();
 });
 
-document.getElementById('col-model').addEventListener('input', e => {
-  modelColor.set(e.target.value);
-  if (mesh) mesh.material.color.set(e.target.value);
+$('col-model').addEventListener('input', e => solidMat.color.set(e.target.value));
+
+$('rng-metal').addEventListener('input', e => {
+  solidMat.metalness = parseFloat(e.target.value);
+  $('val-metal').textContent = solidMat.metalness.toFixed(2);
 });
 
-document.getElementById('rng-metal').addEventListener('input', e => {
-  metalness = parseFloat(e.target.value);
-  document.getElementById('val-metal').textContent = metalness.toFixed(2);
-  if (mesh) { mesh.material.metalness = metalness; }
+$('rng-rough').addEventListener('input', e => {
+  solidMat.roughness = parseFloat(e.target.value);
+  $('val-rough').textContent = solidMat.roughness.toFixed(2);
 });
 
-document.getElementById('rng-rough').addEventListener('input', e => {
-  roughness = parseFloat(e.target.value);
-  document.getElementById('val-rough').textContent = roughness.toFixed(2);
-  if (mesh) { mesh.material.roughness = roughness; }
+function bindToggle(id, onChange) {
+  const el = $(id);
+  const set = on => { el.classList.toggle('on', on); onChange(on); };
+  el.addEventListener('click', () => set(!el.classList.contains('on')));
+  return () => set(!el.classList.contains('on'));
+}
+
+const toggleGrid = bindToggle('tog-grid', on => { gridVisible = on; gridHelper.visible = on; });
+bindToggle('tog-axes', on => { axesHelper.visible = on; });
+const toggleRot = bindToggle('tog-rot', on => { autoRotate = on; });
+bindToggle('tog-shadow', on => { shadowsOn = on; applyRenderMode(); });
+bindToggle('tog-zup', on => {
+  zUp = on;
+  if (raw) {
+    loading.style.display = 'flex';
+    setTimeout(() => {
+      try { buildModel(false); } catch (e) { alert('Fehler: ' + e.message); }
+      loading.style.display = 'none';
+    }, 50);
+  }
 });
 
-document.getElementById('tog-grid').addEventListener('click', function() {
-  this.classList.toggle('on');
-  gridHelper.visible = this.classList.contains('on');
-});
-
-document.getElementById('tog-axes').addEventListener('click', function() {
-  this.classList.toggle('on');
-  axesHelper.visible = this.classList.contains('on');
-});
-
-document.getElementById('tog-rot').addEventListener('click', function() {
-  this.classList.toggle('on');
-  autoRotate = this.classList.contains('on');
-  if (!autoRotate && mesh) { mesh.rotation.y = 0; if (wireMesh) wireMesh.rotation.y = 0; }
-});
-
-document.getElementById('col-bg').addEventListener('input', e => {
+$('col-bg').addEventListener('input', e => {
   scene.background = new THREE.Color(e.target.value);
 });
 
-document.getElementById('sel-cam').addEventListener('change', e => {
-  usePerspective = e.target.value === 'persp';
-  controls.update();
-});
+function setProjection(persp) {
+  usePerspective = persp;
+  $('sel-cam').value = persp ? 'persp' : 'ortho';
+  controls.apply();
+}
+$('sel-cam').addEventListener('change', e => setProjection(e.target.value === 'persp'));
 
-// ── Keyboard ──────────────────────────────────────────────────────
+// ── Tastatur ─────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
-  switch(e.key) {
-    case 'f': case 'F':
-      if (mesh) controls.fitToModel(mesh.geometry.boundingBox);
-      break;
-    case 'r': case 'R':
-      if (mesh) controls.fitToModel(mesh.geometry.boundingBox);
-      break;
-    case ' ':
-      e.preventDefault();
-      const togRot = document.getElementById('tog-rot');
-      togRot.classList.toggle('on');
-      autoRotate = togRot.classList.contains('on');
-      break;
-    case 'g': case 'G': {
-      const tog = document.getElementById('tog-grid');
-      tog.classList.toggle('on');
-      gridHelper.visible = tog.classList.contains('on');
-      break;
-    }
-    case 'w': case 'W': {
-      const sel = document.getElementById('sel-render');
-      sel.value = sel.value === 'wireframe' ? 'solid' : 'wireframe';
-      renderMode = sel.value;
-      applyRenderMode();
-      break;
-    }
-    case '7': controls.setView(0.01, 0); break;      // oben
-    case '1': controls.setView(Math.PI/2, 0); break; // vorne
-    case '3': controls.setView(Math.PI/2, Math.PI/2); break; // links
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+  const k = e.key.toLowerCase();
+  const num = e.code.startsWith('Numpad') ? e.code.slice(6) : e.key;
+
+  if (k === 'f') fitView();
+  else if (k === 'r') resetView();
+  else if (k === ' ') { e.preventDefault(); toggleRot(); }
+  else if (k === 'g') toggleGrid();
+  else if (k === 'w') {
+    const sel = $('sel-render');
+    sel.value = sel.value === 'wireframe' ? 'solid' : 'wireframe';
+    renderMode = sel.value;
+    applyRenderMode();
   }
+  else if (num === '7') controls.setView(0, 0);                       // oben
+  else if (num === '1') controls.setView(Math.PI / 2, 0);             // vorne
+  else if (num === '3') controls.setView(Math.PI / 2, Math.PI / 2);   // rechts
+  else if (num === '5') setProjection(!usePerspective);               // Perspektive umschalten
 });
 
 })();

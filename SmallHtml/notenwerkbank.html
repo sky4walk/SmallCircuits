@@ -78,6 +78,7 @@ code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
   <span class="sub">Vektordaten aus Noten-PDFs auslesen — Glyphen, Systeme, Notenwerte</span>
   <span class="spacer"></span>
   <span class="sub" id="doc-info"></span>
+  <a class="sub" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#9aa5af">itzwieseltal.wordpress.com</a>
 </header>
 
 <div id="bar">
@@ -242,9 +243,18 @@ const SEMI=[0,2,4,5,7,9,11];
 const LETTER="CDEFGAH";
 function pitchOf(base, step, alter){
   const D=base+step, letter=((D%7)+7)%7, oct=Math.floor(D/7);
-  return { midi:(oct+1)*12+SEMI[letter]+alter, letter, oct,
-           name:LETTER[letter]+(alter>0?"is".repeat(alter):alter<0?"es".repeat(-alter):"")+oct };
+  return { midi:(oct+1)*12+SEMI[letter]+alter, letter, oct, name:noteName(letter,alter)+oct };
 }
+// Deutsche Tonnamen: B statt Hes, Es/As statt Ees/Aes
+function noteName(letter,alter){
+  const L=LETTER[letter];
+  if(alter>=0) return L+"is".repeat(alter);
+  if(letter===6) return alter===-1 ? "B" : "Heses";
+  if(letter===2||letter===5) return L+"s"+"es".repeat(-alter-1);
+  return L+"es".repeat(-alter);
+}
+const cmpV=(a,b)=>a===b?0:(a<b?-1:1);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const roles = {};
 // Fertige Zuordnung für den MScore-Font aus MuseScore 2, an den Zeichenbildern bestimmt.
 const PRESET_MSCORE2={
@@ -417,7 +427,8 @@ function classify(paths,staves){
       const lt=Math.max(c[0][1],c[1][1]), lb=Math.min(c[0][1],c[1][1]);
       const rt=Math.max(c[2][1],c[3][1]), rb=Math.min(c[2][1],c[3][1]);
       const thick=((lt-lb)+(rt-rb))/2;
-      if(thick>space*0.15 && thick<space*0.9){
+      // Hilfslinien sind ~0,16 Zeilenabstände stark, Balken ~0,5 — Schwelle dazwischen
+      if(thick>space*0.28 && thick<space*0.9){
         beams.push({xL:Math.min(c[0][0],c[1][0]), xR:Math.max(c[2][0],c[3][0]), lt,lb,rt,rb});
         continue;
       }
@@ -465,6 +476,8 @@ function buildEvents(glyphs,cls,staves){
   }
   const byStem=new Map(), loose=[];
   for(const c of cols){
+    // Ganze Noten haben keinen Hals — sonst greift die weite Suche nach dem Taktstrich
+    if(c.heads.every(h=>roles[rkey(h)]==="head.whole")){ loose.push(...c.heads); continue; }
     const ys=c.heads.map(h=>h.y), lo=Math.min(...ys), hi=Math.max(...ys), sp=c.sp;
     const fits=(v,win)=>{
       const dx=Math.min(Math.abs(v.x-c.x), Math.abs(v.x-(c.x+sp*1.18)));
@@ -515,7 +528,7 @@ function buildEvents(glyphs,cls,staves){
     if(role==="head.black" && n) dur=1/Math.pow(2,n);
     const nd=dotsFor(Math.max(...hs.map(h=>h.x)), hs[0].y, sp);
     if(nd) dur*=2-Math.pow(2,-nd);
-    events.push({staff:hs[0].staff,x:s.x,dur,dots:nd,beams:n,src:src||"Kopfform",
+    events.push({staff:hs[0].staff,x:s.x,hx:Math.min(...hs.map(h=>h.x)),dur,dots:nd,beams:n,src:src||"Kopfform",
       voice:up?"↑":"↓",steps:hs.map(h=>h.step).sort((a,b)=>a-b),kind:"Note"});
   });
   for(const h of loose){
@@ -523,7 +536,7 @@ function buildEvents(glyphs,cls,staves){
     const role=roles[rkey(h)]||"";
     let dur=ROLES[role]?ROLES[role].dur:null;
     const nd=dotsFor(h.x,h.y,sp); if(dur&&nd) dur*=2-Math.pow(2,-nd);
-    events.push({staff:h.staff,x:h.x,dur,dots:nd,beams:0,src:"ohne Hals",
+    events.push({staff:h.staff,x:h.x,hx:h.x,dur,dots:nd,beams:0,src:"ohne Hals",
       voice:(h.step>=4?"↑":"↓"),steps:[h.step],kind:"Note"});
   }
   for(const r of rests){
@@ -531,13 +544,20 @@ function buildEvents(glyphs,cls,staves){
     const nd=dotsFor(r.g.x,r.g.y,sp);
     let dur=r.dur; if(nd) dur*=2-Math.pow(2,-nd);
     const step=st?stepIn(st,r.g.y):null;
-    events.push({staff:st?st.idx:null,x:r.g.x,dur,dots:nd,beams:0,src:"Pause",
+    events.push({staff:st?st.idx:null,x:r.g.x,hx:r.g.x,dur,dots:nd,beams:0,src:"Pause",
       voice:(step>=4?"↑":"↓"),steps:[],kind:"Pause"});
   }
 
   const barsBy={};
   for(const b of bars) for(const s of b.staves) (barsBy[s]=barsBy[s]||[]).push(b.x);
-  for(const k in barsBy) barsBy[k].sort((a,b)=>a-b);
+  // Doppel- und Schlussstriche bestehen aus zwei Strichen: zu einem zusammenfassen,
+  // sonst springt die Taktnummer um eins.
+  for(const k in barsBy){
+    const out=[];
+    for(const x of barsBy[k].sort((a,b)=>a-b))
+      if(out.length && x-out[out.length-1] < space*1.2) out[out.length-1]=x; else out.push(x);
+    barsBy[k]=out;
+  }
   for(const e of events){
     const xs=barsBy[e.staff]||[];
     e.measure = xs.filter(x=>x < e.x-0.5).length + 1;
@@ -550,9 +570,31 @@ function buildEvents(glyphs,cls,staves){
   }
   events.sort((a,b)=>(a.staff-b.staff)||(a.measure-b.measure)||(a.x-b.x));
   assignPitches(events,staves,clefs,accs,barsBy);
+  assignVoices(events,space);
   assignOnsets(events);
-  linkTies(events,cls.slurs||[],space);
+  linkTies(events,cls.slurs||[],space,staves);
   return events;
+}
+
+/* ---- Stimmen: Halsrichtung ist nur bei echter Mehrstimmigkeit eine Stimme ---- */
+// Einstimmig wechselt die Halsrichtung mit der Tonhöhe. Erst wenn in einem Takt
+// Hals-auf- und Hals-ab-Noten (oder Pause und Note) übereinander stehen, sind es
+// zwei Stimmen; sonst wird alles Stimme 1.
+function assignVoices(events,space){
+  const groups=new Map();
+  for(const e of events){
+    const k=e.staff+"|"+e.measure;
+    if(!groups.has(k)) groups.set(k,[]);
+    groups.get(k).push(e);
+  }
+  for(const list of groups.values()){
+    const notes=list.filter(e=>e.kind==="Note"), rests=list.filter(e=>e.kind!=="Note");
+    const ups=notes.filter(e=>e.voice==="↑"), downs=notes.filter(e=>e.voice==="↓");
+    const near=(a,b)=>Math.abs(a.hx-b.hx)<space*1.3;
+    const poly = ups.some(u=>downs.some(d=>near(u,d))) ||
+                 rests.some(r=>notes.some(n=>near(r,n)));
+    if(!poly) for(const e of list) e.voice="1";
+  }
 }
 
 /* ---- Schlüssel, Tonart, Vorzeichen, Tonhöhen ---- */
@@ -597,7 +639,7 @@ function assignPitches(events,staves,clefs,accs,barsBy){
 function assignOnsets(events){
   const acc={};
   for(const e of events.slice().sort((a,b)=>(a.staff-b.staff)||(a.measure-b.measure)||
-                                            (a.voice<b.voice?-1:1)||(a.x-b.x))){
+                                            cmpV(a.voice,b.voice)||(a.x-b.x))){
     const k=e.staff+"|"+e.measure+"|"+e.voice;
     if(!(k in acc)) acc[k]=0;
     e.onset=acc[k];
@@ -606,17 +648,22 @@ function assignOnsets(events){
 }
 
 /* ---- Haltebögen: gleiche Tonhöhe an beiden Enden ---- */
-function linkTies(events,slurs,space){
+// Ein Haltebogen verbindet zwei unmittelbar aufeinanderfolgende Noten derselben
+// Stimme. Ein Legatobogen von C über andere Töne zurück nach C ist kein Haltebogen.
+function linkTies(events,slurs,space,staves){
+  const notes=events.filter(e=>e.kind==="Note");
+  const after=(p,q)=>p.measure>q.measure || (p.measure===q.measure && p.x>q.x);
   for(const sl of slurs){
-    const near=(x)=>events.filter(e=>e.kind==="Note" && Math.abs(e.x-x)<space*2.2);
+    const st=staffOf((sl.xL+sl.xR)/2, sl.y, staves);
+    const near=x=>notes.filter(e=>Math.abs(e.x-x)<space*2.2 && (!st || e.staff===st.idx));
     const A=near(sl.xL), B=near(sl.xR);
     for(const a of A) for(const b of B){
-      if(a===b || a.staff!==b.staff) continue;
-      if(Math.abs(a.y0-b.y0)>space*8) continue;
+      if(a===b || a.staff!==b.staff || a.voice!==b.voice || !after(b,a)) continue;
+      const between=notes.some(e=>e!==a && e!==b && e.staff===a.staff && e.voice===a.voice &&
+                                  after(e,a) && after(b,e));
+      if(between) continue;
       const common=(a.pitches||[]).find(p=>(b.pitches||[]).some(q=>q.midi===p.midi));
-      if(common && (b.measure>a.measure || (b.measure===a.measure && b.x>a.x))){
-        b.tieFrom=common.midi; a.tieTo=common.midi;
-      }
+      if(common){ b.tieFrom=common.midi; a.tieTo=common.midi; }
     }
   }
 }
@@ -630,14 +677,21 @@ function checkMeasures(events){
     if(!map.has(k)) map.set(k,{staff:e.staff,measure:e.measure,voice:e.voice,sum:0,n:0,unsure:0});
     const r=map.get(k); r.n++; if(e.dur) r.sum+=e.dur; else r.unsure++;
   }
-  const rows=[...map.values()].sort((a,b)=>(a.staff-b.staff)||(a.measure-b.measure)||(a.voice<b.voice?-1:1));
+  const rows=[...map.values()].sort((a,b)=>(a.staff-b.staff)||(a.measure-b.measure)||cmpV(a.voice,b.voice));
   for(const r of rows) r.ok = r.unsure===0 && Math.abs(r.sum-need)<1e-6;
   return {rows,need};
 }
 
 /* ================= Darstellung ================= */
+// pdf.js verträgt kein zweites render() auf derselben Leinwand, solange das erste
+// läuft. Schnelles Blättern oder Zoomen bricht daher den laufenden Auftrag ab.
+let renderTask=null, renderSeq=0;
 async function render(){
+  const seq=++renderSeq;
   const page=await pdf.getPage(pageNo);
+  if(seq!==renderSeq) return;
+  if(renderTask){ renderTask.cancel(); try{ await renderTask.promise; }catch(e){} renderTask=null; }
+  if(seq!==renderSeq) return;
   viewport=page.getViewport({scale:parseFloat($("zoom").value)});
   const c=$("page"), o=$("overlay"), dpr=window.devicePixelRatio||1;
   for(const cv of [c,o]){
@@ -646,10 +700,15 @@ async function render(){
   }
   const ctx=c.getContext("2d"); ctx.setTransform(dpr,0,0,dpr,0,0);
   ctx.clearRect(0,0,viewport.width,viewport.height);
-  await page.render({canvasContext:ctx,viewport}).promise;
+  const task=renderTask=page.render({canvasContext:ctx,viewport});
+  try{ await task.promise; }
+  catch(err){ if(err && err.name==="RenderingCancelledException") return; throw err; }
+  finally{ if(renderTask===task) renderTask=null; }
+  if(seq!==renderSeq) return;
 
   $("status").textContent="Werte Seite aus …";
   const {glyphs,paths}=await scanPage(page);
+  if(seq!==renderSeq) return;
   const staves=findStaves(paths);
   const cls=classify(paths,staves);
   for(const g of glyphs){
@@ -765,7 +824,7 @@ function fillSummary(){
   for(const g of cur.glyphs){ fonts[g.font]=fonts[g.font]||{n:0,codes:new Set()};
     fonts[g.font].n++; fonts[g.font].codes.add(g.code); }
   const fr=Object.entries(fonts).sort((a,b)=>b[1].n-a[1].n).map(([f,v])=>
-    `<tr><td><code>${f}</code></td><td class="num">${v.n}</td><td class="num">${v.codes.size}</td></tr>`);
+    `<tr><td><code>${esc(f)}</code></td><td class="num">${v.n}</td><td class="num">${v.codes.size}</td></tr>`);
   const named=Object.values(roles).filter(Boolean).length;
   b.innerHTML=`
     <h2>Seite ${pageNo}</h2>
@@ -850,7 +909,7 @@ function fillGlyphs(){
     .filter(g=>!f||hex(g.code).toLowerCase().includes(f)||g.font.toLowerCase().includes(f))
     .sort((a,b)=>(b.y-a.y)||(a.x-b.x)).slice(0,1200)
     .map(g=>`<tr><td><code>${hex(g.code)}</code></td>
-      <td>${ROLES[roles[rkey(g)]||""].label}</td><td><code>${g.font}</code></td>
+      <td>${(ROLES[roles[rkey(g)]||""]||ROLES[""]).label}</td><td><code>${esc(g.font)}</code></td>
       <td class="num">${g.x.toFixed(1)}</td><td class="num">${g.y.toFixed(1)}</td>
       <td class="num">${g.size.toFixed(1)}</td>
       <td class="num">${g.sys??""}</td><td class="num">${g.step??""}</td></tr>`);
@@ -970,8 +1029,7 @@ function buildMidi(tracks, ppq, bpm, single){
     let last=0;
     const ch=Math.min(i,15);
     for(const e of ev){
-      data=data.concat(varlen(Math.max(0,e.t-last)),
-                       [(e.on?0x90:0x80)|ch, e.midi&127, e.vel&127]);
+      data.push(...varlen(Math.max(0,e.t-last)), (e.on?0x90:0x80)|ch, e.midi&127, e.vel&127);
       last=e.t;
     }
     data=data.concat(varlen(0),[0xff,0x2f,0]);
@@ -991,8 +1049,7 @@ function buildFormat0(notes, ppq, bpm){
   ev.sort((a,b)=>a.t-b.t || a.on-b.on);
   let last=0;
   for(const e of ev){
-    data=data.concat(varlen(Math.max(0,e.t-last)),
-                     [(e.on?0x90:0x80)|e.ch, e.midi&127, e.vel&127]);
+    data.push(...varlen(Math.max(0,e.t-last)), (e.on?0x90:0x80)|e.ch, e.midi&127, e.vel&127);
     last=e.t;
   }
   data=data.concat(varlen(0),[0xff,0x2f,0]);
@@ -1062,7 +1119,7 @@ async function exportMidi(){
   $("mid-info").innerHTML = total
     ? `${tracks.length} Spuren · ${total} Töne · ${r.measureOffset} Takte`+
       (r.problems?` · ${r.problems} Noten ohne Tonhöhe`:"")+"<br>"+
-      tracks.map(t=>`${t.name}: ${t.notes.length}`).join(" · ")
+      tracks.map(t=>`${esc(t.name)}: ${t.notes.length}`).join(" · ")
     : (()=>{
         const has=p=>Object.values(roles).some(v=>v&&v.startsWith(p));
         const fehlt=[];
@@ -1078,8 +1135,10 @@ async function exportMidi(){
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([bytes],{type:"audio/midi"}));
   a.download="noten.mid"; a.click();
-  $("status").textContent=`MIDI erzeugt: ${total} Töne.`;
+  setTimeout(()=>URL.revokeObjectURL(a.href),4000);
   await render();
+  // erst nach render(), sonst überschreibt recompute() die Meldung sofort
+  $("status").textContent=`MIDI erzeugt: ${total} Töne.`;
 }
 
 /* ================= Diagnose ================= */
@@ -1192,9 +1251,20 @@ async function loadPdf(f){
   pageNo=1; $("prev").disabled=$("next").disabled=false; await render();
 }
 async function loadRoles(f){
-  try{ Object.assign(roles,JSON.parse(await f.text())); }
+  // Nur gültige Einträge übernehmen — eine versehentlich abgelegte Analysedatei
+  // oder unbekannte Rollen würden sonst später zu Abstürzen führen.
+  let n=0, skip=0;
+  try{
+    const obj=JSON.parse(await f.text());
+    if(!obj || typeof obj!=="object" || Array.isArray(obj)) throw new Error("keine Rollentabelle");
+    for(const [k,v] of Object.entries(obj)){
+      if(typeof v==="string" && k.includes("|") && Object.prototype.hasOwnProperty.call(ROLES,v)){ roles[k]=v; n++; }
+      else skip++;
+    }
+    if(!n) throw new Error("keine gültigen Rollen gefunden");
+  }
   catch(err){ $("status").textContent="Rollendatei nicht lesbar: "+err.message; return; }
-  $("status").textContent="Rollen übernommen.";
+  $("status").textContent=`Rollen übernommen: ${n}`+(skip?`, ${skip} ungültige übergangen`:"")+".";
   if(cur){ fillCatalog(); recompute(); }
 }
 async function takeFile(f){
@@ -1240,6 +1310,7 @@ const save=(obj,name)=>{
   const a=document.createElement("a");
   a.href=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}));
   a.download=name; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),4000);
 };
 $("mid-go").onclick=()=>exportMidi();
 $("dbg-refresh").onclick=()=>fillDiag();
