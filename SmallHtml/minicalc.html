@@ -38,6 +38,7 @@
     white-space:nowrap;
   }
   #toolbar button:hover, #toolbar label.filebtn:hover{ background:rgba(255,255,255,.2); }
+  #toolbar button:disabled{ opacity:.4; cursor:default; }
   #toolbar button.active{ background:var(--accent); border-color:var(--accent); }
   #toolbar button.iconb{ font-weight:700; width:26px; text-align:center; padding:5px 0; }
   #toolbar input[type=color]{ width:26px; height:26px; padding:0; border:none; border-radius:4px; cursor:pointer; background:none;}
@@ -86,6 +87,8 @@
   #grid td[data-align="right"]{ text-align:right; }
   #grid td.errorcell{ color:#c0392b; font-weight:600; }
   #grid th.hActive{ background:var(--header-bg-active); }
+  #grid tr.vspacer td{ padding:0; border:none; background:transparent; }
+  #grid td.editing{ white-space:pre-wrap; }
 
   /* ---- Status bar ---- */
   #statusbar{
@@ -108,7 +111,7 @@
   #csvOverlay .customrow input[type=text]{ width:46px; padding:3px 6px; border:1px solid var(--grid-line); border-radius:4px; font-size:13px; }
   #csvOverlay .csvPreviewWrap{ border:1px solid var(--grid-line); border-radius:5px; overflow:auto; max-height:220px; background:#fbfcfc; }
   #csvPreview{ border-collapse:collapse; font-size:12px; width:100%; }
-  #csvPreview td{ border:1px solid var(--grid-line); padding:2px 7px; white-space:nowrap; max-width:180px; overflow:hidden; text-overflow:ellipsis; color:#2a3335; }
+  #csvPreview td{ border:1px solid var(--grid-line); padding:2px 7px; white-space:pre; max-width:180px; overflow:hidden; text-overflow:ellipsis; color:#2a3335; }
   #csvPreview tr:first-child td{ background:var(--header-bg); font-weight:600; }
   #csvOverlay .dlgBtns{ display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
   #csvOverlay .dlgBtns button{ border:1px solid var(--grid-line); background:#f2f4f5; color:var(--text); border-radius:5px; padding:7px 16px; font-size:13px; cursor:pointer; }
@@ -126,6 +129,8 @@
     <button id="btnNew" title="Neue Tabelle">Neu</button>
     <label class="filebtn" title="Datei öffnen (.ods, .csv)">Öffnen<input type="file" id="fileInput" accept=".ods,.csv"></label>
     <button id="btnSaveOds" title="Als .ods speichern – natives LibreOffice/OpenOffice-Format, inkl. Formeln UND Formatierung">💾 ods</button>
+    <button id="btnUndo" class="iconb" title="Rückgängig (Strg+Z)" disabled>↶</button>
+    <button id="btnRedo" class="iconb" title="Wiederholen (Strg+Y)" disabled>↷</button>
     <button id="btnSaveCsv" title="Als .csv speichern (nur Werte, keine Formeln/Formatierung; öffnet in LibreOffice/Excel)">💾 csv</button>
   </div>
 
@@ -182,7 +187,7 @@
 <div id="formulabar">
   <div id="cellAddr">A1</div>
   <div id="fxLabel">fx</div>
-  <input id="formulaInput" type="text" placeholder="Wert oder Formel, z.B. =SUMME(A1:A3)  (engl.: =SUM(A1:A3))" autocomplete="off">
+  <input id="formulaInput" type="text" placeholder="Wert oder Formel, z.B. =SUMME(A1:A3) oder =WENN(A1>0;A1;0)  (engl.: =SUM(A1:A3))" autocomplete="off">
 </div>
 
 <div id="gridWrap">
@@ -219,6 +224,7 @@
   <span>Summe: <b id="stSum">0</b></span>
   <span>Mittelwert: <b id="stAvg">0</b></span>
   <span style="flex:1"></span>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#3d7a6e;">itzwieseltal.wordpress.com</a>
   <span style="opacity:.7" title="ods: natives LibreOffice-Format, Formeln + Formatierung bleiben vollständig erhalten. csv: nur Werte. MiniCalc: eigenes Format, nur hier lesbar.">Doppelklick/F2 = bearbeiten · Strg+C/V = kopieren/einfügen · Entf = löschen</span>
 </div>
 
@@ -228,23 +234,62 @@
    ========================================================================= */
 function colToIndex(letters){ let n=0; for(let i=0;i<letters.length;i++) n=n*26+(letters.charCodeAt(i)-64); return n-1; }
 function indexToCol(n){ n=n+1; let s=''; while(n>0){ const r=(n-1)%26; s=String.fromCharCode(65+r)+s; n=Math.floor((n-1)/26);} return s; }
-function parseRef(ref){ const m=/^\$?([A-Z]+)\$?(\d+)$/.exec(ref); if(!m) return null; return {col:colToIndex(m[1]), row:parseInt(m[2],10)-1}; }
+const REF_RE=/^(\$?)([A-Z]+)(\$?)(\d+)$/;
+function parseRef(ref){ const m=REF_RE.exec(ref); if(!m) return null; return {col:colToIndex(m[2]), row:parseInt(m[4],10)-1, absC:!!m[1], absR:!!m[3]}; }
+function formatRef(p){ return (p.absC?'$':'')+indexToCol(p.col)+(p.absR?'$':'')+(p.row+1); }
 
 class FormulaError extends Error{ constructor(code){ super(code); this.code=code; } }
 
-function tokenize(str){
-  const re=/\s*(<>|<=|>=|[=<>]|\^|\*|\/|\+|-|\(|\)|,|:|"[^"]*"|\$?[A-Z]+\$?\d+|\d+\.?\d*|[A-Za-z_][A-Za-z0-9_]*)\s*/y;
-  let pos=0, tokens=[];
+/* Tokenizer: liefert Token samt Position im Originaltext (für das Umschreiben von Bezügen).
+   Zellbezüge werden auch klein geschrieben erkannt (a1 -> A1). Argumenttrenner: , oder ; */
+const TOKEN_SRC=String.raw`#REF!|<>|<=|>=|[=<>]|\^|\*|\/|\+|-|&|%|\(|\)|,|;|:|"(?:[^"]|"")*"|\$?[A-Za-z]+\$?\d+(?![A-Za-z0-9_(])|(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z0-9_]*`;
+const TOKEN_RE=new RegExp(String.raw`\s*(${TOKEN_SRC})\s*`,'y');
+/* Deutsches Dezimalkomma (1,5): erlaubt, wenn ';' der Argumenttrenner ist oder die
+   Formel gar keine Klammern hat (dann kann ',' kein Trenner sein). */
+const TOKEN_RE_DE=new RegExp(String.raw`\s*(\d+,\d+(?:[eE][+-]?\d+)?|${TOKEN_SRC})\s*`,'y');
+function tokenizeEx(str){
+  const out=[]; let pos=0;
+  const noStr=str.replace(/"(?:[^"]|"")*"/g,'');
+  const RE=(noStr.includes(';') || !noStr.includes('(')) ? TOKEN_RE_DE : TOKEN_RE;
   while(pos<str.length){
-    re.lastIndex=pos;
-    const m=re.exec(str);
-    if(!m || m[0].length===0){
+    RE.lastIndex=pos;
+    const m=RE.exec(str);
+    if(!m){
       if(/\s/.test(str[pos])){ pos++; continue; }
       throw new FormulaError('#ERROR!');
     }
-    tokens.push(m[1]); pos=re.lastIndex;
+    const lead=m[0].length-m[0].replace(/^\s+/,'').length;
+    let t=m[1];
+    if(/^\$?[A-Za-z]+\$?\d+$/.test(t)) t=t.toUpperCase();
+    else if(/^\d+,\d+/.test(t)) t=t.replace(',','.');
+    out.push({t, s:pos+lead, e:pos+lead+m[1].length});
+    pos=RE.lastIndex;
   }
-  return tokens;
+  return out;
+}
+function tokenize(str){ return tokenizeEx(str).map(x=>x.t); }
+
+/* Werte wie in LibreOffice: leere Zelle = 0, WAHR/FALSCH = 1/0, Text -> #VALUE! */
+function toNum(v){
+  if(typeof v==='number') return v;
+  if(v===''||v===null||v===undefined) return 0;
+  if(typeof v==='boolean') return v?1:0;
+  throw new FormulaError('#VALUE!');
+}
+function toText(v){
+  if(Array.isArray(v)) throw new FormulaError('#VALUE!');
+  if(typeof v==='boolean') return v?'WAHR':'FALSCH';
+  if(typeof v==='number') return formatNumber(v,'general');
+  return v==null?'':String(v);
+}
+function cmpVals(a,b){
+  if(Array.isArray(a)||Array.isArray(b)) throw new FormulaError('#VALUE!');
+  const norm=(x,o)=> (x===''||x==null) ? (typeof o==='string'?'':typeof o==='boolean'?false:0) : x;
+  a=norm(a,b); b=norm(b,a);
+  const rank=x=>typeof x==='number'?0:typeof x==='string'?1:2;
+  if(rank(a)!==rank(b)) return rank(a)-rank(b);
+  if(typeof a==='string'){ a=a.toLowerCase(); b=b.toLowerCase(); }
+  return a<b?-1:a>b?1:0;
 }
 
 const FUNCTIONS={
@@ -252,49 +297,76 @@ const FUNCTIONS={
   SUMME:(v)=>FUNCTIONS.SUM(v),
   AVERAGE:(v)=>{ const n=v.filter(x=>typeof x==='number'); if(!n.length) throw new FormulaError('#DIV/0!'); return n.reduce((a,b)=>a+b,0)/n.length; },
   MITTELWERT:(v)=>FUNCTIONS.AVERAGE(v),
-  MIN:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?Math.min(...n):0; },
-  MAX:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?Math.max(...n):0; },
+  MIN:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?n.reduce((a,b)=>b<a?b:a):0; },
+  MAX:(v)=>{ const n=v.filter(x=>typeof x==='number'); return n.length?n.reduce((a,b)=>b>a?b:a):0; },
   COUNT:(v)=>v.filter(x=>typeof x==='number').length,
   ANZAHL:(v)=>FUNCTIONS.COUNT(v),
   COUNTA:(v)=>v.filter(x=>x!==''&&x!==null&&x!==undefined).length,
-  ROUND:(v)=>{ const [n,d]=v; const f=Math.pow(10,d||0); return Math.round(n*f)/f; },
+  ANZAHL2:(v)=>FUNCTIONS.COUNTA(v),
+  ROUND:(v)=>{
+    const n=toNum(v[0]), d=Math.trunc(toNum(v[1]));
+    const f=Math.pow(10,d);
+    const x=Number((Math.abs(n)*f).toPrecision(15));   // 1.005 -> 100.5 statt 100.49999…
+    return Math.sign(n)*Math.round(x)/f;                // kaufmännisch: -2.5 -> -3
+  },
   RUNDEN:(v)=>FUNCTIONS.ROUND(v),
-  ABS:(v)=>Math.abs(v[0]),
-  SQRT:(v)=>Math.sqrt(v[0]),
-  WURZEL:(v)=>Math.sqrt(v[0]),
-  IF:(v)=>v[0]?v[1]:(v.length>2?v[2]:false),
-  WENN:(v)=>FUNCTIONS.IF(v),
-  CONCAT:(v)=>v.map(x=>x===undefined||x===null?'':String(x)).join(''),
+  ABS:(v)=>Math.abs(toNum(v[0])),
+  SQRT:(v)=>Math.sqrt(toNum(v[0])),
+  WURZEL:(v)=>FUNCTIONS.SQRT(v),
+  CONCAT:(v)=>v.map(x=>toText(x)).join(''),
   CONCATENATE:(v)=>FUNCTIONS.CONCAT(v),
-  AND:(v)=>v.every(Boolean),
-  OR:(v)=>v.some(Boolean),
-  NOT:(v)=>!v[0],
-  MOD:(v)=>v[0]%v[1],
-  POW:(v)=>Math.pow(v[0],v[1]),
-  LEN:(v)=>String(v[0]).length,
-  UPPER:(v)=>String(v[0]).toUpperCase(),
-  LOWER:(v)=>String(v[0]).toLowerCase(),
+  VERKETTEN:(v)=>FUNCTIONS.CONCAT(v),
+  AND:(v)=>v.filter(x=>x!=='').every(x=>toNum(x)!==0),
+  UND:(v)=>FUNCTIONS.AND(v),
+  OR:(v)=>v.filter(x=>x!=='').some(x=>toNum(x)!==0),
+  ODER:(v)=>FUNCTIONS.OR(v),
+  NOT:(v)=>toNum(v[0])===0,
+  NICHT:(v)=>FUNCTIONS.NOT(v),
+  MOD:(v)=>{ const a=toNum(v[0]), b=toNum(v[1]); if(b===0) throw new FormulaError('#DIV/0!'); return a-b*Math.floor(a/b); },
+  REST:(v)=>FUNCTIONS.MOD(v),
+  POW:(v)=>Math.pow(toNum(v[0]),toNum(v[1])),
+  POWER:(v)=>FUNCTIONS.POW(v),
+  POTENZ:(v)=>FUNCTIONS.POW(v),
+  LEN:(v)=>toText(v[0]).length,
+  UPPER:(v)=>toText(v[0]).toUpperCase(),
+  LOWER:(v)=>toText(v[0]).toLowerCase(),
   TODAY:()=>new Date().toLocaleDateString('de-DE'),
+  HEUTE:()=>FUNCTIONS.TODAY(),
+  TRUE:()=>true, WAHR:()=>true,
+  FALSE:()=>false, FALSCH:()=>false,
 };
 
+/* Parser mit "Trockenlauf" (dry): Im nicht gewählten WENN-Zweig wird nur die Syntax
+   geprüft, aber nichts ausgewertet – so liefert =WENN(B1=0;0;A1/B1) kein #DIV/0! mehr. */
 class Parser{
-  constructor(tokens,ctx){ this.toks=tokens; this.i=0; this.ctx=ctx; }
+  constructor(tokens,ctx){ this.toks=tokens; this.i=0; this.ctx=ctx; this.dry=0; }
   peek(){ return this.toks[this.i]; }
   next(){ return this.toks[this.i++]; }
   expect(t){ if(this.next()!==t) throw new FormulaError('#ERROR!'); }
+  isSep(t){ return t===','||t===';'; }
   parse(){ const v=this.parseComparison(); if(this.i<this.toks.length) throw new FormulaError('#ERROR!'); return v; }
   parseComparison(){
-    let left=this.parseAdd();
+    let left=this.parseConcat();
     while(['=','<>','<','>','<=','>='].includes(this.peek())){
-      const op=this.next(); const right=this.parseAdd();
+      const op=this.next(); const right=this.parseConcat();
+      if(this.dry){ left=false; continue; }
+      const c=cmpVals(left,right);
       switch(op){
-        case '=': left=left===right; break;
-        case '<>': left=left!==right; break;
-        case '<': left=left<right; break;
-        case '>': left=left>right; break;
-        case '<=': left=left<=right; break;
-        case '>=': left=left>=right; break;
+        case '=': left=c===0; break;
+        case '<>': left=c!==0; break;
+        case '<': left=c<0; break;
+        case '>': left=c>0; break;
+        case '<=': left=c<=0; break;
+        case '>=': left=c>=0; break;
       }
+    }
+    return left;
+  }
+  parseConcat(){
+    let left=this.parseAdd();
+    while(this.peek()==='&'){
+      this.next(); const right=this.parseAdd();
+      left = this.dry ? '' : toText(left)+toText(right);
     }
     return left;
   }
@@ -302,8 +374,9 @@ class Parser{
     let left=this.parseMul();
     while(this.peek()==='+'||this.peek()==='-'){
       const op=this.next(); const right=this.parseMul();
-      this.numCheck(left); this.numCheck(right);
-      left = op==='+' ? left+right : left-right;
+      if(this.dry){ left=0; continue; }
+      const a=toNum(left), b=toNum(right);
+      left = op==='+' ? a+b : a-b;
     }
     return left;
   }
@@ -311,37 +384,48 @@ class Parser{
     let left=this.parsePow();
     while(this.peek()==='*'||this.peek()==='/'){
       const op=this.next(); const right=this.parsePow();
-      this.numCheck(left); this.numCheck(right);
-      if(op==='/'){ if(right===0) throw new FormulaError('#DIV/0!'); left=left/right; }
-      else left=left*right;
+      if(this.dry){ left=0; continue; }
+      const a=toNum(left), b=toNum(right);
+      if(op==='/'){ if(b===0) throw new FormulaError('#DIV/0!'); left=a/b; }
+      else left=a*b;
     }
     return left;
   }
   parsePow(){
     let left=this.parseUnary();
-    while(this.peek()==='^'){ this.next(); const right=this.parseUnary(); left=Math.pow(left,right); }
+    while(this.peek()==='^'){
+      this.next(); const right=this.parseUnary();
+      left = this.dry ? 0 : Math.pow(toNum(left),toNum(right));
+    }
     return left;
   }
   parseUnary(){
-    if(this.peek()==='-'){ this.next(); return -this.parseUnary(); }
+    if(this.peek()==='-'){ this.next(); const v=this.parseUnary(); return this.dry?0:-toNum(v); }
     if(this.peek()==='+'){ this.next(); return this.parseUnary(); }
-    return this.parsePrimary();
+    return this.parsePostfix();
   }
-  numCheck(v){ if(typeof v!=='number') throw new FormulaError('#VALUE!'); }
-  isCellRef(tok){ return tok && /^\$?[A-Z]+\$?\d+$/.test(tok); }
+  parsePostfix(){
+    let v=this.parsePrimary();
+    while(this.peek()==='%'){ this.next(); v = this.dry ? 0 : toNum(v)/100; }
+    return v;
+  }
+  isCellRef(tok){ return !!tok && REF_RE.test(tok); }
   parsePrimary(){
     const tok=this.peek();
     if(tok===undefined) throw new FormulaError('#ERROR!');
+    if(tok==='#REF!'){ this.next(); if(this.dry) return 0; throw new FormulaError('#REF!'); }
     if(tok==='('){ this.next(); const v=this.parseComparison(); this.expect(')'); return v; }
-    if(/^\d+\.?\d*$/.test(tok)){ this.next(); return parseFloat(tok); }
-    if(tok.startsWith('"')){ this.next(); return tok.slice(1,-1); }
+    if(/^(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(tok)){ this.next(); return parseFloat(tok); }
+    if(tok.startsWith('"')){ this.next(); return tok.slice(1,-1).replace(/""/g,'"'); }
     if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok) && this.toks[this.i+1]==='('){
       const name=this.next().toUpperCase();
       this.expect('(');
-      const args=this.parseArgs();
-      this.expect(')');
+      if(name==='IF'||name==='WENN') return this.parseIf();
       const fn=FUNCTIONS[name];
       if(!fn) throw new FormulaError('#NAME?');
+      const args=this.parseArgs();
+      this.expect(')');
+      if(this.dry) return 0;
       return fn(args);
     }
     if(this.isCellRef(tok)){
@@ -350,11 +434,38 @@ class Parser{
       return this.getCellValue(first);
     }
     if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok)){
-      if(tok.toUpperCase()==='TRUE'||tok.toUpperCase()==='WAHR'){ this.next(); return true; }
-      if(tok.toUpperCase()==='FALSE'||tok.toUpperCase()==='FALSCH'){ this.next(); return false; }
+      const u=tok.toUpperCase();
+      if(u==='TRUE'||u==='WAHR'){ this.next(); return true; }
+      if(u==='FALSE'||u==='FALSCH'){ this.next(); return false; }
       throw new FormulaError('#NAME?');
     }
     throw new FormulaError('#ERROR!');
+  }
+  truthy(v){
+    if(Array.isArray(v)) throw new FormulaError('#VALUE!');
+    if(typeof v==='string' && v!=='') throw new FormulaError('#VALUE!');
+    return toNum(v)!==0;
+  }
+  branch(active){
+    const t=this.peek();
+    if(t===')'||this.isSep(t)) return 0;          // leeres Argument: WENN(A1;;5)
+    if(!active) this.dry++;
+    try{ return this.parseComparison(); }
+    finally{ if(!active) this.dry--; }
+  }
+  parseIf(){                                       // '(' ist bereits gelesen
+    const cond=this.parseComparison();
+    const c=this.dry?true:this.truthy(cond);
+    let result=c;
+    if(this.isSep(this.peek())){
+      this.next();
+      const thenV=this.branch(c);
+      let elseV=false;
+      if(this.isSep(this.peek())){ this.next(); elseV=this.branch(!c); }
+      result=c?thenV:elseV;
+    }
+    this.expect(')');
+    return this.dry?0:result;
   }
   parseArgs(){
     const out=[];
@@ -362,11 +473,11 @@ class Parser{
     while(true){
       if(this.isCellRef(this.peek()) && this.toks[this.i+1]===':'){
         const first=this.next(); this.next(); const second=this.next();
-        out.push(...this.rangeAsList(first,second));
+        for(const x of this.rangeAsList(first,second)) out.push(x);
       } else {
         out.push(this.parseComparison());
       }
-      if(this.peek()===','){ this.next(); continue; }
+      if(this.isSep(this.peek())){ this.next(); continue; }
       break;
     }
     return out;
@@ -374,15 +485,71 @@ class Parser{
   rangeAsList(a,b){
     const ra=parseRef(a), rb=parseRef(b);
     if(!ra||!rb) throw new FormulaError('#REF!');
+    if(this.dry) return [];
     const r1=Math.min(ra.row,rb.row), r2=Math.max(ra.row,rb.row);
     const c1=Math.min(ra.col,rb.col), c2=Math.max(ra.col,rb.col);
     const list=[];
     for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) list.push(this.ctx.getCell(r,c));
     return list;
   }
-  getCellValue(ref){ const r=parseRef(ref); if(!r) throw new FormulaError('#REF!'); return this.ctx.getCell(r.row,r.col); }
+  getCellValue(ref){ const r=parseRef(ref); if(!r) throw new FormulaError('#REF!'); if(this.dry) return 0; return this.ctx.getCell(r.row,r.col); }
 }
-function evalFormula(body,ctx){ const tokens=tokenize(body); return new Parser(tokens,ctx).parse(); }
+function evalFormula(body,ctx){
+  const tokens=tokenize(body);
+  const v=new Parser(tokens,ctx).parse();
+  if(Array.isArray(v)) throw new FormulaError('#VALUE!');      // =A1:A3 allein ergibt keinen Einzelwert
+  if(typeof v==='number' && !isFinite(v)) throw new FormulaError('#NUM!');  // z.B. WURZEL(-1)
+  return v;
+}
+
+/* Zahl in einer Zelle erkennen: 1.5, .5, 1e3 und deutsches 1,5 */
+function parseCellNumber(raw){
+  const s=String(raw).trim();
+  if(/^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$/.test(s)) return parseFloat(s);
+  if(/^[-+]?\d+,\d+$/.test(s)) return parseFloat(s.replace(',','.'));
+  return null;
+}
+
+/* Zellbezüge in einer Formel umschreiben (Leerzeichen/Strings bleiben unverändert).
+   mapSingle(p) / mapRange(a,b) liefern den neuen Text. */
+function rewriteFormulaRefs(raw, mapSingle, mapRange){
+  if(typeof raw!=='string' || !raw.trim().startsWith('=')) return raw;
+  let toks;
+  try{ toks=tokenizeEx(raw); } catch(e){ return raw; }
+  const edits=[];
+  for(let i=0;i<toks.length;i++){
+    const t=toks[i].t;
+    if(!REF_RE.test(t) || (toks[i+1] && toks[i+1].t==='(')) continue;
+    if(toks[i+1] && toks[i+1].t===':' && toks[i+2] && REF_RE.test(toks[i+2].t)){
+      edits.push({s:toks[i].s, e:toks[i+2].e, txt:mapRange(parseRef(t),parseRef(toks[i+2].t))});
+      i+=2;
+    } else {
+      edits.push({s:toks[i].s, e:toks[i].e, txt:mapSingle(parseRef(t))});
+    }
+  }
+  let out=raw;
+  for(let k=edits.length-1;k>=0;k--){ const ed=edits[k]; out=out.slice(0,ed.s)+ed.txt+out.slice(ed.e); }
+  return out;
+}
+/* Bezüge nach dem Löschen von Zeile/Spalte idx anpassen (wie LibreOffice, auch absolute) */
+function refsAfterDelete(raw, key, idx){
+  return rewriteFormulaRefs(raw,
+    p=>{ if(p[key]===idx) return '#REF!'; if(p[key]>idx) p[key]--; return formatRef(p); },
+    (a,b)=>{
+      if(a[key]===idx && b[key]===idx) return '#REF!';
+      const lo=a[key]<=b[key]?a:b, hi=lo===a?b:a;
+      if(lo[key]>idx) lo[key]--;
+      if(hi[key]>=idx) hi[key]--;
+      return formatRef(a)+':'+formatRef(b);
+    });
+}
+/* Relative Bezüge beim Einfügen einer Kopie verschieben ($ bleibt fest) */
+function refsShifted(raw, dr, dc){
+  const mv=p=>{ if(!p.absR) p.row+=dr; if(!p.absC) p.col+=dc; return (p.row<0||p.col<0)?null:p; };
+  return rewriteFormulaRefs(raw,
+    p=>{ const q=mv(p); return q?formatRef(q):'#REF!'; },
+    (a,b)=>{ const x=mv(a), y=mv(b); return (x&&y)?formatRef(x)+':'+formatRef(y):'#REF!'; });
+}
 
 /* =========================================================================
    Pure-JS DEFLATE-Dekompressor (RFC 1951) – zum Lesen von .ods-ZIPs,
@@ -420,6 +587,13 @@ const LEN_EXTRA=[0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
 const DIST_BASE=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
 const DIST_EXTRA=[0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
 const CLC_ORDER=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+/* Ausgabepuffer für inflate: wächst durch Verdoppeln (schneller und sparsamer als ein JS-Array) */
+class ByteOut{
+  constructor(n){ this.buf=new Uint8Array(Math.max(1024,n||0)); this.length=0; }
+  ensure(n){ if(this.length+n<=this.buf.length) return; let sz=this.buf.length*2; while(sz<this.length+n) sz*=2; const nb=new Uint8Array(sz); nb.set(this.buf.subarray(0,this.length)); this.buf=nb; }
+  push(b){ if(this.length>=this.buf.length) this.ensure(1); this.buf[this.length++]=b; }
+  result(){ return this.buf.slice(0,this.length); }
+}
 function inflateBlock(reader,output,litHuff,distHuff){
   while(true){
     const sym=decodeSymbol(reader,litHuff);
@@ -431,13 +605,15 @@ function inflateBlock(reader,output,litHuff,distHuff){
       const distSym=decodeSymbol(reader,distHuff);
       const dist=DIST_BASE[distSym]+reader.getBits(DIST_EXTRA[distSym]);
       let start=output.length-dist;
-      for(let i=0;i<len;i++) output.push(output[start+i]);
+      output.ensure(len);
+      const buf=output.buf;
+      for(let i=0;i<len;i++) buf[output.length++]=buf[start+i];
     }
   }
 }
-function inflateRaw(input){
+function inflateRaw(input, sizeHint){
   const reader=new BitReader(input);
-  const output=[];
+  const output=new ByteOut(sizeHint || input.length*4);
   let final=0;
   do{
     final=reader.getBit();
@@ -446,7 +622,8 @@ function inflateRaw(input){
       reader.align();
       const len=reader.data[reader.pos]|(reader.data[reader.pos+1]<<8);
       reader.pos+=4;
-      for(let i=0;i<len;i++) output.push(reader.data[reader.pos++]);
+      output.ensure(len);
+      for(let i=0;i<len;i++) output.buf[output.length++]=reader.data[reader.pos++];
     } else if(type===1){
       const litLengths=new Array(288);
       for(let i=0;i<=143;i++) litLengths[i]=8;
@@ -475,7 +652,7 @@ function inflateRaw(input){
       inflateBlock(reader,output,litHuff,distHuff);
     } else throw new Error('inflate: unbekannter Blocktyp');
   } while(!final);
-  return new Uint8Array(output);
+  return output.result();
 }
 
 /* =========================================================================
@@ -528,6 +705,7 @@ function readZip(bytes){
     if(dv.getUint32(cdOffset,true)!==0x02014b50) throw new Error('Ungültiger Central-Directory-Eintrag');
     const method=dv.getUint16(cdOffset+10,true);
     const compSize=dv.getUint32(cdOffset+20,true);
+    const uncompSize=dv.getUint32(cdOffset+24,true);
     const nameLen=dv.getUint16(cdOffset+28,true);
     const extraLen=dv.getUint16(cdOffset+30,true);
     const commentLen=dv.getUint16(cdOffset+32,true);
@@ -539,7 +717,7 @@ function readZip(bytes){
     const raw=bytes.slice(dataStart,dataStart+compSize);
     let content;
     if(method===0) content=raw;
-    else if(method===8) content=inflateRaw(raw);
+    else if(method===8) content=inflateRaw(raw, uncompSize);
     else throw new Error('Nicht unterstützte ZIP-Kompression: '+method);
     result[name]=content;
     cdOffset+=46+nameLen+extraLen+commentLen;
@@ -551,24 +729,31 @@ function readZip(bytes){
    ODS (OpenDocument Spreadsheet) – Erzeugen & Einlesen von content.xml
    ========================================================================= */
 function xmlEscape(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-const FN_TO_ODF={SUMME:'SUM',MITTELWERT:'AVERAGE',ANZAHL:'COUNT',RUNDEN:'ROUND',WURZEL:'SQRT',WENN:'IF'};
+const FN_TO_ODF={SUMME:'SUM',MITTELWERT:'AVERAGE',ANZAHL:'COUNT',ANZAHL2:'COUNTA',RUNDEN:'ROUND',WURZEL:'SQRT',WENN:'IF',
+  POW:'POWER',POTENZ:'POWER',REST:'MOD',UND:'AND',ODER:'OR',NICHT:'NOT',VERKETTEN:'CONCATENATE',HEUTE:'TODAY',WAHR:'TRUE',FALSCH:'FALSE'};
+/* OpenFormula (ODF): Bezüge in [.A1] bzw. [.A1:.B2], Argumenttrenner ist ';' */
 function internalFormulaToOdf(raw){
   const tokens=tokenize(raw.trim().slice(1));
   let out='';
   for(let i=0;i<tokens.length;i++){
     const tok=tokens[i];
-    if(/^\$?[A-Z]+\$?\d+$/.test(tok)){
-      const clean=tok.replace(/\$/g,'');
-      if(tokens[i+1]===':' && /^\$?[A-Z]+\$?\d+$/.test(tokens[i+2])){ out+='[.'+clean+':.'+tokens[i+2].replace(/\$/g,'')+']'; i+=2; }
-      else out+='[.'+clean+']';
+    if(REF_RE.test(tok) && tokens[i+1]!=='('){
+      if(tokens[i+1]===':' && REF_RE.test(tokens[i+2]||'')){ out+='[.'+tok+':.'+tokens[i+2]+']'; i+=2; }
+      else out+='[.'+tok+']';
     } else if(/^[A-Za-z_][A-Za-z0-9_]*$/.test(tok) && tokens[i+1]==='('){ out+=FN_TO_ODF[tok.toUpperCase()]||tok.toUpperCase(); }
+    else if(/^(TRUE|WAHR)$/i.test(tok)) out+='TRUE()';
+    else if(/^(FALSE|FALSCH)$/i.test(tok)) out+='FALSE()';
+    else if(tok===','||tok===';') out+=';';
+    else if(tok==='#REF!') out+='[.#REF!]';
     else out+=tok;
   }
   return 'of:='+out;
 }
 function odfFormulaToInternal(odf){
   let body=odf.replace(/^of:=/,'').replace(/^=/,'');
-  body=body.replace(/\[\.([A-Z]+\d+):\.([A-Z]+\d+)\]/g,'$1:$2').replace(/\[\.([A-Z]+\d+)\]/g,'$1');
+  // [.A1], [.$A$1], [.A1:.B2] -> A1 / $A$1 / A1:B2  (';' als Trenner versteht der Parser direkt)
+  body=body.replace(/\[\.(\$?[A-Z]+\$?\d+)(?::\.(\$?[A-Z]+\$?\d+))?\]/g,(m,a,b)=>b?a+':'+b:a)
+           .replace(/\[\.?#REF![^\]]*\]/g,'#REF!');
   return '='+body;
 }
 function formatNumberPlain(v,fmt){
@@ -646,12 +831,13 @@ function buildOdsContentXml(rows,cols,grid,colW,rowH){
         else { vtAttr=' office:value-type="string"'; text=comp==null?'':String(comp); }
         cellsXml.push(`<table:table-cell${styleAttr}${formulaAttr}${vtAttr}${vAttr}>${text!==''?`<text:p>${xmlEscape(text)}</text:p>`:''}</table:table-cell>`);
       } else {
-        const isNum=/^-?\d+(\.\d+)?$/.test(raw);
-        if(isNum){
-          const n=parseFloat(raw);
+        const n=parseCellNumber(raw);
+        if(typeof comp==='boolean'){
+          cellsXml.push(`<table:table-cell${styleAttr} office:value-type="boolean" office:boolean-value="${comp}"><text:p>${comp?'WAHR':'FALSCH'}</text:p></table:table-cell>`);
+        } else if(n!==null){
           cellsXml.push(`<table:table-cell${styleAttr} office:value-type="float" office:value="${n}"><text:p>${xmlEscape(formatNumberPlain(n,cell.style.numFmt))}</text:p></table:table-cell>`);
         } else {
-          cellsXml.push(`<table:table-cell${styleAttr} office:value-type="string"><text:p>${xmlEscape(raw)}</text:p></table:table-cell>`);
+          cellsXml.push(`<table:table-cell${styleAttr} office:value-type="string">${String(cell.raw).replace(/^\s+$/,'').split('\n').map(p=>`<text:p>${xmlEscape(p)}</text:p>`).join('')}</table:table-cell>`);
         }
       }
     }
@@ -809,7 +995,7 @@ function parseOdsContentXml(doc){
       const formula=cellEl.getAttribute('table:formula');
       const valueType=cellEl.getAttribute('office:value-type');
       // Anzeigetext: alle <text:p> der Zelle (mehrzeilige Zellen bleiben erhalten)
-      const displayText=()=>Array.from(cellEl.getElementsByTagNameNS(ns.tx,'p')).map(p=>p.textContent).join(' ').trim();
+      const displayText=()=>Array.from(cellEl.getElementsByTagNameNS(ns.tx,'p')).map(p=>p.textContent).join('\n').trim();
       let raw='';
       if(formula) raw=odfFormulaToInternal(formula);
       else if(valueType==='float'||valueType==='percentage'||valueType==='currency') raw=cellEl.getAttribute('office:value')||'0';
@@ -889,7 +1075,178 @@ function initData(rows,cols){
   rowHeights=Array.from({length:rows},()=>DEFAULT_ROW_H);
 }
 
+
+/* ---------- Rückgängig / Wiederholen ----------
+   Einträge: 'cells' (nur geänderter Bereich), 'sizes' (Spaltenbreiten/Zeilenhöhen),
+   'full' (komplettes Blatt, bei Zeilen/Spalten einfügen/löschen). */
+const UNDO_MAX=100;
+let undoStack=[], redoStack=[];
+let lastUndoTag='', lastUndoTime=0;
+const copyStyle=st=>Object.assign({},st);
+function selSnapshot(){ return {sel:Object.assign({},selRange), active:Object.assign({},active)}; }
+function captureCells(r1,c1,r2,c2){
+  const cells=[];
+  for(let r=r1;r<=r2;r++){ const row=[]; for(let c=c1;c<=c2;c++){ const d=data[r][c]; row.push({raw:d.raw, style:copyStyle(d.style)}); } cells.push(row); }
+  return Object.assign({kind:'cells', r1,c1,r2,c2, cells}, selSnapshot());
+}
+function captureSel(){ const {r1,r2,c1,c2}=normRange(); return captureCells(r1,c1,r2,c2); }
+function captureSizes(){ return Object.assign({kind:'sizes', colWidths:colWidths.slice(), rowHeights:rowHeights.slice()}, selSnapshot()); }
+function captureFull(){
+  return Object.assign({kind:'full', ROWS, COLS, colWidths:colWidths.slice(), rowHeights:rowHeights.slice(),
+    data:data.map(row=>row.map(d=>({raw:d.raw, style:copyStyle(d.style)})))}, selSnapshot());
+}
+function captureLike(e){ return e.kind==='cells' ? captureCells(e.r1,e.c1,e.r2,e.c2) : e.kind==='sizes' ? captureSizes() : captureFull(); }
+/* tag: gleichartige Schritte kurz hintereinander (z.B. Farbwähler ziehen) zu einem zusammenfassen */
+function pushUndo(entry, tag){
+  const now=Date.now();
+  if(tag && tag===lastUndoTag && now-lastUndoTime<1500){ lastUndoTime=now; return; }
+  lastUndoTag=tag||''; lastUndoTime=now;
+  undoStack.push(entry); if(undoStack.length>UNDO_MAX) undoStack.shift();
+  redoStack.length=0;
+  updateUndoButtons();
+}
+function resetUndo(){ undoStack=[]; redoStack=[]; lastUndoTag=''; updateUndoButtons(); }
+function applyUndoEntry(e){
+  if(e.kind==='cells'){
+    for(let r=e.r1;r<=e.r2;r++) for(let c=e.c1;c<=e.c2;c++){
+      if(r>=ROWS||c>=COLS) continue;
+      const src=e.cells[r-e.r1][c-e.c1];
+      data[r][c].raw=src.raw; data[r][c].style=copyStyle(src.style);
+    }
+    recalcAll();
+  } else if(e.kind==='sizes'){
+    colWidths=e.colWidths.slice(); rowHeights=e.rowHeights.slice();
+    buildTable(); recalcAll();
+  } else {
+    ROWS=e.ROWS; COLS=e.COLS; colWidths=e.colWidths.slice(); rowHeights=e.rowHeights.slice();
+    data=e.data.map(row=>row.map(d=>({raw:d.raw, style:copyStyle(d.style), computed:''})));
+    buildTable(); recalcAll();
+  }
+  selRange=Object.assign({},e.sel); active=Object.assign({},e.active); selAnchor=Object.assign({},e.active);
+  clampSelection();
+  renderAll(); syncFormulaBar(); ensureVisible(active.r,active.c);
+}
+function undo(){
+  if(editing) cancelEdit();
+  const e=undoStack.pop(); if(!e) return;
+  redoStack.push(captureLike(e)); lastUndoTag='';
+  applyUndoEntry(e); updateUndoButtons(); focusProxy();
+}
+function redo(){
+  if(editing) cancelEdit();
+  const e=redoStack.pop(); if(!e) return;
+  undoStack.push(captureLike(e)); lastUndoTag='';
+  applyUndoEntry(e); updateUndoButtons(); focusProxy();
+}
+function updateUndoButtons(){
+  const u=document.getElementById('btnUndo'), r=document.getElementById('btnRedo');
+  if(u) u.disabled=!undoStack.length; if(r) r.disabled=!redoStack.length;
+}
+
+/* ---------- Tabellenaufbau mit Zeilen-Virtualisierung ----------
+   Im DOM stehen nur die sichtbaren Zeilen (plus Puffer). Platzhalterzeilen oben/unten
+   halten die Scrollhöhe korrekt. So bleiben auch Blätter mit tausenden Zeilen flüssig.
+   domCells[r] / domRowHeads[r] existieren nur für gerade gerenderte Zeilen. */
+const VBUF=15;                 // Pufferzeilen ober-/unterhalb des sichtbaren Bereichs
+let vStart=0, vEnd=0;          // gerenderter Zeilenbereich [vStart, vEnd)
+let rowTops=[0];               // Präfixsummen der Zeilenhöhen (Länge ROWS+1)
+let topSpacer=null, bottomSpacer=null;
+const gridWrap=document.getElementById('gridWrap');
+
+function computeRowTops(){
+  rowTops=new Array(ROWS+1); rowTops[0]=0;
+  for(let r=0;r<ROWS;r++) rowTops[r+1]=rowTops[r]+(rowHeights[r]||DEFAULT_ROW_H);
+}
+function rowAtY(y){          // größte Zeile r mit rowTops[r] <= y
+  let lo=0, hi=Math.max(0,ROWS-1);
+  while(lo<hi){ const mid=(lo+hi+1)>>1; if(rowTops[mid]<=y) lo=mid; else hi=mid-1; }
+  return lo;
+}
+function makeSpacer(){
+  const tr=document.createElement('tr'); tr.className='vspacer';
+  const td=document.createElement('td'); td.colSpan=COLS+1; tr.appendChild(td);
+  return tr;
+}
+function setSpacerHeight(tr,h){ tr.style.display=h>0?'':'none'; tr.firstChild.style.height=h+'px'; }
+function updateSpacers(){
+  setSpacerHeight(topSpacer, rowTops[vStart]);
+  setSpacerHeight(bottomSpacer, rowTops[ROWS]-rowTops[vEnd]);
+}
+function createRow(r){
+  const tr=document.createElement('tr');
+  tr.style.height=(rowHeights[r]||DEFAULT_ROW_H)+'px';
+  const th=document.createElement('th');
+  th.className='rowhead'; th.textContent=(r+1); th.dataset.r=r;
+  tr.appendChild(th);
+  const cells=new Array(COLS);
+  for(let c=0;c<COLS;c++){
+    const td=document.createElement('td');
+    td.dataset.r=r; td.dataset.c=c;
+    tr.appendChild(td); cells[c]=td;
+  }
+  domCells[r]=cells; domRowHeads[r]=th;
+  return tr;
+}
+function removeRow(r){
+  const th=domRowHeads[r];
+  if(th) markedRowHeads.delete(th);
+  if(domCells[r]) for(const td of domCells[r]) markedCells.delete(td);
+  if(th && th.parentElement) th.parentElement.remove();
+  domCells[r]=undefined; domRowHeads[r]=undefined;
+}
+function buildRows(from,to){
+  const frag=document.createDocumentFragment();
+  for(let r=from;r<to;r++) frag.appendChild(createRow(r));
+  return frag;
+}
+function renderRowWindow(force, aroundRow){
+  const headH=headRow.offsetHeight||DEFAULT_ROW_H;
+  const visH=gridWrap.clientHeight||800;
+  const y=Math.max(0, gridWrap.scrollTop-headH);
+  let s=Math.max(0, rowAtY(y)-VBUF);
+  let e=Math.min(ROWS, rowAtY(y+visH)+1+VBUF);
+  if(aroundRow!==undefined && (aroundRow<s || aroundRow>=e)){   // Zielzeile erzwingen (falls kein Layout/Scroll möglich)
+    s=Math.max(0,aroundRow-VBUF); e=Math.min(ROWS,aroundRow+VBUF+1);
+  }
+  if(!force && s===vStart && e===vEnd) return;
+  // Wird die gerade bearbeitete Zeile weggescrollt, Bearbeitung vorher abschließen
+  if(editing && (active.r<s || active.r>=e)) commitEdit(null);
+  const created=[];
+  if(force || s>=vEnd || e<=vStart){
+    for(let r=vStart;r<vEnd;r++) removeRow(r);
+    bottomSpacer.before(buildRows(s,e));
+    for(let r=s;r<e;r++) created.push(r);
+  } else {
+    for(let r=vStart;r<s;r++) removeRow(r);
+    for(let r=e;r<vEnd;r++) removeRow(r);
+    if(s<vStart){ topSpacer.after(buildRows(s,vStart)); for(let r=s;r<vStart;r++) created.push(r); }
+    if(e>vEnd){ bottomSpacer.before(buildRows(vEnd,e)); for(let r=vEnd;r<e;r++) created.push(r); }
+  }
+  vStart=s; vEnd=e;
+  updateSpacers();
+  for(const r of created) for(let c=0;c<COLS;c++) renderCell(r,c);
+  if(created.length) updateSelectionVisuals();
+}
+/* Zelle (r,c) in den sichtbaren Bereich scrollen und ihre Zeile rendern */
+function ensureVisible(r,c){
+  const headH=headRow.offsetHeight||DEFAULT_ROW_H;
+  const top=rowTops[r], bot=rowTops[r+1];
+  if(top<gridWrap.scrollTop) gridWrap.scrollTop=top;
+  else if(gridWrap.clientHeight && headH+bot>gridWrap.scrollTop+gridWrap.clientHeight) gridWrap.scrollTop=headH+bot-gridWrap.clientHeight;
+  const headW=domColHeads[0]?domColHeads[0].offsetLeft:44;
+  let left=0; for(let i=0;i<c;i++) left+=colWidths[i]||DEFAULT_COL_W;
+  const right=left+(colWidths[c]||DEFAULT_COL_W);
+  if(left<gridWrap.scrollLeft) gridWrap.scrollLeft=left;
+  else if(gridWrap.clientWidth && headW+right>gridWrap.scrollLeft+gridWrap.clientWidth) gridWrap.scrollLeft=headW+right-gridWrap.clientWidth;
+  renderRowWindow(false, r);   // Fenster nach Scrollposition, Zielzeile notfalls erzwingen
+}
+
 function buildTable(){
+  if(editing){                 // laufende Bearbeitung übernehmen, bevor die Zellen neu entstehen
+    const td=domCells[active.r]&&domCells[active.r][active.c];
+    if(td && data[active.r] && data[active.r][active.c]) data[active.r][active.c].raw=td.textContent;
+    editing=false; isPointing=false; pointRef=null;
+  }
   // Spaltenbreiten über <colgroup>
   const colgroup=document.getElementById('colgroup');
   colgroup.innerHTML='';
@@ -915,32 +1272,23 @@ function buildTable(){
     headRow.appendChild(th);
     domColHeads.push(th);
   }
-  // Body
+  // Body: nur Platzhalter + sichtbarer Ausschnitt
   gridBody.innerHTML='';
-  domCells=[]; domRowHeads=[];
-  for(let r=0;r<ROWS;r++){
-    const tr=document.createElement('tr');
-    tr.style.height=(rowHeights[r]||DEFAULT_ROW_H)+'px';
-    const th=document.createElement('th');
-    th.className='rowhead'; th.textContent=(r+1); th.dataset.r=r;
-    th.addEventListener('mousedown', onRowHeaderMouseDown);
-    th.addEventListener('mousemove', onRowHeaderMouseMove);
-    tr.appendChild(th);
-    domRowHeads.push(th);
-    const rowCells=[];
-    for(let c=0;c<COLS;c++){
-      const td=document.createElement('td');
-      td.dataset.r=r; td.dataset.c=c;
-      td.addEventListener('mousedown', onCellMouseDown);
-      td.addEventListener('mouseover', onCellMouseOver);
-      td.addEventListener('dblclick', onCellDblClick);
-      tr.appendChild(td);
-      rowCells.push(td);
-    }
-    gridBody.appendChild(tr);
-    domCells.push(rowCells);
-  }
-  document.getElementById('gridWrap').addEventListener('keydown', onGridEditKeydown);
+  domCells=new Array(ROWS); domRowHeads=new Array(ROWS);
+  pointingCells=[]; markedCells=new Set(); markedRowHeads=new Set();
+  topSpacer=makeSpacer(); bottomSpacer=makeSpacer();
+  gridBody.appendChild(topSpacer); gridBody.appendChild(bottomSpacer);
+  vStart=vEnd=0;
+  clampSelection();
+  computeRowTops();
+  renderRowWindow(true);
+}
+/* Auswahl/aktive Zelle auf die aktuelle Tabellengröße begrenzen (nach Löschen, Neu, Laden) */
+function clampSelection(){
+  const cr=v=>Math.max(0,Math.min(ROWS-1,v)), cc=v=>Math.max(0,Math.min(COLS-1,v));
+  selRange={r1:cr(selRange.r1), r2:cr(selRange.r2), c1:cc(selRange.c1), c2:cc(selRange.c2)};
+  active={r:cr(active.r), c:cc(active.c)};
+  selAnchor={r:cr(selAnchor.r), c:cc(selAnchor.c)};
 }
 
 /* ---------- Recalc ---------- */
@@ -948,14 +1296,14 @@ function recalcAll(){
   const memo=new Map();
   const evaluating=new Set();
   function getCell(r,c){
-    const key=r+','+c;
+    if(r<0||c<0||r>=ROWS||c>=COLS) return '';
+    const key=r*COLS+c;
     if(memo.has(key)){
       const v=memo.get(key);
       if(v && v.__err) throw new FormulaError(v.__err);
       return v;
     }
     if(evaluating.has(key)) throw new FormulaError('#CIRC!');
-    if(r<0||c<0||r>=ROWS||c>=COLS){ memo.set(key,''); return ''; }
     const raw=(data[r][c].raw||'').trim();
     let result;
     if(raw===''){ memo.set(key,''); return ''; }
@@ -965,9 +1313,11 @@ function recalcAll(){
       catch(e){ evaluating.delete(key); const code=e.code||'#ERROR!'; memo.set(key,{__err:code}); throw new FormulaError(code); }
       evaluating.delete(key);
     } else {
-      const n=parseFloat(raw);
-      const isNum = /^-?\d+(\.\d+)?$/.test(raw);
-      result = isNum ? n : raw;
+      const n=parseCellNumber(raw);
+      if(n!==null) result=n;
+      else if(/^(TRUE|WAHR)$/i.test(raw)) result=true;
+      else if(/^(FALSE|FALSCH)$/i.test(raw)) result=false;
+      else result=raw;
     }
     memo.set(key,result);
     return result;
@@ -981,21 +1331,22 @@ function recalcAll(){
 }
 
 function formatNumber(v,fmt){
+  const de=s=>s.replace('.',',');          // deutsche Anzeige: Dezimalkomma
   switch(fmt){
-    case 'num2': return v.toFixed(2);
-    case 'percent': return (v*100).toFixed(1)+'%';
-    case 'currency': return '€'+v.toFixed(2);
+    case 'num2': return de(v.toFixed(2));
+    case 'percent': return de((v*100).toFixed(1))+'%';
+    case 'currency': return de(v.toFixed(2))+' €';
     case 'int': return String(Math.round(v));
     default: {
       if(Number.isInteger(v)) return String(v);
-      let s=v.toPrecision(10);
-      return parseFloat(s).toString();
+      return de(parseFloat(v.toPrecision(10)).toString());
     }
   }
 }
 
 function renderCell(r,c){
-  const td=domCells[r][c]; const cell=data[r][c];
+  const td=domCells[r] && domCells[r][c]; if(!td) return;    // Zeile gerade nicht im DOM
+  const cell=data[r][c];
   const comp=cell.computed;
   let text, isErr=false;
   if(comp && typeof comp==='object' && comp.__err){ text=comp.__err; isErr=true; }
@@ -1020,7 +1371,7 @@ function renderCell(r,c){
 }
 
 function renderAll(){
-  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) renderCell(r,c);
+  for(let r=vStart;r<vEnd;r++) for(let c=0;c<COLS;c++) renderCell(r,c);
   updateSelectionVisuals();
   updateStatusBar();
 }
@@ -1041,18 +1392,31 @@ function setSelection(a,b){
   syncFormulaBar();
   updateStatusBar();
 }
+/* Hervorhebung differenziell: nur Zellen im (sichtbaren) Auswahlrechteck und die
+   zuvor markierten werden angefasst – unabhängig von der Blattgröße. */
+let markedCells=new Set(), markedRowHeads=new Set();
 function updateSelectionVisuals(){
   const {r1,r2,c1,c2}=normRange();
-  for(let r=0;r<ROWS;r++){
-    for(let c=0;c<COLS;c++){
-      const td=domCells[r][c];
-      const inSel = r>=r1&&r<=r2&&c>=c1&&c<=c2;
-      td.classList.toggle('sel', inSel && !(r===active.r&&c===active.c));
-      td.classList.toggle('active', r===active.r&&c===active.c);
-    }
+  const nextCells=new Set(), nextHeads=new Set();
+  const ra=Math.max(r1,vStart), rb=Math.min(r2,vEnd-1);
+  for(let r=ra;r<=rb;r++){
+    const row=domCells[r]; if(!row) continue;
+    for(let c=c1;c<=c2;c++) if(row[c]) nextCells.add(row[c]);
+    if(domRowHeads[r]) nextHeads.add(domRowHeads[r]);
   }
+  const at=domCells[active.r] && domCells[active.r][active.c];
+  if(at) nextCells.add(at);
+  for(const td of markedCells) if(!nextCells.has(td)){ td.classList.remove('sel'); td.classList.remove('active'); }
+  for(const td of nextCells){
+    const isActive = td===at;
+    td.classList.toggle('active', isActive);
+    td.classList.toggle('sel', !isActive);
+  }
+  markedCells=nextCells;
+  for(const th of markedRowHeads) if(!nextHeads.has(th)) th.classList.remove('hActive');
+  for(const th of nextHeads) th.classList.add('hActive');
+  markedRowHeads=nextHeads;
   for(let c=0;c<COLS;c++) domColHeads[c].classList.toggle('hActive', c>=c1&&c<=c2);
-  for(let r=0;r<ROWS;r++) domRowHeads[r].classList.toggle('hActive', r>=r1&&r<=r2);
 }
 function syncFormulaBar(){
   const {r1,r2,c1,c2}=normRange();
@@ -1060,6 +1424,7 @@ function syncFormulaBar(){
   formulaInput.value = data[active.r][active.c].raw;
 }
 function updateStatusBar(){
+  clampSelection();
   const {r1,r2,c1,c2}=normRange();
   let count=0,sum=0,nums=0;
   for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++){
@@ -1107,9 +1472,9 @@ function clearPointingHighlight(){
 function setPointingHighlight(r1,c1,r2,c2){
   clearPointingHighlight();
   const rr1=Math.min(r1,r2), rr2=Math.max(r1,r2), cc1=Math.min(c1,c2), cc2=Math.max(c1,c2);
-  for(let r=rr1;r<=rr2;r++) for(let c=cc1;c<=cc2;c++){
+  for(let r=Math.max(rr1,vStart);r<=Math.min(rr2,vEnd-1);r++) for(let c=cc1;c<=cc2;c++){
     if(r===active.r && c===active.c) continue; // die bearbeitete Zelle selbst nicht überdecken
-    const td=domCells[r][c];
+    const td=domCells[r] && domCells[r][c]; if(!td) continue;
     td.classList.add('sel');
     pointingCells.push(td);
   }
@@ -1121,7 +1486,8 @@ function onCellMouseDown(e){
     const text=td.textContent;
     const isFormula=text.trim().startsWith('=');
     const isSameCell=(r===active.r && c===active.c);
-    if(isFormula && !isSameCell){
+    if(isSameCell) return;   // Klick in die eigene Zelle: Browser setzt den Cursor, Bearbeitung bleibt aktiv
+    if(isFormula){
       // "Point-Mode": Zellbezug an der Cursorposition in die Formel einfügen, Bearbeitung bleibt aktiv
       e.preventDefault();
       const offset=getCaretOffset(td);
@@ -1133,7 +1499,7 @@ function onCellMouseDown(e){
       setPointingHighlight(r,c,r,c);
       return;
     }
-    // kein Formel-Kontext (oder Klick auf die eigene Zelle) -> Bearbeitung normal abschließen
+    // kein Formel-Kontext -> Bearbeitung normal abschließen
     commitEdit(null);
   }
   if(e.shiftKey){ setSelection(active,{r,c}); }
@@ -1159,6 +1525,26 @@ function onCellMouseOver(e){
   if(!isSelecting || editing) return;
   setSelection(selAnchor,{r,c});
 }
+/* Ereignis-Delegation am <tbody> statt Listener an jeder Zelle */
+function delegated(e,el){
+  return {currentTarget:el, target:e.target, shiftKey:e.shiftKey, ctrlKey:e.ctrlKey, metaKey:e.metaKey,
+          clientX:e.clientX, clientY:e.clientY, preventDefault:()=>e.preventDefault()};
+}
+gridBody.addEventListener('mousedown',(e)=>{
+  const td=e.target.closest('td[data-c]'); if(td) return onCellMouseDown(delegated(e,td));
+  const th=e.target.closest('th.rowhead[data-r]'); if(th) return onRowHeaderMouseDown(delegated(e,th));
+});
+gridBody.addEventListener('mouseover',(e)=>{ const td=e.target.closest('td[data-c]'); if(td) onCellMouseOver(delegated(e,td)); });
+gridBody.addEventListener('dblclick',(e)=>{ const td=e.target.closest('td[data-c]'); if(td) onCellDblClick(delegated(e,td)); });
+gridBody.addEventListener('mousemove',(e)=>{ const th=e.target.closest('th.rowhead[data-r]'); if(th) onRowHeaderMouseMove(delegated(e,th)); });
+gridBody.addEventListener('input',(e)=>{ if(editing && e.target.classList && e.target.classList.contains('editing')) formulaInput.value=e.target.textContent; });
+gridWrap.addEventListener('keydown', onGridEditKeydown);
+gridWrap.addEventListener('scroll', ()=>renderRowWindow(false), {passive:true});
+window.addEventListener('resize', ()=>renderRowWindow(false));
+// Klick auf Toolbar/Formelleiste während der Zellbearbeitung: Eingabe erst übernehmen
+document.getElementById('toolbar').addEventListener('mousedown', (e)=>{ if(editing) commitEdit(null); }, true);
+formulaInput.addEventListener('mousedown', ()=>{ if(editing) commitEdit(null); });
+
 window.addEventListener('mouseup', ()=>{
   if(isPointing){ isPointing=false; pointRef=null; clearPointingHighlight(); return; }
   if(isSelecting){ isSelecting=false; focusProxy(); }
@@ -1189,6 +1575,7 @@ function onColHeaderMouseDown(e){
   e.preventDefault();
   const c=+th.dataset.c;
   const startX=e.clientX, startW=colWidths[c]||DEFAULT_COL_W;
+  const before=captureSizes();
   isColResizing=true;
   function onMove(ev){
     const w=Math.max(24, startW + (ev.clientX - startX));
@@ -1197,6 +1584,7 @@ function onColHeaderMouseDown(e){
   }
   function onUp(){
     isColResizing=false;
+    if((colWidths[c]||DEFAULT_COL_W)!==startW) pushUndo(before);
     window.removeEventListener('mousemove',onMove);
     window.removeEventListener('mouseup',onUp);
   }
@@ -1209,14 +1597,17 @@ function onRowHeaderMouseDown(e){
   e.preventDefault();
   const r=+th.dataset.r;
   const startY=e.clientY, startH=rowHeights[r]||DEFAULT_ROW_H;
+  const before=captureSizes();
   isRowResizing=true;
   function onMove(ev){
     const h=Math.max(14, startH + (ev.clientY - startY));
     rowHeights[r]=h;
-    domRowHeads[r].parentElement.style.height=h+'px';
+    if(domRowHeads[r]) domRowHeads[r].parentElement.style.height=h+'px';
   }
   function onUp(){
     isRowResizing=false;
+    computeRowTops(); updateSpacers();
+    if((rowHeights[r]||DEFAULT_ROW_H)!==startH) pushUndo(before);
     window.removeEventListener('mousemove',onMove);
     window.removeEventListener('mouseup',onUp);
   }
@@ -1227,6 +1618,7 @@ function onRowHeaderMouseDown(e){
 /* ---------- Bearbeiten ---------- */
 function startEdit(r,c,initialText){
   active={r,c}; selRange={r1:r,c1:c,r2:r,c2:c};
+  ensureVisible(r,c);
   editing=true;
   const td=domCells[r][c];
   td.classList.add('editing');
@@ -1245,7 +1637,9 @@ function commitEdit(moveDir){
   const {r,c}=active;
   const td=domCells[r][c];
   const newRaw=td.textContent;
+  if(newRaw!==data[r][c].raw) pushUndo(captureCells(r,c,r,c));
   data[r][c].raw=newRaw;
+  isPointing=false; pointRef=null;
   td.removeAttribute('contenteditable');
   td.classList.remove('editing');
   editing=false;
@@ -1276,6 +1670,7 @@ function moveActive(dir,extend){
   if(dir==='down') r++; else if(dir==='up') r--; else if(dir==='left') c--; else if(dir==='right') c++;
   const n=clampRC(r,c);
   if(extend) setSelection(selAnchor,n); else { selAnchor=n; setSelection(n,n); }
+  ensureVisible(n.r,n.c);
 }
 clipProxy.addEventListener('keydown', (e)=>{
   if(editing) return;
@@ -1292,10 +1687,13 @@ clipProxy.addEventListener('keydown', (e)=>{
   if(key==='Delete' || key==='Backspace'){
     e.preventDefault();
     const {r1,r2,c1,c2}=normRange();
+    pushUndo(captureCells(r1,c1,r2,c2));
     for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) data[r][c].raw='';
     recalcAndRender(); syncFormulaBar();
     return;
   }
+  if((e.ctrlKey||e.metaKey) && !e.altKey && key.toLowerCase()==='z'){ e.preventDefault(); if(e.shiftKey) redo(); else undo(); return; }
+  if((e.ctrlKey||e.metaKey) && !e.altKey && key.toLowerCase()==='y'){ e.preventDefault(); redo(); return; }
   if((e.ctrlKey||e.metaKey) && key.toLowerCase()==='a'){ e.preventDefault(); setSelection({r:0,c:0},{r:ROWS-1,c:COLS-1}); return; }
   if(e.ctrlKey||e.metaKey||e.altKey) return; // Copy/Cut/Paste laufen über native Events unten
   if(key.length===1){ e.preventDefault(); startEdit(active.r,active.c,key); return; }
@@ -1307,7 +1705,10 @@ function buildClipboardText(){
   const rows=[];
   for(let r=r1;r<=r2;r++){
     const cols=[];
-    for(let c=c1;c<=c2;c++) cols.push(data[r][c].raw);
+    for(let c=c1;c<=c2;c++){
+      const v=String(data[r][c].raw);
+      cols.push(/[\t\n\r"]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v);
+    }
     rows.push(cols.join('\t'));
   }
   return rows.join('\n');
@@ -1358,34 +1759,48 @@ function buildClipboardHtml(){
   }
   return html+'</table>';
 }
+/* Merkt sich, woher die zuletzt in MiniCalc kopierten Zellen stammen. Wird genau
+   dieser Text wieder eingefügt, werden relative Bezüge verschoben (wie in LibreOffice).
+   Nach Ausschneiden bleiben Bezüge unverändert. */
+let internalClip=null;
+function rememberClip(cut){
+  const {r1,c1}=normRange();
+  internalClip={text:buildClipboardText().replace(/\r/g,''), r:r1, c:c1, cut};
+}
 function pasteText(text){
   if(!text) return;
-  const rows=text.replace(/\r/g,'').split('\n');
-  // leere letzte Zeile durch abschließendes \n ignorieren
-  if(rows.length>1 && rows[rows.length-1]==='') rows.pop();
+  const fromSelf = internalClip && !internalClip.cut && text.replace(/\r/g,'')===internalClip.text;
+  const dr = fromSelf ? active.r-internalClip.r : 0, dc = fromSelf ? active.c-internalClip.c : 0;
+  const rows=parseCsv(text,'\t');            // Tab-getrennt, Zellen mit Umbruch in "…" (Excel/LibreOffice)
+  if(!rows.length) return;
   const startR=active.r, startC=active.c;
-  const neededRows=startR+rows.length;
-  const neededCols=startC+Math.max(...rows.map(l=>l.split('\t').length));
-  if(neededRows>ROWS || neededCols>COLS) growGrid(Math.max(ROWS,neededRows), Math.max(COLS,neededCols));
-  rows.forEach((line,i)=>{
-    const cols=line.split('\t');
+  const width=rows.reduce((m,r)=>Math.max(m,r.length),1);
+  const neededRows=startR+rows.length, neededCols=startC+width;
+  if(neededRows>ROWS || neededCols>COLS){
+    pushUndo(captureFull());
+    growGrid(Math.max(ROWS,neededRows), Math.max(COLS,neededCols));
+  } else pushUndo(captureCells(startR,startC,neededRows-1,neededCols-1));
+  rows.forEach((cols,i)=>{
     cols.forEach((val,j)=>{
       const r=startR+i, c=startC+j;
-      if(r<ROWS && c<COLS) data[r][c].raw=val;
+      if(r<ROWS && c<COLS) data[r][c].raw = fromSelf ? refsShifted(val,dr,dc) : val;
     });
   });
   const endR=Math.min(ROWS-1,startR+rows.length-1);
-  const endC=Math.min(COLS-1,startC+Math.max(...rows.map(l=>l.split('\t').length))-1);
+  const endC=Math.min(COLS-1,startC+width-1);
   setSelection({r:startR,c:startC},{r:endR,c:endC});
   recalcAndRender();
 }
 clipProxy.addEventListener('copy',(e)=>{
   if(editing) return; e.preventDefault();
+  rememberClip(false);
   e.clipboardData.setData('text/plain', buildClipboardText());
   e.clipboardData.setData('text/html', buildClipboardHtml());
 });
 clipProxy.addEventListener('cut',(e)=>{
   if(editing) return; e.preventDefault();
+  rememberClip(true);
+  pushUndo(captureSel());
   e.clipboardData.setData('text/plain', buildClipboardText());
   e.clipboardData.setData('text/html', buildClipboardHtml());
   const {r1,r2,c1,c2}=normRange();
@@ -1403,6 +1818,7 @@ formulaInput.addEventListener('focus', ()=>{ /* Eingabe erlauben */ });
 formulaInput.addEventListener('keydown',(e)=>{
   if(e.key==='Enter'){
     e.preventDefault();
+    if(formulaInput.value!==data[active.r][active.c].raw) pushUndo(captureCells(active.r,active.c,active.r,active.c));
     data[active.r][active.c].raw=formulaInput.value;
     recalcAndRender();
     focusProxy();
@@ -1413,24 +1829,27 @@ formulaInput.addEventListener('keydown',(e)=>{
 });
 
 /* ---------- Formatierung ---------- */
-function applyToSelection(fn){
+function applyToSelection(fn, tag){
   const {r1,r2,c1,c2}=normRange();
+  pushUndo(captureCells(r1,c1,r2,c2), tag);
   for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) fn(data[r][c].style);
   for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++) renderCell(r,c);
   updateSelectionVisuals();
   focusProxy();
 }
+document.getElementById('btnUndo').onclick=()=>undo();
+document.getElementById('btnRedo').onclick=()=>redo();
 document.getElementById('btnBold').onclick=()=>applyToSelection(s=>s.bold=!s.bold);
 document.getElementById('btnItalic').onclick=()=>applyToSelection(s=>s.italic=!s.italic);
 document.getElementById('btnUnderline').onclick=()=>applyToSelection(s=>s.underline=!s.underline);
 document.getElementById('btnLeft').onclick=()=>applyToSelection(s=>s.align='left');
 document.getElementById('btnCenter').onclick=()=>applyToSelection(s=>s.align='center');
 document.getElementById('btnRight').onclick=()=>applyToSelection(s=>s.align='right');
-document.getElementById('fontColor').oninput=(e)=>applyToSelection(s=>s.color=e.target.value);
-document.getElementById('fontColor').onchange=(e)=>applyToSelection(s=>s.color=e.target.value);
+document.getElementById('fontColor').oninput=(e)=>applyToSelection(s=>s.color=e.target.value,'fontColor');
+document.getElementById('fontColor').onchange=(e)=>applyToSelection(s=>s.color=e.target.value,'fontColor');
 document.getElementById('fontColorApply').onclick=()=>applyToSelection(s=>s.color=document.getElementById('fontColor').value);
-document.getElementById('fillColor').oninput=(e)=>applyToSelection(s=>s.bg=e.target.value);
-document.getElementById('fillColor').onchange=(e)=>applyToSelection(s=>s.bg=e.target.value);
+document.getElementById('fillColor').oninput=(e)=>applyToSelection(s=>s.bg=e.target.value,'fillColor');
+document.getElementById('fillColor').onchange=(e)=>applyToSelection(s=>s.bg=e.target.value,'fillColor');
 document.getElementById('fillColorApply').onclick=()=>applyToSelection(s=>s.bg=document.getElementById('fillColor').value);
 document.getElementById('btnClearFmt').onclick=()=>applyToSelection(s=>{ s.bold=false;s.italic=false;s.underline=false;s.align='left';s.color='';s.bg='';s.numFmt='general';s.borderSides='0000';s.borderColor=''; });
 
@@ -1438,6 +1857,7 @@ document.getElementById('btnClearFmt').onclick=()=>applyToSelection(s=>{ s.bold=
 // mode: 'all' (jede Zelle voll), 'outline' (nur Außenkante der Auswahl), 'none'
 function applyBorder(mode){
   const {r1,r2,c1,c2}=normRange();
+  pushUndo(captureCells(r1,c1,r2,c2));
   const col=document.getElementById('borderColor').value;
   for(let r=r1;r<=r2;r++) for(let c=c1;c<=c2;c++){
     const s=data[r][c].style;
@@ -1467,16 +1887,20 @@ function growGrid(newRows,newCols){
   ROWS=newRows; COLS=newCols;
   buildTable(); recalcAndRender();
 }
-document.getElementById('btnAddRow').onclick=()=>{ growGrid(ROWS+1,COLS); setSelection(active,active); };
-document.getElementById('btnAddCol').onclick=()=>{ growGrid(ROWS,COLS+1); setSelection(active,active); };
+document.getElementById('btnAddRow').onclick=()=>{ pushUndo(captureFull()); growGrid(ROWS+1,COLS); setSelection(active,active); };
+document.getElementById('btnAddCol').onclick=()=>{ pushUndo(captureFull()); growGrid(ROWS,COLS+1); setSelection(active,active); };
 document.getElementById('btnDelRow').onclick=()=>{
   if(ROWS<=1) return;
+  pushUndo(captureFull());
+  for(const row of data) for(const cell of row) cell.raw=refsAfterDelete(cell.raw,'row',active.r);
   data.splice(active.r,1); rowHeights.splice(active.r,1); ROWS--;
   active.r=Math.min(active.r,ROWS-1);
   buildTable(); recalcAndRender(); setSelection(active,active);
 };
 document.getElementById('btnDelCol').onclick=()=>{
   if(COLS<=1) return;
+  pushUndo(captureFull());
+  for(const row of data) for(const cell of row) cell.raw=refsAfterDelete(cell.raw,'col',active.c);
   for(let r=0;r<ROWS;r++) data[r].splice(active.c,1); colWidths.splice(active.c,1); COLS--;
   active.c=Math.min(active.c,COLS-1);
   buildTable(); recalcAndRender(); setSelection(active,active);
@@ -1485,7 +1909,7 @@ document.getElementById('btnDelCol').onclick=()=>{
 /* ---------- Neu ---------- */
 document.getElementById('btnNew').onclick=()=>{
   if(!confirm('Neue Tabelle erstellen? Nicht gespeicherte Änderungen gehen verloren.')) return;
-  initData(40,20); buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
+  initData(40,20); resetUndo(); buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
 };
 
 /* ---------- Speichern: ODS ---------- */
@@ -1505,21 +1929,27 @@ document.getElementById('btnSaveOds').onclick=()=>{
 /* ---------- Speichern: CSV ---------- */
 function csvEscape(v){
   v=String(v);
-  if(/[";\n]/.test(v)) return '"'+v.replace(/"/g,'""')+'"';
+  if(/[";\r\n]/.test(v)) return '"'+v.replace(/"/g,'""')+'"';
   return v;
 }
+/* Export mit ';' als Trenner und deutschem Dezimalkomma (öffnet so direkt im deutschen Excel/LibreOffice).
+   Exportiert wird nur der benutzte Bereich, nicht leere Zeilen/Spalten am Ende. */
+function csvValue(val){
+  if(val && typeof val==='object' && val.__err) return val.__err;
+  if(typeof val==='number') return String(val).replace('.',',');
+  if(typeof val==='boolean') return val?'WAHR':'FALSCH';
+  return val==null?'':String(val);
+}
 document.getElementById('btnSaveCsv').onclick=()=>{
+  let lastR=-1, lastC=-1;
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) if(csvValue(data[r][c].computed)!==''){ if(r>lastR) lastR=r; if(c>lastC) lastC=c; }
   const lines=[];
-  for(let r=0;r<ROWS;r++){
+  for(let r=0;r<=lastR;r++){
     const cols=[];
-    for(let c=0;c<COLS;c++){
-      const val=data[r][c].computed;
-      const out = (val && typeof val==='object' && val.__err) ? val.__err : (val===undefined||val===null?'':val);
-      cols.push(csvEscape(out));
-    }
+    for(let c=0;c<=lastC;c++) cols.push(csvEscape(csvValue(data[r][c].computed)));
     lines.push(cols.join(';'));
   }
-  const blob=new Blob(['\uFEFF'+lines.join('\r\n')],{type:'text/csv;charset=utf-8;'});
+  const blob=new Blob(['\uFEFF'+lines.join('\r\n')+(lines.length?'\r\n':'')],{type:'text/csv;charset=utf-8;'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='minicalc.csv'; a.click();
 };
 
@@ -1530,52 +1960,54 @@ function loadMinicalcJson(text){
   colWidths=payload.colWidths || Array.from({length:COLS},()=>DEFAULT_COL_W);
   rowHeights=payload.rowHeights || Array.from({length:ROWS},()=>DEFAULT_ROW_H);
   data=payload.data.map(row=>row.map(c=>({raw:c.raw||'', style:Object.assign(newCell().style, c.style||{}), computed:''})));
+  resetUndo();
   buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
 }
 
 /* ---------- Öffnen ---------- */
-function splitCsvLines(text){
-  return text.replace(/^\uFEFF/,'').replace(/\r/g,'').split('\n').filter((l,i,arr)=>!(i===arr.length-1 && l===''));
-}
-function parseCsvLine(line, sep){
-  const out=[]; let cur=''; let inQ=false;
-  for(let i=0;i<line.length;i++){
-    const ch=line[i];
+/* Liest CSV als Ganzes: Felder in Anführungszeichen dürfen Trennzeichen und
+   Zeilenumbrüche enthalten ("" = ein Anführungszeichen). maxRows begrenzt die Vorschau. */
+function parseCsv(text, sep, maxRows){
+  text=text.replace(/^\uFEFF/,'');
+  const rows=[]; let row=[], cur='', inQ=false;
+  const endRow=()=>{ row.push(cur); rows.push(row); row=[]; cur=''; };
+  for(let i=0;i<text.length;i++){
+    const ch=text[i];
     if(inQ){
-      if(ch==='"'){ if(line[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
+      if(ch==='"'){ if(text[i+1]==='"'){ cur+='"'; i++; } else inQ=false; }
+      else if(ch==='\r' && text[i+1]==='\n'){ /* \r\n im Feld -> \n */ }
       else cur+=ch;
-    } else {
-      if(ch==='"') inQ=true;
-      else if(ch===sep){ out.push(cur); cur=''; }
-      else cur+=ch;
-    }
+    } else if(ch==='"' && cur==='') inQ=true;
+    else if(ch===sep){ row.push(cur); cur=''; }
+    else if(ch==='\r'){ if(text[i+1]!=='\n') endRow(); }
+    else if(ch==='\n') endRow();
+    else cur+=ch;
+    if(maxRows && rows.length>=maxRows) return rows;
   }
-  out.push(cur);
-  return out;
+  if(cur!=='' || row.length) endRow();
+  return rows;
 }
-// Zählt Trennzeichen NUR außerhalb von Anführungszeichen und rät das häufigste.
-function detectCsvSep(lines){
+// Zählt Trennzeichen NUR außerhalb von Anführungszeichen (erste ~64 KB) und rät das häufigste.
+function detectCsvSep(text){
   const counts={';':0,',':0,'\t':0};
-  for(const line of lines.slice(0,10)){
-    let inQ=false;
-    for(let i=0;i<line.length;i++){
-      const ch=line[i];
-      if(ch==='"'){ if(inQ && line[i+1]==='"'){ i++; } else inQ=!inQ; }
-      else if(!inQ && (ch===';'||ch===','||ch==='\t')) counts[ch]++;
-    }
+  const n=Math.min(text.length,65536); let inQ=false;
+  for(let i=0;i<n;i++){
+    const ch=text[i];
+    if(ch==='"'){ if(inQ && text[i+1]==='"'){ i++; } else inQ=!inQ; }
+    else if(!inQ && (ch===';'||ch===','||ch==='\t')) counts[ch]++;
   }
   let best=',', bestN=-1;
   for(const s of [';','\t',',']) if(counts[s]>bestN){ bestN=counts[s]; best=s; }
   return bestN>0?best:',';
 }
 function loadCsvText(text, sep){
-  const lines=splitCsvLines(text);
-  if(!sep) sep = detectCsvSep(lines);
-  const rows=lines.map(l=>parseCsvLine(l, sep));
+  if(!sep) sep = detectCsvSep(text);
+  const rows=parseCsv(text, sep);
   const newRows=Math.max(40, rows.length+3);
-  const newCols=Math.max(20, Math.max(1,...rows.map(r=>r.length))+3);
+  const newCols=Math.max(20, rows.reduce((m,r)=>Math.max(m,r.length),1)+3);
   initData(newRows,newCols);
   rows.forEach((cols,r)=>cols.forEach((val,c)=>{ data[r][c].raw=val; }));
+  resetUndo();
   buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
 }
 function loadOdsFile(arrayBuffer){
@@ -1595,6 +2027,7 @@ function loadOdsFile(arrayBuffer){
   }
   colWidths=Array.from({length:COLS},(_,c)=>(parsed.colWidths&&parsed.colWidths[c])?parsed.colWidths[c]:DEFAULT_COL_W);
   rowHeights=Array.from({length:ROWS},(_,r)=>(parsed.rowHeights&&parsed.rowHeights[r])?parsed.rowHeights[r]:DEFAULT_ROW_H);
+  resetUndo();
   buildTable(); recalcAndRender(); setSelection({r:0,c:0},{r:0,c:0});
 }
 document.getElementById('fileInput').addEventListener('change',(e)=>{
@@ -1626,7 +2059,7 @@ function currentCsvSep(){
 }
 function renderCsvPreview(){
   const sep=currentCsvSep();
-  const rows=splitCsvLines(csvPendingText).slice(0,6).map(l=>parseCsvLine(l, sep));
+  const rows=parseCsv(csvPendingText, sep, 6);
   const maxc=Math.min(10, Math.max(1, ...rows.map(r=>r.length)));
   let html='';
   for(const r of rows){
@@ -1638,7 +2071,7 @@ function renderCsvPreview(){
 }
 function openCsvDialog(text){
   csvPendingText=text;
-  const guess=detectCsvSep(splitCsvLines(text));
+  const guess=detectCsvSep(text);
   const valMap={';':';',',':',','\t':'tab'};
   const val=valMap[guess]||',';
   const radio=document.querySelector('input[name="csvsep"][value="'+val+'"]');
