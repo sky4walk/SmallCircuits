@@ -113,7 +113,7 @@ input[type=number]{
 
 /* ---- Diff-Ansicht ---- */
 .stage{display:flex;background:var(--panel);border:1px solid var(--rule);border-radius:0 0 3px 3px}
-.viewport{flex:1;overflow:auto;max-height:min(70vh,900px);scroll-behavior:auto}
+.viewport{flex:1;position:relative;overflow:auto;max-height:min(70vh,900px);scroll-behavior:auto}
 .empty{padding:48px 20px;text-align:center;color:var(--muted);font-size:13px}
 .empty .big{font-family:var(--font-mono);letter-spacing:.14em;text-transform:uppercase;font-size:12px;margin-bottom:8px}
 
@@ -131,7 +131,7 @@ td.ln{
   user-select:none; font-variant-numeric:tabular-nums;
 }
 td.mk{width:16px;text-align:center;color:var(--muted);user-select:none}
-td.tx{padding:0 8px;white-space:pre}
+td.tx{padding:0 8px;white-space:pre;overflow:hidden;tab-size:8;-moz-tab-size:8}
 table.diff.wrap td.tx{white-space:pre-wrap;overflow-wrap:anywhere}
 tr.del td.tx{background:var(--del-bg);color:var(--del-fg)}
 tr.ins td.tx{background:var(--add-bg);color:var(--add-fg)}
@@ -166,6 +166,9 @@ tr.blockstart td{border-top:1px solid var(--rule)}
 }
 .note{margin-top:10px;font-size:12.5px;color:var(--muted)}
 .note.warn{color:var(--del-mark)}
+.note div+div{margin-top:4px}
+footer{margin-top:22px;font-size:12px;color:var(--muted)}
+footer a{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -244,6 +247,8 @@ tr.blockstart td{border-top:1px solid var(--rule)}
 </div>
 
 <div class="note" id="note"></div>
+
+<footer>Mehr Werkzeuge und Artikel: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 
 </div>
 
@@ -386,8 +391,9 @@ function groupOps(ops){
 
 /* ===================== Inhalte laden ===================== */
 
+/* Eine leere Datei hat null Zeilen — nicht eine leere Zeile. */
 function splitLines(text){
-  if(text === "") return {lines:[""], eol:true, empty:true};
+  if(text === "") return {lines:[], eol:true, empty:true};
   var eol = /[\n\r]$/.test(text);
   var t = eol ? text.replace(/\r\n$|[\n\r]$/,"") : text;
   return {lines: t.split(/\r\n|\n|\r/), eol: eol, empty:false};
@@ -418,47 +424,69 @@ function hexLines(bytes){
     }
     out.push(h + "|" + a + "|");
   }
-  if(out.length===0) out.push("");
   return out;
 }
 
-function decodeText(bytes, enc){
-  if(enc==="latin1"){
-    var s = "", i, CH = 0x8000;
-    for(i=0;i<bytes.length;i+=CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i+CH));
-    return s;
+function decodeLatin1(bytes){
+  var s = "", i, CH = 0x8000;
+  for(i=0;i<bytes.length;i+=CH) s += String.fromCharCode.apply(null, bytes.subarray(i, i+CH));
+  return s;
+}
+
+/* Liefert {text, enc}. Bei "auto" wird erst striktes UTF-8 versucht;
+   ist die Datei kein gültiges UTF-8, wird sie als Latin-1 gelesen.
+   Die BOM bleibt im Text erhalten und wird in prepare() gesondert behandelt. */
+function decodeText(bytes, mode){
+  if(mode==="latin1") return {text:decodeLatin1(bytes), enc:"Latin-1"};
+  if(mode==="utf8")   return {text:new TextDecoder("utf-8",{ignoreBOM:true}).decode(bytes), enc:"UTF-8"};
+  try {
+    return {text:new TextDecoder("utf-8",{fatal:true, ignoreBOM:true}).decode(bytes), enc:"UTF-8"};
+  } catch(e){
+    return {text:decodeLatin1(bytes), enc:"Latin-1 (erkannt)"};
   }
-  return new TextDecoder("utf-8").decode(bytes);
+}
+
+/* Zeilenende-Stil eines Texts: LF, CRLF, CR, gemischt oder "" (keins) */
+function eolStyle(text){
+  var crlf = 0, lf = 0, cr = 0, i, c, n = text.length;
+  for(i=0;i<n;i++){
+    c = text.charCodeAt(i);
+    if(c===13){ if(text.charCodeAt(i+1)===10){ crlf++; i++; } else cr++; }
+    else if(c===10) lf++;
+  }
+  var kinds = (crlf?1:0) + (lf?1:0) + (cr?1:0);
+  if(kinds===0) return "";
+  if(kinds>1) return "gemischt";
+  return crlf ? "CRLF" : (lf ? "LF" : "CR");
 }
 
 var Doc = {
-  A:{name:"A", bytes:null, text:null, mode:"auto", lines:null, hex:false, eol:true, size:0},
-  B:{name:"B", bytes:null, text:null, mode:"auto", lines:null, hex:false, eol:true, size:0}
+  A:{name:"A", bytes:null, text:null, mode:"auto", lines:null, hex:false, eol:true, size:0, enc:"", bom:false, eolStyle:""},
+  B:{name:"B", bytes:null, text:null, mode:"auto", lines:null, hex:false, eol:true, size:0, enc:"", bom:false, eolStyle:""}
 };
 
 function prepare(side){
   var d = Doc[side];
-  d.lines = null; d.hex = false;
+  d.lines = null; d.hex = false; d.enc = ""; d.bom = false; d.eolStyle = "";
   if(d.bytes === null && d.text === null) return;
 
-  var mode = d.mode, bytes = d.bytes;
+  var mode = d.mode, bytes = d.bytes, txt;
   if(bytes){
     d.size = bytes.length;
     var isBin = (mode==="hex") || (mode==="auto" && looksBinary(bytes));
     if(isBin){ d.hex = true; d.lines = hexLines(bytes); d.eol = true; return; }
-    var enc = (mode==="latin1") ? "latin1" : "utf8";
-    var txt = decodeText(bytes, enc);
-    var sp = splitLines(txt);
-    d.lines = sp.lines; d.eol = sp.eol;
+    var dec = decodeText(bytes, mode);
+    txt = dec.text; d.enc = dec.enc;
   } else {
-    d.size = d.text.length;
-    if(mode==="hex"){
-      var enc2 = new TextEncoder().encode(d.text);
-      d.hex = true; d.lines = hexLines(enc2); d.eol = true; return;
-    }
-    var sp2 = splitLines(d.text);
-    d.lines = sp2.lines; d.eol = sp2.eol;
+    var enc2 = new TextEncoder().encode(d.text);
+    d.size = enc2.length;                               // Bytes, nicht Zeichen
+    if(mode==="hex"){ d.hex = true; d.lines = hexLines(enc2); d.eol = true; return; }
+    txt = d.text;
   }
+  if(txt.charCodeAt(0)===0xFEFF){ d.bom = true; txt = txt.slice(1); }
+  d.eolStyle = eolStyle(txt);
+  var sp = splitLines(txt);
+  d.lines = sp.lines; d.eol = sp.eol;
 }
 
 function fmtSize(n){
@@ -471,8 +499,14 @@ function updateMeta(side){
   var d = Doc[side], el = $("meta"+side);
   if(!d.lines){ el.textContent = "Kein Inhalt"; return; }
   var kind = d.hex ? "Hex · " + d.lines.length + " Zeilen à 16 B"
-                   : d.lines.length + " Zeilen";
-  el.innerHTML = "<b>" + esc(d.name) + "</b> · " + fmtSize(d.size) + " · " + kind;
+                   : d.lines.length + (d.lines.length===1 ? " Zeile" : " Zeilen");
+  if(!d.hex){
+    if(d.enc) kind += " · " + d.enc;
+    if(d.bom) kind += " · BOM";
+    if(d.eolStyle) kind += " · " + d.eolStyle;
+  }
+  el.innerHTML = "<b>" + esc(d.name) + "</b> · " + fmtSize(d.size) + " · " + esc(kind);
+  el.title = el.textContent;
 }
 
 
@@ -634,7 +668,7 @@ function rowUniLine(kind, r, idx, first){
   var wp = (r.a>=0 && r.b>=0) ? wordPair(r.a, r.b) : null;
   var body = wp ? (del ? wp.l : wp.r)
                 : esc(del ? State.aLines[r.a] : State.bLines[r.b]);
-  return '<tr class="'+cls+'" data-i="'+idx+'"><td class="ln">'+lnum(del ? r.a : -1)+
+  return '<tr class="'+cls+'" data-i="'+idx+'" data-m="'+(del ? "d" : "a")+'"><td class="ln">'+lnum(del ? r.a : -1)+
          '</td><td class="ln">'+lnum(del ? -1 : r.b)+'</td><td class="mk">'+(del ? "−" : "+")+
          '</td><td class="tx">'+body+'</td></tr>';
 }
@@ -653,17 +687,35 @@ function rowSbs(r, A, B, idx){
   var rr = r.b>=0
       ? '<td class="ln gap">'+lnum(r.b)+'</td><td class="tx add">'+(wp ? wp.r : esc(B[r.b]))+'</td>'
       : '<td class="ln gap"></td><td class="tx blank"></td>';
-  return '<tr class="chg'+first+'" data-i="'+idx+'">'+l+rr+'</tr>';
+  var m = r.a>=0 ? "d" : "a";
+  return '<tr class="chg'+first+'" data-i="'+idx+'" data-m="'+m+'">'+l+rr+'</tr>';
 }
 
 /* Feste Spaltenbreiten, damit im Nebeneinander-Modus beide Seiten
    exakt auf gleicher Höhe bleiben und gemeinsam horizontal scrollen. */
+/* Sichtbare Breite einer Zeile in Zeichenzellen: Tabs springen auf die
+   nächste 8er-Spalte, ostasiatische Zeichen und Emoji belegen zwei Zellen. */
+var SLOW_RE = /[\tᄀ-￿]/;
+function visWidth(s){
+  if(!SLOW_RE.test(s)) return s.length;               // schneller Normalfall
+  var w = 0, cp;
+  for(var ch of s){
+    cp = ch.codePointAt(0);
+    if(cp===9){ w += 8 - (w % 8); continue; }
+    if((cp>=0x1100 && cp<=0x115F) || (cp>=0x2E80 && cp<=0xA4CF) || (cp>=0xAC00 && cp<=0xD7A3) ||
+       (cp>=0xF900 && cp<=0xFAFF) || (cp>=0xFE30 && cp<=0xFE4F) || (cp>=0xFF00 && cp<=0xFF60) ||
+       (cp>=0xFFE0 && cp<=0xFFE6) || (cp>=0x1F300 && cp<=0x1FAFF) || cp>=0x20000) w += 2;
+    else w += 1;
+  }
+  return w;
+}
+
 function sizeColumns(){
   var t = $("difftable"); if(!t) return;
-  var max = 0, A = State.aLines, B = State.bLines, i;
+  var max = 0, A = State.aLines, B = State.bLines, i, w;
   if(!State.wrap){
-    for(i=0;i<A.length;i++) if(A[i].length>max) max = A[i].length;
-    for(i=0;i<B.length;i++) if(B[i].length>max) max = B[i].length;
+    for(i=0;i<A.length;i++) if(A[i].length*8>max && (w = visWidth(A[i]))>max) max = w;
+    for(i=0;i<B.length;i++) if(B[i].length*8>max && (w = visWidth(B[i]))>max) max = w;
     max = Math.min(Math.max(max+2, 20), 20000);
   }
   var cols = t.getElementsByTagName("col"), gw = State.hex ? 76 : 58;
@@ -693,22 +745,25 @@ function renderKeepScroll(){
   vp.scrollTop = top;
 }
 
-/* Signatur: schmale Leiste rechts, ein Strich je geänderter Zeile */
+/* Signatur: schmale Leiste rechts, ein Strich je geänderter Zeile.
+   Die Position kommt aus der tatsächlich gerenderten Zeile (Pixel), damit
+   Striche, Sichtrahmen und Klick-Sprung auch bei eingeklappten Bereichen
+   und bei Zeilenumbruch übereinstimmen. */
 function drawMinimap(){
-  var mm = $("minimap");
+  var mm = $("minimap"), vp = $("viewport"), t = $("difftable");
   mm.innerHTML = "";
-  if(!State.rows || State.blocks.length===0) return;
-  var total = State.rows.length, h = mm.clientHeight, i, r, y, frag = document.createDocumentFragment();
-  var seen = new Set();
-  for(i=0;i<total;i++){
-    r = State.rows[i];
-    if(r.t!=="chg") continue;
-    y = Math.round(i/total*(h-2));
-    var key = y + (r.a>=0 && r.b>=0 ? "x" : (r.a>=0 ? "d" : "a"));
+  if(!State.rows || State.blocks.length===0 || !t) return;
+  var h = mm.clientHeight, sh = vp.scrollHeight || 1, base = t.offsetTop;
+  var trs = t.querySelectorAll("tr[data-m]"), i, y, m, key, el;
+  var frag = document.createDocumentFragment(), seen = new Set();
+  for(i=0;i<trs.length;i++){
+    m = trs[i].getAttribute("data-m");
+    y = Math.round((base + trs[i].offsetTop) / sh * (h-2));
+    key = y + m;
     if(seen.has(key)) continue;
     seen.add(key);
-    var el = document.createElement("i");
-    el.className = (r.b>=0 && r.a<0) ? "a" : "d";
+    el = document.createElement("i");
+    el.className = m;
     el.style.top = y + "px";
     frag.appendChild(el);
   }
@@ -746,9 +801,19 @@ function compare(){
     return;
   }
 
+  var notes = [], warn = false;
   if(a.hex !== b.hex){
-    note.className = "note warn";
-    note.textContent = "A und B werden unterschiedlich gelesen (einmal Text, einmal Hex). Stelle beide Seiten oben gleich ein.";
+    warn = true;
+    notes.push("A und B werden unterschiedlich gelesen (einmal Text, einmal Hex). Stelle beide Seiten oben gleich ein.");
+  }
+  if(!a.hex && !b.hex){
+    // Diese Unterschiede fliessen bewusst nicht in den Zeilenvergleich ein — aber verschweigen soll man sie nicht.
+    if(a.eolStyle && b.eolStyle && a.eolStyle !== b.eolStyle)
+      notes.push("Zeilenenden unterscheiden sich: A " + a.eolStyle + ", B " + b.eolStyle + ". Der Vergleich ignoriert das.");
+    if(a.bom !== b.bom)
+      notes.push("Nur " + (a.bom ? "A" : "B") + " beginnt mit einer UTF-8-BOM. Der Vergleich ignoriert das.");
+    if(a.enc && b.enc && a.enc !== b.enc)
+      notes.push("Unterschiedliche Zeichensätze: A " + a.enc + ", B " + b.enc + ".");
   }
 
   var t0 = performance.now();
@@ -768,14 +833,17 @@ function compare(){
   var big = State.rows.length > 40000;
   if(big && !State.collapse){
     State.collapse = true; $("btnCollapse").classList.add("on");
-    note.textContent = "Sehr großer Vergleich — unveränderte Bereiche bleiben eingeklappt.";
+    notes.push("Sehr großer Vergleich — unveränderte Bereiche bleiben eingeklappt.");
   }
+  if(warn) note.className = "note warn";
+  note.innerHTML = notes.map(function(s){ return "<div>" + esc(s) + "</div>"; }).join("");
 
   render();
 
   var idn = (add===0 && del===0);
   $("stats").innerHTML = idn
-    ? '<span>Inhalte sind identisch ('+a.lines.length+' Zeilen).</span>'
+    ? '<span>'+(notes.length ? "Zeileninhalte sind identisch" : "Inhalte sind identisch")+
+      ' ('+a.lines.length+(a.lines.length===1?' Zeile':' Zeilen')+').</span>'
     : '<span class="plus">+'+add+'</span><span class="minus">−'+del+'</span>'+
       '<span>'+State.blocks.length+(State.blocks.length===1?" Block":" Blöcke")+'</span>'+
       '<span>'+a.lines.length+' → '+b.lines.length+' Zeilen</span>'+
@@ -896,6 +964,8 @@ function loadFile(side, file){
   var d = Doc[side];
   var rd = new FileReader();
   rd.onload = function(){
+    $("file"+side).value = "";                          // dieselbe Datei später erneut wählbar
+    d = Doc[side];                                      // nach "A ⇄ B" das aktuelle Objekt nehmen
     d.bytes = new Uint8Array(rd.result);
     d.text = null;
     d.name = file.name;
@@ -917,10 +987,13 @@ function setupSide(side){
     if(input.files && input.files[0]) loadFile(side, input.files[0]);
   });
 
-  panel.addEventListener("dragover", function(e){ e.preventDefault(); panel.classList.add("over"); });
-  panel.addEventListener("dragleave", function(){ panel.classList.remove("over"); });
+  // Zähler statt einfachem dragleave: Kind-Elemente lösen sonst Flackern aus
+  var depth = 0;
+  panel.addEventListener("dragenter", function(e){ e.preventDefault(); depth++; panel.classList.add("over"); });
+  panel.addEventListener("dragover", function(e){ e.preventDefault(); });
+  panel.addEventListener("dragleave", function(){ if(--depth<=0){ depth = 0; panel.classList.remove("over"); } });
   panel.addEventListener("drop", function(e){
-    e.preventDefault(); panel.classList.remove("over");
+    e.preventDefault(); depth = 0; panel.classList.remove("over");
     var fs = e.dataTransfer.files;
     if(fs && fs.length>=2){ loadFile("A", fs[0]); loadFile("B", fs[1]); return; }
     if(fs && fs.length===1){ loadFile(side, fs[0]); return; }
