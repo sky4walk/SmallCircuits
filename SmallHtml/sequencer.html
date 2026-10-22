@@ -218,6 +218,21 @@ canvas#grid-canvas { display: block; cursor: crosshair; }
 
 #add-track-btn { font-size: 18px; background: none; border: none; color: var(--text3); cursor: pointer; }
 #add-track-btn:hover { color: var(--accent2); }
+/* MIDI-EINGANG */
+#midibar {
+  background: var(--bg2); border-bottom: 1px solid var(--border); padding: 4px 12px;
+  display: flex; align-items: center; gap: 6px 12px; flex-shrink: 0; flex-wrap: wrap; font-size: 12px;
+}
+#midibar .mb-title { font-size: 11px; color: var(--accent2); font-weight: 600; white-space: nowrap; }
+#midibar label { display: flex; align-items: center; gap: 4px; color: var(--text2); font-size: 11px; cursor: pointer; white-space: nowrap; }
+#midibar input[type=checkbox] { accent-color: var(--accent2); }
+#midi-input { max-width: 220px; }
+#midi-led { width: 9px; height: 9px; border-radius: 50%; background: #2a2a40; border: 1px solid var(--border); flex-shrink: 0; transition: background 0.15s; }
+#midi-led.on { background: var(--green); box-shadow: 0 0 6px var(--green); transition: none; }
+#midi-last { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text2); min-width: 170px; white-space: nowrap; }
+.btn.rec { background: #7f1d1d; border-color: var(--red); color: #fff; animation: recblink 1s steps(2) infinite; }
+@keyframes recblink { 50% { background: #b91c1c; } }
+.btn:disabled { opacity: 0.45; cursor: default; }
 </style>
 </head>
 <body>
@@ -280,6 +295,26 @@ canvas#grid-canvas { display: block; cursor: crosshair; }
   <div class="tb-group">
     <button class="btn active" id="lyric-btn" onclick="toggleLyrics()" title="Liedtext ein-/ausblenden" style="display:none">♪ Liedtext</button>
     <button class="btn" onclick="clearAll()">🗑 Leeren</button>
+  </div>
+</div>
+
+<div id="midibar">
+  <span class="mb-title">🎛 MIDI-Eingang</span>
+  <button class="btn" id="midi-connect" onclick="midiConnect()" title="Web-MIDI-Zugriff anfordern (Firefox fragt einmal nach Erlaubnis)">🔌 Verbinden</button>
+  <select id="midi-input" onchange="midiSelectInput()" disabled title="Welches Gerät spielt">
+    <option value="">— nicht verbunden —</option>
+  </select>
+  <span id="midi-led" title="MIDI-Aktivität"></span>
+  <span id="midi-last"></span>
+  <div class="tb-group">
+    <button class="btn" id="rec-btn" onclick="toggleRecord()" title="Aufnahme in die gewählte Spur (Taste R)">● Aufnahme</button>
+    <button class="btn" id="metro-btn" onclick="toggleMetronome()" title="Metronom während der Wiedergabe">♩ Metronom</button>
+    <label title="Notenanfang und -länge auf das eingestellte Raster runden"><input type="checkbox" id="rec-quant" checked> Quantisieren</label>
+    <button class="btn" id="undo-take-btn" onclick="undoTake()" disabled title="Alles aus der letzten Aufnahme wieder entfernen">↶ Take verwerfen</button>
+  </div>
+  <div class="tb-group">
+    <label title="Noten auf MIDI-Kanal 10 (Pads des MPK mini) landen in einer Schlagzeugspur – sie wird bei Bedarf angelegt"><input type="checkbox" id="midi-pads" checked> Pads (Kanal 10) → Drums</label>
+    <label title="MPK-mini-Drehregler K1–K8 (CC 70–77) → Filter, Resonanz, Hall, Chorus, Lautstärke, Panorama, Expression, Modulation"><input type="checkbox" id="midi-knobs" checked> MPK-Regler zuordnen</label>
   </div>
 </div>
 
@@ -39921,7 +39956,9 @@ const CC_TARGET = { 7: 'vol', 11: 'vol', 10: 'pan', 91: 'fx', 93: 'fx', 1: 'mod'
                     6: null, 38: null, 121: null };
 
 // ========== STIMMEN ==========
+let voiceCollector = null;       // Live-Spiel: hier landen die Stimmen einer Note, damit sie losgelassen werden kann
 function trackVoice(tr, v) {
+  if (voiceCollector) voiceCollector.push(v);
   activeVoices.add(v.src);
   if (tr._rt) tr._rt.voices.add(v);
   v.src.onended = () => {
@@ -40045,7 +40082,7 @@ function sf2PlayNote(tr, rt, pitch, velocity, prog, bank, isDrum, ctx, atTime, d
     src.start(t0);
     const end = tOff + rel + 0.05;
     src.stop(end);
-    trackVoice(tr, { src, gain: g, strip: rt.strip, start: t0, end });
+    trackVoice(tr, { src, gain: g, strip: rt.strip, start: t0, end, rel });
 
     if (e.excl) {
       const key = tracks.indexOf(tr) + ':' + e.excl;
@@ -40322,7 +40359,9 @@ function startSeq() {
 }
 
 // Ab Tick `from` neu einsteigen: Zustände nachziehen, Zeiger setzen
+let passNo = 0;                 // zählt die Durchläufe (Schleife) – für die Aufnahme
 function beginPass(from, t) {
+  passNo++;
   schedTick = from;
   sysPtr = lowerBound(song.sysex, from);
   fx = chaseFx(from);
@@ -40338,6 +40377,7 @@ function beginPass(from, t) {
 }
 
 function pauseSeq() {
+  liveStopAll();
   isPlaying = false;
   clearTimeout(schedTimer);
   cancelAnimationFrame(animFrameId);
@@ -40408,6 +40448,8 @@ function scheduleWindow(a, b, ctx) {
     applyFx(t);
   }
 
+  if (metronomeOn) scheduleClicks(a, b, timeOf, now, ctx);
+
   const soloActive = tracks.some(x => x.solo);
   for (const tr of tracks) {
     const rt = runtime(tr);
@@ -40423,6 +40465,7 @@ function scheduleWindow(a, b, ctx) {
         handleEvent(tr, rt, e, t);
       } else {
         const n = notes[rt.ni++];
+        if (n._skip === passNo) continue;          // gerade live eingespielt, schon zu hören
         if (!audible) continue;
         const t = timeOf(n.tick);
         if (t < now - 0.05) continue;             // zu spät (z. B. nach Tab-Wechsel): überspringen
@@ -41529,6 +41572,7 @@ document.addEventListener('keydown', (e) => {
   if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
   if (e.code === 'Space') { e.preventDefault(); if (!e.repeat) togglePlay(); }
   if (e.code === 'Home') { e.preventDefault(); stopSeq(); }
+  if (e.code === 'KeyR' && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey) { e.preventDefault(); toggleRecord(); }
   if (e.code === 'Escape') { document.getElementById('ctx-menu').style.display = 'none'; closeInstModal(); }
 });
 document.addEventListener('keyup', (e) => {
@@ -41587,6 +41631,380 @@ function loadExample(id) {
     console.error(err);
     statusMsg('Fehler beim Laden: ' + err.message);
   }
+}
+
+// ========== MIDI-EINGANG (Web MIDI) ==========
+// Ein Keyboard (z. B. AKAI MPK mini) spielt live über die Klangquelle der Zielspur.
+// Bei laufender Aufnahme landen Noten, Controller und Pitch Bend in der Spur.
+//
+//   Ziel:      die gewählte Spur; Kanal 10 (Pads) optional in eine Schlagzeugspur
+//   Noten:     Stimme mit offener Länge starten, beim Note Off ausklingen lassen
+//   Pedal:     CC 64 hält losgelassene Noten, bis das Pedal hochgeht
+//   Aufnahme:  Position aus der Audiozeit, Latenz der Ausgabe wird abgezogen
+let midiAccess = null;
+let midiInputId = 'all';         // 'all' oder die id eines Eingangs
+let recording = false;
+let metronomeOn = false;
+let lastTake = [];               // [{tr, list:'notes'|'events', item}] – für „Take verwerfen“
+const liveHeld = new Map();      // "Kanal:Tonhöhe" → gehaltene Note
+const liveSustained = [];        // losgelassen, aber vom Haltepedal gehalten
+const LIVE_HOLD = 600;           // Sekunden: so lange darf eine Taste höchstens gehalten werden
+
+// MPK mini (mk2/mk3) Drehregler K1–K8 senden ab Werk CC 70–77
+const MPK_KNOB_MAP = { 70: 74, 71: 71, 72: 91, 73: 93, 74: 7, 75: 10, 76: 11, 77: 1 };
+
+function midiConnect() {
+  if (!navigator.requestMIDIAccess) {
+    statusMsg('Dieser Browser kennt kein Web MIDI (Firefox ab 108, Chrome/Chromium gehen).');
+    return;
+  }
+  getAudioCtx();                 // Klick = Benutzergeste: Audio darf jetzt starten
+  if (!window.isSecureContext) statusMsg('Web MIDI braucht https:// oder localhost.');
+  navigator.requestMIDIAccess({ sysex: false }).then(acc => {
+    midiAccess = acc;
+    acc.onstatechange = () => midiRefreshInputs();
+    midiRefreshInputs();
+    const n = [...acc.inputs.values()].filter(i => i.state !== 'disconnected').length;
+    statusMsg(n ? `MIDI verbunden: ${n} Eingang${n > 1 ? 'e' : ''}` : 'MIDI erlaubt, aber kein Gerät gefunden – Keyboard einstecken');
+    const b = document.getElementById('midi-connect');
+    b.textContent = '✔ MIDI'; b.classList.add('active');
+  }).catch(err => {
+    console.error(err);
+    statusMsg('MIDI-Zugriff abgelehnt: ' + (err.message || err.name));
+  });
+}
+
+function midiRefreshInputs() {
+  if (!midiAccess) return;
+  const sel = document.getElementById('midi-input');
+  const inputs = [...midiAccess.inputs.values()].filter(i => i.state !== 'disconnected');
+  sel.innerHTML = '';
+  sel.add(new Option(inputs.length ? `Alle Eingänge (${inputs.length})` : '— kein Gerät —', 'all'));
+  for (const inp of inputs) sel.add(new Option(inp.name + (inp.manufacturer ? ` (${inp.manufacturer})` : ''), inp.id));
+  // Ein MPK mini wird automatisch gewählt
+  if (midiInputId === 'all' && inputs.length > 1) {
+    const mpk = inputs.find(i => /mpk/i.test(i.name));
+    if (mpk) midiInputId = mpk.id;
+  }
+  if (![...sel.options].some(o => o.value === midiInputId)) midiInputId = 'all';
+  sel.value = midiInputId;
+  sel.disabled = false;
+  for (const inp of midiAccess.inputs.values()) inp.onmidimessage = midiMessage;
+}
+
+function midiSelectInput() {
+  midiInputId = document.getElementById('midi-input').value || 'all';
+  liveStopAll();
+}
+
+let midiLedTimer = null;
+function midiActivity(text) {
+  const led = document.getElementById('midi-led');
+  led.classList.add('on');
+  clearTimeout(midiLedTimer);
+  midiLedTimer = setTimeout(() => led.classList.remove('on'), 80);
+  if (text) document.getElementById('midi-last').textContent = text;
+}
+
+function noteLabel(p) { return NOTE_NAMES[p % 12] + (Math.floor(p / 12) - 1); }
+
+function midiMessage(e) {
+  if (midiInputId !== 'all' && e.target && e.target.id !== midiInputId) return;
+  const d = e.data;
+  if (!d || !d.length) return;
+  const st = d[0];
+  if (st >= 0xF0) return;                         // Clock, Active Sensing, SysEx: ignorieren
+  const cmd = st & 0xF0, ch = st & 0x0F;
+  const ctx = getAudioCtx();
+  // Zeitpunkt des Ereignisses in Audiozeit (e.timeStamp ist performance.now()-Zeit)
+  const lag = e.timeStamp ? Math.max(0, Math.min(0.1, (performance.now() - e.timeStamp) / 1000)) : 0;
+  const t = ctx.currentTime - lag;
+  const a = d[1] | 0, b = d[2] | 0;
+
+  if (cmd === 0x90 && b > 0) liveNoteOn(ch, a, b, t);
+  else if (cmd === 0x80 || (cmd === 0x90 && b === 0)) liveNoteOff(ch, a, cmd === 0x80 ? b : 64, t);
+  else if (cmd === 0xB0) liveCC(ch, a, b, t);
+  else if (cmd === 0xE0) livePitchBend(ch, (b << 7) | a, t);
+  else if (cmd === 0xC0) liveProgram(ch, a);
+  else if (cmd === 0xD0) liveChannelPressure(ch, a, t);
+}
+
+// ---------- Zielspur ----------
+function midiTargetTrack(ch) {
+  const act = tracks[activeTrackIdx];
+  if (ch === 9 && document.getElementById('midi-pads').checked && !(act && isDrumTrack(act))) {
+    let drum = tracks.find(isDrumTrack);
+    if (!drum) {
+      addTrack('MPK Pads', 'drums');
+      drum = tracks[tracks.length - 1];
+      drum.channel = 9;
+      if (isPlaying) { const rt = runtime(drum); rt.ni = 0; rt.ei = 0; }
+      statusMsg('Schlagzeugspur „MPK Pads“ für Kanal 10 angelegt');
+    }
+    return drum;
+  }
+  return act;
+}
+
+// ---------- Position für die Aufnahme ----------
+// Liefert {tick, pass} zur Audiozeit t – oder null, wenn gerade nicht aufgenommen wird.
+// Der Spieler hört mit Ausgabelatenz, also meint er die Stelle, die um diese Latenz früher lag.
+function recPosAt(t) {
+  if (!recording || !isPlaying || !audioCtx) return null;
+  const lat = (audioCtx.outputLatency || 0) + (audioCtx.baseLatency || 0);
+  const at = t - Math.min(lat, 0.25);
+  let sec = at - passBase, pass = passNo;
+  if (sec < 0) { sec = at - prevPassBase; pass = passNo - 1; }   // Scheduler ist schon im nächsten Durchlauf
+  return { tick: clamp(tickAt(Math.max(0, sec)), 0, songEnd - 1), pass };
+}
+
+// Sortiert einfügen, ohne dass der laufende Scheduler etwas doppelt spielt
+function recInsert(tr, list, item, pass) {
+  const arr = tr[list];
+  const idx = upperBound(arr, item.tick);
+  arr.splice(idx, 0, item);
+  const rt = tr._rt;
+  const ptr = list === 'notes' ? 'ni' : 'ei';
+  if (isPlaying && rt && rt[ptr] !== undefined) {
+    if (item.tick < schedTick) { if (idx <= rt[ptr]) rt[ptr]++; }   // liegt hinter dem Zeiger
+    else if (pass === passNo && list === 'notes') item._skip = passNo;   // liegt davor, ist aber schon erklungen
+  }
+  if (list === 'events') tr._cache = null;
+  lastTake.push({ tr, list, item });
+  document.getElementById('undo-take-btn').disabled = recording || !lastTake.length;
+  requestRecRedraw();
+}
+
+let recRedrawPending = false;
+function requestRecRedraw() {
+  if (recRedrawPending) return;
+  recRedrawPending = true;
+  requestAnimationFrame(() => {
+    recRedrawPending = false;
+    renderGrid(); drawLane(); updateNoteCount();
+  });
+}
+
+// ---------- Noten ----------
+function liveNoteOn(ch, pitch, vel, t) {
+  const tr = midiTargetTrack(ch);
+  if (!tr) return;
+  const key = ch + ':' + pitch;
+  if (liveHeld.has(key)) liveNoteOff(ch, pitch, 64, t);
+  // Taste wird erneut angeschlagen, während das Pedal den alten Ton noch hält
+  for (let i = liveSustained.length - 1; i >= 0; i--) {
+    const h = liveSustained[i];
+    if (h.tr === tr && h.pitch === pitch) { releaseLiveVoices(h); liveSustained.splice(i, 1); }
+  }
+  const ctx = getAudioCtx();
+  const now = ctx.currentTime + 0.003;
+  const drum = isDrumTrack(tr);
+  const voices = voiceCollector = [];
+  try { playVoice(tr, pitch, vel, now, drum ? 0.1 : LIVE_HOLD); }
+  finally { voiceCollector = null; }
+
+  let hit = null;
+  if (pitch >= MIDI_MIN && pitch <= MIDI_MAX) {
+    hit = { pitch, start: now, end: drum ? now + 0.15 : Infinity, color: tr.color };
+    keyHits.push(hit);
+    if (!keyLightFrame) keyLightFrame = requestAnimationFrame(updateKeyLights);
+  }
+  liveHeld.set(key, { tr, ch, pitch, vel, voices, hit, drum, pos: recPosAt(t) });
+  midiActivity(`K${ch + 1} ${noteLabel(pitch).padEnd(4)} v${String(vel).padStart(3)} → ${tr.name}`);
+}
+
+function liveNoteOff(ch, pitch, offVel, t) {
+  const key = ch + ':' + pitch;
+  const h = liveHeld.get(key);
+  if (!h) return;
+  liveHeld.delete(key);
+  const now = audioCtx ? audioCtx.currentTime : 0;
+  if (h.hit && h.hit.end > now) h.hit.end = now;
+  if (h.pos) recCommitNote(h, recPosAt(t), offVel);
+  if (h.drum) return;                                   // Schlagzeug klingt von selbst aus
+  const st = h.tr._rt && h.tr._rt.state;
+  if (st && st.sus >= 64) liveSustained.push(h);
+  else releaseLiveVoices(h);
+  midiActivity();
+}
+
+function releaseLiveVoices(h) {
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  for (const v of h.voices || []) {
+    const rel = v.rel !== undefined ? v.rel : 0.03;
+    try {
+      v.gain.gain.cancelScheduledValues(t);
+      v.gain.gain.setTargetAtTime(0, t, Math.max(0.004, rel / 4));
+      v.src.stop(t + rel + 0.1);
+    } catch (e) {}
+    v.end = t + rel + 0.1;
+  }
+}
+
+function recCommitNote(h, endPos, offVel) {
+  let tick = h.pos.tick;
+  let len = endPos && endPos.pass === h.pos.pass ? endPos.tick - tick : songEnd - tick;
+  if (document.getElementById('rec-quant').checked) {
+    tick = Math.round(tick / ticksPerStep) * ticksPerStep;
+    len = Math.max(1, Math.round(len / ticksPerStep)) * ticksPerStep;
+    if (tick >= songEnd) tick = 0;                      // gehört auf die Eins des nächsten Durchlaufs
+  }
+  tick = Math.round(tick);
+  len = clamp(Math.round(len), Math.max(1, Math.round(ticksPerStep / 4)), Math.max(1, songEnd - tick));
+  const n = { tick, len, pitch: h.pitch, velocity: h.vel, offVel: offVel || 64 };
+  recInsert(h.tr, 'notes', n, h.pos.pass);
+}
+
+// ---------- Controller ----------
+function liveCC(ch, cc, val, t) {
+  if (document.getElementById('midi-knobs').checked && MPK_KNOB_MAP[cc] !== undefined) cc = MPK_KNOB_MAP[cc];
+  const tr = midiTargetTrack(ch);
+  if (!tr) return;
+  const rt = runtime(tr), st = rt.state;
+  const now = rt.ctx.currentTime;
+  midiActivity(`K${ch + 1} CC${String(cc).padEnd(3)} ${String(val).padStart(3)}  ${(CC_NAMES[cc] || (LANE_BASE.find(l => l.cc === cc) || {}).name || '').replace(/^CC \d+ /, '')}`);
+
+  if (cc === 120 || cc === 123) { releaseTrackVoices(tr, now, cc === 120); return; }
+  const wasSus = st.sus >= 64;
+  if (applyCC(st, cc, val)) {
+    const which = CC_TARGET[cc];
+    if (which) applyStateToStrip(tr, now, which);
+    else for (const w of ['vol', 'mod', 'filter', 'bend']) applyStateToStrip(tr, now, w);
+  }
+  if (cc === 64 && wasSus && st.sus < 64) {             // Pedal hoch: gehaltene Töne loslassen
+    for (let i = liveSustained.length - 1; i >= 0; i--) {
+      if (liveSustained[i].tr === tr) { releaseLiveVoices(liveSustained[i]); liveSustained.splice(i, 1); }
+    }
+  }
+  const pos = recPosAt(t);
+  if (pos) recInsert(tr, 'events', { tick: Math.round(pos.tick), t: 'cc', a: cc, b: val }, pos.pass);
+}
+
+function livePitchBend(ch, val, t) {
+  const tr = midiTargetTrack(ch);
+  if (!tr) return;
+  const rt = runtime(tr);
+  rt.state.bend = val;
+  rt.strip.bend.offset.setValueAtTime(bendCents(rt.state), rt.ctx.currentTime);
+  midiActivity(`K${ch + 1} Bend ${String(val - 8192).padStart(6)}`);
+  const pos = recPosAt(t);
+  if (pos) recInsert(tr, 'events', { tick: Math.round(pos.tick), t: 'pb', a: val }, pos.pass);
+}
+
+function liveChannelPressure(ch, val, t) {
+  const tr = midiTargetTrack(ch);
+  if (!tr) return;
+  midiActivity(`K${ch + 1} Druck ${val}`);
+  const pos = recPosAt(t);
+  if (pos) recInsert(tr, 'events', { tick: Math.round(pos.tick), t: 'cp', a: val }, pos.pass);
+}
+
+// Programmwechsel (MPK: PROG-CHANGE-Modus der Pads): Instrument der Zielspur umstellen
+function liveProgram(ch, prog) {
+  const tr = midiTargetTrack(ch);
+  if (!tr) return;
+  if (isDrumTrack(tr)) tr.kit = prog; else { tr.instrument = prog; tr.bank = 0; }
+  if (tr._rt) { tr._rt.state.prog = prog; tr._rt.state.progBank = 0; tr._rt.state.bankM = 0; }
+  renderTrackList();
+  midiActivity(`K${ch + 1} Prog ${prog + 1} → ${tr.name}`);
+  statusMsg(`${tr.name}: ${trackInstName(tr)}`);
+}
+
+// Alle live gehaltenen Töne beenden (Pause/Stop, Gerätewechsel)
+function liveStopAll() {
+  const t = audioCtx ? audioCtx.currentTime : 0;
+  for (const h of liveHeld.values()) {
+    if (h.pos) recCommitNote(h, recPosAt(t), 64);
+    if (!h.drum) releaseLiveVoices(h);
+  }
+  liveHeld.clear();
+  for (const h of liveSustained) releaseLiveVoices(h);
+  liveSustained.length = 0;
+  if (recording) {
+    setRecording(false);
+    statusMsg(`Aufnahme beendet: ${lastTake.filter(x => x.list === 'notes').length} Noten, ${lastTake.filter(x => x.list === 'events').length} Controller`);
+  }
+}
+
+// ---------- Aufnahme ----------
+function setRecording(on) {
+  recording = on;
+  const b = document.getElementById('rec-btn');
+  b.classList.toggle('rec', on);
+  b.textContent = on ? '● REC' : '● Aufnahme';
+  document.getElementById('undo-take-btn').disabled = on || !lastTake.length;
+  if (!on) { renderTrackList(); buildLaneSelect(); drawLane(); renderGrid(); updateNoteCount(); }
+}
+
+function toggleRecord() {
+  if (recording) {
+    // Noch gehaltene Töne werden bis jetzt aufgenommen, klingen aber weiter
+    const t = audioCtx ? audioCtx.currentTime : 0;
+    for (const h of liveHeld.values()) if (h.pos) { recCommitNote(h, recPosAt(t), 64); h.pos = null; }
+    setRecording(false);
+    statusMsg(`Aufnahme beendet: ${lastTake.filter(x => x.list === 'notes').length} Noten, ${lastTake.filter(x => x.list === 'events').length} Controller`);
+    return;
+  }
+  if (!tracks[activeTrackIdx]) return;
+  lastTake = [];
+  setRecording(true);
+  if (!isPlaying) startSeq();
+  if (!midiAccess) statusMsg('Aufnahme läuft – für ein Keyboard erst „🔌 Verbinden“ klicken');
+  else statusMsg(`Aufnahme in „${tracks[activeTrackIdx].name}“ – die Schleife läuft weiter, jeder Durchlauf wird dazugespielt`);
+}
+
+function undoTake() {
+  if (recording || !lastTake.length) return;
+  withPlaybackPaused(() => {
+    for (const { tr, list, item } of lastTake) {
+      const arr = tr[list];
+      const i = arr.indexOf(item);
+      if (i !== -1) arr.splice(i, 1);
+      if (list === 'events') tr._cache = null;
+    }
+    const n = lastTake.length;
+    lastTake = [];
+    statusMsg(`Letzte Aufnahme verworfen (${n} Ereignisse)`);
+  });
+  document.getElementById('undo-take-btn').disabled = true;
+  renderTrackList(); buildLaneSelect(); drawLane(); renderGrid(); updateNoteCount();
+}
+
+// ---------- Metronom ----------
+function toggleMetronome() {
+  metronomeOn = !metronomeOn;
+  document.getElementById('metro-btn').classList.toggle('active', metronomeOn);
+}
+
+// Klicks auf jeder Zählzeit im Bereich [a, b); die Eins klingt höher
+function scheduleClicks(a, b, timeOf, now, ctx) {
+  if (!bars.length || !master) return;
+  for (let i = barIndexAt(a); i < bars.length && bars[i].tick < b; i++) {
+    const bar = bars[i];
+    const beat = song.ppq * 4 / bar.den;
+    for (let k = 0; k < bar.num; k++) {
+      const tk = bar.tick + k * beat;
+      if (tk < a || tk >= b) continue;
+      const t = timeOf(tk);
+      if (t < now - 0.02) continue;
+      metronomeClick(ctx, Math.max(t, now), k === 0);
+    }
+  }
+}
+
+function metronomeClick(ctx, t, accent) {
+  const osc = ctx.createOscillator();
+  const g = ctx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = accent ? 1760 : 1175;
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(accent ? 0.22 : 0.13, t + 0.001);
+  g.gain.exponentialRampToValueAtTime(0.0005, t + 0.05);
+  osc.connect(g); g.connect(master.vol);
+  osc.start(t); osc.stop(t + 0.06);
+  activeVoices.add(osc);
+  osc.onended = () => activeVoices.delete(osc);
 }
 
 // ========== START ==========
