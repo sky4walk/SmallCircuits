@@ -100,7 +100,7 @@
   .knopf.voll:hover{background:#dcaa3c}
 
   .effet{display:flex;align-items:center;gap:10px}
-  .effet canvas{width:60px;height:60px;border-radius:50%;cursor:crosshair;display:block}
+  .effet canvas{touch-action:none;width:60px;height:60px;border-radius:50%;cursor:crosshair;display:block}
   .effet .werte{font-size:12.5px;color:var(--kreide-matt);font-variant-numeric:tabular-nums;line-height:1.35;min-width:8.5em}
   .effet .werte b{color:var(--kreide);font-weight:500}
   .kraft{display:flex;align-items:center;gap:10px}
@@ -175,6 +175,7 @@
     </label>
     <div class="rechts"><button class="knopf" id="neu">Neues Spiel</button></div>
   </div>
+  <p style="margin:0;text-align:center;font-size:13px;color:var(--kreide-matt)">Mehr Basteleien: <a href="https://itzwieseltal.wordpress.com" style="color:var(--messing)">itzwieseltal.wordpress.com</a></p>
 </div>
 
 <div class="schleier" id="aufbau">
@@ -2149,7 +2150,7 @@ function zielvorschau(winkel){
   let tMin = 10;
   for (const b of BANDEN){
     const denom = dx*b.nx + dy*b.ny; if (denom >= 0) continue;
-    const t = ((b.x1 - w.x)*b.nx + (b.y1 - w.y)*b.ny - R) / denom;
+    const t = ((b.x1 - w.x)*b.nx + (b.y1 - w.y)*b.ny + R) / denom;
     if (t > 0 && t < tMin) tMin = t;
   }
   return { gx:w.x + dx*tMin, gy:w.y + dy*tMin, kugel:null };
@@ -2555,7 +2556,7 @@ function gegnerBewegen(dt){
 }
 function gegnerKoerper(){
   if (!spiel || !figur.pos) return;
-  const { boden } = RAUM, gg = spiel.spieler[1 - spiel.dran];
+  const { boden } = RAUM, gg = dran().mensch ? gegner() : dran();
   const { gebeugt } = gegnerPhase();
   const t = performance.now()/1000, sway = gebeugt ? 0 : Math.sin(t*0.7)*0.012;
   const fuss = proj([figur.pos.x + sway, figur.pos.y, boden]); if (fuss.z < NAH) return;
@@ -2977,12 +2978,6 @@ function kanal(pan, laut){
   } else g.connect(kulisseBus());
   return g;
 }
-function rauschen(dauer){
-  const a = audio(), n = Math.max(1, Math.floor(a.sampleRate * dauer));
-  const buf = a.createBuffer(1, n, a.sampleRate), d = buf.getChannelData(0);
-  for (let i = 0; i < n; i++) d[i] = Math.random()*2 - 1;
-  const s = a.createBufferSource(); s.buffer = buf; return s;
-}
 /* Glas klingt unharmonisch — deshalb krumme Teiltonverhältnisse */
 function klirren(ziel, t0, hoehe){
   const a = audio();
@@ -3133,8 +3128,8 @@ function istMensch(){ return spiel && dran().mensch; }
 function gruppeVon(nr){ return nr === 8 ? "acht" : nr < 8 ? "voll" : "halb"; }
 function eigeneFertig(sp){ return sp.gruppe && !kugeln.some(k => !k.drin && k.nr !== 0 && k.nr !== 8 && gruppeVon(k.nr) === sp.gruppe); }
 /* Welche Kugel darf der Spieler zuerst treffen? */
-function istLegal(nr, sp){
-  if (nr === 8) return eigeneFertig(sp);
+function istLegal(nr, sp, fertig = eigeneFertig(sp)){
+  if (nr === 8) return fertig;
   if (!sp.gruppe) return true;
   return gruppeVon(nr) === sp.gruppe;
 }
@@ -3145,11 +3140,11 @@ function zugBeginnen(grund){
   tafelZeichnen(); hinweis();
   if (spiel.vorbei) return;
   if (dran().mensch){ kameraNach("decke", 1300); kreideTon(); }
-  else { kameraNach("zuschauer", 1300); setTimeout(kiZug, 1400); }
+  else { const dieses = spiel; kameraNach("zuschauer", 1300); setTimeout(() => { if (spiel === dieses) kiZug(); }, 1400); }
 }
 
 function stossAusfuehren(winkel, kraft, a, b, kn){
-  schuss = { erstKontakt:null, versenkt:[], bande:false, anstoss:spiel.anstoss };
+  schuss = { erstKontakt:null, versenkt:[], bande:false, anstoss:spiel.anstoss, fertig:eigeneFertig(dran()) };
   queueTon(kraft, weisse().x, weisse().y);
   stossen(winkel, kraft, a, b, kn);
   laeuft = true; kiLinie = null;
@@ -3179,7 +3174,7 @@ function auswerten(){
   const achtDrin = versenkt.includes(8);
   let foul = null;
   if (s.erstKontakt === null) foul = "keine Kugel getroffen";
-  else if (!istLegal(s.erstKontakt, sp)) foul = "falsche Kugel zuerst";
+  else if (!istLegal(s.erstKontakt, sp, s.fertig)) foul = "falsche Kugel zuerst";
   else if (!versenkt.length && !s.bande) foul = "keine Bande nach dem Kontakt";
   if (weisseDrin) foul = "Weiße versenkt";
 
@@ -3189,7 +3184,7 @@ function auswerten(){
       aufsetzen(kugel(8));                                 // beim Anstoß: wieder aufsetzen
       rufSetzen("Schwarze beim Anstoß", "wird aufgesetzt");
       setTimeout(rufWeg, 2000);
-    } else if (eigeneFertig(sp) && !foul){
+    } else if (s.fertig && !foul){
       return spielEnde(sp, "Schwarze versenkt");
     } else {
       return spielEnde(gg, foul ? "Schwarze mit Foul versenkt" : sp.name + " versenkt die Schwarze zu früh");
@@ -3212,7 +3207,7 @@ function auswerten(){
 
   if (foul){
     rufSetzen("Foul", foul + " — " + gg.name + " hat die Weiße in der Hand");
-    weisse().drin = false; weisse().vx = weisse().vy = 0;
+    weisse().vx = weisse().vy = 0;
     inHand = true; inHandKueche = s.anstoss;
     spiel.dran = 1 - spiel.dran;
     setTimeout(rufWeg, 2200);
@@ -3311,7 +3306,7 @@ function kiZug(){
       if (kk.length && (!best || kk[0].wert > best.wert)) best = { x, y, wert:kk[0].wert };
     }
     weisseSetzen(best ? { x:best.x, y:best.y } : { x:W*0.25, y:H/2 });
-    if (!best) weisseSetzen({ x:W*0.25, y:H*0.45 });
+    for (let i = 0; inHand && i < 400; i++) weisseSetzen({ x:R + Math.random()*(xMax - 2*R), y:R + Math.random()*(H - 2*R) });
     tafelZeichnen();
   }
   const w = weisse();
@@ -3340,7 +3335,8 @@ function kiZug(){
   kiLinie = { winkel };
   gegnerAnStoss(winkel);
   hinweis();
-  setTimeout(() => { if (!spiel.vorbei && !laeuft) stossAusfuehren(winkel, kraft, a, b, kn); }, 1620);
+  const dieses = spiel;
+  setTimeout(() => { if (spiel === dieses && !spiel.vorbei && !laeuft) stossAusfuehren(winkel, kraft, a, b, kn); }, 1620);
 }
 
 /* ===================================================================
@@ -3408,6 +3404,7 @@ leinwand.addEventListener("contextmenu", ev => { ev.preventDefault(); if (kamMod
 document.getElementById("zurueck").addEventListener("click", () => kameraNach("decke", 900));
 
 window.addEventListener("keydown", ev => {
+  if (!aufbau.hidden || (ev.target.matches && ev.target.matches("input[type=text], input[type=range], select, textarea"))) return;
   if (intro && (ev.key === "Escape" || ev.key === " " || ev.key === "Enter")){ introBeenden(); ev.preventDefault(); return; }
   if (ev.key === "Escape" && kamModus === "queue"){ kameraNach("decke", 900); return; }
   if (!zielenErlaubt()) return;
@@ -3452,6 +3449,7 @@ function theoSagt(art, chance){
   setTimeout(() => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "de-DE"; u.pitch = 0.7; u.rate = 0.95;
+    u.onstart = () => ducken(true); u.onend = u.onerror = () => ducken(false);
     speechSynthesis.cancel(); speechSynthesis.speak(u);
   }, 700 + Math.random()*1200);
 }
@@ -3481,13 +3479,13 @@ function tafelZeichnen(){
     const nummern = sp.gruppe === "halb" ? [9,10,11,12,13,14,15] : sp.gruppe === "voll" ? [1,2,3,4,5,6,7] : [];
     for (const n of nummern){
       const k = kugel(n), e = document.createElement("i");
-      e.style.background = farbe(n); e.className = (n > 8 ? "halb" : "") + (k && k.drin ? " weg" : "");
+      e.style.backgroundColor = farbe(n); e.className = (n > 8 ? "halb" : "") + (k && k.drin ? " weg" : "");
       box.appendChild(e);
     }
   });
   const m = document.getElementById("meldung");
   if (spiel.vorbei) m.innerHTML = "<b>Spiel vorbei</b>";
-  else m.innerHTML = "<b>" + dran().name + (dran().mensch ? "" : "") + "</b>" + (spiel.anstoss ? "stößt an" : inHand ? "Weiße in der Hand" + (inHandKueche ? " (Kopffeld)" : "") : "ist dran");
+  else { m.innerHTML = "<b></b><span></span>"; m.firstChild.textContent = dran().name; m.lastChild.textContent = (spiel.anstoss ? "stößt an" : inHand ? "Weiße in der Hand" + (inHandKueche ? " (Kopffeld)" : "") : "ist dran"); }
 }
 function hinweis(){
   const h = document.getElementById("hinweis");
@@ -3511,7 +3509,11 @@ document.getElementById("losgehts").addEventListener("click", () => {
   if (an("kneipe")) kulisseStarten();
   spielStarten(cfg);
 });
-document.getElementById("neu").addEventListener("click", () => { laeuft = false; intro = false; for (const t of introTimer) clearTimeout(t); rufWeg(); aufbau.hidden = false; });
+document.getElementById("neu").addEventListener("click", () => {
+  laeuft = false; intro = false; for (const t of introTimer) clearTimeout(t); introTimer = [];
+  spiel = null; schuss = null; inHand = false; kiLinie = null; laedt = false; griff = null; zug = 0; kraftAnzeigen(0);
+  figur.pose = "wartet"; hinweis(); rufWeg(); aufbau.hidden = false;
+});
 document.getElementById("kneipe").addEventListener("change", ev => { if (ev.target.checked) kulisseStarten(); else kulisseStoppen(); kulisseAnpassen(); });
 document.getElementById("kneipeLaut").addEventListener("input", kulisseAnpassen);
 document.getElementById("ton").addEventListener("change", kulisseAnpassen);

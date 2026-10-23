@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Kalaha 4·4</title>
+<title>Kalaha 6·6</title>
 <style>
 :root{
   /* Tisch */
@@ -202,6 +202,8 @@ button.cup.playable:hover, button.cup.playable:focus-visible{
 .log li.me span:last-child{color:var(--me-light)}
 .log li.cpu span:last-child{color:var(--cpu-light)}
 .log li.note span:last-child{color:var(--ink)}
+.foot{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);font-size:11.5px;color:var(--ink-dim)}
+.foot a{color:var(--brass)}
 
 @media (max-width:560px){
   .app{padding:20px 8px 40px}
@@ -230,7 +232,7 @@ button.cup.playable:hover, button.cup.playable:focus-visible{
 <main class="app">
 
   <header class="masthead">
-    <div class="wordmark">KALAHA<span id="wm-sub">4·4</span></div>
+    <div class="wordmark">KALAHA<span id="wm-sub">6·6</span></div>
     <div class="spacer"></div>
     <div class="actions">
       <button class="btn" id="btn-new">Neues Spiel</button>
@@ -297,7 +299,7 @@ button.cup.playable:hover, button.cup.playable:focus-visible{
     </div>
     <div class="field">
       <span class="field-label">Bedienung</span>
-      <p class="field-note">Änderungen wirken ab dem nächsten Spiel. Ziehen: Mulde in deiner Reihe anklicken oder Taste 1–6 drücken.</p>
+      <p class="field-note">Jede Änderung startet sofort ein neues Spiel. Ziehen: Mulde in deiner Reihe anklicken oder Taste 1–6 drücken.</p>
     </div>
   </section>
 
@@ -351,6 +353,8 @@ button.cup.playable:hover, button.cup.playable:focus-visible{
       <ol class="log" id="log"></ol>
     </div>
   </section>
+
+  <footer class="foot">Mehr Bastelprojekte: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 
 </main>
 
@@ -468,13 +472,13 @@ function evaluate(b) {
   let cs = 0, hs = 0;
   for (let i = P + 1; i <= 2 * P; i++) cs += b[i];
   for (let i = 0; i < P; i++)          hs += b[i];
-  s += W_SIDE * (cs - hs);
+  s += (CFG.leftoversToOpponent ? -W_SIDE : W_SIDE) * (cs - hs);
   // Mulden, aus denen genau der eigene Kalah erreicht wird -> Extrazug
   for (let i = P + 1; i <= 2 * P; i++) if (b[i] === CSTORE - i) s += W_REACH;
   for (let i = 0; i < P; i++)          if (b[i] === HSTORE - i) s -= W_REACH;
-  // leere eigene Mulde gegenüber einem großen Haufen ist angreifbar
-  for (let i = P + 1; i <= 2 * P; i++) if (b[i] === 0 && b[oppositePit(i)] > 3) s -= W_HOLE;
-  for (let i = 0; i < P; i++)          if (b[i] === 0 && b[oppositePit(i)] > 3) s += W_HOLE;
+  // leere eigene Mulde gegenüber einem großen gegnerischen Haufen = Schlagchance
+  for (let i = P + 1; i <= 2 * P; i++) if (b[i] === 0 && b[oppositePit(i)] > 3) s += W_HOLE;
+  for (let i = 0; i < P; i++)          if (b[i] === 0 && b[oppositePit(i)] > 3) s -= W_HOLE;
   return s;
 }
 
@@ -644,6 +648,7 @@ const el = {
 };
 
 let board, turn, busy = false, over = false, history = [], moveNo = 0;
+let gen = 0, cpuTimer = null;   // gen: verwirft laufende Animationen nach Neustart/Rücknahme
 let cups = {};   // Brettindex -> DOM-Element
 
 /* Deterministische Steinlagen: goldener Winkel, pro Mulde leicht gedreht. */
@@ -694,6 +699,7 @@ function buildBoard() {
   cups[HSTORE] = el.storeMe;
   cups[CSTORE] = el.storeCpu;
   el.wmSub.textContent = P + "·" + CFG.seeds;
+  document.title = "Kalaha " + P + "·" + CFG.seeds;
 }
 
 function paintCup(idx, n, fresh) {
@@ -720,7 +726,7 @@ function render(b, fresh) {
   const diff = b[HSTORE] - b[CSTORE];
   el.beamL.textContent = b[CSTORE];
   el.beamR.textContent = b[HSTORE];
-  const ang = Math.max(-12, Math.min(12, -diff * 2.0));
+  const ang = Math.max(-12, Math.min(12, diff * 2.0));
   el.beam.style.transform = `rotate(${ang}deg)`;
   el.lead.textContent = diff === 0 ? "ausgeglichen"
     : diff > 0 ? `du führst mit ${diff}` : `Computer führt mit ${-diff}`;
@@ -734,6 +740,7 @@ function markPlayable() {
     c.classList.toggle("playable", ok);
     c.disabled = !ok;
   }
+  $("btn-undo").disabled = busy || history.length === 0;
 }
 
 function say(html) { el.status.innerHTML = html; }
@@ -753,7 +760,7 @@ function pitName(pl, idx) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-async function animate(pl, pit) {
+async function animate(pl, pit, g) {
   const res = play(board, pl, pit);
   const view = board.slice();
 
@@ -769,14 +776,17 @@ async function animate(pl, pit) {
     const step = res.seq.length > 14 ? 55 : 105;
     for (const i of res.seq) {
       await sleep(step);
+      if (g !== gen) return null;
       view[i]++;
       render(view, i);
     }
     if (res.capture) {
       await sleep(220);
+      if (g !== gen) return null;
       cups[res.capture.opp].classList.add("taken");
       cups[res.capture.pit].classList.add("taken");
       await sleep(200);
+      if (g !== gen) return null;
     }
     board = res.board;
     render(board);
@@ -792,8 +802,10 @@ async function animate(pl, pit) {
 }
 
 async function step(pl, pit) {
+  const g = gen;
   busy = true; markPlayable();
-  const res = await animate(pl, pit);
+  const res = await animate(pl, pit, g);
+  if (!res) return;   // Spiel wurde inzwischen neu gestartet oder zurückgenommen
 
   const fin = finished(board);
   if (fin) { endGame(fin); busy = false; return; }
@@ -817,12 +829,14 @@ function tick() {
     say("Du bist am Zug. <b>Wähle eine Mulde.</b>");
   } else {
     say("Der Computer rechnet …");
-    setTimeout(cpuMove, reduced ? 30 : 220);
+    clearTimeout(cpuTimer);
+    cpuTimer = setTimeout(cpuMove, reduced ? 30 : 220);
   }
 }
 
 function cpuMove() {
-  if (over) return;
+  cpuTimer = null;
+  if (over || busy || turn !== CPU) return;
   const r = think(board, CPU, CFG.level);
   if (!r) return;
   el.tDepth.textContent = r.depth;
@@ -865,6 +879,7 @@ function undo() {
     if (s.turn === HUMAN) break;
   }
   if (!s) return;
+  gen++; clearTimeout(cpuTimer);
   board = s.board; turn = s.turn; moveNo = s.moveNo; over = false;
   while (el.log.children.length && el.log.children.length > moveNo) {
     el.log.removeChild(el.log.lastChild);
@@ -882,6 +897,7 @@ function readSettings() {
 }
 
 function reset() {
+  gen++; clearTimeout(cpuTimer);
   readSettings();
   buildBoard();
   board = newBoard();
@@ -905,6 +921,8 @@ $("btn-cfg").addEventListener("click", e => {
   .forEach(id => $(id).addEventListener("change", reset));
 
 document.addEventListener("keydown", e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.target.closest("select, input, textarea")) return;
   if (e.key >= "1" && e.key <= "6") {
     const i = +e.key - 1;
     if (i < P) humanMove(i);

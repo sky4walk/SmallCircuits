@@ -77,9 +77,11 @@
   }
   .touch-controls button:active{background:var(--amber);color:#1c130a;}
   .touch-controls .pour{flex:1.4;font-size:22px;font-weight:700;}
-  @media (max-width:720px){
+  .keyhint .mobileonly{display:none;}
+  @media (max-width:720px),(pointer:coarse){
     .touch-controls{display:flex;}
     .keyhint .desktoponly{display:none;}
+    .keyhint .mobileonly{display:inline;}
   }
   footer{margin-top:12px;font-size:12px;color:var(--cream);opacity:0.55;text-align:center;padding-bottom:16px;}
   footer a{color:var(--brass-light);}
@@ -120,7 +122,7 @@
     </div>
   </div>
 
-  <footer>Bierlauf — ein Fan-Tresenspiel f&uuml;r den <a href="https://www.brauverein-schwabach.de/" target="_blank" rel="noopener">Brauverein Schwabach e.V.</a></footer>
+  <footer>Bierlauf — ein Fan-Tresenspiel f&uuml;r den <a href="https://www.brauverein-schwabach.de/" target="_blank" rel="noopener">Brauverein Schwabach e.V.</a> &nbsp;·&nbsp; <a href="https://zwieselbrau.wordpress.com/" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></footer>
 
 <script>
 (function(){
@@ -217,6 +219,8 @@
       const m=MEL[s];if(m)tone(F[m],t,stepDur*1.25,'triangle',0.14);
     }
     function scheduler(){
+      // nach Hintergrund-Tab (Timer gedrosselt) nicht alle verpassten Noten auf einmal nachspielen
+      if(nextT<ac.currentTime)nextT=ac.currentTime+0.02;
       while(nextT<ac.currentTime+0.12){playStep(step,nextT);nextT+=stepDur;step=(step+1)%STEPS;}
     }
     function startMusic(){
@@ -312,7 +316,12 @@
 
   function spawnCustomer(){
     const cand=[];
-    for(let i=0;i<LANES;i++)if(lanes[i].customers.length<3)cand.push(i);
+    for(let i=0;i<LANES;i++){
+      const cs=lanes[i].customers;
+      const lastX=cs.length?Math.max(...cs.map(c=>c.x)):-1e9;
+      // nur spawnen, wenn am Eingang Platz ist (sonst schiebt minGap den Gast über den rechten Rand)
+      if(cs.length<3&&lastX<=counterRightX-14-minGap)cand.push(i);
+    }
     if(!cand.length)return;
     const li=cand[Math.floor(Math.random()*cand.length)];
     lanes[li].customers.push({
@@ -336,7 +345,11 @@
 
   function loseLife(){lives--;updateHud();if(lives<=0){state='gameover';gameoverAt=performance.now();Sound.stopPour();}}
 
+  let hudKey='';
   function updateHud(){
+    const key=score+'|'+round+'|'+lives;
+    if(key===hudKey)return; // DOM nur bei Änderung anfassen, nicht 60x pro Sekunde
+    hudKey=key;
     document.getElementById('scoreVal').textContent=score;
     document.getElementById('roundVal').textContent=round;
     const box=document.getElementById('livesBox');box.innerHTML='';
@@ -420,8 +433,9 @@
 
       if(lane.beer){
         lane.beer.x+=lane.beer.speed*dt;
-        const front=lane.customers[0];
-        if(front&&front.state==='walking'&&lane.beer.x>=front.x-16){
+        // erster noch wartender Gast (ein trinkender Gast vorne darf das Bier nicht "durchlassen")
+        const front=lane.customers.find(c=>c.state==='walking');
+        if(front&&lane.beer.x>=front.x-16){
           front.state='serving';front.serveT=0.5;
           score+=Math.round(10+lane.beer.fill*8);Sound.serve();
           lane.beer=null;
@@ -598,7 +612,7 @@
     if(f.kind==='tip'){
       ctx.fillStyle='#edd000';ctx.beginPath();ctx.arc(0,0,7,0,Math.PI*2);ctx.fill();
       ctx.strokeStyle='#8e5029';ctx.lineWidth=1.5;ctx.stroke();
-    }else drawSprite(f.kind==='full'?MUG_FULL:MUG_EMPTY,0,0,null,false);
+    }else drawSprite(f.kind==='full'?MUG_FULL:MUG_EMPTY,0,0,null,false,MUG_SC);
     ctx.restore();
   }
   function drawTip(x,y){
@@ -629,16 +643,19 @@
   let spaceHeld=false;
   window.addEventListener('keydown',e=>{
     if(['ArrowUp','ArrowDown',' '].includes(e.key))e.preventDefault();
+    if(e.repeat&&e.key!==' ')return; // gehaltene Pfeiltaste nicht durch alle Tresen rasen lassen
     if(e.key==='ArrowUp'||e.key==='w'||e.key==='W')switchLane(-1);
     else if(e.key==='ArrowDown'||e.key==='s'||e.key==='S')switchLane(1);
     else if(e.key==='m'||e.key==='M')setSoundLabel(Sound.toggleMute());
     else if(e.key===' '){
       Sound.ensure();
-      if(state!=='playing'){startOrRestart();return;}
+      if(state!=='playing'){spaceHeld=true;startOrRestart();return;} // Start-Druck nicht direkt ins Zapfen übergehen lassen
       if(!spaceHeld){spaceHeld=true;pourDown();}
     }
   });
-  window.addEventListener('keyup',e=>{if(e.key===' '){spaceHeld=false;pourUp();}});
+  window.addEventListener('keyup',e=>{if(e.key===' '){e.preventDefault();spaceHeld=false;pourUp();}});
+  // Fensterwechsel (Alt+Tab) mit gehaltener Leertaste: kein keyup -> Zapfen hängt sonst fest
+  window.addEventListener('blur',()=>{spaceHeld=false;if(state==='playing')pourUp();});
 
   // desktop mouse
   canvas.addEventListener('mousedown',e=>{Sound.ensure();if(state!=='playing')startOrRestart();else pourDown();});
@@ -665,6 +682,7 @@
   function bindHold(el,down,up){
     el.addEventListener('touchstart',e=>{e.preventDefault();Sound.ensure();down();},{passive:false});
     el.addEventListener('touchend',e=>{e.preventDefault();if(up)up();},{passive:false});
+    el.addEventListener('touchcancel',()=>{if(up)up();});
     el.addEventListener('mousedown',e=>{e.preventDefault();Sound.ensure();down();});
     el.addEventListener('mouseup',e=>{e.preventDefault();if(up)up();});
     el.addEventListener('mouseleave',e=>{if(up)up();});
@@ -677,7 +695,8 @@
 
   const soundBtn=document.getElementById('soundBtn');
   function setSoundLabel(muted){soundBtn.textContent=muted?'TON: AUS':'TON: AN';}
-  soundBtn.addEventListener('click',()=>{Sound.ensure();setSoundLabel(Sound.toggleMute());});
+  // blur(): sonst behält der Button den Fokus und die Leertaste schaltet beim Spielen den Ton um
+  soundBtn.addEventListener('click',()=>{Sound.ensure();setSoundLabel(Sound.toggleMute());soundBtn.blur();});
 
   resetGame();
   requestAnimationFrame(frame);

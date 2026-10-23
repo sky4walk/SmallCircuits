@@ -66,7 +66,7 @@
     clip-path:polygon(44% 0,56% 0,100% 100%,0 100%);
     filter:blur(7px);
   }
-  canvas#brett{display:block;margin:0 auto;position:relative;z-index:1;aspect-ratio:1 / 1;touch-action:none;border-radius:2px}
+  canvas#brett{outline:none;display:block;margin:0 auto;position:relative;z-index:1;aspect-ratio:1 / 1;touch-action:none;border-radius:2px}
   .hinweis{
     position:absolute;left:50%;bottom:16px;transform:translateX(-50%);
     background:rgba(20,16,13,.88);border:1px solid var(--eiche-hell);
@@ -206,6 +206,9 @@
   .reihe .weg-knopf:hover{color:var(--rot)}
   .karte .abschluss{display:flex;gap:10px;margin-top:22px}
   .karte .abschluss .knopf{flex:1;padding:11px}
+  .karte .abschluss .knopf[hidden]{display:none}
+  .fusslink{margin-top:10px;font-size:12px;color:var(--kreide-matt);text-align:center}
+  .fusslink a{color:inherit}
 
   .ruf{
     position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:30;
@@ -225,7 +228,7 @@
   <section class="buehne">
     <div class="brettrahmen">
       <div class="lampe" aria-hidden="true"><div class="schirm"></div><div class="kegel"></div></div>
-      <canvas id="brett" width="640" height="640" role="application"
+      <canvas id="brett" width="640" height="640" role="application" tabindex="0"
               aria-label="Dartboard. Mit Maus oder Pfeiltasten zielen, Klick oder Leertaste wirft."></canvas>
       <div class="hinweis" id="hinweis">Zielen und klicken, am Handy tippen und loslassen</div>
 
@@ -301,6 +304,7 @@
     <div class="kreideleiste" aria-hidden="true">
       <span class="kreide"></span><span class="schwamm"></span><span class="staub"></span>
     </div>
+    <div class="fusslink"><a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></div>
   </aside>
 </div>
 
@@ -345,7 +349,7 @@
       <button class="knopf" id="spielerplus" style="margin-top:6px;padding:5px 12px;font-size:13px">Spieler dazu</button>
     </div>
 
-    <div class="abschluss"><button class="knopf voll" id="losgehts">Spiel starten</button></div>
+    <div class="abschluss"><button class="knopf" id="zurueck" hidden>Zurück zum Spiel</button><button class="knopf voll" id="losgehts">Spiel starten</button></div>
   </div>
 </div>
 
@@ -2104,7 +2108,7 @@ const ALLE_WUERFE = (() => {
   a.push({ v:50, l:"Bull", doppel:true,  kosten:30 });
   return a;
 })();
-const DOPPEL_GUETE = { 40:0, 32:1, 16:2, 24:3, 8:4, 20:5, 36:6, 4:7, 12:8, 28:9, 50:10 };
+const DOPPEL_GUETE = { 40:0, 32:1, 16:2, 24:3, 8:4, 20:5, 36:6, 4:7, 12:8, 28:9, 50:22 };
 const SCHLUSS = ALLE_WUERFE.filter(w => w.doppel).map(w => ({
   ...w, kosten: DOPPEL_GUETE[w.v] !== undefined ? DOPPEL_GUETE[w.v] : (w.v % 4 === 0 ? 14 : 22)
 }));
@@ -2126,7 +2130,15 @@ const CHECKOUT = (() => {
       f[stufe][rest] = best;
     }
   const tab = new Array(MAX+1).fill(null);
-  for (let rest = 2; rest <= MAX; rest++) tab[rest] = f[0][rest] || f[1][rest] || f[2][rest];
+  const wert = Object.fromEntries(ALLE_WUERFE.map(w => [w.l, w.v]));
+  for (let rest = 2; rest <= MAX; rest++){
+    const w = f[0][rest] || f[1][rest] || f[2][rest];
+    if (w && w.route.length > 1){       // Vorbereitungspfeile groß zuerst, Doppel bleibt hinten
+      const vor = w.route.slice(0, -1).sort((a, b) => wert[b] - wert[a]);
+      w.route = [...vor, w.route[w.route.length - 1]];
+    }
+    tab[rest] = w;
+  }
   return tab;
 })();
 function finishWeg(rest, pfeileUebrig){
@@ -2276,7 +2288,7 @@ function malen(){
     const t = Math.min(1, (performance.now() - flug.start) / flug.dauer);
     const e = 1 - Math.pow(1 - t, 3), s = 3.4 - 2.4*e;
     pfeilZeichnen({ x:flug.ziel.x, y:flug.ziel.y - (1-e)*120 }, PFEILFARBEN[flug.i % 3], s);
-    if (t >= 1) flugFertig();
+    if (t >= 1 && !pausiert) flugFertig();
   }
   if (zielenErlaubt()) fadenkreuzZeichnen(fadenkreuz());
   requestAnimationFrame(malen);
@@ -2365,7 +2377,8 @@ function rufen(text){
   const u = new SpeechSynthesisUtterance(text);
   u.lang = "de-DE"; u.rate = .95; u.pitch = .9;
   ducken(true);
-  const zurueck = () => { clearTimeout(rufen.notbremse); ducken(false); };
+  const id = rufen.nr = (rufen.nr || 0) + 1;      // ältere Ansagen melden sich per onerror ab
+  const zurueck = () => { if (id !== rufen.nr) return; clearTimeout(rufen.notbremse); ducken(false); };
   u.onend = zurueck; u.onerror = zurueck;
   clearTimeout(rufen.notbremse);                       // falls onend ausbleibt
   rufen.notbremse = setTimeout(zurueck, 1200 + text.length * 95);
@@ -2425,6 +2438,7 @@ async function kulisseStarten(){
     } catch (e){
       KULISSE.bett = null;      // Aufnahme nicht dekodierbar: dann eben nur Einzelgeräusche
     }
+    if (!KULISSE.laeuft) return;   // inzwischen abgeschaltet
   }
   if (KULISSE.bett && !KULISSE.quelle){
     const q = a.createBufferSource();
@@ -2599,7 +2613,7 @@ const MODI = {
   x01: {
     titel: s => s.opt.start + " Double Out",
     optionen: ["start", "legs"],
-    init(s){ for (const p of s.spieler){ p.rest = s.opt.start; p.legs = 0; p.bestesAuf = 0; p.anzahl180 = 0; } },
+    init(s){ for (const p of s.spieler){ p.rest = s.opt.start; p.legs = 0; p.bestesAuf = 0; p.anzahl180 = 0; p.erzielt = 0; } },
     wurf(s, p, w){
       const rest = p.rest - w.v;
       if (rest < 0 || rest === 1 || (rest === 0 && !w.doppel)){
@@ -2625,10 +2639,10 @@ const MODI = {
       if (summe >= 100) return { ruf:{gross:String(summe), klein:p.name}, sprich:String(summe), jubel:.7 };
       return null;
     },
-    legNeu(s){ for (const p of s.spieler) p.rest = s.opt.start; },
+    legNeu(s){ for (const p of s.spieler){ p.erzielt += s.opt.start - p.rest; p.rest = s.opt.start; } },
     gross: (s,p) => p.rest,
     zeile(s, p){
-      const gesamt = s.opt.start * p.legs + (s.opt.start - p.rest);
+      const gesamt = p.erzielt + (s.opt.start - p.rest);
       const avg = p.pfeile ? gesamt / p.pfeile * 3 : 0;
       return "Legs " + p.legs + " / " + s.opt.legs + "  ·  Ø " + avg.toFixed(1)
            + (p.bestesAuf ? "  ·  bestes " + p.bestesAuf : "")
@@ -2785,7 +2799,8 @@ const MODI = {
     rundenEnde(s){
       if (s.runde <= 7) return null;
       const beste = s.spieler.slice().sort((a,b) => b.punkte - a.punkte);
-      return { ende:"spiel", sieger:beste[0] };
+      const gleich = beste.length > 1 && beste[0].punkte === beste[1].punkte;
+      return { ende:"spiel", sieger: gleich ? null : beste[0] };
     },
     gross: (s,p) => p.punkte,
     zeile: (s,p) => "Runde " + Math.min(7, s.runde) + " von 7  ·  Ziel " + Math.min(7, s.runde),
@@ -2813,12 +2828,24 @@ function ausscheiden(s, taeter, opfer, note){
    7. Spielablauf
    =================================================================== */
 let spiel = null, steckend = [], flug = null, sperre = true;
+let pausiert = false, aufgeschoben = [];
+
+/* Alle Spiel-Timer laufen hierüber: Ein Timer aus einem alten Spiel verfällt,
+   und solange der Aufbau-Dialog offen ist, wird er bis zum Weiterspielen geparkt. */
+function spaeter(fn, ms){
+  const s = spiel;
+  setTimeout(() => {
+    if (spiel !== s || !s || s.vorbei) return;
+    if (pausiert){ aufgeschoben.push(fn); return; }
+    fn();
+  }, ms);
+}
 
 const modus = () => MODI[spiel.modus];
 function aktiverSpieler(){ return spiel ? spiel.spieler[spiel.dran] : null; }
 function zielenErlaubt(){
   const p = aktiverSpieler();
-  return !!(spiel && !sperre && !flug && p && p.mensch && !spiel.vorbei);
+  return !!(spiel && !pausiert && !sperre && !flug && p && p.mensch && !spiel.vorbei);
 }
 
 function spielStarten(cfg){
@@ -2831,7 +2858,7 @@ function spielStarten(cfg){
       stufeKI: s.art === "mensch" ? "mittel" : s.art,
       pfeile: 0
     })),
-    dran: 0, wurfNr: 0, zuege: 0, runde: 1, aufnahmeStart: 0, aufnahme: [], vorbei: false
+    dran: 0, wurfNr: 0, zuege: 0, runde: 1, aufnahmeStart: 0, aufnahme: [], vorbei: false, legStart: 0
   };
   modus().init(spiel);
   steckend = []; flug = null; sperre = false;
@@ -2847,7 +2874,7 @@ function zugVorbereiten(){
   spiel.wurfNr = 0; spiel.aufnahme = []; steckend = [];
   phasenNeu();
   tafelZeichnen(); hinweisSetzen();
-  if (!p.mensch) setTimeout(kiWirft, 850);
+  if (!p.mensch) spaeter(kiWirft, 850);
 }
 
 function werfen(ziel, streu){
@@ -2891,24 +2918,30 @@ function verbuchen(w){
   if (erg.ende === "spiel") return spielEnde(erg.sieger);
   if (erg.ende === "leg"){
     sperre = true;
-    setTimeout(() => { rufWeg(); modus().legNeu(spiel); zugWeiter(); }, 2200);
+    spaeter(() => {
+      rufWeg(); modus().legNeu(spiel);
+      const n = spiel.spieler.length;                 // Anwurf wechselt mit jedem Leg
+      spiel.legStart = (spiel.legStart + 1) % n;
+      spiel.dran = (spiel.legStart - 1 + n) % n;      // zugWeiter() rückt eins weiter
+      zugWeiter();
+    }, 2200);
     return;
   }
   if (erg.ende === "zug"){
     sperre = true;
-    setTimeout(() => { rufWeg(); zugWeiter(); }, 1400);
+    spaeter(() => { rufWeg(); zugWeiter(); }, 1400);
     return;
   }
   if (p.leben !== undefined && p.leben <= 0){        // Killer: selbst ausgeschieden
     sperre = true;
-    setTimeout(() => { rufWeg(); zugWeiter(); }, 1200);
+    spaeter(() => { rufWeg(); zugWeiter(); }, 1200);
     return;
   }
   if (spiel.wurfNr >= 3) return aufnahmeEnde();
 
-  if (erg.ruf) setTimeout(rufWeg, 1200);
+  if (erg.ruf) spaeter(rufWeg, 1200);
   sperre = false; hinweisSetzen();
-  if (!p.mensch) setTimeout(kiWirft, 750);
+  if (!p.mensch) spaeter(kiWirft, 750);
 }
 
 function aufnahmeEnde(){
@@ -2918,9 +2951,9 @@ function aufnahmeEnde(){
   let warten = 800;
   if (erg && erg.jubel) groelen(erg.jubel);
   if (erg && erg.ruf){ rufSetzen(erg.ruf.gross, erg.ruf.klein); if (erg.sprich) rufen(erg.sprich); warten = 1600; }
-  if (erg && erg.ende === "spiel") return setTimeout(() => spielEnde(erg.sieger), 900);
+  if (erg && erg.ende === "spiel") return spaeter(() => spielEnde(erg.sieger), 900);
   tafelZeichnen();
-  setTimeout(() => { rufWeg(); zugWeiter(); }, warten);
+  spaeter(() => { rufWeg(); zugWeiter(); }, warten);
 }
 
 function zugWeiter(){
@@ -2948,8 +2981,13 @@ function spielEnde(sieger){
     ? "Legs " + spiel.spieler.map(a => a.legs).join(" : ")
     : spiel.modus === "shanghai" ? "Punkte " + spiel.spieler.map(a => a.punkte).join(" : ") : "";
   groelen(1.6);
-  rufSetzen(sieger.name + " gewinnt", zusatz);
-  rufen("Spiel und Sieg, " + sieger.name);
+  if (sieger){
+    rufSetzen(sieger.name + " gewinnt", zusatz);
+    rufen("Spiel und Sieg, " + sieger.name);
+  } else {
+    rufSetzen("Unentschieden", zusatz);
+    rufen("Unentschieden");
+  }
   hinweisSetzen();
 }
 
@@ -2957,7 +2995,7 @@ function spielEnde(sieger){
    8. Gegner
    =================================================================== */
 function kiWirft(){
-  if (!spiel || spiel.vorbei || flug) return;
+  if (!spiel || spiel.vorbei || pausiert || flug || sperre) return;
   const p = aktiverSpieler();
   if (!p || p.mensch) return;
   const label = modus().ziel(spiel, p);
@@ -2990,11 +3028,13 @@ leinwand.addEventListener("pointermove", ev => {
 });
 leinwand.addEventListener("pointerdown", ev => {
   ev.preventDefault();
+  leinwand.focus({ preventScroll:true });     // Tastatur zielt wieder aufs Brett
   if (!zielenErlaubt()) return;
   if (ev.pointerType === "mouse") abdruecken(); else basisSetzen(brettKoord(ev));
 });
 leinwand.addEventListener("pointerup", ev => { if (ev.pointerType !== "mouse") abdruecken(); });
 window.addEventListener("keydown", ev => {
+  if (ev.target.closest && ev.target.closest("input,select,button,textarea")) return;
   if (!zielenErlaubt()) return;
   const s = ev.shiftKey ? 3 : 12;
   if (ev.key === "ArrowLeft")       basisSetzen({ x:basis.x - s, y:basis.y });
@@ -3149,13 +3189,24 @@ document.getElementById("losgehts").addEventListener("click", () => {
   const min = MODI[gewMod].mindestens || 1;
   while (sp.length < min) sp.push({ name:"Theke-Theo", art:"mittel" });
   aufbau.hidden = true;
+  pausiert = false; aufgeschoben = [];
   audio();
   if (an("kneipe")) kulisseStarten();     // erst hier, ein Klick muss vorausgegangen sein
   spielStarten({ modus:gewMod, start:gewStart, legs:gewLegs, spieler:sp });
+  leinwand.focus({ preventScroll:true });
 });
 
 document.getElementById("neu").addEventListener("click", () => {
-  sperre = true; flug = null; rufWeg(); aufbau.hidden = false;
+  pausiert = true; rufWeg();
+  document.getElementById("zurueck").hidden = !(spiel && !spiel.vorbei);
+  aufbau.hidden = false;
+});
+document.getElementById("zurueck").addEventListener("click", () => {
+  aufbau.hidden = true; pausiert = false;
+  const offen = aufgeschoben; aufgeschoben = [];
+  for (const fn of offen) fn();
+  hinweisSetzen();
+  leinwand.focus({ preventScroll:true });
 });
 document.getElementById("kneipe").addEventListener("change", ev => {
   if (ev.target.checked) kulisseStarten(); else kulisseStoppen();

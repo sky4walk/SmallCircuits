@@ -194,6 +194,8 @@ main{display:flex;flex:1;min-height:0;gap:12px;padding:12px}
 .nin{background:var(--floor);border:1px solid var(--line);padding:6px 8px;min-width:0;flex:1}
 .prow .x{background:none;border:none;color:var(--dim);cursor:pointer;font-size:17px;padding:0 5px}
 .prow .x:hover{color:var(--red)}
+.sfoot .credit{margin-left:auto;font-size:11px;color:var(--dim);letter-spacing:.08em}
+.sfoot .credit:hover{color:var(--yellow)}
 .sfoot{display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding-top:16px;border-top:2px solid var(--line)}
 .help{margin-top:18px;border-top:1px solid var(--line);padding-top:12px}
 .help summary{cursor:pointer;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;font-size:11px}
@@ -465,12 +467,15 @@ async function stepMove(st, r, d, cause, io) {
   const pushed = chain.filter(x => x !== r);
   if (pushed.length) await onPush(st, r, pushed, d, io);
 
+  // Erst die ganze Kette versetzen, dann Feldeffekte auslösen. Fällt der
+  // vorderste Roboter in eine Grube und rebootet, ist das Feld, in das der
+  // Schiebende einzieht, damit schon belegt — niemand landet auf ihm.
   for (const m of chain) {
     const fx = m.x, fy = m.y;
     m.x += DX[d]; m.y += DY[d];
     await io.emit({ t: 'move', r: m.id, from: [fx, fy], to: [m.x, m.y], dir: d, cause });
-    await landOn(st, m, d, cause, io);
   }
+  for (const m of chain) await landOn(st, m, d, cause, io);
   return !r.destroyed;
 }
 
@@ -609,7 +614,10 @@ async function fireBoardLasers(st, io) {
   for (let y = 0; y < b.h; y++) for (let x = 0; x < b.w; x++) {
     const c = cellAt(b, x, y);
     if (!c.laser) continue;
-    const { path, hit } = traceLaser(st, x, y, c.laser.d, false);
+    // Der Emitter sitzt an der Rückwand seines Feldes: wer auf dem Feld
+    // selbst steht, steht im Strahl und wird zuerst getroffen.
+    const self = robotAt(st, x, y);
+    const { path, hit } = self ? { path: [[x, y]], hit: [self] } : traceLaser(st, x, y, c.laser.d, false);
     await io.emit({ t: 'laser', from: [x, y], dir: c.laser.d, path, kind: 'board', n: c.laser.n || 1 });
     if (hit[0]) await damage(st, hit[0], c.laser.n || 1, io, null, 'board');
   }
@@ -660,18 +668,23 @@ async function moveBelts(st, io, expressOnly) {
   // Konvergenz: zwei Roboter aufs gleiche Feld -> keiner bewegt sich
   const count = {};
   for (const m of moves) count[m.nx + ',' + m.ny] = (count[m.nx + ',' + m.ny] || 0) + 1;
-  // Band schiebt nicht: Zielfeld mit stehendem Roboter, der sich nicht bewegt -> blockiert
-  const movingIds = new Set(moves.map(m => m.r.id));
-  const valid = moves.filter(m => {
-    if (count[m.nx + ',' + m.ny] > 1) return false;
-    const occ = robotAt(st, m.nx, m.ny);
-    if (occ && !movingIds.has(occ.id)) return false;
-    return true;
-  });
-  for (const m of valid) {
-    const fx = m.r.x, fy = m.r.y;
-    m.r.x = m.nx; m.r.y = m.ny;
+  // Band schiebt nicht: Zielfeld mit Roboter, der sich nicht bewegt -> blockiert.
+  // Iterativ, denn ein blockierter Roboter blockiert wiederum seinen Hintermann.
+  let valid = moves.filter(m => count[m.nx + ',' + m.ny] === 1);
+  for (let changed = true; changed;) {
+    changed = false;
+    const movingIds = new Set(valid.map(m => m.r.id));
+    const next = valid.filter(m => {
+      const occ = robotAt(st, m.nx, m.ny);
+      if (!occ) return true;
+      if (!movingIds.has(occ.id)) return false;
+      // Gegenläufige Bänder: zwei Roboter fahren nicht durcheinander hindurch
+      const om = valid.find(v => v.r === occ);
+      return !(om.nx === m.r.x && om.ny === m.r.y);
+    });
+    if (next.length !== valid.length) { valid = next; changed = true; }
   }
+  for (const m of valid) { m.r.x = m.nx; m.r.y = m.ny; }
   for (const m of valid) {
     await io.emit({ t: 'move', r: m.r.id, from: [m.r.x - DX[m.d], m.r.y - DY[m.d]], to: [m.r.x, m.r.y], dir: m.d, cause: 'belt' });
     // Kurve: Drehung, wenn die Ausrichtung des Zielbandes abweicht
@@ -1761,17 +1774,46 @@ async function rebootRobot(st, r, io, reason) {
   const spot = rebootSpot(st, r);
   r.x = spot.x; r.y = spot.y;
   r.dir = await io.choose(r, 'rebootDir', { def: spot.d });
-  // Steht dort jemand, wird er geschoben
-  // Steht dort schon jemand, schiebt der Neuankömmling ihn in Pfeilrichtung
-  const occ = st.robots.find(o => o !== r && !o.out && o.x === r.x && o.y === r.y);
-  if (occ) await stepMove(st, occ, spot.d, 'reboot', io);
+  // Steht dort schon jemand, schiebt der Neuankömmling ihn in Pfeilrichtung.
+  // Ein Reboot, der während eines anderen Reboots ausgelöst wird, schiebt
+  // nicht noch einmal — sonst schieben sich zwei Roboter endlos gegenseitig
+  // in die Grube. Bleibt das Feld besetzt, geht es aufs nächste freie Feld.
+  const occAt = () => st.robots.find(o => o !== r && !o.out && o.x === r.x && o.y === r.y);
+  const occ = occAt();
+  if (occ && !st._rebooting) {
+    st._rebooting = true;
+    try { await stepMove(st, occ, spot.d, 'reboot', io); }
+    finally { st._rebooting = false; }
+  }
+  if (occAt()) {
+    const f = freeCellNear(st, r.x, r.y, r);
+    r.x = f[0]; r.y = f[1];
+  }
   await io.emit({ t: 'reboot', r: r.id, at: [r.x, r.y], dir: r.dir, reason });
 }
+/* Reboot-Punkt: der erste freie, sonst der erste. Ohne Reboot-Punkt auf dem
+   Board gilt der Archivmarker. */
 function rebootSpot(st, r) {
-  const b = st.board;
+  const b = st.board, spots = [];
   for (let i = 0; i < b.cells.length; i++)
-    if (b.cells[i].respawn) return { x: i % b.w, y: (i / b.w) | 0, d: b.cells[i].respawn.d };
-  return { x: r.ax, y: r.ay, d: r.adir };
+    if (b.cells[i].respawn) spots.push({ x: i % b.w, y: (i / b.w) | 0, d: b.cells[i].respawn.d });
+  if (!spots.length) return { x: r.ax, y: r.ay, d: r.adir };
+  const free = spots.find(s => !st.robots.some(o => o !== r && !o.out && o.x === s.x && o.y === s.y));
+  return free || spots[0];
+}
+/* Nächstes freies, sicheres Feld (keine Grube, kein Roboter) per Breitensuche */
+function freeCellNear(st, x0, y0, self) {
+  const b = st.board, seen = new Set([x0 + ',' + y0]), q = [[x0, y0]];
+  for (let h = 0; h < q.length; h++) {
+    const [x, y] = q[h];
+    const c = cellAt(b, x, y);
+    if (c && c.t !== 'pit' && !st.robots.some(o => o !== self && !o.out && o.x === x && o.y === y)) return [x, y];
+    for (let d = 0; d < 4; d++) {
+      const nx = x + DX[d], ny = y + DY[d], k = nx + ',' + ny;
+      if (inBounds(b, nx, ny) && !seen.has(k)) { seen.add(k); q.push([nx, ny]); }
+    }
+  }
+  return [x0, y0];
 }
 
 /* --- Prioritätsantenne -------------------------------------------------- */
@@ -1922,7 +1964,8 @@ async function mResolve(st, r, card, reg, io, depth) {
       return;
     case 'again': case 'r_repeat': {
       const prev = reg >= 2 ? r.regs[reg - 2] : null;
-      if (prev) return mResolve(st, r, prev.c, reg, io, depth + 1);
+      // Eine Wiederholung im Vorregister wiederholt ihrerseits das Register davor
+      if (prev) return mResolve(st, r, prev.c, reg - 1, io, depth + 1);
       return;
     }
     case 'r_spin':
@@ -2198,8 +2241,11 @@ async function useRoundPower(st, r, id, io) {
     r.hand.splice(i, 1);
     r.hand.push(drawFrom(st, r));
   } else if (id === 'zwischenspeicher') {
-    const pick = await io.choose(r, 'pickCards', { n: 0, prompt: 'Karten oben aufs Deck legen (ohne Ersatz)' });
-    for (const idx of (pick || []).slice().sort((a, b) => b - a)) {
+    // Es müssen genug Karten für die noch freien Register auf der Hand bleiben
+    const max = Math.max(0, r.hand.length - r.regs.filter(x => !x).length);
+    if (!max) return false;
+    const pick = await io.choose(r, 'pickCards', { n: 0, max, prompt: 'Karten oben aufs Deck legen (ohne Ersatz, höchstens ' + max + ')' });
+    for (const idx of (pick || []).slice(0, max).sort((a, b) => b - a)) {
       const c = r.hand.splice(idx, 1)[0];
       if (c) r.deck.push(c);
     }
@@ -2469,7 +2515,8 @@ function mBotAnswer(st, r, kind, data) {
     case 'blauer_todesbildschirm': return true;
     case 'pickCards': {
       const idx = [];
-      for (let i = 0; i < r.hand.length && idx.length < (data.n || 3); i++)
+      const lim = Math.min(data.n || 3, data.max != null ? data.max : 99);
+      for (let i = 0; i < r.hand.length && idx.length < lim; i++)
         if (isDmgCard(r.hand[i])) idx.push(i);
       return idx;
     }
@@ -2795,6 +2842,77 @@ test('Greifarm beruehrt Flagge vom Nachbarfeld', async () => {
   eq(a.nextFlag, 2, 'Flagge zaehlt');
 });
 
+/* --- Regressionen (Prüfung Oktober 2026) -------------------------------- */
+test('Boardlaser trifft auch den Roboter auf dem Emitterfeld', async () => {
+  const b = tb(`.......`, { lasers: [[0, 0, 1, 1]] });
+  const a = R(1, 0, 0, 0);
+  const st = tstate(b, [a]);
+  await fireBoardLasers(st, headlessIO(st));
+  eq(a.dmg, 1, 'Schaden auf dem Emitterfeld');
+});
+
+test('Blockierter Vordermann blockiert den Hintermann auf dem Band', async () => {
+  const b = tb(`......\n......\n......`);
+  cellAt(b, 1, 1).cv = { d: 1, x: false };
+  cellAt(b, 2, 1).cv = { d: 1, x: false };
+  cellAt(b, 3, 0).cv = { d: 2, x: false };       // konvergiert mit (2,1) auf (3,1)
+  const a = R(1, 1, 1, 0), c = R(2, 2, 1, 0), d = R(3, 3, 0, 0);
+  const st = tstate(b, [a, c, d]);
+  await moveBelts(st, headlessIO(st), false);
+  eq([a.x, c.x, d.y], [1, 2, 0], 'niemand bewegt sich, niemand stapelt');
+});
+
+test('Gegenläufige Bänder lassen niemanden durcheinander fahren', async () => {
+  const b = tb(`......`);
+  cellAt(b, 1, 0).cv = { d: 1, x: false };
+  cellAt(b, 2, 0).cv = { d: 3, x: false };
+  const a = R(1, 1, 0, 0), c = R(2, 2, 0, 0);
+  const st = tstate(b, [a, c]);
+  await moveBelts(st, headlessIO(st), false);
+  eq([a.x, c.x], [1, 2], 'beide bleiben stehen');
+});
+
+test('Wiederholung nach Wiederholung wiederholt das Register davor', async () => {
+  const b = tb(`..........`);
+  const a = R(1, 0, 0, 1);
+  const st = mstate(b, [a]);
+  a.regs = [{ c: { t: 'm2' } }, { c: { t: 'again' } }, { c: { t: 'again' } }, null, null];
+  const io = headlessIO(st);
+  for (let reg = 1; reg <= 3; reg++) { st.register = reg; await mResolve(st, a, a.regs[reg - 1].c, reg, io, 0); }
+  eq(a.x, 6, 'dreimal Vor 2');
+});
+
+test('Reboot auf besetzten Archivpunkt neben Grube endet', async () => {
+  const b = tb(`.#.\n...`);
+  const a = R(1, 0, 1, 1, { ax: 0, ay: 0, adir: 1 });
+  const c = R(2, 0, 0, 1, { ax: 0, ay: 0, adir: 1 });
+  const st = mstate(b, [a, c]);
+  st.register = 1;
+  await rebootRobot(st, a, headlessIO(st), 'Test');
+  ok(!(a.x === c.x && a.y === c.y), 'beide stehen auf verschiedenen Feldern');
+  ok(cellAt(b, a.x, a.y).t !== 'pit' && cellAt(b, c.x, c.y).t !== 'pit', 'keiner steht in der Grube');
+});
+
+test('Geschobener, der rebootet, landet nicht unter dem Schiebenden', async () => {
+  const b = tb(`.....`, { respawn: [[4, 0, 3]] });
+  const p = R(1, 3, 0, 1), q = R(2, 4, 0, 1);
+  const st = mstate(b, [p, q]);
+  st.register = 1;
+  await stepMove(st, p, 1, 'card', headlessIO(st));
+  ok(!(p.x === q.x && p.y === q.y), 'zwei Roboter auf einem Feld');
+});
+
+test('Zwischenspeicher lässt genug Karten für die freien Register', async () => {
+  const a = R(1, 0, 0, 1);
+  const st = mstate(tb(`...`), [a]);
+  a.upgrades.push({ id: 'zwischenspeicher' });
+  a.hand = []; for (let i = 0; i < 9; i++) a.hand.push({ t: 'm1' });
+  const io = headlessIO(st);
+  io.choose = async () => [0, 1, 2, 3, 4, 5, 6, 7, 8];
+  await useRoundPower(st, a, 'zwischenspeicher', io);
+  eq(a.hand.length, 5, 'fünf Karten bleiben');
+});
+
 /* --- Gesamtlauf ---------------------------------------------------------- */
 test('Vollstaendige Bot-Partie laeuft bis zum Sieg', async () => {
   const b = loadBoard(0);
@@ -2811,7 +2929,7 @@ test('Vollstaendige Bot-Partie laeuft bis zum Sieg', async () => {
   ok(st.winner, 'es gibt einen Sieger');
 });
 
-test('Alle drei Boards sind spielbar und erreichbar', async () => {
+test('Alle Boards sind spielbar und erreichbar', async () => {
   for (let i = 0; i < BOARD_SPECS.length; i++) {
     const b = loadBoard(i);
     const n = countFlags(b);
@@ -2830,7 +2948,7 @@ test('Alle drei Boards sind spielbar und erreichbar', async () => {
 
 test('Kartenbestand bleibt ueber viele Runden erhalten', async () => {
   for (const seed of [7, 99, 4242]) {
-    const b = loadBoard(seed % 3);
+    const b = loadBoard(seed % BOARD_SPECS.length);
     const sp = startPositions(b);
     const rs = [0, 1, 2].map(i => makeRobot(i + 1, 'B' + i, '#fff', sp[i].x, sp[i].y,
       startFacing(b, sp[i].x, sp[i].y), { isBot: true, level: 2 }));
@@ -3745,6 +3863,8 @@ const App = {
     // Partie zu mischen.
     const gen = ++this.gen;
     const live = () => this.gen === gen;
+    // Reste der vorigen Partie (Einzelschritt, Auswahl) nicht übernehmen
+    this.stepResolve = null; this.selected = null; this.paused = false; this.stepping = false;
     const b = this.cfg.getBoard ? this.cfg.getBoard() : loadBoard(this.cfg.boardIdx);
     trimFlags(b, this.cfg.flags);
     const sp = startPositions(b);
@@ -3755,14 +3875,15 @@ const App = {
     });
     this.st = newState(b, robots, this.cfg.seed || (Date.now() & 0x7fffffff),
       { optionsOn: this.cfg.options, rules: this.cfg.rules || 'classic' });
+    const st0 = this.st;
     location.hash = 'seed=' + this.st.seed;
     this.io = {
       emit: ev => live() ? this.animate(ev) : Promise.resolve(),
       ask: (r, id, q) => live() ? this.askRuntime(r, id, q) : Promise.resolve(false),
       choose: (r, k, d) => live() ? this.chooseUI(r, k, d) : Promise.resolve(k === 'rebootDir' || k === 'anyDir' ? (d && d.def) || 0 : null),
       program: r => live() ? this.doProgram(r) : Promise.resolve(),
-      scramble: (a, b2) => applyScramble(this.st, b2),
-      radio: (a, b2) => applyRadio(this.st, a, b2),
+      scramble: (a, b2) => { if (live()) applyScramble(st0, b2); },
+      radio: (a, b2) => { if (live()) applyRadio(st0, a, b2); },
       shop: (r, offers) => !live() ? Promise.resolve(null)
         : (r.isBot ? mBotShop(this.st, r, offers) : mShopUI(this, r, offers)),
       tempWindow: (r, when) => live() ? mTempWindow(this, r, when) : Promise.resolve()
@@ -4090,6 +4211,7 @@ const App = {
           if (!isLocked(r, i + 1)) slot.onclick = () => {
             if (e.sub) { r.hand.push(e.sub); e.sub = null; e.mode = null; }
             else { r.hand.push(e.c); r.regs[i] = null; }
+            if (this.selected && this.selected.reg === i) this.selected = null;
             redraw();
           };
         } else if (isLocked(r, i + 1)) {
@@ -4103,8 +4225,9 @@ const App = {
           // Zweitkarte in ein Register legen (Krebsbeine / Doppelprozessor)
           if (combo && this.selected != null && this.selected.reg != null) {
             const e = r.regs[this.selected.reg];
-            const mode = comboMode(r, e.c, c);
-            if (e && !e.sub && mode) {
+            const mode = e && !e.sub ? comboMode(r, e.c, c) : null;
+            if (!e) this.selected = null;          // Register wurde inzwischen geleert
+            if (mode) {
               e.sub = c; e.mode = mode;
               r.hand.splice(ci, 1);
               this.selected = null; redraw(); return;
@@ -4136,7 +4259,7 @@ const App = {
       }
       const filled = r.regs.every((e, i) => e || isLocked(r, i + 1));
       ready.disabled = !filled;
-      ready.textContent = filled ? 'Programm ausführen' : (5 - r.regs.filter(Boolean).length) + ' Register offen';
+      ready.textContent = filled ? 'Programm ausführen' : r.regs.filter((e, i) => !e && !isLocked(r, i + 1)).length + ' Register offen';
     };
 
     // Werkzeuge: Abschaltung, Waffe, Optionen
@@ -4464,20 +4587,29 @@ function mBuildProgramUI(app, r, done) {
     tools.appendChild(d);
 
     for (const u of heldTemp(r)) {
+      if (UPGRADES[u.id].when === 'reg') continue;        // gehört ins Registerfenster
       const rt = UPGRADES[u.id].routine;
       const gone = rt && !st.special[rt];
       const b = el('button', 'ctl temp', UPGRADES[u.id].n);
       b.title = gone ? MCARDNAME[rt] + ' ist schon vergeben — die Karte bringt nichts mehr.'
                      : UPGRADES[u.id].d;
       b.disabled = !!gone;
-      b.onclick = async () => { await useTemp(st, r, u.id, app.io); redraw(); };
+      b.onclick = async () => {
+        if (b.disabled) return;
+        b.disabled = true;                                 // kein Doppelklick
+        await useTemp(st, r, u.id, app.io); redraw();
+      };
       tools.appendChild(b);
     }
     for (const id of ['dings_defrag', 'zwischenspeicher']) {
       if (!hasUpg(r, id) || r.usedThisRound[id]) continue;
       const b = el('button', 'ctl', UPGRADES[id].n);
       b.title = UPGRADES[id].d;
-      b.onclick = async () => { await useRoundPower(st, r, id, app.io); redraw(); };
+      b.onclick = async () => {
+        if (b.disabled) return;
+        b.disabled = true;
+        await useRoundPower(st, r, id, app.io); redraw();
+      };
       tools.appendChild(b);
     }
     const ASKABLE = ['bremse', 'teleporter', 'deflektorschild', 'mini_haubitze',
@@ -4588,7 +4720,7 @@ function mPickCards(app, r, data) {
       const ce = mCardEl(c);
       ce.onclick = () => {
         if (sel.has(i)) sel.delete(i);
-        else if (!data.n || sel.size < data.n) sel.add(i);
+        else if ((!data.n || sel.size < data.n) && (data.max == null || sel.size < data.max)) sel.add(i);
         ce.classList.toggle('picked', sel.has(i));
         okb.textContent = data.n ? 'Übernehmen (' + sel.size + '/' + data.n + ')' : 'Übernehmen (' + sel.size + ')';
       };
@@ -4609,7 +4741,7 @@ function mPickCards(app, r, data) {
 async function mTempWindow(app, r, when) {
   if (r.isBot) return mBotTemps(app.st, r, app.io, when);
   if (r.rebooted || r._noAsk === app.st.turn) return;
-  const usable = heldTemp(r);
+  const usable = heldTemp(r).filter(u => UPGRADES[u.id].when !== 'prog');
   if (!usable.length) return;
   const pick = await app.modal(r.name + ' · Register ' + app.st.register, (b, close) => {
     b.appendChild(el('p', '', 'Temporäre Karte einsetzen, bevor das Register läuft?'));
@@ -4683,7 +4815,11 @@ const Setup = {
     const bl = el('div', 'chips');
     this.boardList().forEach(b => {
       const c = el('button', 'chip-btn' + (b.i === this.boardIdx ? ' on' : ''), b.name);
-      c.onclick = () => { this.boardIdx = b.i; this.show(); };
+      c.onclick = () => {
+        this.boardIdx = b.i;
+        this.flags = Math.max(1, Math.min(this.flags, countFlags(this.getBoard(b.i))));
+        this.show();
+      };
       bl.appendChild(c);
     });
     s1.appendChild(bl);
@@ -4763,22 +4899,35 @@ const Setup = {
     /* Start */
     const foot = el('div', 'sfoot');
     const go = el('button', 'go big', 'Rennen starten');
+    const warn = el('div', 'hint');
     go.onclick = () => {
+      const nStarts = startPositions(this.getBoard(this.boardIdx)).length;
+      if (this.players.length > nStarts) {
+        warn.textContent = 'Der Kurs hat nur ' + nStarts + ' Startplätze für ' + this.players.length + ' Roboter.';
+        return;
+      }
       App.cfg = {
         boardIdx: this.boardIdx, flags: this.flags, options: this.options, rules: this.rules,
         seed: this.seed ? (parseInt(this.seed, 10) || hashStr(this.seed)) : 0,
         players: this.players.map(p => ({ ...p }))
       };
+      // Ein Seed aus der Adresszeile gilt nur für die eine Partie
+      if (this.seedFromUrl) { this.seed = ''; this.seedFromUrl = false; }
       App.cfg.getBoard = () => this.getBoard(this.boardIdx);
       App.start();
     };
     foot.appendChild(go);
+    foot.appendChild(warn);
     const ed = el('button', 'ghost', 'Board-Editor');
     ed.onclick = () => Editor.show();
     foot.appendChild(ed);
     const tst = el('button', 'ghost', 'Selbsttest');
     tst.onclick = () => showTestReport();
     foot.appendChild(tst);
+    const credit = el('a', 'credit', 'itzwieseltal.wordpress.com');
+    credit.href = 'https://itzwieseltal.wordpress.com';
+    credit.target = '_blank'; credit.rel = 'noopener';
+    foot.appendChild(credit);
     box.appendChild(foot);
 
     const help = el('details', 'help');
@@ -4885,6 +5034,9 @@ const Editor = {
       try {
         const b2 = JSON.parse(ta.value);
         if (!b2.w || !b2.h || !Array.isArray(b2.cells)) throw new Error('Feld w, h oder cells fehlt');
+        if (b2.cells.length !== b2.w * b2.h) throw new Error('cells hat ' + b2.cells.length + ' Einträge, erwartet ' + (b2.w * b2.h));
+        if (b2.cells.some(c => !c || typeof c !== 'object')) throw new Error('cells enthält leere Einträge');
+        if (!b2.name) b2.name = 'Eigener Kurs';
         this.board = b2; this.show(this.board);
       } catch (e) { hint.textContent = 'JSON nicht lesbar: ' + e.message; hint.classList.add('err'); }
     };
@@ -4908,7 +5060,8 @@ const Editor = {
     const paint = e => {
       const rect = cv.getBoundingClientRect();
       const cs = this.view.cell;
-      const fx = (e.clientX - rect.left) / cs, fy = (e.clientY - rect.top) / cs;
+      // clientLeft/Top: der Canvas-Rahmen gehört nicht zur Zeichenfläche
+      const fx = (e.clientX - rect.left - cv.clientLeft) / cs, fy = (e.clientY - rect.top - cv.clientTop) / cs;
       const x = Math.floor(fx), y = Math.floor(fy);
       if (!inBounds(this.board, x, y)) return;
       this.apply(x, y, fx - x, fy - y);
@@ -4918,7 +5071,7 @@ const Editor = {
     cv.onmousemove = e => {
       const rect = cv.getBoundingClientRect();
       const cs = this.view.cell;
-      const x = Math.floor((e.clientX - rect.left) / cs), y = Math.floor((e.clientY - rect.top) / cs);
+      const x = Math.floor((e.clientX - rect.left - cv.clientLeft) / cs), y = Math.floor((e.clientY - rect.top - cv.clientTop) / cs);
       if (inBounds(this.board, x, y)) this.view.draw(fake, { showStarts: true, cursor: [x, y] });
     };
     this.view.draw(fake, { showStarts: true });
@@ -5052,15 +5205,17 @@ window.addEventListener('DOMContentLoaded', () => {
   const q = new URLSearchParams(location.search);
   if (q.get('test') === '1') { showTestReport(); return; }
   const h = new URLSearchParams(location.hash.replace(/^#/, ''));
-  if (h.get('seed')) Setup.seed = h.get('seed');
+  if (h.get('seed')) { Setup.seed = h.get('seed'); Setup.seedFromUrl = true; }
   Setup.show();
   let rt;
   window.addEventListener('resize', () => {
     clearTimeout(rt);
-    rt = setTimeout(() => { if (App.mode === 'play' && App.st) App.layout(); }, 120);
+    rt = setTimeout(() => { if ((App.mode === 'play' || App.mode === 'over') && App.st) App.layout(); }, 120);
   });
   document.addEventListener('keydown', e => {
     if (App.mode !== 'play') return;
+    // Eingabefelder, Schieber und Knöpfe behalten ihre eigene Tastatur
+    if (e.target.closest && e.target.closest('input,select,textarea,button')) return;
     if (e.key === ' ') { e.preventDefault(); const b = document.querySelector('#btn-pause'); if (b) b.click(); }
     if (e.key === 'ArrowRight') { const b = document.querySelector('#btn-step'); if (b) b.click(); }
   });

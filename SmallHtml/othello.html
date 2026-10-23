@@ -376,6 +376,7 @@ button.on{border-color:var(--brass);color:var(--brass)}
         bis die Ecke fällt, dann sind sie harmlos. Und: <b>viele Steine früh zu wenden ist meist
         schlecht</b>, es kostet Zugmöglichkeiten.
       </p>
+      <p class="note"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:inherit">itzwieseltal.wordpress.com</a></p>
     </div>
   </div>
 </div>
@@ -654,8 +655,8 @@ function pickMove(b, p, level) {
   nodes = 0;
   deadline = performance.now() + cfg.budget;
 
-  let best = moves[0], bestDepth = 0;
   const order = moves.slice().sort((x, y) => W[y] - W[x]);
+  let best = order[0], bestDepth = 0;   // Fallback: bester Zug nach Feldtabelle
 
   for (let d = 2; d <= target; d++) {
     let alpha = -Infinity;
@@ -664,9 +665,13 @@ function pickMove(b, p, level) {
     try {
       for (const sq of order) {
         const n = applyMove(work, sq, p, FLIP, 0);
-        const sc = -negamax(work, 3 - p, d - 1, -Infinity, -alpha, false, 1);
+        // Mit Rauschen braucht jeder Zug einen exakten Wert: bei engem Fenster
+        // liefern schlechtere Züge nur eine Obergrenze, und das Rauschen würde
+        // dann echte Patzer nach oben spülen.
+        const a = cfg.noise ? -Infinity : alpha;
+        const sc = -negamax(work, 3 - p, d - 1, -Infinity, -a, false, 1);
         undoMove(work, sq, p, FLIP, 0, n);
-        if (sc > alpha) alpha = sc;                       // Schnitt immer exakt
+        if (sc > alpha) alpha = sc;
         const pick = cfg.noise ? sc + (Math.random() * 2 - 1) * cfg.noise : sc;
         scored.push([sq, pick]);
         if (pick > localScore) { localScore = pick; localBest = sq; }
@@ -776,8 +781,18 @@ const S = {
   busy: false,
   history: [],     // Schnappschüsse vor jedem Zug
   log: [],         // {p, sq}  sq = -1 bedeutet ausgesetzt
-  last: -1
+  last: -1,
+  timer: 0         // einziger ausstehender Ablauf-Timer (tick/aiMove/advance)
 };
+
+/* Alle verzögerten Schritte laufen über diesen einen Timer. Ein neuer Schritt,
+   ein Zug des Menschen, Neues Spiel oder Zurück verwerfen den alten — sonst
+   kann ein liegengebliebener tick() einen zweiten aiMove() anstoßen. */
+function later(fn, ms) {
+  clearTimeout(S.timer);
+  S.timer = setTimeout(() => { S.timer = 0; fn(); }, ms);
+}
+function cancelLater() { clearTimeout(S.timer); S.timer = 0; }
 
 function render(animateFrom) {
   const prev = render.prev || new Int8Array(64);
@@ -828,7 +843,7 @@ function render(animateFrom) {
   rowW.classList.toggle("lead", wh > bl);
   barEl.style.width = (100 * bl / Math.max(1, bl + wh)) + "%";
 
-  btnUndo.disabled = S.busy || S.history.length === 0;
+  btnUndo.disabled = S.busy || !canUndo();
   renderLog();
 }
 
@@ -855,6 +870,7 @@ function snapshot() {
 }
 
 function play(sq) {
+  cancelLater();
   const p = S.turn;
   snapshot();
   applyMove(S.board, sq, p, FLIP, 0);
@@ -875,7 +891,7 @@ function advance() {
     S.turn = 3 - S.turn;
     setStatus(colorName(passer) + " setzt aus", "kein legaler Zug");
     render(-1);
-    setTimeout(tick, 850);
+    later(tick, 850);
     return;
   }
   tick();
@@ -892,11 +908,12 @@ function tick() {
     setStatus("Der Gegner denkt nach", LEVELS[S.level].name + " · " + colorName(S.turn));
     S.busy = true;
     render(-1);
-    setTimeout(aiMove, 40);
+    later(aiMove, 40);
   }
 }
 
 function aiMove() {
+  if (S.over || S.turn === S.human) { S.busy = false; return; }
   const t0 = performance.now();
   const { sq, depth } = pickMove(S.board, S.turn, S.level);
   const ms = Math.round(performance.now() - t0);
@@ -911,7 +928,7 @@ function aiMove() {
   render(sq);
   setStatus(colorName(p) + " spielt " + notate(sq),
             depth ? `Tiefe ${depth} · ${ms} ms` : `${ms} ms`);
-  setTimeout(advance, 420);
+  later(advance, 420);
 }
 
 function finish() {
@@ -934,14 +951,14 @@ function onCellClick(i) {
 }
 
 function undo() {
-  if (S.busy || S.history.length === 0) return;
+  if (S.busy || !canUndo()) return;
+  cancelLater();
   // bis zu dem Punkt zurück, an dem der Mensch wieder am Zug ist
   let snap = null;
   while (S.history.length) {
     snap = S.history.pop();
     if (snap.turn === S.human) break;
   }
-  if (!snap) return;
   S.board = snap.board;
   S.turn = snap.turn;
   S.log = snap.log;
@@ -952,7 +969,12 @@ function undo() {
   tick();
 }
 
+function canUndo() {
+  return S.history.some(h => h.turn === S.human);
+}
+
 function reset() {
+  cancelLater();
   S.board = newBoard();
   S.turn = 1;
   S.human = +sideSel.value;

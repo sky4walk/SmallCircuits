@@ -257,6 +257,9 @@ start P U
   }
   #kartenwahl .knoepfe button:hover { border-color: var(--gelb); }
   #kartenhinweis { color: var(--gelb); margin: 8px 0 0; }
+  #kartenwahl .knoepfe { flex-wrap: wrap; }
+  #start .verweis { margin: 18px 0 0; font-size: 13px; opacity: .8; }
+  #start .verweis a { color: var(--gelb); }
   #ansage {
     left: 50%; top: 24px; transform: translateX(-50%);
     background: rgba(22,25,29,.8); backdrop-filter: blur(6px);
@@ -421,14 +424,18 @@ start P U
     <div id="uebungen"></div>
     <details id="kartenwahl">
       <summary>Eigene Karte</summary>
-      <p id="kartenhinweis" hidden>Zurzeit ist eine eigene Karte aus dem Browserspeicher aktiv.</p>
+      <p id="kartenhinweis" hidden>Zurzeit ist eine eigene Karte aktiv. Sie steht in der Adresse dieser Seite; als Lesezeichen gespeichert, kommt sie beim nächsten Mal wieder.</p>
       <textarea id="kartentext" spellcheck="false"></textarea>
       <div class="knoepfe">
         <button id="karteUebernehmen" type="button">Karte übernehmen</button>
         <button id="karteStandard" type="button">Karte aus der Datei</button>
+        <button id="karteSpeichern" type="button">Als Datei speichern</button>
+        <button id="karteLaden" type="button">Aus Datei laden</button>
+        <input id="karteDatei" type="file" accept=".txt,text/plain" hidden>
       </div>
     </details>
   </div>
+  <p class="verweis">Mehr Projekte und Artikel: <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></p>
 </div>
 
 <script>
@@ -716,6 +723,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
               k.regel.gruen[0] = parseFloat(t[j]); j += 1;
               if (t[j] && !isNaN(parseFloat(t[j]))) { k.regel.gruen[1] = parseFloat(t[j]); j += 1; }
               else k.regel.gruen[1] = k.regel.gruen[0];
+              if (!(k.regel.gruen[0] >= 1 && k.regel.gruen[1] >= 1)) fehler(nr, 'Grünzeiten der Ampel müssen mindestens 1 s sein');
             }
           } else {
             fehler(nr, 'unbekannte Angabe "' + t[j] + '"');
@@ -907,6 +915,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const B = netz.benannt.get(s.liste[(i + 1) % n]);
         let vA = { x: A.x - kn.x, z: A.z - kn.z }, vB = { x: B.x - kn.x, z: B.z - kn.z };
         const lA = Math.hypot(vA.x, vA.z), lB = Math.hypot(vB.x, vB.z);
+        // Nachbar auf demselben Punkt: keine Richtung, also keine Kurve
+        if (lA < 0.1 || lB < 0.1) { anker.push({ ein: kn, aus: kn, bogen: null }); continue; }
         vA.x /= lA; vA.z /= lA; vB.x /= lB; vB.z /= lB;
         const e = eckeRunden(kn, vA, vB, kn.radius, 0.45 * Math.min(lA, lB));
         if (!e) { anker.push({ ein: kn, aus: kn, bogen: null }); continue; }
@@ -1313,12 +1323,16 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (ziel < strecke.teile[i].beginn + strecke.teile[i].seg.geometrie.laenge) { teil = strecke.teile[i]; break; }
     }
     const seg = teil.seg, L = seg.geometrie.laenge;
-    const sSeg = klemme(ziel - teil.beginn, 0, L);
+    // 'ab' ist von a aus gemessen; in Segmentkoordinaten (ab seg.von)
+    // umrechnen, falls das Segment von b nach a zeigt.
+    const ab = klemme(ziel - teil.beginn, 0, L);
+    const sSeg = teil.vorwaerts ? ab : L - ab;
     const richtung = teil.vorwaerts ? +1 : -1;
     // äußerste rechte Spur dieser Richtung (die normale Fahrspur)
     const spuren = seg.spuren.filter(sp => sp.richtung === richtung && sp.rolle !== 'links');
     const spur = spuren.sort((u, v) => Math.abs(v.versatz0) - Math.abs(u.versatz0))[0];
-    const s = richtung > 0 ? sSeg - seg.rueckzugVon : (L - seg.rueckzugBis) - sSeg;
+    let s = richtung > 0 ? sSeg - seg.rueckzugVon : (L - seg.rueckzugBis) - sSeg;
+
     return { spur: spur, s: s, segment: seg, strecke: strecke };
   }
 
@@ -1689,7 +1703,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         let a = 0;
         const zugkraft = misch(4.5, 1.2, klemme(vAbs / 40, 0, 1));
 
-        if (eingabe.gas > 0 && this.v >= -0.2) {
+        // Gas und Bremse zugleich: in Fahrt gewinnt die Bremse
+        const bremstInFahrt = eingabe.bremse > 0 && this.v > 0.2;
+        if (eingabe.gas > 0 && !bremstInFahrt && this.v >= -0.2) {
           a += zugkraft * eingabe.gas;                 // vorwärts beschleunigen
         } else if (eingabe.bremse > 0) {
           if (this.v > 0.2) {
@@ -1715,7 +1731,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           this.lenkwinkel *= 0.9;
         }
 
+        const vVorher = this.v;
         this.v += a * dt;
+        // Bremsen, Widerstand und Handbremse halten das Fahrzeug an, drehen
+        // die Fahrtrichtung aber nicht um. Nur Gas oder das Rückwärtsfahren
+        // aus dem Stand dürfen über null hinweg.
+        const antriebUmkehr = (eingabe.gas > 0 && !bremstInFahrt) ||
+                              (eingabe.bremse > 0 && vVorher <= 0.2 && !eingabe.handbremse);
+        if (!antriebUmkehr && vVorher !== 0 && Math.sign(this.v) !== Math.sign(vVorher)) this.v = 0;
         // Nur zum Stillstand runden, wenn weder Gas noch Bremse anliegt.
         // Sonst käme das Fahrzeug nie aus dem Stand rückwärts.
         if (Math.abs(this.v) < 0.06 && eingabe.gas === 0 && eingabe.bremse === 0) this.v = 0;
@@ -1783,6 +1806,27 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     return k.arme.find(a => a.segment === spur.segment) || null;
   }
 
+  // Nächste Kreuzung oder nächster Überweg voraus, über Übergänge
+  // (Kurvenstücke, Verziehungen) hinweg. Die Spur vor einer Kreuzung ist
+  // oft nur ein kurzes Teilstück; wer nur bis zu dessen Ende schaut, sieht
+  // die Haltelinie zu spät. Liefert den Knoten, die Spur, auf der man dort
+  // ankommt, und den Weg bis zu ihrem Ende. 'erste' ist der Übergang am
+  // Ende der aktuellen Spur, falls schon gewählt.
+  function vorausKreuzung(spur, s, erste) {
+    let sp = spur, d = spur.laenge - s, c = erste;
+    for (let i = 0; i < 8; i++) {
+      const k = sp.richtung > 0 ? sp.segment.bis : sp.segment.von;
+      if (!k.direkt || k.typ === 'zebra') return { knoten: k, spur: sp, d: d, ueber: sp !== spur };
+      let v = (c && c.direkt && sp.aus.indexOf(c) >= 0) ? c : null;
+      if (!v) v = sp.aus.find(x => x.direkt && x.nachSpur.rolle !== 'links') || sp.aus.find(x => x.direkt);
+      if (!v) return null;
+      sp = v.nachSpur;
+      d += (v.laenge || 0) + sp.laenge;
+      c = null;
+    }
+    return null;
+  }
+
   // Aus Sicht eines Fahrers, der über 'von' ankommt: liegt 'anderer'
   // rechts, links oder gegenüber?
   function armLage(von, anderer) {
@@ -1807,6 +1851,22 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     } else if (reg.art === 'vorfahrt') {
       if (rX.vorfahrt && !rY.vorfahrt) return false;
       if (!rX.vorfahrt && rY.vorfahrt) return true;
+      // Abknickende Vorfahrt, beide auf der Vorfahrtstraße: man denkt sie
+      // sich gerade. Wer ihr folgt, fährt "geradeaus"; wer sie verlässt,
+      // lässt den Entgegenkommenden durch (§ 9 StVO), nicht rechts vor
+      // links. Auf den untergeordneten Straßen untereinander bleibt es bei
+      // rechts vor links.
+      if (reg.abknickend && rX.vorfahrt && rY.vorfahrt) {
+        const folgt = c => {
+          if (!c) return null;
+          const a = armFuerSpur(k, c.nachSpur), r = a && reg.arme.get(a);
+          return r ? !!r.vorfahrt : null;
+        };
+        const fX = folgt(cX), fY = folgt(cY);
+        if (fX === true) return false;
+        if (fX === false && fY !== false) return true;
+        return cX.art === 'links' && (!cY || cY.art !== 'links');
+      }
     }
 
     // Gleicher Rang
@@ -1823,7 +1883,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let naechsteId = 1;
 
     let saat = 4711;
-    function zufall() { saat = (saat * 1103515245 + 12345) & 0x7fffffff; return saat / 0x7fffffff; }
+    function zufall() { saat = (saat * 1103515245 + 12345) & 0x7fffffff; return saat / 0x80000000; }
 
     // Kreuzungsverbindungen, die von einer Spur aus über höchstens drei
     // direkte Übergänge erreichbar sind: so weiß ein Fahrzeug vor einer
@@ -1844,7 +1904,23 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     function naechsteVerbindung(spur, f) {
       const aus = spur.aus;
       if (!aus.length) return null;
-      if (aus.length === 1) return aus[0];
+      // Fester Weg (von einer Übung gesetzt): Kurve für Kurve abarbeiten
+      if (f && f.plan && f.plan.length) {
+        if (aus.indexOf(f.plan[0]) >= 0) return f.plan.shift();
+        const ziel = f.plan[0];
+        const v = aus.find(x => x.direkt && erreichbareKreuzungen(x.nachSpur, 1).indexOf(ziel) >= 0);
+        if (v) return v;
+        if (aus.some(x => !x.direkt)) f.plan = null;     // Plan passt nicht mehr: normal weiter
+      }
+      if (aus.length === 1) {
+        // Nur ein Übergang: schon jetzt festlegen, wohin es an der
+        // Kreuzung dahinter geht, damit rechtzeitig gebremst und geblinkt wird
+        if (f && aus[0].direkt && !f.wunsch) {
+          const alle = erreichbareKreuzungen(spur, 0);
+          if (alle.length) f.wunsch = zufaelligeWahl(alle);
+        }
+        return aus[0];
+      }
       const direkt = aus.filter(v => v.direkt);
       if (direkt.length === aus.length) {
         // Verzweigung in parallele Spuren: nach dem Wunsch für die nächste
@@ -1940,7 +2016,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
               if (abstand <= 0.3 && e.fahrzeug.id !== undefined && f.id < e.fahrzeug.id) return;   // gleichauf: kleinere Nummer fährt
               // Der Nachbar zählt wie ein Vordermann, hinter dem man ganz
               // bleiben muss, weil die Spuren zusammenlaufen
-              const a = Math.max(abstand, 0.2);
+              // Steht der Nachbar neben mir, muss ich nicht sofort stehen,
+              // sondern erst am Punkt, an dem die Spuren zusammenlaufen.
+              // Dorthin wird weich gebremst; ist er dann vorn, gilt normales
+              // Hinterherfahren.
+              const dMerge = f.stueck.laenge - f.s + ((zA && zB && zA !== zB) ? zB.laenge : 0);
+              const a = abstand < FZ_LAENGE + 0.5 ? Math.max(abstand, 0.2, dMerge) : abstand;
               if (!bester || a < bester.abstand) bester = { abstand: a, fahrzeug: e.fahrzeug };
             });
           }
@@ -1999,11 +2080,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     }
 
     // Kreuzungsentscheidung: null = frei, sonst Grund fürs Anhalten
-    function halteGrund(f, k, arm, dEnde, alle, fussgaenger) {
+    function halteGrund(f, k, arm, dEnde, alle, fussgaenger, c) {
       const reg = k.regelung;
       const rk = reg.arme.get(arm);
-      const c = f.naechste;
-      if (!c) return null;
+      if (!rk) return null;
 
       // Jemand auf der Furt vor der Kreuzung: immer warten
       if (fussgaenger && arm.furt && fussgaenger.aufWeg(arm.furt, false, 'ein')) return 'fussgaenger';
@@ -2014,6 +2094,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (z === 'gelb' && dEnde > f.v * f.v / (2 * 3.2) + 2.5) return 'gelb';
       }
       if (rk.linie === 'halten' && reg.art !== 'ampel' && !f.angehalten) return 'stopp';
+      // Wohin es an der Kreuzung geht, steht noch nicht fest: Ampel und
+      // Stopp sind geprüft, der Rest folgt, sobald die Richtung bekannt ist
+      if (!c) return null;
 
       // Nicht einfahren, wenn hinter der Kreuzung kein Platz ist (§11 StVO):
       // sonst bleibt man in der Kreuzung oder auf der Furt stehen.
@@ -2035,14 +2118,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       // Vorrang anfahrender Fahrzeuge
       for (let i = 0; i < alle.length; i++) {
         const y = alle[i];
-        if (y === f || !y.stueck || y.stueck.typ !== 'spur') continue;
-        const ky = y.stueck.richtung > 0 ? y.stueck.segment.bis : y.stueck.segment.von;
-        if (ky !== k) continue;
-        const armY = armFuerSpur(k, y.stueck);
+        if (y === f || !y.vor || y.vor.knoten !== k) continue;
+        const armY = armFuerSpur(k, y.vor.spur);
         if (!armY || armY === arm) continue;
-        const dY = y.stueck.laenge - y.s;
+        const dY = y.vor.d;
         if (dY > 45) continue;
-        const cY = y.naechste || null;
+        const cY = y.vorC || null;
         if (cY && !konflikt(k, c, cY)) continue;
         if (!mussWarten(k, arm, c, armY, cY, ampeln)) continue;
         // Stehen beide schon länger, wartet jeder auf jeden. Dann fährt
@@ -2124,6 +2205,16 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         l.push({ fahrzeug: fahrzeug, s: s });
       }
       alle.forEach(f => { if (f.stueck) eintragen(f.stueck, f, f.s); });
+      // Für jeden: nächste Kreuzung voraus und die Kurve, die er dort nimmt
+      alle.forEach(y => {
+        y.vor = (y.stueck && y.stueck.typ === 'spur') ? vorausKreuzung(y.stueck, y.s, y.naechste) : null;
+        y.vorC = null;
+        if (!y.vor) return;
+        if (y.vor.spur === y.stueck) y.vorC = y.naechste && !y.naechste.direkt ? y.naechste : null;
+        else if (y.istSpieler) y.vorC = y.kreuzungsAbsicht || null;
+        else if (y.plan && y.plan.length && y.plan[0].knoten === y.vor.knoten) y.vorC = y.plan[0];
+        else if (y.wunsch && y.wunsch.knoten === y.vor.knoten) y.vorC = y.wunsch;
+      });
       geparkt.forEach(g => eintragen(g.spur, g, g.s));
       // Wer vorbeifährt, meldet auf der Gegenspur einen stehenden Schatten am
       // Ende der Engstelle. Der Gegenverkehr wartet dann davor und lässt
@@ -2165,20 +2256,21 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         const rate = Math.max(2.0, 0.7 * f.v) * dt;
         f.seitlich += klemme(f.seitlichZiel - f.seitlich, -rate, rate);
 
-        if (st.typ === 'spur') {
-          const dEnde = st.laenge - f.s;
-          const k = st.richtung > 0 ? st.segment.bis : st.segment.von;
+        if (st.typ === 'spur' && f.vor) {
+          // Weg bis zur nächsten Kreuzung, auch über Übergänge hinweg
+          const dEnde = f.vor.d;
+          const k = f.vor.knoten;
           // Vor Abbiegekurven langsamer werden
-          if (f.naechste && !f.naechste.direkt) {
-            const vKurve = kurvenTempo(f.naechste);
+          if (f.vorC) {
+            const vKurve = kurvenTempo(f.vorC);
             ziel = Math.min(ziel, Math.sqrt(vKurve * vKurve + 2 * 1.6 * Math.max(0, dEnde)));
-            f.blinker = (dEnde < 35 && f.naechste.art !== 'geradeaus') ? f.naechste.art : null;
+            f.blinker = (dEnde < 35 && f.vorC.art !== 'geradeaus') ? f.vorC.art : null;
           } else f.blinker = null;
 
           if (k.typ === 'kreuzung' && dEnde < 60) {
-            const arm = armFuerSpur(k, st);
+            const arm = armFuerSpur(k, f.vor.spur);
             if (dEnde < 6 && f.v < 0.15) f.angehalten = true;
-            const grund = halteGrund(f, k, arm, dEnde, alle, fussgaenger);
+            const grund = halteGrund(f, k, arm, dEnde, alle, fussgaenger, f.vorC);
             // Haltelinie liegt 2 m vor dem Segmentende, davor die Furt.
             // Wer schon fast drüber ist, fährt durch, statt auf der Furt
             // zu stehen.
@@ -2233,7 +2325,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             const n = f.naechste;
             if (!n) { f.s = f.stueck.laenge - 0.01; f.v = 0; break; }
             f.stueck = n.direkt ? n.nachSpur : n;
-            f.angehalten = false;
+            if (!n.direkt) f.angehalten = false;    // erst nach der Kreuzung, nicht an Übergängen
           } else {
             f.stueck = f.stueck.nachSpur;
           }
@@ -2267,14 +2359,29 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // Für Übungen: ein Fahrzeug an eine bestimmte Stelle setzen, mit
     // Geschwindigkeit und gewünschtem Ausgang an der nächsten Kreuzung.
     function einsetzenAuf(spur, s, v, nachName, tempoFaktor) {
-      const f = einsetzen(spur, klemme(s, 0.5, spur.laenge - 0.5));
+      s = klemme(s, 0.5, spur.laenge - 0.5);
+      // Nie auf ein anderes Auto setzen: notfalls eine Wagenlänge zurück
+      for (let i = 0; i < 10 && fahrzeuge.some(x => x.stueck === spur && Math.abs(x.s - s) < 6.5) && s > 7; i++) s -= 6.5;
+      const f = einsetzen(spur, s);
       f.v = v;
       if (tempoFaktor) f.tempoFaktor = tempoFaktor;
       if (nachName) {
-        const w = spur.aus.find(x => x.nachSpur.segment.nachbarn.indexOf(nachName) >= 0);
+        const fuehrtNach = x => !x.direkt && x.nachSpur.segment.nachbarn.indexOf(nachName) >= 0;
+        const w = spur.aus.find(fuehrtNach);
         if (w) f.naechste = w;
+        else {
+          // Die Kreuzung liegt erst hinter einem Übergang: als Wunsch merken,
+          // die Wahl fällt dann an der Kreuzung
+          const weiter = erreichbareKreuzungen(spur, 0).find(fuehrtNach);
+          if (weiter) { f.wunsch = weiter; f.naechste = naechsteVerbindung(spur, f); }
+        }
       }
       return f;
+    }
+    function planSetzen(f, plan) {
+      f.plan = plan.slice();
+      f.wunsch = null;
+      f.naechste = naechsteVerbindung(f.stueck, f);
     }
     function entfernenAlle(rueckruf) {
       fahrzeuge.splice(0).forEach(f => { if (rueckruf) rueckruf(f); });
@@ -2284,7 +2391,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
     return { fahrzeuge: fahrzeuge, geparkt: geparkt, engstellen: engstellen, rechnen: rechnen, anlegen: anlegen, konflikt: konflikt,
              get spieler() { return letzterSpieler; },
-             einsetzenAuf: einsetzenAuf, entfernenAlle: entfernenAlle,
+             einsetzenAuf: einsetzenAuf, planSetzen: planSetzen, entfernenAlle: entfernenAlle,
              mussWarten: mussWarten, armLage: armLage, gegenspur: gegenspur, armFuerSpur: armFuerSpur };
   }
 
@@ -2406,7 +2513,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
   function Fussgaenger(netz, fusswege, ampeln) {
     const leute = [];
     let saat = 90210;
-    function zufall() { saat = (saat * 1103515245 + 12345) & 0x7fffffff; return saat / 0x7fffffff; }
+    function zufall() { saat = (saat * 1103515245 + 12345) & 0x7fffffff; return saat / 0x80000000; }
 
     function lageAuf(weg, s) {
       const pr = weg.proben;
@@ -2638,6 +2745,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let engstelleGemeldet = null;
     let zebraGemeldet = null, zebraMerker = {};
     let vAlt = 0, beschleunigung = 0, letzterSpurwechsel = -10;
+    let annaeherung = null;           // Kreuzung, auf die man gerade zufährt
 
     function melden(art, ort, zusatz) {
       const def = FEHLERARTEN[art];
@@ -2661,11 +2769,11 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (!y.stueck) return;
         let armY = null, cY = null, tY = 0;
         if (y.stueck.typ === 'spur') {
-          if (endKnoten(y.stueck) !== k) return;
-          const dY = y.stueck.laenge - y.s;
+          if (!y.vor || y.vor.knoten !== k) return;
+          const dY = y.vor.d;
           if (dY > 45 || y.v < 0.5) return;
           tY = dY / Math.max(y.v, 0.5);
-          armY = verkehr.armFuerSpur(k, y.stueck); cY = y.naechste;
+          armY = verkehr.armFuerSpur(k, y.vor.spur); cY = y.vorC || null;
         } else if (y.stueck.typ === 'verbindung' && y.stueck.knoten === k) {
           if (y.stueck.laenge - y.s < 1.5 || y.v < 0.5) return;
           armY = verkehr.armFuerSpur(k, y.stueck.vonSpur); cY = y.stueck;
@@ -2714,16 +2822,22 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
       /* --- Gegenfahrbahn und Engstelle ------------------------------ */
       if (lage.lage === 'gegen' && st && st.typ === 'spur') {
-        // Erlaubt, wenn auf der eigenen Spur dort ein Fahrzeug parkt
-        const eigene = verkehr.gegenspur(st);
-        const s1 = eigene.laenge - lage.sGenau;
-        const parker = (netz.geparkt || []).find(g => g.spur === eigene && s1 > g.s - 24 && s1 < g.s + 24);
+        // Erlaubt, wenn auf der eigenen Spur dort ein Fahrzeug parkt. Die
+        // Lage bleibt beim Ausscheren auf der eigenen Spur st, die Parker
+        // stehen ebenfalls auf st.
+        const L2 = verkehr.gegenspur(st);
+        const parker = (netz.geparkt || []).find(g =>
+          (g.spur === st && Math.abs(lage.sGenau - g.s) < 24) ||
+          (g.spur === L2 && Math.abs((L2.laenge - lage.sGenau) - g.s) < 24));
         if (parker) {
           gegenSeit = 0;
           // Gegenverkehr, der wegen uns hart bremsen muss
           if (engstelleGemeldet !== parker) {
-            const behindert = verkehr.fahrzeuge.some(f =>
-              f.stueck === st && f.s < lage.sGenau && lage.sGenau - f.s < 35 && f.v > 1.5 && f.a < -3.0);
+            const behindert = verkehr.fahrzeuge.some(f => {
+              if (f.stueck !== L2 || f.v < 1.5 || f.a > -3.0) return false;
+              const d = (L2.laenge - f.s) - lage.sGenau;     // > 0: kommt auf uns zu
+              return d > 0 && d < 35;
+            });
             if (behindert) { engstelleGemeldet = parker; melden('engstelle', lage.strasse ? lage.strasse.name : ''); }
           }
         } else {
@@ -2741,13 +2855,16 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       }
 
       /* --- Annäherung an eine Kreuzung ------------------------------ */
-      if (st && st.typ === 'spur') {
-        const k = endKnoten(st);
-        const dEnde = st.laenge - lage.sGenau;
-        if (st !== vorherStueck) { angehalten = false; gelbMerker = {}; }
-        if (k.typ === 'kreuzung') {
+      const vor = (st && st.typ === 'spur') ? vorausKreuzung(st, lage.sGenau || 0, null) : null;
+      if (vor) {
+        // Über Übergänge hinweg auf die nächste Kreuzung schauen; erst bei
+        // einer neuen Kreuzung zurücksetzen, nicht bei jedem Teilstück
+        const k = vor.knoten;
+        const dEnde = vor.d;
+        if (k !== annaeherung) { angehalten = false; gelbMerker = {}; annaeherung = k; }
+        if (k.typ === 'kreuzung' && k.regelung) {
           if (dEnde < 9 && v < 0.3) angehalten = true;
-          const arm = verkehr.armFuerSpur(k, st);
+          const arm = verkehr.armFuerSpur(k, vor.spur);
           if (arm && k.regelung.art === 'ampel') {
             const z = ampeln.zustandFuer(arm);
             const m = gelbMerker[arm.segment.id] || { zustand: null };
@@ -2832,7 +2949,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             const y = e.fahrzeug;
             // Nähe zählt nur, solange der andere noch vor der Kreuzung ist;
             // wer schon hinter uns eingeschert ist, folgt uns bloß
-            const nochDavor = y.stueck && y.stueck.typ === 'spur' && endKnoten(y.stueck) === k;
+            const nochDavor = y.stueck && y.stueck.typ === 'spur' && y.vor && y.vor.knoten === k;
             const nah = nochDavor && Math.hypot(y.x - fahrzeug.x, y.z - fahrzeug.z) < 6;
             // Nur wer wegen der Kreuzung oder wegen uns bremst, zählt
             const wegenUns = y.grund === 'belegt' || y.grund === 'vorfahrt' || (verkehr.spieler && y.vorn === verkehr.spieler);
@@ -2887,6 +3004,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       ereignisse = []; zeit = 0; vorherStueck = null; angehalten = false; gelbMerker = {}; vAlt = 0; beschleunigung = 0;
       tempoEpisode = null; gegenSeit = 0; gegenGemeldet = false; kreuzungsfahrt = null; einfahrt = null;
       engstelleGemeldet = null; zebraGemeldet = null; zebraMerker = {}; letzterSpurwechsel = -10;
+      annaeherung = null;
     }
 
     return { rechnen: rechnen, melden: melden, zusammenfassung: zusammenfassung, zuruecksetzen: zuruecksetzen,
@@ -2922,6 +3040,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     }
     function armVon(knotenName, nachbarName) {
       const k = netz.benannt.get(knotenName);
+      if (!k) throw new Error('Übung: Knoten ' + knotenName + ' fehlt in der Karte');
       const arm = k.arme.find(a => a.nachbar === nachbarName);
       if (!arm) throw new Error('Übung: Kreuzung ' + knotenName + ' hat keinen Arm nach ' + nachbarName);
       return arm;
@@ -2929,7 +3048,11 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // Spur, die an knoten über den Arm nach nachbar ankommt
     function spurZu(knotenName, nachbarName) {
       const arm = armVon(knotenName, nachbarName);
-      return arm.amAnfang ? arm.segment.spuren[1] : arm.segment.spuren[0];
+      const richtung = arm.amAnfang ? -1 : 1;
+      const kandidaten = arm.segment.spuren.filter(sp => sp.richtung === richtung && sp.rolle !== 'links');
+      // äußerste rechte Spur dieser Richtung
+      kandidaten.sort((u, v) => Math.abs(v.versatz0) - Math.abs(u.versatz0));
+      return kandidaten[0] || (arm.amAnfang ? arm.segment.spuren[1] : arm.segment.spuren[0]);
     }
     // Der Arm, der aus Sicht eines über 'von' Ankommenden rechts liegt
     function armRechtsVon(knotenName, vonName) {
@@ -2942,8 +3065,32 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     }
     // Fremdfahrzeug 'abstand' Meter vor der Kreuzung auf dem Arm nach 'nachbar'
     function autoVor(knotenName, nachbarName, abstand, v, weiterNach) {
-      const spur = spurZu(knotenName, nachbarName);
-      return verkehr.einsetzenAuf(spur, spur.laenge - abstand, v, weiterNach);
+      // Die Spur vor der Kreuzung ist oft nur ein kurzes Teilstück hinter
+      // einer Kurve oder Verziehung. Reicht sie nicht, über die direkten
+      // Übergänge rückwärts auf die vorherigen Teilstücke weitergehen.
+      // Liegt davor sogar eine andere Kreuzung, geht es durch sie hindurch
+      // (bevorzugt geradeaus); das Auto bekommt dann einen festen Weg.
+      const armSpur = spurZu(knotenName, nachbarName);
+      let spur = armSpur, rest = abstand;
+      const plan = [];
+      for (let i = 0; i < 20 && rest > spur.laenge - 0.5; i++) {
+        const kand = spur.ein.filter(e => e.vonSpur.rolle !== 'links');
+        const e = kand.filter(x => x.direkt).sort((u, w) => Math.abs(w.vonSpur.versatz0) - Math.abs(u.vonSpur.versatz0))[0] ||
+                  kand.find(x => x.art === 'geradeaus') || kand[0];
+        if (!e) break;
+        rest -= spur.laenge + (e.direkt ? 0 : e.laenge);
+        if (!e.direkt) plan.unshift(e);
+        spur = e.vonSpur;
+      }
+      if (!plan.length) return verkehr.einsetzenAuf(spur, spur.laenge - rest, v, weiterNach);
+      // Am Ende des Plans: an der Übungskreuzung in die gewünschte Richtung
+      if (weiterNach) {
+        const ziel = armSpur.aus.find(x => !x.direkt && x.nachSpur.segment.nachbarn.indexOf(weiterNach) >= 0);
+        if (ziel) plan.push(ziel);
+      }
+      const f = verkehr.einsetzenAuf(spur, spur.laenge - rest, v, null);
+      verkehr.planSetzen(f, plan);
+      return f;
     }
 
     const hilfen = { spurZwischen, lageZwischen, spurZu, armVon, armRechtsVon, armGegenueber, autoVor,
@@ -3073,13 +3220,20 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // --- Ablauf ---------------------------------------------------------
     let zustand = {};
     function starten(u, rueckrufe) {
+      // Erst prüfen, ob die Übung auf diese Karte passt, dann abräumen:
+      // sonst bleibt bei einem Fehler eine leere Welt zurück.
+      // start[2]: Meter vor dem zweiten Knoten; negativ: Meter hinter dem ersten
+      const lage = lageZwischen(u.start[0], u.start[1], -u.start[2]);
       uebung = u; routenIndex = 0; ausgeloest = new Set(); fertig = null; vorherStueck = null; zustand = {};
       verkehr.entfernenAlle(rueckrufe.autoWeg);
       fussgaenger.entfernenAlle(rueckrufe.personWeg);
       bewertung.zuruecksetzen();
-      if (u.aufbau) u.aufbau(hilfen);
-      // start[2]: Meter vor dem zweiten Knoten; negativ: Meter hinter dem ersten
-      const lage = lageZwischen(u.start[0], u.start[1], -u.start[2]);
+      try {
+        if (u.aufbau) u.aufbau(hilfen);
+      } catch (e) {
+        uebung = null;
+        throw e;
+      }
       return { spur: lage.spur, s: klemme(lage.s, 2, lage.spur.laenge - 2) };
     }
 
@@ -3100,8 +3254,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
       // Auslöser: wenn der Schüler auf einer Spur zum Knoten hin näher kommt
       if (uebung.ausloeser && st && st.typ === 'spur') {
-        const k = st.richtung > 0 ? st.segment.bis : st.segment.von;
-        const dEnde = st.laenge - lage.sGenau;
+        // Abstand zur nächsten Kreuzung, auch über Übergänge hinweg
+        const vor = vorausKreuzung(st, lage.sGenau || 0, null);
+        const k = vor ? vor.knoten : (st.richtung > 0 ? st.segment.bis : st.segment.von);
+        const dEnde = vor ? vor.d : st.laenge - lage.sGenau;
         uebung.ausloeser.forEach((a, i) => {
           if (ausgeloest.has(i) || k.name !== a.knoten || dEnde > a.abstand) return;
           ausgeloest.add(i);
@@ -3115,10 +3271,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         if (schritt) {
           const k = netz.benannt.get(schritt.knoten);
           if (st && st.typ === 'spur') {
-            const ende = st.richtung > 0 ? st.segment.bis : st.segment.von;
-            const dEnde = st.laenge - lage.sGenau;
+            const vor = vorausKreuzung(st, lage.sGenau || 0, null);
+            const ende = vor ? vor.knoten : (st.richtung > 0 ? st.segment.bis : st.segment.von);
+            const dEnde = vor ? vor.d : st.laenge - lage.sGenau;
             if (ende === k) {
-              const c = schritt.art ? null : st.aus.find(v => v.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0);
+              const vorSpur = vor ? vor.spur : st;
+              const kurven = [];
+              vorSpur.segment.spuren.forEach(sp => { if (sp.richtung === vorSpur.richtung) sp.aus.forEach(v => { if (!v.direkt) kurven.push(v); }); });
+              const c = schritt.art ? null : kurven.find(v => v.nachSpur.segment.nachbarn.indexOf(schritt.nach) >= 0);
               const art = schritt.art || (c ? c.art : 'geradeaus');
               ansage = 'Kreuzung ' + k.name + ' in ' + Math.max(0, Math.round(dEnde)) + ' m: ' + RICHTUNGSTEXT[art];
               if (art === 'links' && st.parallel.length > 1 && st.rolle !== 'links') ansage += ', links einordnen';
@@ -3700,7 +3860,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           const arme = k.arme.filter(a => a !== arm).map(a => ({
             x: -(a.d.x * arm.r.x + a.d.z * arm.r.z),
             y: -(a.d.x * arm.d.x + a.d.z * arm.d.z),
-            haupt: !!k.regelung.arme.get(a).vorfahrt
+            haupt: !!(k.regelung.arme.get(a) && k.regelung.arme.get(a).vorfahrt)
           }));
           liste.push({ art: '1002', zusatz: { arme: arme, eigenHaupt: !!r.vorfahrt }, groesse: 0.45 });
         }
@@ -3804,6 +3964,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         });
         gruppe.add(kopf);
         arm.ampelGruppe = gruppeNr;
+        arm.ampelAnlage = anlage;     // Ampel genau dieser Kreuzung, nicht der am anderen Segmentende
       });
       anlage.setzen = function () {
         const ph = this.phasen[this.phase];
@@ -3826,7 +3987,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       rechnen(dt) {
         anlagen.forEach(a => {
           a.zeit += dt;
-          while (a.zeit >= a.phasen[a.phase].dauer) {
+          while (a.zeit >= a.phasen[a.phase].dauer && a.phasen[a.phase].dauer > 0) {
             a.zeit -= a.phasen[a.phase].dauer;
             a.phase = (a.phase + 1) % a.phasen.length;
           }
@@ -3846,7 +4007,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       },
       // Zustand der Ampel für einen Arm: 'rot', 'rotgelb', 'gruen', 'gelb'
       zustandFuer(arm) {
-        const a = anlagen.find(x => x.knoten === arm.segment.von || x.knoten === arm.segment.bis);
+        const a = arm.ampelAnlage;
         if (!a || arm.ampelGruppe === undefined) return null;
         const ph = a.phasen[a.phase];
         return arm.ampelGruppe === 0 ? ph.a : ph.b;
@@ -3925,7 +4086,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     let saat = 20260906;
     function zufall() {                       // reproduzierbar, damit die
       saat = (saat * 1103515245 + 12345) & 0x7fffffff;   // Stadt immer gleich
-      return saat / 0x7fffffff;                          // aussieht
+      return saat / 0x80000000;                          // aussieht
     }
     function waehle(liste) { return liste[Math.floor(zufall() * liste.length)]; }
 
@@ -4557,7 +4718,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           s.restore();
           return;
         }
-        const art = k.regelung.art;
+        const art = k.regelung ? k.regelung.art : null;
         if (art === 'ampel') {
           s.fillStyle = '#2a2d31'; s.beginPath(); s.arc(x, y, 6, 0, TAU); s.fill();
           s.fillStyle = '#ff2a1a'; s.beginPath(); s.arc(x, y - 2.5, 1.6, 0, TAU); s.fill();
@@ -4634,8 +4795,15 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
                      blinkerLinks: false, blinkerRechts: false, bewertung: false, karte: false, uebungen: false, ton: false, lenkrad: false };
 
     function nummer(e) { return e.code || e.key; }
+    // Beim Tippen in ein Eingabefeld (etwa den Kartentext) gelten die
+    // Tasten dem Feld, nicht dem Fahrzeug
+    function imEingabefeld(e) {
+      const t = e.target;
+      return !!(t && t.closest && (t.closest('textarea, input, select') || t.isContentEditable));
+    }
 
     window.addEventListener('keydown', e => {
+      if (imEingabefeld(e)) return;
       const c = nummer(e);
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].indexOf(c) >= 0) e.preventDefault();
       if (tasten.has(c)) return;
@@ -4731,20 +4899,14 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
      Ein USB-Lenkrad meldet sich im Browser als Gamepad mit Achsen und
      Knöpfen. Welche Achse was ist, unterscheidet sich je Gerät, deshalb
      wird es einmal eingerichtet: Lenkrad drehen, Gas treten, Bremse
-     treten, Blinkertasten drücken. Die Zuordnung landet im Browser-
-     speicher.
+     treten, Blinkertasten drücken. Die Zuordnung gilt bis zum Neuladen
+     und lässt sich als Datei speichern und wieder laden.
      --------------------------------------------------------------------- */
 
   function Lenkrad() {
-    const SCHLUESSEL = 'fahrschule.lenkrad';
     let belegung = null;          // { lenkung:{achse,ruhe,voll}, gas:{...}, bremse:{...}, knoepfe:{blinkerLinks, blinkerRechts, schulterLinks, schulterRechts, kamera} }
     let geraet = null, ruheLage = null, einrichtung = null;
     const knopfZustand = {};
-
-    try {
-      const roh = window.localStorage && window.localStorage.getItem(SCHLUESSEL);
-      if (roh) belegung = JSON.parse(roh);
-    } catch (e) { belegung = null; }
 
     function aktuellesGeraet() {
       if (!navigator.getGamepads) return null;
@@ -4764,8 +4926,13 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return klemme((roh - a.ruhe) / spanne, a.symmetrisch ? -1 : 0, 1);
     }
 
-    function speichern() {
-      try { window.localStorage.setItem(SCHLUESSEL, JSON.stringify(belegung)); } catch (e) { /* egal */ }
+    // Belegung als JSON-Text, etwa für eine Datei, und zurück
+    function alsText() { return belegung ? JSON.stringify(belegung, null, 2) : ''; }
+    function ausText(text) {
+      const b = JSON.parse(text);
+      if (!b || !b.lenkung || typeof b.lenkung.achse !== 'number') throw new Error('Keine gültige Lenkradbelegung');
+      if (!b.knoepfe) b.knoepfe = {};
+      belegung = b;
     }
 
     // Einrichtungsschritte: jeder wartet auf die Achse, die sich am meisten
@@ -4796,7 +4963,6 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (!einrichtung || einrichtung.schritt < SCHRITTE.length) return;
       belegung = einrichtung.neu;
       einrichtung = null;
-      speichern();
     }
     function einrichtungSchritt() {
       if (!einrichtung) return null;
@@ -4809,9 +4975,21 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (!gp) return;
       const s = SCHRITTE[einrichtung.schritt];
       if (!s) { einrichtungAbschliessen(); return; }
+      // Nach jedem Schritt erst warten, bis alles wieder in Ruhe ist: sonst
+      // hält der Schüler das Rad noch eingeschlagen, und das Gas bekäme
+      // die Lenkachse
+      if (einrichtung.wartetLoslassen) {
+        const ruhig = gp.axes.every((a, i) => Math.abs(a - einrichtung.ruhe[i]) < 0.15);
+        if (ruhig) einrichtung.wartetLoslassen = false;
+        einrichtung.knoepfeVorher = gp.buttons.map(b => b.pressed);
+        return;
+      }
       if (s.art === 'achse') {
+        const belegt = ['lenkung', 'gas', 'bremse'].map(f => einrichtung.neu[f] && einrichtung.neu[f].achse)
+                                                   .filter(a => a !== undefined);
         let beste = -1, ausschlag = 0;
         for (let i = 0; i < gp.axes.length; i++) {
+          if (belegt.indexOf(i) >= 0) continue;
           const d = Math.abs(gp.axes[i] - einrichtung.ruhe[i]);
           if (d > ausschlag) { ausschlag = d; beste = i; }
         }
@@ -4861,15 +5039,23 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       return w;
     }
 
+    // Werte nur ansehen, ohne Tastenflanken zu verbrauchen (für die Anzeige)
+    function ansehen() {
+      const gp = aktuellesGeraet();
+      if (!gp || !belegung || !belegung.lenkung) return null;
+      return { lenken: klemme(achseWert(belegung.lenkung, gp) * 2.5, -1, 1),
+               gas: achseWert(belegung.gas, gp), bremse: achseWert(belegung.bremse, gp) };
+    }
+
     return {
-      lesen: lesen,
+      lesen: lesen, ansehen: ansehen, alsText: alsText, ausText: ausText,
       get geraet() { return geraet || aktuellesGeraet(); },
       get belegung() { return belegung; },
       get eingerichtet() { return !!(belegung && belegung.lenkung); },
       einrichtungStarten: einrichtungStarten, einrichtungRechnen: einrichtungRechnen,
       einrichtungSchritt: einrichtungSchritt, einrichtungUeberspringen: einrichtungUeberspringen,
       get inEinrichtung() { return !!einrichtung; },
-      loeschen() { belegung = null; try { window.localStorage.removeItem(SCHLUESSEL); } catch (e) { /* egal */ } }
+      loeschen() { belegung = null; }
     };
   }
 
@@ -4896,26 +5082,57 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const kartenBlock = document.getElementById('karte');
     let kartenText = kartenBlock && kartenBlock.textContent.trim() ? kartenBlock.textContent : STANDARDKARTE;
     let eigeneKarte = false;
+    // Eine eigene Karte steht nicht im Browserspeicher, sondern in der
+    // Adresse (#karte=...). So überlebt sie das Neuladen, lässt sich als
+    // Lesezeichen sichern und weitergeben.
+    const KARTEN_MARKE = '#karte=';
     try {
-      const gespeichert = window.localStorage && window.localStorage.getItem('fahrschule.karte');
-      if (gespeichert && gespeichert.trim()) { kartenText = gespeichert; eigeneKarte = true; }
-    } catch (e) { /* Speicher nicht verfügbar, etwa bei manchen Datei-Aufrufen */ }
+      if (window.location.hash.indexOf(KARTEN_MARKE) === 0) {
+        const ausAdresse = decodeURIComponent(window.location.hash.slice(KARTEN_MARKE.length));
+        if (ausAdresse.trim()) { kartenText = ausAdresse; eigeneKarte = true; }
+      }
+    } catch (e) { /* kaputte Adresse: Standardkarte */ }
+    function adresseMitKarte(text) {
+      const basis = window.location.href.split('#')[0];
+      return text === null ? basis : basis + KARTEN_MARKE + encodeURIComponent(text);
+    }
+    function neuLadenMit(text) {
+      try { history.replaceState(null, '', adresseMitKarte(text)); }
+      catch (e) { window.location.hash = text === null ? '' : KARTEN_MARKE + encodeURIComponent(text); }
+      window.location.reload();
+    }
     const kartenFeldText = document.getElementById('kartentext');
     if (kartenFeldText) {
       kartenFeldText.value = kartenText;
-      document.getElementById('karteUebernehmen').addEventListener('click', () => {
+      const fehlerFeld = document.getElementById('kartenfehler');
+      function kartePruefenUndLaden(text) {
         try {
-          netzAusKarte(karteLesen(kartenFeldText.value));     // erst prüfen
-          window.localStorage.setItem('fahrschule.karte', kartenFeldText.value);
-          window.location.reload();
+          netzAusKarte(karteLesen(text));     // erst prüfen
+          fehlerFeld.hidden = true;
+          neuLadenMit(text);
         } catch (e) {
-          const feld = document.getElementById('kartenfehler');
-          feld.textContent = e.message; feld.hidden = false;
+          fehlerFeld.textContent = e.message; fehlerFeld.hidden = false;
         }
+      }
+      document.getElementById('karteUebernehmen').addEventListener('click', () => kartePruefenUndLaden(kartenFeldText.value));
+      document.getElementById('karteStandard').addEventListener('click', () => neuLadenMit(null));
+      // Speichern als Textdatei und Laden aus einer Textdatei
+      document.getElementById('karteSpeichern').addEventListener('click', () => {
+        const blob = new Blob([kartenFeldText.value], { type: 'text/plain;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'fahrschule-karte.txt';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       });
-      document.getElementById('karteStandard').addEventListener('click', () => {
-        try { window.localStorage.removeItem('fahrschule.karte'); } catch (e) { /* egal */ }
-        window.location.reload();
+      const dateiFeld = document.getElementById('karteDatei');
+      document.getElementById('karteLaden').addEventListener('click', () => dateiFeld.click());
+      dateiFeld.addEventListener('change', () => {
+        const datei = dateiFeld.files && dateiFeld.files[0];
+        if (!datei) return;
+        const leser = new FileReader();
+        leser.onload = () => { kartenFeldText.value = String(leser.result); dateiFeld.value = ''; };
+        leser.readAsText(datei, 'utf-8');
       });
       const hinweis = document.getElementById('kartenhinweis');
       if (hinweis && eigeneKarte) hinweis.hidden = false;
@@ -4949,7 +5166,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
 
     const startPunkt = spurPunkt(netz.start.spur, netz.start.s);
     const fahrzeug = Fahrzeug(startPunkt.x, startPunkt.z, startPunkt.psi);
-    verfolger.setzen(netz.start.spur, 0);
+    verfolger.setzen(netz.start.spur, Math.round(klemme(netz.start.s / Math.max(netz.start.spur.laenge, 0.5), 0, 1) * (netz.start.spur.proben.length - 1)));
 
     // --- Fremdverkehr -------------------------------------------------
     const verkehr = Verkehr(netz, ampeln);
@@ -4995,7 +5212,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // --- Bewertung ----------------------------------------------------
     const bewertung = Bewertung(netz, verkehr, ampeln, fussgaenger);
     const protokoll = document.getElementById('protokoll');
-    let protokollOffen = false, liefVorher = true, protokollGezeigt = false;
+    let protokollOffen = false, protokollGezeigt = false;
     function protokollZeigen(titel) {
       const z = bewertung.zusammenfassung(fahrzeug.strecke);
       if (titel) z.titel = titel;
@@ -5020,12 +5237,12 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       teile.push('<p class="meta">Wie in der Fahrerlaubnisprüfung: ein schwerer Fehler genügt zum Nichtbestehen, mehr als fünf leichte ebenfalls. B schließt, R wiederholt, L öffnet die Übungen.</p>');
       protokoll.querySelector('.inhalt').innerHTML = teile.join('');
       protokoll.hidden = false;
-      liefVorher = laeuft; laeuft = false; pauseFeld.hidden = true;
-      protokollOffen = true;
+      protokollOffen = true; pausiert = false;
+      laufZustand();
     }
     function protokollSchliessen() {
       protokoll.hidden = true; protokollOffen = false;
-      laeuft = liefVorher;
+      laufZustand();
     }
 
     // --- Lernmodus ----------------------------------------------------
@@ -5040,7 +5257,15 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       uebungsListe.appendChild(knopf);
     });
     function uebungStarten(u) {
-      const st = lernmodus.starten(u, { autoWeg: autoWeg, personWeg: personWeg });
+      let st;
+      try {
+        st = lernmodus.starten(u, { autoWeg: autoWeg, personWeg: personWeg });
+      } catch (e) {
+        // Die Übung passt nicht zur geladenen Karte
+        anzAnsage.hidden = false;
+        anzAnsage.textContent = 'Übung nicht möglich: ' + e.message;
+        return;
+      }
       // Etwas Hintergrundleben, weit weg vom Geschehen
       const p0 = spurPunkt(st.spur, st.s);
       verkehr.anlegen(8, p0);
@@ -5048,18 +5273,25 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       fahrzeugModelleAbgleichen(); personenModelleAbgleichen();
       fahrzeug.zuruecksetzen(p0.x, p0.z, p0.psi);
       fahrzeug.strecke = 0;
-      verfolger.setzen(st.spur, 0);
-      verlassen = 0; warAbseits = false; stoesse = 0; imStoss = false; stossMeldungBis = 0; unfaelle = 0; blinker = null;
+      verfolger.setzen(st.spur, verfolgerIndex(st.spur, st.s));
+      verlassen = 0; warAbseits = false; stoesse = 0; imStoss = false; imFremdStoss = false; stossMeldungBis = 0; unfaelle = 0; blinker = null;
       protokollGezeigt = false;
       if (protokollOffen) protokollSchliessen();
-      startFeld.hidden = true; laeuft = true; pauseFeld.hidden = true;
+      startFeld.hidden = true; gestartet = true; pausiert = false; laufZustand();
       anzAnsage.hidden = false; anzAnsage.textContent = u.titel;
       leinwand.focus();
     }
     function freiesFahren() {
+      // Neue freie Fahrt: Zähler und Bewertung beginnen von vorn, auch wenn
+      // vorher eine Übung lief
+      verlassen = 0; warAbseits = false; stoesse = 0; imStoss = false; imFremdStoss = false; stossMeldungBis = 0; unfaelle = 0;
+      fahrzeug.strecke = 0;
+      bewertung.zuruecksetzen(); protokollGezeigt = false;
       if (!lernmodus.aktiv) return;
       lernmodus.beenden();
       anzAnsage.hidden = true;
+      // Die Fahrzeuge der Übung (etwa das langsame Auto) wieder durch normalen Verkehr ersetzen
+      verkehr.entfernenAlle(autoWeg);
       verkehr.anlegen(32, { x: fahrzeug.x, z: fahrzeug.z });
       fussgaenger.anlegen(90, { x: fahrzeug.x, z: fahrzeug.z });
       fahrzeugModelleAbgleichen(); personenModelleAbgleichen();
@@ -5171,13 +5403,28 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // --- Lenkrad-Einrichtung ------------------------------------------
     const lenkradFeld = document.getElementById('lenkradfeld');
     const lenkradInhalt = lenkradFeld.querySelector('.inhalt');
-    let lenkradOffen = false, liefVorLenkrad = true;
+    let lenkradOffen = false;
     function lenkradFeldUmschalten() {
       lenkradOffen = !lenkradOffen;
       lenkradFeld.hidden = !lenkradOffen;
-      if (lenkradOffen) { liefVorLenkrad = laeuft; laeuft = false; }
-      else { laeuft = liefVorLenkrad; }
+      laufZustand();
     }
+    // Datei-Auswahl für eine gespeicherte Belegung
+    const lenkradDatei = document.createElement('input');
+    lenkradDatei.type = 'file'; lenkradDatei.accept = '.json,application/json'; lenkradDatei.hidden = true;
+    document.body.appendChild(lenkradDatei);
+    let lenkradMeldung = '';
+    lenkradDatei.addEventListener('change', () => {
+      const datei = lenkradDatei.files && lenkradDatei.files[0];
+      if (!datei) return;
+      const leser = new FileReader();
+      leser.onload = () => {
+        try { eingabe.lenkrad.ausText(String(leser.result)); lenkradMeldung = 'Belegung geladen.'; }
+        catch (e) { lenkradMeldung = 'Datei nicht lesbar: ' + e.message; }
+        lenkradDatei.value = ''; lenkradSchluessel = null; lenkradTakt = 1;
+      };
+      leser.readAsText(datei, 'utf-8');
+    });
     lenkradFeld.addEventListener('click', ev => {
       const knopf = ev.target.closest('button');
       if (!knopf) return;
@@ -5186,8 +5433,22 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (was === 'ueberspringen') eingabe.lenkrad.einrichtungUeberspringen();
       if (was === 'loeschen') eingabe.lenkrad.loeschen();
       if (was === 'schliessen') lenkradFeldUmschalten();
+      if (was === 'laden') lenkradDatei.click();
+      if (was === 'speichern') {
+        const blob = new Blob([eingabe.lenkrad.alsText()], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'fahrschule-lenkrad.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      }
+      lenkradMeldung = was === 'laden' ? lenkradMeldung : '';
+      lenkradSchluessel = null; lenkradTakt = 1;     // sofort neu aufbauen
     });
-    let lenkradTakt = 0;
+    let lenkradTakt = 0, lenkradSchluessel = null;
+    // Das Fenster wird nur neu aufgebaut, wenn sich sein Zustand ändert.
+    // Die laufenden Werte stehen in eigenen Feldern; so bleiben die Knöpfe
+    // dieselben Elemente, und ein Klick geht nicht zwischen zwei Neuaufbauten
+    // verloren.
     function lenkradFeldAktualisieren(dt) {
       const lr = eingabe.lenkrad;
       if (lr.inEinrichtung) lr.einrichtungRechnen();
@@ -5196,27 +5457,45 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (lenkradTakt < 0.1) return;
       lenkradTakt = 0;
       const gp = lr.geraet;
-      const teile = [];
-      if (!gp) {
-        teile.push('<p>Kein Lenkrad erkannt. Schließ es an und beweg das Rad oder drück eine Taste daran, dann meldet es sich beim Browser.</p>');
-      } else {
-        teile.push('<p class="meta">Erkannt: ' + gp.id.replace(/[<>]/g, '') + ' (' + gp.axes.length + ' Achsen, ' + gp.buttons.length + ' Tasten)</p>');
-        const schritt = lr.einrichtungSchritt();
-        if (schritt) {
-          teile.push('<p class="schritt">Schritt ' + schritt.nummer + ' von ' + schritt.gesamt + ': <b>' + schritt.text + '</b></p>');
-          teile.push('<p><button type="button" data-aktion="ueberspringen">Überspringen</button></p>');
-        } else if (lr.eingerichtet) {
-          const w = lr.lesen();
-          teile.push('<p>Eingerichtet. Lenkung ' + (w ? (w.lenken * 100).toFixed(0) : '-') + ' %, Gas ' + (w ? (w.gas * 100).toFixed(0) : '-') + ' %, Bremse ' + (w ? (w.bremse * 100).toFixed(0) : '-') + ' %</p>');
-          teile.push('<p><button type="button" data-aktion="einrichten">Neu einrichten</button> <button type="button" data-aktion="loeschen">Belegung löschen</button></p>');
+      const schritt = gp ? lr.einrichtungSchritt() : null;
+      const schluessel = (gp ? gp.id + '|' + gp.axes.length : 'kein') + '|' +
+                         (schritt ? 's' + schritt.nummer : (lr.eingerichtet ? 'e' : 'n')) + '|' + lenkradMeldung;
+      if (schluessel !== lenkradSchluessel) {
+        lenkradSchluessel = schluessel;
+        const teile = [];
+        const dateiKnoepfe = '<button type="button" data-aktion="laden">Belegung laden</button>' +
+                             (lr.eingerichtet ? ' <button type="button" data-aktion="speichern">Belegung speichern</button>' : '');
+        if (!gp) {
+          teile.push('<p>Kein Lenkrad erkannt. Schließ es an und beweg das Rad oder drück eine Taste daran, dann meldet es sich beim Browser.</p>');
         } else {
-          teile.push('<p>Noch nicht eingerichtet. Die Einrichtung fragt nacheinander Lenkrad, Gas, Bremse und Tasten ab.</p>');
-          teile.push('<p><button type="button" data-aktion="einrichten">Einrichten</button></p>');
+          teile.push('<p class="meta">Erkannt: ' + gp.id.replace(/[<>&]/g, '') + ' (' + gp.axes.length + ' Achsen, ' + gp.buttons.length + ' Tasten)</p>');
+          if (schritt) {
+            teile.push('<p class="schritt">Schritt ' + schritt.nummer + ' von ' + schritt.gesamt + ': <b>' + schritt.text + '</b></p>');
+            teile.push('<p><button type="button" data-aktion="ueberspringen">Überspringen</button></p>');
+          } else if (lr.eingerichtet) {
+            teile.push('<p>Eingerichtet. <span class="lenkradwerte"></span></p>');
+            teile.push('<p><button type="button" data-aktion="einrichten">Neu einrichten</button> <button type="button" data-aktion="loeschen">Belegung löschen</button></p>');
+          } else {
+            teile.push('<p>Noch nicht eingerichtet. Die Einrichtung fragt nacheinander Lenkrad, Gas, Bremse und Tasten ab.</p>');
+            teile.push('<p><button type="button" data-aktion="einrichten">Einrichten</button></p>');
+          }
+          teile.push('<p class="achsen"></p>');
         }
-        teile.push('<p class="achsen">' + Array.prototype.map.call(gp.axes, (a, i) => 'Achse ' + i + ': ' + a.toFixed(2)).join(' · ') + '</p>');
+        if (!schritt) teile.push('<p>' + dateiKnoepfe + '</p>');
+        if (lenkradMeldung) teile.push('<p class="meta">' + lenkradMeldung.replace(/[<>&]/g, '') + '</p>');
+        teile.push('<p class="meta">Die Belegung gilt bis zum Neuladen der Seite; zum Aufheben als Datei speichern. Tasten der Tastatur behalten Vorrang. G schließt dieses Fenster.</p>');
+        lenkradInhalt.innerHTML = teile.join('');
       }
-      teile.push('<p class="meta">Tasten der Tastatur behalten Vorrang. G schließt dieses Fenster.</p>');
-      lenkradInhalt.innerHTML = teile.join('');
+      if (gp) {
+        const werte = lenkradInhalt.querySelector('.lenkradwerte');
+        if (werte) {
+          const w = lr.ansehen();
+          werte.textContent = 'Lenkung ' + (w ? (w.lenken * 100).toFixed(0) : '-') + ' %, Gas ' + (w ? (w.gas * 100).toFixed(0) : '-') +
+                              ' %, Bremse ' + (w ? (w.bremse * 100).toFixed(0) : '-') + ' %';
+        }
+        const achsen = lenkradInhalt.querySelector('.achsen');
+        if (achsen) achsen.textContent = Array.prototype.map.call(gp.axes, (a, i) => 'Achse ' + i + ': ' + a.toFixed(2)).join(' · ');
+      }
     }
 
     // --- Eigener Blinker ----------------------------------------------
@@ -5327,7 +5606,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         // beim Schulterblick zusätzlich zur Seite gedreht.
         const psiBlick = fahrzeug.psi - blickWinkel;
         const cosB = Math.cos(psiBlick), sinB = Math.sin(psiBlick);
-        const versatz = Math.sin(fahrzeug.lenkwinkel) * 10 * (1 - Math.abs(blickWinkel) / grad(70));
+        const versatz = Math.sin(fahrzeug.lenkwinkel) * 10 * Math.max(0, 1 - Math.abs(blickWinkel) / grad(70));
         kameraZiel.set(
           kameraOrt.x + cosB * 30 + sinB * versatz, 1.00 + Math.abs(blickWinkel) * 0.5,
           kameraOrt.z + sinB * 30 - cosB * versatz
@@ -5372,8 +5651,25 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     const hilfe      = document.getElementById('hilfe');
     const pauseFeld  = document.getElementById('pause');
 
-    let verlassen = 0, warAbseits = false, laeuft = true;
-    let stoesse = 0, imStoss = false, stossMeldungBis = 0, stossMeldung = 'Zusammenstoß', unfaelle = 0;
+    let verlassen = 0, warAbseits = false;
+    let stoesse = 0, imStoss = false, imFremdStoss = false, stossMeldungBis = 0, stossMeldung = 'Zusammenstoß', unfaelle = 0;
+
+    // Laufzustand: aus den einzelnen Gründen fürs Anhalten abgeleitet,
+    // damit Pause, Protokoll, Lenkradfenster und Übungsauswahl sich nicht
+    // gegenseitig aufheben. Vor dem ersten Losfahren läuft die Welt hinter
+    // dem Startbild weiter, das eigene Fahrzeug und die Bewertung aber nicht.
+    let pausiert = false, gestartet = false, laeuft = false, welt = true;
+    function laufZustand() {
+      const gehalten = pausiert || protokollOffen || lenkradOffen;
+      laeuft = !gehalten && startFeld.hidden;
+      welt = !gehalten && (startFeld.hidden || !gestartet);
+      pauseFeld.hidden = !(pausiert && !protokollOffen && !lenkradOffen && startFeld.hidden);
+    }
+    // Index der Probe, die zur Bogenlänge s gehört, damit der Spurverfolger
+    // gleich an der richtigen Stelle sucht
+    function verfolgerIndex(spur, s) {
+      return Math.round(klemme(s / Math.max(spur.laenge, 0.5), 0, 1) * (spur.proben.length - 1));
+    }
 
     const eingabe = Eingabe(leinwand);
 
@@ -5381,10 +5677,10 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (lernmodus.aktiv) { uebungStarten(lernmodus.aktiv); return; }
       const p = spurPunkt(netz.start.spur, netz.start.s);
       fahrzeug.zuruecksetzen(p.x, p.z, p.psi);
-      verfolger.setzen(netz.start.spur, 0);
+      verfolger.setzen(netz.start.spur, verfolgerIndex(netz.start.spur, netz.start.s));
       fahrzeug.strecke = 0;
       verlassen = 0; warAbseits = false;
-      stoesse = 0; imStoss = false; stossMeldungBis = 0; unfaelle = 0; blinker = null;
+      stoesse = 0; imStoss = false; imFremdStoss = false; stossMeldungBis = 0; unfaelle = 0; blinker = null;
       bewertung.zuruecksetzen(); protokollGezeigt = false;
       if (protokollOffen) protokollSchliessen();
     }
@@ -5414,9 +5710,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
         erstesBild = true;
       }
       if (eingabe.merkerLesen('zuruecksetzen')) zurueck();
-      if (eingabe.merkerLesen('pause')) {
-        laeuft = !laeuft;
-        pauseFeld.hidden = laeuft;
+      if (eingabe.merkerLesen('pause') && !protokollOffen && !lenkradOffen && startFeld.hidden) {
+        pausiert = !pausiert;
+        laufZustand();
       }
       if (eingabe.merkerLesen('hilfe')) hilfe.hidden = !hilfe.hidden;
       if (eingabe.merkerLesen('bewertung')) { if (protokollOffen) protokollSchliessen(); else protokollZeigen(); }
@@ -5425,8 +5721,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (eingabe.merkerLesen('lenkrad')) lenkradFeldUmschalten();
       lenkradFeldAktualisieren(dt);
       if (eingabe.merkerLesen('uebungen')) {
-        if (startFeld.hidden) { startFeld.hidden = false; laeuft = false; }
-        else { startFeld.hidden = true; laeuft = true; pauseFeld.hidden = true; }
+        if (startFeld.hidden) startFeld.hidden = false;
+        else if (gestartet) startFeld.hidden = true;    // vor dem ersten Start erst über die Knöpfe
+        laufZustand();
       }
       if (!protokollGezeigt && bewertung.zeit >= 600) { protokollGezeigt = true; protokollZeigen(); }
       if (eingabe.merkerLesen('blinkerLinks')) blinkerSetzen('links');
@@ -5435,7 +5732,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       const steuerung = eingabe.lesen();
       if (laeuft) fahrzeug.rechnen(dt, steuerung);
 
-      if (laeuft) ampeln.rechnen(dt);
+      if (welt) ampeln.rechnen(dt);
 
       // Lage auf der Fahrbahn
       const lage = verfolger.aktualisieren(fahrzeug.x, fahrzeug.z, fahrzeug.psi);
@@ -5454,19 +5751,33 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
       if (lage.stueck && lage.stueck.typ === 'spur') {
         const art = blinker || 'geradeaus';
         spielerEintrag.naechste = lage.stueck.aus.find(v => v.art === art) || null;
-      }
+        // Liegt die Kreuzung erst hinter einem Übergang: Absicht dort
+        const vor = vorausKreuzung(lage.stueck, lage.sGenau || 0, null);
+        spielerEintrag.kreuzungsAbsicht = null;
+        if (vor && vor.ueber) {
+          vor.spur.segment.spuren.forEach(sp => {
+            if (sp.richtung !== vor.spur.richtung || spielerEintrag.kreuzungsAbsicht) return;
+            spielerEintrag.kreuzungsAbsicht = sp.aus.find(v => !v.direkt && v.art === art) || null;
+          });
+        }
+      } else spielerEintrag.kreuzungsAbsicht = null;
 
       // Blinker stellt sich zurück: nach dem Abbiegen auf die nächste Spur,
       // oder wenn das Lenkrad nach einer deutlichen Drehung zurückgestellt ist
       if (blinker) {
         if (lage.stueck && lage.stueck.typ === 'verbindung' && lage.stueck.art === blinker) blinkerStueck = lage.stueck;
         if (blinkerStueck && lage.stueck !== blinkerStueck && lage.stueck && lage.stueck.typ === 'spur') blinker = null;
-        else if (Math.abs(winkelNormiert(fahrzeug.psi - blinkerPsi)) > grad(55) && Math.abs(fahrzeug.lenkwinkel) < grad(3)) blinker = null;
+        // Auf gebogenen Straßen (Ring) dreht man auch ohne Abbiegen weit;
+        // dort stellt erst das Abbiegen den Blinker zurück
+        else if (!(lage.stueck && lage.stueck.typ === 'spur' && lage.stueck.segment.geometrie.art === 'bogen') &&
+                 Math.abs(winkelNormiert(fahrzeug.psi - blinkerPsi)) > grad(55) && Math.abs(fahrzeug.lenkwinkel) < grad(3)) blinker = null;
       }
 
-      if (laeuft) {
+      if (welt) {
         verkehr.rechnen(dt, spielerEintrag, fussgaenger);
         fussgaenger.rechnen(dt, verkehr.fahrzeuge.concat([spielerEintrag]));
+      }
+      if (laeuft) {
         bewertung.rechnen(dt, fahrzeug, lage, blinker);
         const lm = lernmodus.rechnen(lage, fahrzeug, dt);
         if (lm) {
@@ -5476,8 +5787,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             protokollZeigen(lernmodus.aktiv.titel);
           }
         }
-        fahrzeugModelleAbgleichen(); personenModelleAbgleichen();
       }
+      // Neue Fahrzeuge und Fußgänger (auch aus Übungsauslösern) bekommen ihr Modell
+      fahrzeugModelleAbgleichen(); personenModelleAbgleichen();
       blinkPhase += dt;
       const blinkAn = (blinkPhase * 1.5) % 1 < 0.5;
       const eigen = modell.userData.blinker;
@@ -5520,6 +5832,7 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           }
         }
       });
+      let fremdJetzt = false;
       verkehr.fahrzeuge.forEach(f => {
         f.modell.position.set(f.x, 0, f.z);
         f.modell.rotation.y = -f.psi - Math.PI / 2;
@@ -5535,14 +5848,16 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
             const hinein = Math.cos(fahrzeug.psi) * k.nx + Math.sin(fahrzeug.psi) * k.nz;
             const richtungHinein = fahrzeug.v > 0 ? -hinein : (fahrzeug.v < 0 ? hinein : 0);
             if (richtungHinein > 0.5) {
-              if (!imStoss) {
+              // Eigener Merker für Fahrzeuge: der Hindernisblock weiter unten
+              // setzt imStoss in jedem Bild neu
+              if (!imFremdStoss) {
                 if (Math.abs(fahrzeug.v) > 0.8 || f.v > 0.8) {
                   stoesse++; stossMeldungBis = jetzt + 1800; stossMeldung = 'Zusammenstoß';
                   bewertung.melden('zusammenstoss', lage.strasse ? lage.strasse.name : '', '(mit einem Fahrzeug)');
                 }
                 fahrzeug.v *= -0.12;
               } else fahrzeug.v = 0;
-              imStoss = true;
+              fremdJetzt = true;
             } else if (richtungHinein > 0) {
               fahrzeug.v *= 1 - richtungHinein * dt * 3;
               wandEntlangDrehen(k, dt);
@@ -5551,6 +5866,8 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
           }
         }
       });
+      // Wer weiter gegen ein Auto drückt, zählt nicht bei jedem Bild neu
+      if (laeuft) imFremdStoss = fremdJetzt;
       if (abseits && !warAbseits) {
         verlassen++;
         fahrzeug.v *= 0.72;                 // Stoß über die Bordsteinkante
@@ -5656,8 +5973,9 @@ const t="160",e={LEFT:0,MIDDLE:1,RIGHT:2,ROTATE:0,DOLLY:1,PAN:2},n={ROTATE:0,PAN
     // --- Startbild ----------------------------------------------------
     document.getElementById('losfahren').addEventListener('click', () => {
       startFeld.hidden = true;
+      gestartet = true;
       freiesFahren();
-      laeuft = true; pauseFeld.hidden = true;
+      pausiert = false; laufZustand();
       leinwand.focus();
     });
 

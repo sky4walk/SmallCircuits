@@ -73,6 +73,13 @@ button.snd:hover{color:var(--text);}
 .stat .l{font-size:11px;color:var(--dim);}
 #result p{color:var(--dim);font-size:14px;line-height:1.6;max-width:560px;margin:0 auto 16px;}
 .rbtns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
+#profil{display:none;text-align:center;padding:16px;}
+#profil h2{color:var(--gold);margin:0 0 10px;font-size:24px;}
+#profil p{color:var(--dim);font-size:14px;line-height:1.6;max-width:560px;margin:0 auto 12px;}
+#profNotes{text-align:left;max-width:560px;margin:0 auto 16px;padding-left:20px;}
+#profNotes li{font-size:13px;color:var(--text);line-height:1.55;margin-bottom:4px;}
+#profil .foot{margin-top:16px;font-size:12px;}
+#profil a{color:var(--copper);}
 @media(hover:hover){#pad{opacity:.85;}}
 </style>
 </head>
@@ -83,6 +90,7 @@ button.snd:hover{color:var(--text);}
   <h1 class="club">Brauverein<br>Schwabach e.V.</h1>
   <p class="sub">Das Brauspiel &ndash; vom Malz bis zur Flasche</p>
   <a href="https://www.brauverein-schwabach.de" target="_blank" rel="noopener">www.brauverein-schwabach.de</a>
+  <p class="sub" style="margin:8px 0 0">mehr zum Brauen: <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></p>
   <canvas id="titleart" width="320" height="120"></canvas>
   <button id="btnStart">Start</button>
 </div>
@@ -110,7 +118,20 @@ button.snd:hover{color:var(--text);}
   <div class="rbtns">
     <button id="btnNext">Weiter</button>
     <button id="btnAgain" class="ghost">Station wiederholen</button>
+    <button id="btnToTitle" class="ghost">Zum Titel</button>
   </div>
+</div>
+
+<div id="profil">
+  <h2 id="profName">Dein Bier</h2>
+  <div class="stats" id="profStats"></div>
+  <p id="profText"></p>
+  <ul id="profNotes"></ul>
+  <div class="rbtns">
+    <button id="btnNewSud">Neuer Sud</button>
+    <button id="btnProfTitle" class="ghost">Zum Titel</button>
+  </div>
+  <p class="foot">mehr zum Brauen: <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></p>
 </div>
 
 <div id="debug">
@@ -392,6 +413,7 @@ bindHold(document.getElementById('pbR'), 'right');
 bindHold(document.getElementById('pbAct'), 'action');
 
 document.addEventListener('keydown', e=>{
+  if(!running) return;
   if(e.key==='ArrowLeft'){ if(!input.left) leftEdge = true; input.left=true; e.preventDefault(); }
   if(e.key==='ArrowRight'){ if(!input.right) rightEdge = true; input.right=true; e.preventDefault(); }
   if(e.key===' '||e.key==='ArrowUp'){ if(!input.action) actionEdge = true; input.action=true; e.preventDefault(); }
@@ -603,7 +625,7 @@ const GRIND = {
   grob:  { label:'grob 1.2mm',  half:11, yield:0.70, laeuter:0.02 }
 };
 const ORDER = ['fein','mittel','grob'];
-const X_STACK = 122, X_CRANK = 192, X_MILL = 212, X_WHEEL = 240, X_BIN = 272;
+const X_STACK = 122, X_MILL = 212, X_BIN = 272;   /* Kurbel und Stellrad hängen an der Mühle */
 const HOPPER_CAP = 6, SACK_KG = 5, TARGET_KG = 20;
 
 const S1 = { id:1, name:'Schroten', s:{} };
@@ -614,6 +636,7 @@ S1.reset = function(){
   s.sackKg = 0; s.setting = 'mittel'; s.crankAngle = 0; s.lastCrank = null;
   s.yieldSum = 0; s.laeuterSum = 0; s.groundKg = 0;
   s.pouring = false; s.aligned = false; s.stream = []; s.flash = 0;
+  s.wasCranking = false;
   s.done = false; s.reason = '';
 };
 S1.mouth = function(){ return X_MILL + 12 + Math.sin(this.s.t * 2.0) * 10; };
@@ -621,12 +644,18 @@ S1.update = function(dt){
   const s = this.s;
   s.t += dt;
   if(s.flash > 0) s.flash -= dt;
-  const atStack = near(X_STACK, 16), atCrank = near(X_CRANK, 11), atWheel = near(X_WHEEL, 10);
   const mc = this.mouth();
+  /* Kurbel und Stellrad sitzen an der rüttelnden Mühle und wandern mit.
+     Wer schon kurbelt, behält den Griff in einem etwas breiteren Bereich. */
+  const millX = mc - 12;
+  const atStack = near(X_STACK, 16);
+  const atCrank = near(millX - 4, s.wasCranking ? 16 : 10);
+  const atWheel = near(millX + 28, 10);
   const atMill = Math.abs(p.x + 7 - mc) < 26;
   s.pouring = false; s.aligned = false; prompt = '';
 
   const cranking = atCrank && s.hopper > 0.01 && input.action && !p.carry;
+  s.wasCranking = cranking;
   if(atCrank && s.hopper > 0.01 && !p.carry)
     prompt = cranking ? 'kurbeln: \u2190 \u2192 abwechselnd' : 'Aktion halten zum Kurbeln';
   if(cranking){
@@ -654,7 +683,7 @@ S1.update = function(dt){
       s.sackKg -= amount;
       if(s.aligned && s.hopper < HOPPER_CAP) s.hopper = Math.min(HOPPER_CAP, s.hopper + amount);
       else s.spill += amount;
-      prompt = s.aligned ? 'trifft!' : (s.hopper >= HOPPER_CAP && atMill ? 'Trichter voll!' : 'daneben!');
+      prompt = (atMill && s.hopper >= HOPPER_CAP) ? 'Trichter voll!' : (s.aligned ? 'trifft!' : 'daneben!');
       if(s.sackKg <= 0.01){ s.sackKg = 0; p.carry = null; }
     }
   }
@@ -697,8 +726,9 @@ S1.draw = function(){
   const ca = s.crankAngle, cx = millX - 4, cy = 140;
   for(let i = 0; i < 6; i++) px(cx + Math.cos(ca)*i*0.9, cy + Math.sin(ca)*i*0.9, 1, 1, '#8b98a4');
   px(cx + Math.cos(ca)*5.5 - 1, cy + Math.sin(ca)*5.5 - 1, 3, 3, '#b87333');
-  px(X_WHEEL - 3, 136, 6, 6, s.flash > 0 ? '#d9a441' : '#8b98a4');
-  px(X_WHEEL - 1, 134, 2, 4, '#5a666f');
+  const wx = millX + 28;
+  px(wx - 3, 136, 6, 6, s.flash > 0 ? '#d9a441' : '#8b98a4');
+  px(wx - 1, 134, 2, 4, '#5a666f');
 
   spr(SPR.bin, X_BIN - 11, FLOOR - 10);
   const binH = Math.min(8, (s.bin / TARGET_KG) * 8);
@@ -785,6 +815,7 @@ S2.reset = function(){
   s.stirring = false;
   s.warnT = 0;
   s.idx = 0; s.hold = 0; s.rastOk = false;
+  s.rastGong = false; s.warned = false; s.inBand = false;
   s.done = false; s.reason = '';
 };
 S2.heat = function(){ return this.s.fuel * (this.s.flap ? 1.0 : 0.55); };
@@ -1050,6 +1081,9 @@ const FLOWS = [
   { label:'weit auf',rate:1.80 }
 ];
 const ZIEL_L = 100, ZEIT_L = 150;
+/* Auswaschrate: bei 100 l liegen noch ~27 % Zucker im Ablauf,
+   ab ~105 l fällt er unter 25 % und Gerbstoffe gehen mit. */
+const AUSWASCH = 1.12, EXTRAKT_REF = 62;
 
 const S3 = { id:3, name:'L\u00e4utern', s:{} };
 S3.reset = function(){
@@ -1080,7 +1114,7 @@ S3.update = function(dt){
   prompt = '';
 
   const atNach = near(X_NACH, 14), atHarke = near(X_HARKE, 18);
-  const atHahn = near(X_HAHN, 11), atHebel = near(X_HEBEL, 10);
+  const atHahn = near(X_HAHN, 9), atHebel = near(X_HEBEL, 9);   /* Zonen dürfen sich nicht überlappen */
 
   s.hacking = atHarke && input.action && !s.done;
   s.pouring = atNach && input.action && !s.done;
@@ -1102,8 +1136,9 @@ S3.update = function(dt){
     const l = eff*dt;
     s.vol += l;
     s.turbSum += s.turb * l;
-    s.erem = Math.max(0, s.erem - conc*l);
-    s.sugar += conc*l;
+    const z = Math.min(s.erem, AUSWASCH*conc*l);
+    s.erem -= z;
+    s.sugar += z;
     if(conc < 0.25) s.tannin += (0.25 - conc)*l*22;
   }
   s.conc = conc;
@@ -1118,8 +1153,13 @@ S3.update = function(dt){
   }
 
   if(atHahn){
-    prompt = 'Aktion: Hahn \u2013 ' + FLOWS[s.pos].label;
-    if(actionEdge){ s.pos = (s.pos + 1) % FLOWS.length; sfx('klick'); }
+    if(s.vol >= ZIEL_L){
+      prompt = 'Aktion: Hahn zu \u2013 fertig';
+      if(actionEdge && !s.done){ s.pos = 0; s.done = true; s.reason = 'fertig'; sfx('klick'); endStation(700); }
+    } else {
+      prompt = 'Aktion: Hahn \u2013 ' + FLOWS[s.pos].label;
+      if(actionEdge){ s.pos = (s.pos + 1) % FLOWS.length; sfx('klick'); }
+    }
   }
   if(atHebel){
     prompt = 'Aktion: ' + (s.route === 'zurueck' ? 'in den Beh\u00e4lter leiten' : 'zur\u00fcck in den Bottich');
@@ -1131,10 +1171,11 @@ S3.update = function(dt){
   else if(s.pouring) prompt = 'Nachguss\u2026';
   if(atHarke && !s.hacking) prompt = 'Aktion halten: aufhacken';
   else if(s.hacking) prompt = 'aufhacken\u2026';
-  if(s.water <= 0.2 && base > 0) prompt = 'Bottich l\u00e4uft trocken!';
+  if(s.water <= 0.2 && base > 0 && !(atHahn && s.vol >= ZIEL_L)) prompt = 'Bottich l\u00e4uft trocken!';
 
-  if(!s.done && s.vol >= ZIEL_L){ s.done = true; s.reason = 'fertig'; endStation(700); }
-  else if(!s.done && s.left <= 0){ s.done = true; s.reason = 'zeit'; endStation(900); }
+  if(!s.done && s.left <= 0){
+    s.done = true; s.reason = s.vol >= ZIEL_L ? 'fertig' : 'zeit'; endStation(900);
+  }
 };
 S3.draw = function(){
   const s = this.s;
@@ -1211,6 +1252,14 @@ S3.draw = function(){
   txt('Zucker im Ablauf', 218, 46, '#b8ac97');
   px(262, 56, 40, 5, '#241f1a');
   px(262, 56, 40*clamp(s.conc,0,1), 5, s.conc < 0.25 ? '#791f1f' : '#b8862c');
+  px(262 + 40*0.25, 54, 1, 9, '#ede3d0');
+  if(s.vol >= ZIEL_L){
+    const h = s.conc < 0.25 ? 'Ablauf dünn – Gerbstoffe! am Hahn beenden'
+                            : '100 l erreicht – am Hahn beenden oder weiter';
+    const w = ctx.measureText(h).width;
+    px((W - w)/2 - 3, 166, w + 6, 10, '#241f1a');
+    txt(h, (W - w)/2, 167, s.conc < 0.25 ? '#c0503e' : '#639922');
+  }
   drawPrompt();
 };
 S3.result = function(){
@@ -1220,6 +1269,7 @@ S3.result = function(){
   sud.klarheit = klar;
   sud.extrakt = s.sugar;
   sud.tannin = s.tannin;
+  sud.volLaeuter = s.vol;
   return {
     ok,
     title: ok ? 'Abgel\u00e4utert' : 'Zeit abgelaufen',
@@ -1230,7 +1280,10 @@ S3.result = function(){
       { v: s.tannin < 2 ? 'nein' : s.tannin < 8 ? 'etwas' : 'stark', l: 'Gerbstoffe' }
     ],
     text: ok
-      ? 'Klarheit ' + Math.round(klar) + '%. Der erste Ablauf ist immer tr\u00fcb \u2013 wer zu fr\u00fch in den Beh\u00e4lter umleitet, holt sich Trub in die W\u00fcrze. Weit ge\u00f6ffneter Hahn zieht den Treberkuchen zusammen: schnell, aber der Bottich setzt zu und die W\u00fcrze bleibt tr\u00fcb.'
+      ? 'Klarheit ' + Math.round(klar) + '%. '
+        + (s.tannin >= 2 ? 'Zu weit ausgewaschen: Der dünne Nachlauf hat Gerbstoffe aus den Spelzen gezogen. '
+          : s.vol > ZIEL_L + 3 ? 'Etwas länger geläutert – mehr Extrakt, und rechtzeitig vor den Gerbstoffen aufgehört. ' : '')
+        + 'Der erste Ablauf ist immer tr\u00fcb \u2013 wer zu fr\u00fch in den Beh\u00e4lter umleitet, holt sich Trub in die W\u00fcrze. Weit ge\u00f6ffneter Hahn zieht den Treberkuchen zusammen: schnell, aber der Bottich setzt zu und die W\u00fcrze bleibt tr\u00fcb.'
       : 'Die Sudpfanne wartet nicht. Zu vorsichtig gefahren \u2013 oder der Bottich hat zugesetzt und du hast zu sp\u00e4t aufgehackt. Fein geschrotetes Malz verdichtet sich deutlich schneller.'
   };
 };
@@ -1244,6 +1297,7 @@ S3.guide = `
 <li>Am Nachgusskessel <b>Aktion halten = Nachguss.</b> Ohne Wasser l&auml;uft der Bottich trocken und es kommt gar nichts mehr.</li>
 <li>Setzt der Treber zu (Balken &bdquo;Treber dicht&ldquo;), am Bottich <b>Aktion halten = aufhacken</b>. Kostet Zeit und macht kurz wieder alles tr&uuml;b.</li>
 <li><b>Ziel:</b> 100 l in 150 s. Geduld allein reicht nicht.</li>
+<li>Ab 100 l beendest du am <b>Hahn</b>. Du darfst weiterl&auml;utern: mehr Extrakt, aber f&auml;llt der Zucker im Ablauf unter die wei&szlig;e Marke, gehen <b>Gerbstoffe</b> mit.</li>
 </ul>
 <h3 class="zwei">In echt</h3>
 <p>Beim L&auml;utern trennt man die zuckerhaltige W&uuml;rze vom festen Treber &ndash; und der <b>Treberkuchen ist der Filter</b>, nicht der Senkboden darunter. Zieht man zu schnell ab, saugt der Unterdruck den Kuchen zusammen, er dichtet ab und der Bottich &bdquo;setzt zu&ldquo;. Dann hilft nur <b>Aufhacken</b>: mit der Harke die Schicht wieder auflockern &ndash; danach l&auml;uft es zwar, ist aber erst mal wieder tr&uuml;b. Die ersten Liter sind grunds&auml;tzlich tr&uuml;b und werden zur&uuml;ckgegeben (<b>Tr&uuml;blauf</b> oder Vorlauf), bis sich der Filter gesetzt hat. Mit hei&szlig;em <b>Nachguss</b> (~78 &deg;C) w&auml;scht man den restlichen Zucker aus dem Treber. W&auml;scht man zu weit aus oder ist das Wasser zu hei&szlig;, l&ouml;sen sich Gerbstoffe aus den Spelzen &ndash; das Bier wird herb und pelzig im Abgang.</p>`;
@@ -1286,6 +1340,7 @@ S4.reset = function(){
   s.phase = 'kochen';
   s.spin = 0;
   s.rest = 0;
+  s.fWarn = false;
   s.done = false; s.reason = '';
 };
 S4.heat = function(){ return this.s.fuel * (this.s.flap ? 1.0 : 0.55); };
@@ -1303,8 +1358,8 @@ S4.update = function(dt){
   if(s.temp >= 100){ s.temp = 100; }
   s.wall = s.temp >= 99.5 ? clamp(surplus/1.6, 0, 1.3) : 0;
 
-  const atWood = near(X_WOOD4, 18), atFire = near(X_FIRE4, 12), atFlap = near(X_FLAP4, 10);
-  const atPfanne = near(X_PFANNE, 20), atHahn = near(X_HAHN4, 10);
+  const atWood = near(X_WOOD4, 18), atFire = near(X_FIRE4, 12), atFlap = near(X_FLAP4, 8);
+  const atPfanne = near(X_PFANNE, 20), atHahn = near(X_HAHN4, 8);   /* Klappe/Hahn ohne Überlappung */
   const atBitter = near(X_BITTER, 12), atAroma = near(X_AROMA, 12);
 
   s.stirring = atPfanne && input.action && !p.carry && !s.done;
@@ -1546,6 +1601,15 @@ S4.result = function(){
   const ok = s.reason === 'fertig';
   const klar = clamp(s.hotbreak*0.6 + (s.rest >= 10 ? 30 : 0) + (s.spin >= 80 ? 10 : 0), 0, 100);
   sud.ibu = s.ibu; sud.aroma = s.aroma; sud.dms = s.dms; sud.volKoch = s.vol;
+  sud.bruch = klar;
+  /* Stammwürze: Ausbeute (Schrot) × Extrakt (Läutern), verdünnt durch Kellen
+     beim Maischen, aufkonzentriert durch Verdampfen. Übergekochtes nimmt Zucker
+     und Wasser gleichermaßen mit und ändert die Konzentration nicht. */
+  const ausbeute = (sud.yield === undefined ? 0.9 : sud.yield) / 0.9;
+  const extrakt  = (sud.extrakt === undefined ? EXTRAKT_REF : sud.extrakt) / EXTRAKT_REF;
+  const verd     = Math.max(0.7, 1 - 0.03*(sud.dilute || 0));
+  const verdampft = Math.max(0, 100 - 8*s.spills - s.vol);
+  sud.og = clamp(11.0 * ausbeute * extrakt * verd * 100/(100 - verdampft), 7, 16);
   const stil = s.ibu < 18 ? 'mild' : s.ibu < 32 ? 'ausgewogen gehopft' : 'kr\u00e4ftig bitter';
   return {
     ok,
@@ -1556,13 +1620,14 @@ S4.result = function(){
       { v: Math.round(s.ibu) + '', l: 'Bittere (IBU)' },
       { v: Math.round(s.aroma) + '', l: 'Hopfenaroma' },
       { v: Math.round(klar) + '%', l: 'Bruch / Klarheit' },
-      { v: s.dms < 15 ? 'weg' : s.dms < 40 ? 'Rest' : 'deutlich', l: 'DMS' }
+      { v: s.dms < 15 ? 'weg' : s.dms < 40 ? 'Rest' : 'deutlich', l: 'DMS' },
+      { v: sud.og.toFixed(1) + ' \u00b0P', l: 'Stammw\u00fcrze' }
     ],
     text: ok
       ? 'Dein Sud ist ' + stil + '. ' + (s.dms > 40
-        ? 'Die Wallung war zu schwach \u2013 DMS bleibt drin, das schmeckt nach gekochtem Gem\u00fcse.'
-        : 'Krftige Wallung: DMS ist ausgedampft und das Eiwei\u00df ist ausgeflockt.')
-        .replace('Krftige','Kr\u00e4ftige')
+        ? 'Die Wallung war zu schwach \u2013 DMS bleibt drin, das schmeckt nach gekochtem Gem\u00fcse. '
+        : 'Kr\u00e4ftige Wallung: DMS ist ausgedampft und das Eiwei\u00df ist ausgeflockt. ')
+        + 'Die Stammw\u00fcrze von ' + sud.og.toFixed(1) + ' \u00b0P ergibt sich aus Schrot, L\u00e4utern und Verdampfen.'
       : s.reason === 'leer'
         ? 'Unter ' + MIN_VOL + ' l lohnt der Sud nicht mehr. Der Schaum steigt vor allem in den ersten Sekunden der Wallung \u2013 dann geh\u00f6rst du an die Pfanne, nicht zum Holzstapel.'
         : 'Kochen frisst Holz wie nichts anderes: Um die Wallung zu halten, braucht das Feuer dauerhaft \u00fcber 75%. Geht es aus, k\u00fchlt die Pfanne ab und die Kochzeit steht.'
@@ -1573,7 +1638,7 @@ S4.guide = `
 <ul>
 <li><b>Wallung halten:</b> Die W\u00fcrze muss richtig kochen. Der Balken zeigt die Wallung &ndash; erst ab der wei\u00dfen Marke l\u00e4uft die Kochzeit \u00fcberhaupt.</li>
 <li><b>Feuer:</b> Armvoll Holz holen und nachlegen. F\u00fcr echte Wallung braucht das Feuer dauerhaft &uuml;ber 75 % &ndash; das ist der hungrigste Verbraucher im ganzen Sud.</li>
-<li><b>&Uuml;berkochen:</b> Steigt der Schaum, hast du wenige Sekunden. Am Kessel <b>Aktion halten = umr&uuml;hren</b>, oder die Luftklappe schlie&szlig;en. Zu sp&auml;t = 12 l W&uuml;rze auf dem Boden.</li>
+<li><b>&Uuml;berkochen:</b> Steigt der Schaum, hast du wenige Sekunden. Am Kessel <b>Aktion halten = umr&uuml;hren</b>, oder die Luftklappe schlie&szlig;en. Zu sp&auml;t = 8 l W&uuml;rze auf dem Boden.</li>
 <li><b>Hopfen:</b> Der <b>Hopfenplan</b> rechts oben sagt, wann was hineingeh&ouml;rt &ndash; unten blendet sich rechtzeitig ein Hinweis ein. Sack vom Boden holen, zur Pfanne tragen, Aktion = zugeben. Der Weg dauert, also fr&uuml;h genug losgehen.</li>
 <li>Du darfst vom Plan abweichen: Der Zeitpunkt ist die Entscheidung, nicht die Pflicht. Fr&uuml;h = Bittere, sp&auml;t = Aroma.</li>
 <li><b>Whirlpool:</b> Nach der Kochzeit am Kessel Aktion halten, bis der Drall steht. Dann <b>10 Sekunden nicht anfassen</b>, damit sich der Trub setzt. Erst danach am Hahn klar abziehen.</li>
@@ -1594,7 +1659,7 @@ S5.reset = function(){
   s.temp = 9.5;
   s.ice = 1.7;
   s.eisVorrat = 12;
-  s.og = 12;
+  s.og = (sud.og === undefined) ? 12 : sud.og;
   const vg = (sud.vergaergrad === undefined) ? 72 : sud.vergaergrad;
   s.fg = s.og * (1 - vg/100);
   s.ext = s.og;
@@ -1627,7 +1692,7 @@ S5.update = function(dt){
   s.kraeusen = act * (1 - Math.exp(-s.t/22));
   s.ester += Math.max(0, s.temp - 9) * act * 0.5 * dt;
 
-  s.spund = Math.max(0, s.spund - 0.6*dt);
+  s.spund = Math.max(0, s.spund - 0.95*dt);   /* ~105 s bis trocken – einmal nachfüllen nötig */
   if(s.spund <= 0) s.risk += 2.5*dt;
   s.risk = Math.min(120, s.risk);
 
@@ -1788,10 +1853,10 @@ S5.result = function(){
       { v: s.mess.length + 'x', l: 'gemessen' }
     ],
     text: ok
-      ? 'Der Extrakt steht bei ' + s.ext.toFixed(1) + ' \u00b0P (Endverg\u00e4rung ' + s.fg.toFixed(1) + '). G\u00e4raroma: ' + arom + '. Warm vergoren geht schnell, produziert aber Ester und Fusel \u2013 bei einem Lager unerw\u00fcnscht. Kalt ist sauber, dauert aber, und Tag 10 kommt bestimmt.'
+      ? 'Von ' + s.og.toFixed(1) + ' \u00b0P Stammw\u00fcrze auf ' + s.ext.toFixed(1) + ' \u00b0P vergoren (Endverg\u00e4rung ' + s.fg.toFixed(1) + '). G\u00e4raroma: ' + arom + '. Warm vergoren geht schnell, produziert aber Ester und Fusel \u2013 bei einem Lager unerw\u00fcnscht. Kalt ist sauber, dauert aber, und Tag 10 kommt bestimmt.'
       : s.reason === 'infektion'
         ? 'Zu oft und zu schlampig gemessen \u2013 oder der G\u00e4rspund lief trocken. Jede \u00d6ffnung ist ein Einfallstor: desinfizierte Spindel halbiert das Risiko, und kalte G\u00e4rung macht es Keimen schwer.'
-        : 'Der Extrakt steht noch bei ' + s.ext.toFixed(1) + ' \u00b0P, endverg\u00e4ren w\u00e4re ' + s.fg.toFixed(1) + '. Zu kalt gefahren: Die Hefe arbeitet bei 7 \u00b0C nur ein Drittel so schnell wie bei 12 \u00b0C. Wer die Messreihe liest, sieht die Kurve rechtzeitig abflachen.'
+        : 'Der Extrakt steht noch bei ' + s.ext.toFixed(1) + ' \u00b0P, endverg\u00e4ren w\u00e4re ' + s.fg.toFixed(1) + '. Zu kalt gefahren: Die Hefe arbeitet bei 7 \u00b0C nur etwa ein Viertel so schnell wie bei 12 \u00b0C. Wer die Messreihe liest, sieht die Kurve rechtzeitig abflachen.'
   };
 };
 S5.guide = `
@@ -1900,7 +1965,9 @@ S6.update = function(dt){
       } else prompt = 'Aktion halten: Flasche sp\u00fclen';
     }
     if(atFuell && (p.carry === 'fl_dreckig' || p.carry === 'fl_sauber')){
-      if(s.fState !== 'none') busy = true;
+      /* beim Entlasten nur festhalten, solange Aktion gedrückt ist –
+         wer loslässt und weggeht, verliert die Flasche */
+      if(s.fState !== 'none' && (s.fState !== 'entlasten' || input.action)) busy = true;
       if(s.fState === 'none'){
         prompt = 'Aktion halten: vorspannen + f\u00fcllen';
         if(input.action){
@@ -1924,8 +1991,7 @@ S6.update = function(dt){
             sfx('zisch'); sfx('schwapp');
             s.flSchlecht++; s.flFertig++; s.verlust += 0.4;
             p.carry = null; s.fState = 'none';
-          }
-          if(s.level > 110){
+          } else if(s.level > 110){
             s.msg = '\u00fcbergelaufen'; s.msgT = 2.2;
             sfx('schwapp');
             s.flSchlecht++; s.flFertig++; s.verlust += 0.5;
@@ -1959,6 +2025,7 @@ S6.update = function(dt){
         const gut = f.lvl >= 75 && f.lvl <= 92 && f.sauber && f.co2 >= CO2_MIN && f.co2 <= CO2_MAX;
         if(gut) s.flOk++; else s.flSchlecht++;
         if(!f.sauber) s.ungespuelt++;
+        if(gut){ s.co2Sum += f.co2; }
         s.flFertig++;
         p.carry = null;
         sfx('kork');
@@ -2060,6 +2127,9 @@ S6.result = function(){
   const s = this.s;
   const ok = s.flOk >= 5;
   sud.flaschen = s.flOk;
+  sud.sauerstoff = !s.purged;
+  sud.ungespuelt = s.ungespuelt;
+  sud.co2 = s.flOk > 0 ? s.co2Sum / s.flOk : s.co2;
   return {
     ok,
     title: ok ? 'Abgef\u00fcllt' : 'Zu viele Flaschen hin\u00fcber',
@@ -2093,7 +2163,14 @@ S6.guide = `
 /* ================= Stationsverwaltung ================= */
 const STATIONS = { 1:S1, 2:S2, 3:S3, 4:S4, 5:S5, 6:S6 };
 const sud = {};
-let cur = null, running = false, lastT = 0, endTimer = null;
+let cur = null, running = false, lastT = 0, endTimer = null, rafId = 0;
+
+function $(id){ return document.getElementById(id); }
+function zeige(id){
+  for(const k of ['title','game','result','profil']) $(k).style.display = (k === id) ? 'block' : 'none';
+}
+function stopTimer(){ if(endTimer){ clearTimeout(endTimer); endTimer = null; } }
+function stopLoop(){ running = false; if(rafId){ cancelAnimationFrame(rafId); rafId = 0; } }
 
 function endStation(delayMs){
   if(endTimer) return;
@@ -2101,81 +2178,164 @@ function endStation(delayMs){
 }
 function loop(t){
   if(!running) return;
-  const dt = Math.min(0.05, (t - lastT)/1000);
+  const dt = Math.min(0.05, Math.max(0, (t - lastT)/1000));
   lastT = t;
   cur.update(dt);
   cur.draw();
   actionEdge = leftEdge = rightEdge = false;
-  requestAnimationFrame(loop);
+  rafId = requestAnimationFrame(loop);
 }
 function startStation(n){
-  if(endTimer){ clearTimeout(endTimer); endTimer = null; }
+  stopTimer();
+  stopLoop();                       /* nie zwei Spielschleifen gleichzeitig */
   cur = STATIONS[n];
   cur.reset();
   AUDIO.init(); AUDIO.resume(); AUDIO.station(n); AUDIO.amb(0, 400);
-  document.getElementById('guide').innerHTML = cur.guide || '';
+  $('guide').innerHTML = cur.guide || '';
   input.left = input.right = input.action = false;
-  document.getElementById('title').style.display = 'none';
-  document.getElementById('result').style.display = 'none';
-  document.getElementById('game').style.display = 'block';
+  actionEdge = leftEdge = rightEdge = false;   /* keine Tastendrücke vom Ergebnisbildschirm mitnehmen */
+  for(const id of ['pbL','pbR','pbAct']) $(id).classList.remove('on');
+  zeige('game');
   running = true;
   lastT = performance.now();
-  requestAnimationFrame(loop);
+  rafId = requestAnimationFrame(loop);
 }
 function finishStation(){
-  endTimer = null;
-  running = false;
+  stopTimer();
+  stopLoop();
   AUDIO.amb(0, 400);
   const r = cur.result();
   sfx(r.ok ? 'fertig' : 'schlecht');
-  document.getElementById('game').style.display = 'none';
-  const res = document.getElementById('result');
-  res.style.display = 'block';
-  document.getElementById('resTitle').textContent = r.title;
-  document.getElementById('resStats').innerHTML = r.stats
+  zeige('result');
+  $('resTitle').textContent = r.title;
+  $('resStats').innerHTML = r.stats
     .map(x => '<div class="stat"><div class="v">' + x.v + '</div><div class="l">' + x.l + '</div></div>').join('');
-  document.getElementById('resText').textContent = r.text;
+  $('resText').textContent = r.text;
   const next = STATIONS[cur.id + 1];
-  const bn = document.getElementById('btnNext');
-  bn.style.display = (r.ok && next) ? 'inline-block' : 'none';
-  bn.textContent = next ? 'Weiter: Station ' + next.id + ' \u2013 ' + next.name + ' \u2192' : '';
-  bn.dataset.next = next ? next.id : '';
-  document.getElementById('btnAgain').textContent = r.ok ? 'Station wiederholen' : 'Nochmal versuchen';
+  const bn = $('btnNext');
+  if(next){
+    bn.textContent = 'Weiter: Station ' + next.id + ' – ' + next.name + ' →';
+    bn.dataset.next = next.id;
+  } else {
+    bn.textContent = 'Zum fertigen Bier →';
+    bn.dataset.next = 'profil';
+  }
+  bn.style.display = r.ok ? 'inline-block' : 'none';
+  $('btnAgain').textContent = r.ok ? 'Station wiederholen' : 'Nochmal versuchen';
 }
 function showTitle(){
-  running = false;
+  stopTimer();
+  stopLoop();
   AUDIO.station(0); AUDIO.amb(0, 400);
-  if(endTimer){ clearTimeout(endTimer); endTimer = null; }
-  document.getElementById('game').style.display = 'none';
-  document.getElementById('result').style.display = 'none';
-  document.getElementById('title').style.display = 'block';
+  zeige('title');
+}
+function neuerSud(){
+  for(const k of Object.keys(sud)) delete sud[k];
+  startStation(1);
+}
+
+/* ================= Abschluss: das fertige Bier ================= */
+function bierProfil(){
+  const d = (v, x) => (v === undefined ? x : v);
+  const og   = d(sud.og, 12);
+  const vg   = d(sud.vergaergrad, 72);
+  const rest = d(sud.restExt, og * (1 - vg/100));
+  const abv  = Math.max(0, (og - rest) * 0.52);
+  const ibu  = d(sud.ibu, 20), aroma = d(sud.aroma, 0);
+  const klar = (d(sud.klarheit, 70) + d(sud.bruch, 70)) / 2;
+
+  let name = ibu >= 30 ? 'Pils' : vg <= 70 ? 'Märzen' : 'Helles';
+  if(og >= 14 && ibu < 30) name = 'Festbier';
+  if(og < 10) name = 'Schankbier';
+  if(aroma >= 15) name += ', hopfenbetont';
+
+  const fehler = [], lob = [];
+  let punkte = 100;
+  const dms = d(sud.dms, 20);
+  if(dms > 40){ punkte -= 15; fehler.push('Riecht nach gekochtem Gemüse und Mais (DMS) – die Wallung beim Kochen war zu schwach.'); }
+  else if(dms >= 15){ punkte -= 5; fehler.push('Ein Hauch DMS ist geblieben.'); }
+  const ester = d(sud.ester, 0);
+  if(ester >= 25){ punkte -= 20; fehler.push('Fuselig und lösungsmittelartig – zu warm vergoren.'); }
+  else if(ester >= 8){ punkte -= 7; fehler.push('Leicht fruchtige Ester – für ein Lager untypisch.'); }
+  const tannin = d(sud.tannin, 0);
+  if(tannin >= 8){ punkte -= 15; fehler.push('Herb und pelzig im Abgang – stark überschwänzt.'); }
+  else if(tannin >= 2){ punkte -= 7; fehler.push('Etwas Gerbstoff im Abgang – zu weit ausgewaschen.'); }
+  if(sud.sauerstoff){ punkte -= 12; fehler.push('Ohne CO₂-Spülung abgefüllt: In ein paar Wochen schmeckt es pappig nach Karton.'); }
+  if(sud.ungespuelt > 0){ punkte -= 3*sud.ungespuelt; fehler.push(sud.ungespuelt + ' Flasche(n) ungespült – die werden in der Reifung trüb.'); }
+  if(klar < 50){ punkte -= 10; fehler.push('Deutlich trüb – Trüblauf und Bruch nicht sauber abgetrennt.'); }
+  else if(klar < 70){ punkte -= 4; fehler.push('Leicht schleierig.'); }
+  if((sud.dilute || 0) >= 3){ punkte -= 5; fehler.push('Etwas wässrig – zu oft mit kaltem Wasser gebremst.'); }
+
+  if(dms < 15) lob.push('Sauber ausgekocht, kein DMS.');
+  if(ester < 8) lob.push('Kalt und sauber vergoren.');
+  if(klar >= 80) lob.push('Schön klar.');
+  if(!fehler.length) lob.push('Keine Fehlaromen – so soll es sein.');
+
+  punkte = clamp(Math.round(punkte), 0, 100);
+  const urteil = punkte >= 90 ? 'Vereinsbier! Das kommt aufs nächste Fest.'
+    : punkte >= 75 ? 'Ordentlicher Sud – den kann man mit Stolz ausschenken.'
+    : punkte >= 55 ? 'Trinkbar, aber der Stammtisch hat Anmerkungen.'
+    : 'Lehrgeld. Der nächste Sud wird besser.';
+  const koerper = vg > 78 ? 'trocken' : vg > 70 ? 'ausgewogen' : 'vollmundig';
+
+  return {
+    name,
+    stats: [
+      { v: og.toFixed(1) + ' °P', l: 'Stammwürze' },
+      { v: abv.toFixed(1) + ' %', l: 'Alkohol' },
+      { v: Math.round(ibu) + '', l: 'Bittere (IBU)' },
+      { v: koerper, l: 'Körper' },
+      { v: d(sud.flaschen, 0) + '/' + FLASCHEN, l: 'gute Flaschen' },
+      { v: punkte + '/100', l: 'Bewertung' }
+    ],
+    text: urteil,
+    notes: lob.concat(fehler)
+  };
+}
+function showProfil(){
+  stopTimer();
+  stopLoop();
+  const b = bierProfil();
+  $('profName').textContent = 'Dein Bier: ' + b.name;
+  $('profStats').innerHTML = b.stats
+    .map(x => '<div class="stat"><div class="v">' + x.v + '</div><div class="l">' + x.l + '</div></div>').join('');
+  $('profText').textContent = b.text;
+  $('profNotes').innerHTML = '';
+  for(const n of b.notes){ const li = document.createElement('li'); li.textContent = n; $('profNotes').appendChild(li); }
+  zeige('profil');
 }
 
 /* Audio darf erst nach einer Nutzeraktion starten (Browser-Regel) */
 ['pointerdown','keydown'].forEach(ev =>
   document.addEventListener(ev, () => { AUDIO.init(); AUDIO.resume(); }, { once:false }));
-const btnSnd = document.getElementById('btnSound');
+const btnSnd = $('btnSound');
 btnSnd.addEventListener('click', e => {
   e.stopPropagation();
   AUDIO.on = !AUDIO.on;
   btnSnd.textContent = AUDIO.on ? 'Ton an' : 'Ton aus';
   if(!AUDIO.on) AUDIO.amb(0, 400);
+  btnSnd.blur();                    /* sonst löst die Leertaste den Knopf erneut aus */
 });
 
-document.getElementById('btnStart').addEventListener('click', () => startStation(1));document.getElementById('btnAgain').addEventListener('click', () => startStation(cur.id));
-document.getElementById('btnNext').addEventListener('click', e => {
-  const n = parseInt(e.currentTarget.dataset.next, 10);
-  if(n) startStation(n);
+$('btnStart').addEventListener('click', neuerSud);
+$('btnAgain').addEventListener('click', () => startStation(cur.id));
+$('btnNext').addEventListener('click', e => {
+  const n = e.currentTarget.dataset.next;
+  if(n === 'profil') showProfil();
+  else if(parseInt(n, 10)) startStation(parseInt(n, 10));
 });
+$('btnToTitle').addEventListener('click', showTitle);
+$('btnNewSud').addEventListener('click', neuerSud);
+$('btnProfTitle').addEventListener('click', showTitle);
 document.querySelectorAll('#debug button[data-jump]').forEach(b => {
   b.addEventListener('click', () => startStation(parseInt(b.dataset.jump, 10)));
 });
-document.getElementById('dbgSkip').addEventListener('click', () => {
+$('dbgSkip').addEventListener('click', () => {
   const n = cur ? cur.id + 1 : 1;
   if(STATIONS[n]) startStation(n);
-  else if(cur){ running = false; finishStation(); }
+  else if(cur) finishStation();
 });
-document.getElementById('dbgTitle').addEventListener('click', showTitle);
+$('dbgTitle').addEventListener('click', showTitle);
 
 /* ---- Debug-Leiste: versteckt, drei Wege sie zu \u00f6ffnen ----
    1) URL:        ?debug  oder  #debug
@@ -2216,6 +2376,7 @@ document.addEventListener('keydown', e => {
     else t2.drawImage(img, x, y);
   }
   function f(){
+    if(!sichtbar()){ requestAnimationFrame(f); return; }   /* während des Spiels nichts zeichnen */
     const dt = 1/60;
     tt += dt; modeT += dt;
     if(mode === 'walk'){

@@ -22,6 +22,7 @@
   --u:44px;
 }
 *{box-sizing:border-box}
+[hidden]{display:none !important}
 html,body{margin:0;padding:0}
 body{
   background:var(--olive);
@@ -221,6 +222,7 @@ footer a{color:#D8DCC6}
 
 <footer>
   Eigenständige Umsetzung des klassischen Sperrstein-Laufspiels. Kein Produkt und keine Kopie des gleichnamigen Markenspiels – Regeln und Wegenetz sind nachgebaut, Grafik und Code sind selbst geschrieben. Läuft vollständig offline in einer einzigen Datei.
+  <br>Mehr Selbstgebautes auf <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>.
 </footer>
 
 <script>
@@ -417,14 +419,29 @@ const figurEntfernung = (f,d) =>
 const besteEntfernung = (i,d) =>
   Math.min(...spielerFiguren(i).map(f=>figurEntfernung(f,d)));
 
-function bedrohteFelder(eigenerIdx){
-  const m = new Map();
-  S.figuren.forEach(f=>{
-    if (f.besitzer === eigenerIdx) return;
-    for (let a=1;a<=6;a++)
-      zuegeFuer(f.nr,a).forEach((_,ziel)=>m.set(ziel,(m.get(ziel)||0)+1));
-  });
-  return m;
+/* Wie oft könnte ein Gegner das Feld nach dem Zug z erreichen?
+   Der Zug wird dazu kurz probeweise ausgeführt (Figur versetzt, Opfer im Haus,
+   genommener Sperrstein entfernt) und danach wieder zurückgenommen. */
+function gefahrNachZug(z, eigenerIdx){
+  const f = S.figuren[z.fig];
+  const altPos = f.pos;
+  const opfer = S.figuren.find(o => o.nr !== f.nr && o.pos === z.ziel) || null;
+  const sperre = S.sperren.has(z.ziel);
+  f.pos = z.ziel;
+  if (opfer) opfer.pos = null;
+  if (sperre) S.sperren.delete(z.ziel);
+  let n = 0;
+  try {
+    S.figuren.forEach(g=>{
+      if (g.besitzer === eigenerIdx) return;
+      for (let a=1;a<=6;a++) if (zuegeFuer(g.nr,a).has(z.ziel)) n++;
+    });
+  } finally {
+    f.pos = altPos;
+    if (opfer) opfer.pos = z.ziel;
+    if (sperre) S.sperren.add(z.ziel);
+  }
+  return n;
 }
 
 const KI_STUFEN = {
@@ -440,7 +457,6 @@ function kiWaehltZug(liste){
   const bel = belegung();
   const hausD = d.get(S.spieler[ich].eintritt) + 1;
   const par = KI_STUFEN[S.staerke] || KI_STUFEN[3];
-  const bedroht = par.vorsicht > 0 ? bedrohteFelder(ich) : null;
 
   let best = null, bestWert = -Infinity;
   for (const z of liste){
@@ -460,8 +476,8 @@ function kiWaehltZug(liste){
     }
     if (S.sperren.has(z.ziel)) w += 22;
 
-    if (bedroht){
-      const gefahr = bedroht.get(z.ziel) || 0;
+    if (par.vorsicht > 0 && z.ziel !== ZIEL){
+      const gefahr = gefahrNachZug(z, ich);
       const fortschritt = Math.max(0.25, (hausD - nachher) / hausD);
       w -= gefahr * par.vorsicht * fortschritt;
     }
@@ -568,7 +584,7 @@ function zeichneBrett(){
     const g = el("g",{class:"figur klickbar","data-fig":f.nr});
     g.appendChild(el("circle",{class:"body",cx:0,cy:0,r:14,fill:p.farbe.hex}));
     g.appendChild(el("circle",{class:"glanz",cx:-4,cy:-5,r:4}));
-    g.addEventListener("click", ()=>figurGeklickt(f.nr));
+    g.addEventListener("click", e=>{ e.stopPropagation(); figurGeklickt(f.nr); });
     gFiguren.appendChild(g);
     figurEl.set(f.nr,g);
   });
@@ -585,6 +601,10 @@ function sternPfad(cx,cy,ra,ri,z){
   return d + "Z";
 }
 
+function setzeFigurPos(g,x,y){
+  g.style.transform = `translate(${x}px,${y}px)`;
+}
+
 function figurPos(f){
   return f.pos === null ? hausSlotKoord(S.spieler[f.besitzer].haus, f.slot) : koord(f.pos);
 }
@@ -594,7 +614,7 @@ function aktualisiere(sofort){
     const g = figurEl.get(f.nr);
     const [x,y] = figurPos(f);
     if (sofort) g.style.transition = "none";
-    g.setAttribute("transform",`translate(${x},${y})`);
+    setzeFigurPos(g,x,y);
     if (sofort) requestAnimationFrame(()=>{ g.style.transition = ""; });
   });
   zeichneSperren();
@@ -705,6 +725,7 @@ const warte = ms => new Promise(r=>setTimeout(r,ms));
 const reduziert = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 function figurGeklickt(nr){
+  if (!S) return;
   if (animiert || S.phase !== "zug" || S.spieler[S.dran].ki) return;
   const f = S.figuren[nr];
   if (f.besitzer !== S.dran) return;
@@ -717,6 +738,7 @@ function figurGeklickt(nr){
 }
 
 async function wuerfeln(){
+  if (!S) return;
   if (animiert || S.phase !== "wurf") return;
   animiert = true;
   document.getElementById("wuerfeln").disabled = true;
@@ -762,7 +784,7 @@ async function fuehreZugAus(figNr, ziel, pfad){
   gFiguren.appendChild(g);                       // nach vorne holen
   for (const knoten of pfad){
     const [x,y] = koord(knoten);
-    g.setAttribute("transform",`translate(${x},${y})`);
+    setzeFigurPos(g,x,y);
     await warte(reduziert ? 0 : 135);
   }
   f.pos = ziel;
@@ -813,7 +835,7 @@ async function fuehreZugAus(figNr, ziel, pfad){
     }
     return;
   }
-  await warte(450);
+  await warte(geschlagen ? 1300 : 450);
   naechsterSpieler();
 }
 
@@ -853,7 +875,11 @@ function sieg(){
   const panel = document.getElementById("panel");
   const box = document.createElement("div");
   box.className = "sieg";
-  box.innerHTML = `<div class="display" style="color:${p.farbe.hex}">${p.name} gewinnt!</div>`;
+  const titel = document.createElement("div");
+  titel.className = "display";
+  titel.style.color = p.farbe.hex;
+  titel.textContent = `${p.name} gewinnt!`;
+  box.appendChild(titel);
   const b = document.createElement("button");
   b.textContent = "Noch einmal";
   b.addEventListener("click", ()=>location.reload());
@@ -920,6 +946,13 @@ document.getElementById("start").addEventListener("click", ()=>{
 });
 
 document.getElementById("wuerfeln").addEventListener("click", wuerfeln);
+svg.addEventListener("click", ()=>{
+  if (!S || animiert || S.phase !== "zug" || gewaehlt === null) return;
+  if (S.spieler[S.dran].ki) return;
+  gewaehlt = null; zuege = null;
+  zeichneMarken();
+  status(`${S.spieler[S.dran].name} würfelt ${S.wurf}. Figur auswählen.`);
+});
 document.getElementById("neu").addEventListener("click", ()=>location.reload());
 </script>
 </body>
