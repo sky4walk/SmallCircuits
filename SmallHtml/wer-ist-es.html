@@ -149,6 +149,15 @@
   }
   .guess-option:hover { border-color: var(--accent2); }
 
+  .my-secret { display: flex; align-items: center; gap: 6px; font-size: 0.85em; color: var(--text-dim); }
+  .my-secret svg { width: 32px; height: 32px; background: var(--card); border-radius: 6px; border: 2px solid var(--green); }
+  .my-secret b { color: var(--text); }
+  .status-bar { flex-wrap: wrap; gap: 6px; }
+  .log .sys { color: var(--text-dim); font-style: italic; }
+  footer { text-align: center; font-size: 0.8em; color: var(--text-dim); padding: 20px 10px 30px; }
+  footer a { color: var(--accent2); }
+  .card svg, .char-pick svg, .guess-option svg { max-width: 100%; height: auto; }
+
   @media (max-width: 600px) {
     .board, .char-grid-pick { grid-template-columns: repeat(4, 1fr); }
     .guess-grid { grid-template-columns: repeat(3, 1fr); }
@@ -194,6 +203,7 @@
 <!-- Game -->
 <div id="game" class="screen">
   <div class="status-bar">
+    <span id="my-secret" class="my-secret"></span>
     <span id="turn-info" class="turn"></span>
     <span id="remaining-info"></span>
   </div>
@@ -212,7 +222,7 @@
     <h2 id="end-title"></h2>
     <div id="end-face"></div>
     <p id="end-text"></p>
-    <button onclick="location.reload()">Nochmal spielen</button>
+    <button onclick="restartGame()">Nochmal spielen</button>
   </div>
 </div>
 
@@ -225,6 +235,11 @@
     <button onclick="closeGuessModal()" style="background:#555;margin-right:8px">Abbrechen</button>
   </div>
 </div>
+
+<footer>
+  Mehr Projekte und Artikel: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  · <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
+</footer>
 
 <script>
 // ============================================================
@@ -271,16 +286,12 @@ function seededRand(str) {
 }
 
 function makeFace(c, size = 70) {
-  const s = size, cx = s/2, cy = s/2;
+  // Feste Zeichenfläche 70×70, skaliert wird nur über width/height
+  const V = 70, cx = V/2, cy = V/2;
   const skin = SKIN_TONES[Math.floor(seededRand(c.name) * SKIN_TONES.length)];
   const hairC = HAIR_COLORS[c.hair];
   const eyeC = EYE_COLORS[c.eyeColor];
-  let svg = `<svg viewBox="0 0 ${s} ${s}" xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}">`;
-
-  if (c.hat) {
-    svg += `<rect x="${cx-18}" y="8" width="36" height="12" rx="3" fill="#e74c3c"/>`;
-    svg += `<rect x="${cx-24}" y="17" width="48" height="5" rx="2" fill="#c0392b"/>`;
-  }
+  let svg = `<svg viewBox="0 0 ${V} ${V}" xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}">`;
 
   svg += `<ellipse cx="${cx}" cy="${cy+2}" rx="20" ry="23" fill="${skin}"/>`;
 
@@ -310,7 +321,7 @@ function makeFace(c, size = 70) {
   svg += `<line x1="${cx-10}" y1="${ey-5}" x2="${cx-4}" y2="${ey-5.5}" stroke="${hairC}" stroke-width="1.5" stroke-linecap="round"/>`;
   svg += `<line x1="${cx+4}" y1="${ey-5.5}" x2="${cx+10}" y2="${ey-5}" stroke="${hairC}" stroke-width="1.5" stroke-linecap="round"/>`;
 
-  svg += `<path d="M${cx-2} ${cy+5} Q${cx} ${cy+8} ${cx+2} ${cy+5}" fill="none" stroke="${skin}" stroke-width="1.2" opacity="0.7"/>`;
+  svg += `<path d="M${cx-2} ${cy+5} Q${cx} ${cy+8} ${cx+2} ${cy+5}" fill="none" stroke="#a0522d" stroke-width="1.2" opacity="0.5"/>`;
 
   if (c.gender === "w") {
     svg += `<path d="M${cx-5} ${cy+11} Q${cx} ${cy+15} ${cx+5} ${cy+11}" fill="#e74c3c" stroke="none"/>`;
@@ -333,6 +344,12 @@ function makeFace(c, size = 70) {
   if (c.freckles) {
     for (const [dx,dy] of [[-5,5],[-3,6],[5,5],[3,6],[-4,3],[4,3]])
       svg += `<circle cx="${cx+dx}" cy="${cy+dy}" r="0.8" fill="#a0522d" opacity="0.5"/>`;
+  }
+  // Hut zuletzt, damit er über Kopf und Haaren liegt
+  if (c.hat) {
+    svg += `<rect x="${cx-16}" y="2" width="32" height="12" rx="3" fill="#e74c3c"/>`;
+    svg += `<rect x="${cx-16}" y="10" width="32" height="2.5" fill="#2c3e50"/>`;
+    svg += `<rect x="${cx-24}" y="12.5" width="48" height="5" rx="2" fill="#c0392b"/>`;
   }
   svg += `</svg>`;
   return svg;
@@ -378,6 +395,10 @@ function findQuestionByKey(key) { return ALL_QUESTIONS.find(q => q.key === key);
 // ============================================================
 // GAME STATE
 // ============================================================
+// Hinweis: Das eigene Brett zeigt die KANDIDATEN für die Person des Gegners.
+// Die eigene geheime Person wird separat in der Statusleiste angezeigt und
+// ist auf dem Brett ein ganz normaler Kandidat – beide Seiten dürfen
+// dieselbe Person wählen (wie beim Original-Brettspiel).
 let mode = null;            // 'ai' or 'mp'
 let playerSecret = null;
 let aiSecret = null;
@@ -388,6 +409,7 @@ let isPlayerTurn = true;
 let gameOver = false;
 let turnCount = 0;
 let opponentReady = false;
+let iConfirmed = false;
 
 // ============================================================
 // WEBRTC
@@ -397,6 +419,8 @@ let dc = null;
 let isHost = false;
 let iceCandidates = [];
 let iceGatheringDone = false;
+let iceTimer = null;
+let connectedOnce = false;
 
 const RTC_CONFIG = {
   iceServers: [
@@ -404,68 +428,83 @@ const RTC_CONFIG = {
     { urls: "stun:stun1.l.google.com:19302" },
   ]
 };
+const ICE_TIMEOUT_MS = 4000;
 
 function encode(obj) {
   return btoa(JSON.stringify(obj));
 }
 
 function decode(str) {
-  return JSON.parse(atob(str.trim()));
+  // Messenger fügen gern Zeilenumbrüche/Leerzeichen ein – alles entfernen
+  return JSON.parse(atob(str.replace(/\s+/g, "")));
 }
 
 function createPeerConnection() {
+  if (pc) { try { pc.close(); } catch (e) {} }
   pc = new RTCPeerConnection(RTC_CONFIG);
   iceCandidates = [];
   iceGatheringDone = false;
+  connectedOnce = false;
+  clearTimeout(iceTimer);
 
   pc.onicecandidate = (e) => {
-    if (e.candidate) {
-      iceCandidates.push(e.candidate);
-    }
+    if (e.candidate) iceCandidates.push(e.candidate);
+    else onIceComplete(); // null-Kandidat = Sammeln beendet
   };
 
   pc.onicegatheringstatechange = () => {
-    if (pc.iceGatheringState === "complete") {
-      iceGatheringDone = true;
-      onIceComplete();
-    }
+    if (pc.iceGatheringState === "complete") onIceComplete();
   };
 
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "connected") {
-      onConnected();
-    } else if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
-      setConnStatus("Verbindung verloren!", "error");
+    const st = pc.connectionState;
+    if (st === "failed" || st === "disconnected" || st === "closed") {
+      onConnectionLost(st === "disconnected"
+        ? "Verbindung unterbrochen (wird evtl. wiederhergestellt)…"
+        : "Verbindung verloren!");
     }
   };
 }
 
+// Startet die Zeitbegrenzung fürs ICE-Sammeln (manche Netze brauchen ewig)
+function armIceTimeout() {
+  clearTimeout(iceTimer);
+  iceTimer = setTimeout(() => onIceComplete(), ICE_TIMEOUT_MS);
+}
+
 function onIceComplete() {
+  if (iceGatheringDone || !pc || !pc.localDescription) return;
+  iceGatheringDone = true;
+  clearTimeout(iceTimer);
+
   const flow = document.getElementById("conn-flow");
+  const code = encode({ sdp: pc.localDescription, candidates: iceCandidates });
   if (isHost) {
-    const offer = encode({ sdp: pc.localDescription, candidates: iceCandidates });
     flow.innerHTML = `
       <div class="conn-step">
         <h3>Schritt 1: Code kopieren & an Mitspieler senden</h3>
-        <textarea class="code-area" id="offer-code" readonly>${offer}</textarea>
+        <textarea class="code-area" id="offer-code" readonly>${code}</textarea>
         <button class="small-btn copy" onclick="copyCode('offer-code')">📋 Kopieren</button>
       </div>
       <div class="conn-step">
         <h3>Schritt 2: Antwort-Code des Mitspielers einfügen</h3>
         <textarea class="code-area" id="answer-input" placeholder="Antwort-Code hier einfügen..."></textarea>
-        <button class="small-btn apply" onclick="hostApplyAnswer()">✓ Verbinden</button>
+        <button class="small-btn apply" id="btn-apply-answer" onclick="hostApplyAnswer()">✓ Verbinden</button>
       </div>
     `;
     setConnStatus("Warte auf Mitspieler...", "waiting");
   } else {
-    const answer = encode({ sdp: pc.localDescription, candidates: iceCandidates });
-    flow.innerHTML += `
+    // insertAdjacentHTML statt innerHTML += (sonst geht der eingefügte Code im Textfeld verloren)
+    const status = flow.querySelector(".conn-status");
+    const html = `
       <div class="conn-step">
         <h3>Schritt 2: Diesen Antwort-Code an den Gastgeber senden</h3>
-        <textarea class="code-area" id="answer-code" readonly>${answer}</textarea>
+        <textarea class="code-area" id="answer-code" readonly>${code}</textarea>
         <button class="small-btn copy" onclick="copyCode('answer-code')">📋 Kopieren</button>
       </div>
     `;
+    if (status) status.insertAdjacentHTML("beforebegin", html);
+    else flow.insertAdjacentHTML("beforeend", html);
     setConnStatus("Antwort-Code kopieren und an Gastgeber senden...", "waiting");
   }
 }
@@ -477,18 +516,21 @@ async function startHost() {
   document.getElementById("conn-flow").innerHTML = "";
   setConnStatus("Erstelle Verbindung...", "waiting");
 
-  createPeerConnection();
-  dc = pc.createDataChannel("game");
-  setupDataChannel(dc);
+  try {
+    createPeerConnection();
+    dc = pc.createDataChannel("game");
+    setupDataChannel(dc);
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  // If ICE gathering is fast, it might already be done
-  if (pc.iceGatheringState === "complete") onIceComplete();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    armIceTimeout();
+    if (pc.iceGatheringState === "complete") onIceComplete();
+  } catch (e) {
+    setConnStatus("Fehler beim Erstellen: " + e.message, "error");
+  }
 }
 
-async function startJoin() {
+function startJoin() {
   isHost = false;
   document.getElementById("btn-join").classList.add("active");
   document.getElementById("btn-host").classList.remove("active");
@@ -497,15 +539,18 @@ async function startJoin() {
     <div class="conn-step">
       <h3>Schritt 1: Einladungs-Code des Gastgebers einfügen</h3>
       <textarea class="code-area" id="offer-input" placeholder="Einladungs-Code hier einfügen..."></textarea>
-      <button class="small-btn apply" onclick="joinApplyOffer()">✓ Annehmen</button>
+      <button class="small-btn apply" id="btn-apply-offer" onclick="joinApplyOffer()">✓ Annehmen</button>
     </div>
   `;
   setConnStatus("Einladungs-Code einfügen, um beizutreten.", "waiting");
 }
 
 async function joinApplyOffer() {
+  const btn = document.getElementById("btn-apply-offer");
   try {
     const data = decode(document.getElementById("offer-input").value);
+    if (!data || !data.sdp || data.sdp.type !== "offer") throw new Error("Kein Einladungs-Code.");
+    btn.disabled = true;
     createPeerConnection();
 
     pc.ondatachannel = (e) => {
@@ -514,33 +559,44 @@ async function joinApplyOffer() {
     };
 
     await pc.setRemoteDescription(data.sdp);
-    for (const c of data.candidates) await pc.addIceCandidate(c);
+    for (const c of (data.candidates || [])) {
+      try { await pc.addIceCandidate(c); } catch (e) { /* doppelte/ungültige Kandidaten ignorieren */ }
+    }
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-
+    armIceTimeout();
     if (pc.iceGatheringState === "complete") onIceComplete();
   } catch (e) {
+    if (btn) btn.disabled = false;
     setConnStatus("Ungültiger Code! " + e.message, "error");
   }
 }
 
 async function hostApplyAnswer() {
+  const btn = document.getElementById("btn-apply-answer");
   try {
+    if (!pc || pc.signalingState !== "have-local-offer") throw new Error("Antwort wurde bereits übernommen.");
     const data = decode(document.getElementById("answer-input").value);
+    if (!data || !data.sdp || data.sdp.type !== "answer") throw new Error("Kein Antwort-Code.");
+    btn.disabled = true;
     await pc.setRemoteDescription(data.sdp);
-    for (const c of data.candidates) await pc.addIceCandidate(c);
+    for (const c of (data.candidates || [])) {
+      try { await pc.addIceCandidate(c); } catch (e) { /* ignorieren */ }
+    }
+    setConnStatus("Verbinde...", "waiting");
   } catch (e) {
+    if (btn && pc && pc.signalingState === "have-local-offer") btn.disabled = false;
     setConnStatus("Ungültiger Antwort-Code! " + e.message, "error");
   }
 }
 
 function setConnStatus(msg, cls) {
-  let el = document.querySelector(".conn-status");
+  const flow = document.getElementById("conn-flow");
+  let el = flow.querySelector(".conn-status");
   if (!el) {
     el = document.createElement("div");
-    el.className = "conn-status";
-    document.getElementById("conn-flow").appendChild(el);
+    flow.appendChild(el);
   }
   el.className = "conn-status " + cls;
   el.textContent = msg;
@@ -548,15 +604,24 @@ function setConnStatus(msg, cls) {
 
 function copyCode(id) {
   const ta = document.getElementById(id);
+  const btn = ta.nextElementSibling;
   ta.select();
-  navigator.clipboard.writeText(ta.value).then(() => {
-    const btn = ta.nextElementSibling;
+  const done = () => {
     btn.textContent = "✓ Kopiert!";
     setTimeout(() => btn.textContent = "📋 Kopieren", 2000);
-  });
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(ta.value).then(done, () => {
+      try { document.execCommand("copy"); done(); } catch (e) {}
+    });
+  } else {
+    try { document.execCommand("copy"); done(); } catch (e) {}
+  }
 }
 
 function onConnected() {
+  if (connectedOnce) return; // onopen und connectionstate können beide feuern
+  connectedOnce = true;
   setConnStatus("✓ Verbunden! Spiel startet...", "connected");
   setTimeout(() => {
     showScreen("setup");
@@ -564,42 +629,64 @@ function onConnected() {
   }, 1000);
 }
 
+function onConnectionLost(msg) {
+  if (document.getElementById("connect-screen").classList.contains("active")) {
+    setConnStatus(msg, "error");
+  } else if (mode === "mp" && !gameOver) {
+    addLog("sys", msg);
+    const ti = document.getElementById("turn-info");
+    if (ti) ti.textContent = "⚠ " + msg;
+  }
+}
+
 // ============================================================
 // DATA CHANNEL PROTOCOL
 // ============================================================
 function setupDataChannel(channel) {
-  channel.onopen = () => {
-    onConnected();
-  };
-  channel.onclose = () => {
-    if (!gameOver) setConnStatus("Verbindung geschlossen.", "error");
-  };
+  channel.onopen = () => onConnected();
+  channel.onclose = () => onConnectionLost("Verbindung geschlossen.");
   channel.onmessage = (e) => {
-    const msg = JSON.parse(e.data);
-    handleNetMessage(msg);
+    let msg;
+    try { msg = JSON.parse(e.data); } catch (err) { return; }
+    if (msg && typeof msg === "object") handleNetMessage(msg);
   };
 }
 
 function sendMsg(obj) {
-  if (dc && dc.readyState === "open") dc.send(JSON.stringify(obj));
+  if (dc && dc.readyState === "open") {
+    dc.send(JSON.stringify(obj));
+    return true;
+  }
+  addLog("sys", "Nachricht konnte nicht gesendet werden – keine Verbindung.");
+  return false;
+}
+
+function validCharIndex(i) {
+  return Number.isInteger(i) && i >= 0 && i < CHARS.length;
 }
 
 function handleNetMessage(msg) {
   switch (msg.type) {
     case "ready":
-      // Opponent has picked their character
       opponentReady = true;
       checkBothReady();
       break;
 
+    case "restart":
+      // Gegner möchte neu spielen – seine alte Auswahl gilt nicht mehr
+      opponentReady = false;
+      if (!gameOver && document.getElementById("game").classList.contains("active")) break;
+      addLog("sys", "Mitspieler möchte noch einmal spielen.");
+      break;
+
     case "question": {
-      // Opponent asks a question — answer based on our secret
+      if (gameOver || playerSecret === null) return;
       const q = findQuestionByKey(msg.key);
       if (!q) return;
       const answer = q.test(CHARS[playerSecret]);
       sendMsg({ type: "answer", key: msg.key, answer });
       addLog("opponent", q.text, answer);
-      // Now it's our turn
+      turnCount++;
       isPlayerTurn = true;
       updateStatus();
       renderQuestions();
@@ -607,16 +694,12 @@ function handleNetMessage(msg) {
     }
 
     case "answer": {
-      // Response to our question
+      if (gameOver) return;
       const q = findQuestionByKey(msg.key);
       if (!q) return;
-      addLog("player", q.text, msg.answer);
-      // Flip cards based on answer
-      CHARS.forEach((c, i) => {
-        if (i === playerSecret) return;
-        if (msg.answer) { if (!q.test(c)) playerDown.add(i); }
-        else { if (q.test(c)) playerDown.add(i); }
-      });
+      const answer = !!msg.answer;
+      addLog("player", q.text, answer);
+      applyAnswerToBoard(q, answer);
       turnCount++;
       isPlayerTurn = false;
       renderBoard();
@@ -626,14 +709,14 @@ function handleNetMessage(msg) {
     }
 
     case "guess": {
-      // Opponent guesses a character
+      if (gameOver || playerSecret === null || !validCharIndex(msg.charIndex)) return;
       const correct = msg.charIndex === playerSecret;
       sendMsg({ type: "guessResult", correct, charIndex: msg.charIndex });
+      addLog("opponent", `Ist es ${CHARS[msg.charIndex].name}?`, correct);
+      turnCount++;
       if (correct) {
-        addLog("opponent", `Rät: ${CHARS[msg.charIndex].name}`, true);
-        endGame(false);
+        endGame(false, msg.charIndex);
       } else {
-        addLog("opponent", `Rät: ${CHARS[msg.charIndex].name}`, false);
         isPlayerTurn = true;
         updateStatus();
         renderQuestions();
@@ -642,13 +725,16 @@ function handleNetMessage(msg) {
     }
 
     case "guessResult": {
-      if (msg.correct) {
-        addLog("player", `Rät: ${CHARS[msg.charIndex].name}`, true);
-        endGame(true);
+      if (gameOver || !validCharIndex(msg.charIndex)) return;
+      const correct = !!msg.correct;
+      addLog("player", `Ist es ${CHARS[msg.charIndex].name}?`, correct);
+      turnCount++;
+      if (correct) {
+        endGame(true, msg.charIndex);
       } else {
-        addLog("player", `Rät: ${CHARS[msg.charIndex].name}`, false);
-        turnCount++;
+        playerDown.add(msg.charIndex);
         isPlayerTurn = false;
+        renderBoard();
         updateStatus();
         renderQuestions();
       }
@@ -679,8 +765,10 @@ function selectMode(m) {
 // SETUP
 // ============================================================
 function initSetup() {
+  // opponentReady wird hier bewusst NICHT zurückgesetzt – ein "ready"
+  // des Gegners kann schon vor unserem Setup eingetroffen sein.
   playerSecret = null;
-  opponentReady = false;
+  iConfirmed = false;
   const grid = document.getElementById("pick-grid");
   grid.innerHTML = "";
   CHARS.forEach((c, i) => {
@@ -688,62 +776,91 @@ function initSetup() {
     div.className = "char-pick";
     div.innerHTML = makeFace(c) + `<div class="name">${c.name}</div>`;
     div.onclick = () => {
+      if (iConfirmed) return;
       document.querySelectorAll(".char-pick").forEach((el, j) => el.classList.toggle("selected", j === i));
       playerSecret = i;
       document.getElementById("btn-start").disabled = false;
     };
     grid.appendChild(div);
   });
-  document.getElementById("btn-start").disabled = true;
+  const btn = document.getElementById("btn-start");
+  btn.textContent = "Auswahl bestätigen";
+  btn.disabled = true;
+}
+
+function resetRound() {
+  turnCount = 0;
+  playerDown = new Set();
+  aiDown = new Set();
+  aiAsked = new Set();
+  gameOver = false;
+  activeCategory = null;
+  document.getElementById("log").innerHTML = "";
 }
 
 function confirmCharacter() {
-  if (playerSecret === null) return;
+  if (playerSecret === null || iConfirmed) return;
 
   if (mode === "ai") {
-    do { aiSecret = Math.floor(Math.random() * CHARS.length); } while (aiSecret === playerSecret);
+    // Wie beim Brettspiel: Die KI darf auch dieselbe Person wählen
+    aiSecret = Math.floor(Math.random() * CHARS.length);
+    resetRound();
     isPlayerTurn = Math.random() < 0.5;
-    turnCount = 0;
-    playerDown = new Set();
-    aiDown = new Set();
-    aiAsked = new Set();
-    gameOver = false;
-    showScreen("game");
-    renderBoard();
-    renderQuestions();
-    updateStatus();
+    startBoard();
     if (!isPlayerTurn) setTimeout(aiTurn, 800);
   } else {
-    // Multiplayer: tell opponent we're ready
-    sendMsg({ type: "ready" });
-    opponentReady ? startMPGame() : waitForOpponent();
+    iConfirmed = true;
+    if (!sendMsg({ type: "ready" })) { iConfirmed = false; return; }
+    if (opponentReady) startMPGame(); else waitForOpponent();
   }
 }
 
 function waitForOpponent() {
-  document.getElementById("btn-start").textContent = "Warte auf Mitspieler...";
-  document.getElementById("btn-start").disabled = true;
+  const btn = document.getElementById("btn-start");
+  btn.textContent = "Warte auf Mitspieler...";
+  btn.disabled = true;
 }
 
 function checkBothReady() {
-  if (playerSecret !== null && opponentReady) startMPGame();
+  if (iConfirmed && opponentReady) startMPGame();
 }
 
 function startMPGame() {
-  // Host starts
-  isPlayerTurn = isHost;
-  turnCount = 0;
-  playerDown = new Set();
-  gameOver = false;
+  resetRound();
+  opponentReady = false; // für eine mögliche nächste Runde
+  isPlayerTurn = isHost; // Gastgeber beginnt
+  startBoard();
+}
+
+function startBoard() {
+  const me = CHARS[playerSecret];
+  document.getElementById("my-secret").innerHTML =
+    makeFace(me, 32) + `<span>Deine Person: <b>${me.name}</b></span>`;
   showScreen("game");
   renderBoard();
   renderQuestions();
   updateStatus();
 }
 
+function restartGame() {
+  document.getElementById("end-modal").classList.remove("show");
+  if (mode === "mp") {
+    if (!dc || dc.readyState !== "open") { location.reload(); return; }
+    sendMsg({ type: "restart" });
+  }
+  showScreen("setup");
+  initSetup();
+}
+
 // ============================================================
 // BOARD
 // ============================================================
+function applyAnswerToBoard(q, answer) {
+  CHARS.forEach((c, i) => {
+    if (q.test(c) !== answer) playerDown.add(i);
+  });
+}
+
 function renderBoard() {
   const board = document.getElementById("board");
   board.innerHTML = "";
@@ -751,12 +868,13 @@ function renderBoard() {
     const div = document.createElement("div");
     div.className = "card" + (playerDown.has(i) ? " down" : "");
     div.innerHTML = makeFace(c, 64) + `<div class="name">${c.name}</div>`;
+    div.title = "Klicken zum Umklappen";
     div.onclick = () => {
-      if (gameOver || i === playerSecret) return;
+      if (gameOver) return;
       if (playerDown.has(i)) playerDown.delete(i); else playerDown.add(i);
       renderBoard();
+      updateStatus();
     };
-    if (i === playerSecret && !playerDown.has(i)) div.classList.add("highlight");
     board.appendChild(div);
   });
 }
@@ -772,7 +890,8 @@ function renderQuestions() {
   cats.innerHTML = "";
   opts.innerHTML = "";
 
-  if (!isPlayerTurn || gameOver) {
+  if (gameOver) return;
+  if (!isPlayerTurn) {
     const who = mode === "ai" ? "KI" : "Mitspieler";
     opts.innerHTML = `<span style="color:var(--text-dim);font-size:0.85em">Warte auf ${who}...</span>`;
     return;
@@ -814,11 +933,7 @@ function askQuestion(q) {
   if (mode === "ai") {
     const answer = q.test(CHARS[aiSecret]);
     addLog("player", q.text, answer);
-    CHARS.forEach((c, i) => {
-      if (i === playerSecret) return;
-      if (answer) { if (!q.test(c)) playerDown.add(i); }
-      else { if (q.test(c)) playerDown.add(i); }
-    });
+    applyAnswerToBoard(q, answer);
     turnCount++;
     isPlayerTurn = false;
     renderBoard();
@@ -826,9 +941,8 @@ function askQuestion(q) {
     renderQuestions();
     setTimeout(aiTurn, 1000);
   } else {
-    // Multiplayer: send question, wait for answer
-    sendMsg({ type: "question", key: q.key });
-    isPlayerTurn = false; // wait for answer
+    if (!sendMsg({ type: "question", key: q.key })) return;
+    isPlayerTurn = false; // auf Antwort warten
     updateStatus();
     renderQuestions();
   }
@@ -842,13 +956,16 @@ function openGuessModal() {
   const grid = document.getElementById("guess-grid");
   grid.innerHTML = "";
   CHARS.forEach((c, i) => {
-    if (playerDown.has(i) || i === playerSecret) return;
+    if (playerDown.has(i)) return;
     const div = document.createElement("div");
     div.className = "guess-option";
     div.innerHTML = makeFace(c, 56) + `<div class="name">${c.name}</div>`;
     div.onclick = () => doGuess(i);
     grid.appendChild(div);
   });
+  if (!grid.children.length) {
+    grid.innerHTML = `<p style="grid-column:1/-1">Alle Karten sind umgeklappt – klappe Kandidaten wieder hoch.</p>`;
+  }
   document.getElementById("guess-modal").classList.add("show");
 }
 
@@ -858,22 +975,24 @@ function closeGuessModal() {
 
 function doGuess(i) {
   closeGuessModal();
-  if (gameOver) return;
+  if (gameOver || !isPlayerTurn) return;
 
   if (mode === "ai") {
     turnCount++;
-    if (i === aiSecret) {
-      endGame(true);
+    const correct = i === aiSecret;
+    addLog("player", `Ist es ${CHARS[i].name}?`, correct);
+    if (correct) {
+      endGame(true, i);
     } else {
-      addLog("player", `Ist es ${CHARS[i].name}?`, false);
+      playerDown.add(i);
       isPlayerTurn = false;
+      renderBoard();
       updateStatus();
       renderQuestions();
       setTimeout(aiTurn, 1000);
     }
   } else {
-    // Multiplayer: send guess, wait for result
-    sendMsg({ type: "guess", charIndex: i });
+    if (!sendMsg({ type: "guess", charIndex: i })) return;
     isPlayerTurn = false;
     updateStatus();
     renderQuestions();
@@ -883,51 +1002,49 @@ function doGuess(i) {
 // ============================================================
 // AI LOGIC
 // ============================================================
+function aiGuess(guessIdx) {
+  const correct = guessIdx === playerSecret;
+  addLog("ai", `Ist es ${CHARS[guessIdx].name}?`, correct);
+  turnCount++;
+  if (correct) { endGame(false, guessIdx); return true; }
+  aiDown.add(guessIdx);
+  return false;
+}
+
 function aiTurn() {
   if (gameOver || mode !== "ai") return;
 
-  const remaining = CHARS.filter((_, i) => !aiDown.has(i));
+  const remainingIdx = CHARS.map((_, i) => i).filter(i => !aiDown.has(i));
 
-  if (remaining.length <= 2) {
-    const guessIdx = CHARS.indexOf(remaining[Math.floor(Math.random() * remaining.length)]);
-    const correct = guessIdx === playerSecret;
-    addLog("ai", `Ist es ${CHARS[guessIdx].name}?`, correct);
-    if (correct) { endGame(false); return; }
-    aiDown.add(guessIdx);
-    turnCount++;
-    isPlayerTurn = true;
-    updateStatus();
-    renderQuestions();
-    return;
-  }
-
-  let bestQ = null, bestScore = Infinity;
-  ALL_QUESTIONS.forEach((q, qi) => {
-    if (aiAsked.has(qi)) return;
-    const yesCount = remaining.filter(c => q.test(c)).length;
-    const score = Math.abs(yesCount - remaining.length / 2);
-    if (score < bestScore) { bestScore = score; bestQ = qi; }
-  });
-
-  if (bestQ === null) {
-    const guessIdx = CHARS.indexOf(remaining[0]);
-    const correct = guessIdx === playerSecret;
-    addLog("ai", `Ist es ${CHARS[guessIdx].name}?`, correct);
-    if (correct) { endGame(false); return; }
-    aiDown.add(guessIdx);
+  if (remainingIdx.length <= 2) {
+    const guessIdx = remainingIdx[Math.floor(Math.random() * remainingIdx.length)];
+    if (aiGuess(guessIdx)) return;
   } else {
-    const q = ALL_QUESTIONS[bestQ];
-    aiAsked.add(bestQ);
-    const answer = q.test(CHARS[playerSecret]);
-    addLog("ai", q.text, answer);
-    CHARS.forEach((c, i) => {
-      if (aiDown.has(i)) return;
-      if (answer) { if (!q.test(c)) aiDown.add(i); }
-      else { if (q.test(c)) aiDown.add(i); }
+    // Frage suchen, die die Kandidaten möglichst halbiert; Fragen, die
+    // nichts trennen (alle Ja oder alle Nein), werden übersprungen.
+    let bestQ = null, bestScore = Infinity;
+    ALL_QUESTIONS.forEach((q, qi) => {
+      if (aiAsked.has(qi)) return;
+      const yesCount = remainingIdx.filter(i => q.test(CHARS[i])).length;
+      if (yesCount === 0 || yesCount === remainingIdx.length) return;
+      const score = Math.abs(yesCount - remainingIdx.length / 2);
+      if (score < bestScore) { bestScore = score; bestQ = qi; }
     });
+
+    if (bestQ === null) {
+      // Keine trennende Frage mehr – raten
+      const guessIdx = remainingIdx[Math.floor(Math.random() * remainingIdx.length)];
+      if (aiGuess(guessIdx)) return;
+    } else {
+      const q = ALL_QUESTIONS[bestQ];
+      aiAsked.add(bestQ);
+      const answer = q.test(CHARS[playerSecret]);
+      addLog("ai", q.text, answer);
+      remainingIdx.forEach(i => { if (q.test(CHARS[i]) !== answer) aiDown.add(i); });
+      turnCount++;
+    }
   }
 
-  turnCount++;
   isPlayerTurn = true;
   updateStatus();
   renderQuestions();
@@ -948,51 +1065,60 @@ function addLog(who, text, answer) {
   } else if (who === "opponent") {
     div.innerHTML = `<span class="ai-q">Gegner:</span> ${text} → ${a}`;
   } else {
-    div.innerHTML = `<em>${text}</em>`;
+    div.className = "entry sys";
+    div.textContent = text;
   }
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
 }
 
+function currentRound() {
+  return Math.floor(turnCount / 2) + 1;
+}
+
 function updateStatus() {
   const ti = document.getElementById("turn-info");
-  if (isPlayerTurn) {
-    ti.textContent = "Du bist dran!";
-  } else {
-    ti.textContent = mode === "ai" ? "KI denkt nach..." : "Gegner ist dran...";
-  }
+  if (gameOver) ti.textContent = "Spiel beendet";
+  else if (isPlayerTurn) ti.textContent = "Du bist dran!";
+  else ti.textContent = mode === "ai" ? "KI denkt nach..." : "Gegner ist dran...";
+
+  const plRem = CHARS.filter((_, i) => !playerDown.has(i)).length;
   if (mode === "ai") {
     const aiRem = CHARS.filter((_, i) => !aiDown.has(i)).length;
-    const plRem = CHARS.filter((_, i) => !playerDown.has(i) && i !== playerSecret).length;
     document.getElementById("remaining-info").textContent =
-      `Dein Board: ${plRem} übrig | KI: ${aiRem} übrig | Runde ${Math.ceil(turnCount/2)+1}`;
+      `Dein Board: ${plRem} übrig | KI: ${aiRem} übrig | Runde ${currentRound()}`;
   } else {
-    const plRem = CHARS.filter((_, i) => !playerDown.has(i) && i !== playerSecret).length;
     document.getElementById("remaining-info").textContent =
-      `${plRem} Personen übrig | Runde ${Math.ceil(turnCount/2)+1}`;
+      `${plRem} Personen übrig | Runde ${currentRound()}`;
   }
 }
 
 // ============================================================
 // END GAME
 // ============================================================
-function endGame(playerWins) {
+// shownIdx = die erratene Person (bei Sieg die des Gegners, bei Niederlage die eigene)
+function endGame(playerWins, shownIdx) {
   gameOver = true;
+  const rounds = Math.ceil(turnCount / 2);
   const modal = document.getElementById("end-modal");
   document.getElementById("end-title").textContent = playerWins ? "🎉 Du hast gewonnen!" : "😞 Du hast verloren!";
   document.getElementById("end-title").style.color = playerWins ? "var(--green)" : "var(--accent)";
 
   if (mode === "ai") {
-    document.getElementById("end-face").innerHTML = makeFace(CHARS[aiSecret], 90);
+    const show = playerWins ? aiSecret : playerSecret;
+    document.getElementById("end-face").innerHTML = makeFace(CHARS[show], 90);
     document.getElementById("end-text").innerHTML = playerWins
-      ? `Die geheime Person der KI war <b>${CHARS[aiSecret].name}</b>.<br>Geschafft in ${Math.ceil(turnCount/2)} Runden!`
-      : `Deine Person war <b>${CHARS[playerSecret].name}</b>.<br>Die KI hat es in ${Math.ceil(turnCount/2)} Runden erraten.`;
+      ? `Die geheime Person der KI war <b>${CHARS[aiSecret].name}</b>.<br>Geschafft in ${rounds} Runden!`
+      : `Deine Person war <b>${CHARS[playerSecret].name}</b>.<br>Die KI hat es in ${rounds} Runden erraten.<br>Die KI hatte <b>${CHARS[aiSecret].name}</b>.`;
   } else {
-    document.getElementById("end-face").innerHTML = makeFace(CHARS[playerSecret], 90);
+    const show = playerWins ? shownIdx : playerSecret;
+    document.getElementById("end-face").innerHTML = makeFace(CHARS[show], 90);
     document.getElementById("end-text").innerHTML = playerWins
-      ? `Du hast es in ${Math.ceil(turnCount/2)} Runden geschafft!`
-      : `Der Gegner hat deine Person (<b>${CHARS[playerSecret].name}</b>) erraten.`;
+      ? `Die Person des Gegners war <b>${CHARS[shownIdx].name}</b>.<br>Geschafft in ${rounds} Runden!`
+      : `Der Gegner hat deine Person (<b>${CHARS[playerSecret].name}</b>) in ${rounds} Runden erraten.`;
   }
+  updateStatus();
+  renderQuestions();
   modal.classList.add("show");
 }
 </script>

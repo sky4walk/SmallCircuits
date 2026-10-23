@@ -54,6 +54,10 @@
   .win-card p{color:#aaa;margin-bottom:16px;line-height:1.5}
   .win-card p span{color:#f1c40f;font-weight:700}
   .win-btns{display:flex;gap:8px;justify-content:center}
+  button:disabled{opacity:.4;cursor:default}
+  .footer{font-size:.72rem;color:#666;text-align:center;padding:0 16px 24px}
+  .footer a{color:#f39c12;text-decoration:none}
+  .footer a:hover{text-decoration:underline}
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -76,10 +80,13 @@
   <button class="btn-s" onclick="undo()">↶ Zurück</button>
   <button class="btn-s" onclick="resetLvl()">↻ Neustart</button>
   <button class="btn-h" onclick="showHint()">💡 Hinweis</button>
-  <button class="btn-p" onclick="step(1)">Weiter ▸</button>
+  <button class="btn-p" id="nextBtn" onclick="step(1)">Weiter ▸</button>
 </div>
 <div class="controls" style="padding-top:0">
   <button class="chip" id="freeTgl" onclick="toggleFree()" aria-pressed="true"></button>
+  <button class="chip" onclick="saveProgress()" title="Gelöste Level als Datei sichern">💾 Fortschritt speichern</button>
+  <button class="chip" onclick="document.getElementById('progFile').click()" title="Gesicherte Datei wieder laden">📂 Fortschritt laden</button>
+  <input type="file" id="progFile" accept=".json,application/json" hidden onchange="loadProgress(this)">
 </div>
 <div class="level-picker">
   <div class="picker-row" id="setTabs"></div>
@@ -92,11 +99,12 @@
     <h2>🎉 Geschafft!</h2>
     <p>In <span id="wm">0</span> Zügen<br><span id="wo"></span></p>
     <div class="win-btns">
-      <button class="btn-p" onclick="step(1)">Nächstes Level ▸</button>
+      <button class="btn-p" id="ovNext" onclick="step(1)">Nächstes Level ▸</button>
       <button class="btn-s" onclick="closeOv()">Schließen</button>
     </div>
   </div>
 </div>
+<div class="footer">Mehr Projekte: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></div>
 
 <script>
 const G=6;
@@ -121,8 +129,8 @@ function decode(code){
 }
 
 let cs,cv,cx,cur=0,vehs=[],mc=0,solvedSet=new Set(),drag=null,hist=[];
-let pickSet=0,pickDiff=-1,allowFree=true;
-const SKEY='rh_solved_v2',FKEY='rh_freeexit';
+let pickSet=0,pickDiff=-1,allowFree=true,won=false;
+let hint=null,hintTimer=null;   // {i,dr,dc,ex} – markiertes Fahrzeug aus dem Hinweis
 // Karten, die ohne die Regel unlösbar sind
 const NEEDFREE=new Set(DATA.needfree);
 
@@ -131,8 +139,6 @@ function lvId(L){return L.set+'-'+L.num}
 function init(){
   cv=document.getElementById('cv');cx=cv.getContext('2d');
   resize();window.addEventListener('resize',resize);
-  try{const s=localStorage.getItem(SKEY);if(s)solvedSet=new Set(JSON.parse(s))}catch(e){}
-  try{allowFree=localStorage.getItem(FKEY)!=='0'}catch(e){}
   updFreeBtn();buildTabs();loadLvl(0);
   cv.addEventListener('pointerdown',onDown);
   cv.addEventListener('pointermove',onMove);
@@ -142,9 +148,13 @@ function init(){
 }
 
 function resize(){
-  const mw=Math.min(window.innerWidth-32,480);
+  // 28 px Rand je Seite, damit der Ausfahrt-Pfeil (22 px) nicht abgeschnitten wird
+  const mw=Math.min(window.innerWidth-56,480);
   cs=Math.floor(mw/G);const sz=cs*G;
-  cv.width=sz;cv.height=sz;cv.style.width=sz+'px';cv.style.height=sz+'px';
+  const dpr=window.devicePixelRatio||1;
+  cv.width=Math.round(sz*dpr);cv.height=Math.round(sz*dpr);
+  cv.style.width=sz+'px';cv.style.height=sz+'px';
+  cx.setTransform(dpr,0,0,dpr,0,0);
   const bw=document.getElementById('bw');bw.style.width=sz+'px';bw.style.height=sz+'px';
   const ea=document.getElementById('exitArrow');
   ea.style.top=(2*cs)+'px';ea.style.height=cs+'px';
@@ -165,8 +175,7 @@ function updGoal(){
 }
 function toggleFree(){
   allowFree=!allowFree;
-  try{localStorage.setItem(FKEY,allowFree?'1':'0')}catch(e){}
-  updFreeBtn();updGoal();document.getElementById('hm').textContent='';
+  updFreeBtn();updGoal();clearHint();
 }
 function updFreeBtn(){
   const b=document.getElementById('freeTgl');
@@ -177,10 +186,13 @@ function updFreeBtn(){
 function loadLvl(i){
   cur=i;const L=LEVELS[i];
   vehs=decode(L.code);
-  mc=0;hist=[];
+  mc=0;hist=[];won=false;drag=null;
   document.getElementById('mc').textContent='0';
-  document.getElementById('hm').textContent='';
+  clearHint();
   updGoal();
+  const last=i>=LEVELS.length-1;
+  document.getElementById('nextBtn').disabled=last;
+  document.getElementById('ovNext').style.display=last?'none':'';
   const title=L.set===4?('Eigene · '+L.name):(SETNAMES[L.set]+' · Karte '+L.num);
   document.getElementById('lvInfo').innerHTML=
     title+' <span class="difficulty diff-'+L.diff+'">'+DIFFNAMES[L.diff]+'</span>';
@@ -191,9 +203,9 @@ function resetLvl(){loadLvl(cur)}
 function step(d){closeOv();const n=cur+d;if(n>=0&&n<LEVELS.length)loadLvl(n)}
 function undo(){
   if(!hist.length)return;
-  vehs=hist.pop();mc=Math.max(0,mc-1);
+  vehs=hist.pop();mc=Math.max(0,mc-1);won=false;
   document.getElementById('mc').textContent=mc;
-  document.getElementById('hm').textContent='';
+  clearHint();
   draw();
 }
 function snapshot(){hist.push(vehs.map(v=>({...v})));if(hist.length>200)hist.shift()}
@@ -220,7 +232,7 @@ function buildGrid(){
   const vis=visible();
   vis.forEach(([l,i])=>{
     const b=document.createElement('button');b.className='lv-btn';
-    b.textContent=l.set===4?l.num:l.num;
+    b.textContent=l.num;
     b.title=l.name||(SETNAMES[l.set]+' '+l.num);
     if(i===cur)b.classList.add('cur');
     if(solvedSet.has(lvId(l)))b.classList.add('done');
@@ -229,7 +241,31 @@ function buildGrid(){
   const done=vis.filter(([l])=>solvedSet.has(lvId(l))).length;
   document.getElementById('pMeta').textContent=done+' von '+vis.length+' gelöst';
 }
-function saveP(){try{localStorage.setItem(SKEY,JSON.stringify([...solvedSet]))}catch(e){}}
+// ── Fortschritt als Datei (kein localStorage) ──
+function saveProgress(){
+  const data={app:'rush_hour',version:1,solved:[...solvedSet],allowFree:allowFree};
+  const blob=new Blob([JSON.stringify(data,null,1)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download='rush_hour_fortschritt.json';document.body.appendChild(a);a.click();
+  setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},1000);
+}
+function loadProgress(inp){
+  const f=inp.files&&inp.files[0];if(!f)return;
+  const rd=new FileReader();
+  rd.onload=()=>{
+    const hm=document.getElementById('hm');
+    try{
+      const d=JSON.parse(rd.result);
+      if(!d||!Array.isArray(d.solved))throw new Error('Format');
+      const ids=new Set(LEVELS.map(lvId));
+      solvedSet=new Set(d.solved.filter(x=>typeof x==='string'&&ids.has(x)));
+      if(typeof d.allowFree==='boolean'){allowFree=d.allowFree;updFreeBtn();updGoal()}
+      buildGrid();hm.textContent='📂 Fortschritt geladen: '+solvedSet.size+' Level gelöst.';
+    }catch(e){hm.textContent='⚠ Datei konnte nicht gelesen werden.'}
+    inp.value='';
+  };
+  rd.readAsText(f);
+}
 
 // ── Zeichnen ──
 function draw(){
@@ -245,6 +281,25 @@ function draw(){
     cx.beginPath();cx.moveTo(0,i*cs);cx.lineTo(S,i*cs);cx.stroke()}
   cx.fillStyle='rgba(231,76,60,.14)';cx.fillRect(S-5,2*cs,5,cs);
   vehs.forEach((v,i)=>{if(!v.out)drawV(v,i)});
+  if(hint&&vehs[hint.i]&&!vehs[hint.i].out)drawHint();
+}
+// Hinweis: Fahrzeug gelb gestrichelt umranden und Richtungspfeil zeigen
+function drawHint(){
+  const v=vehs[hint.i];
+  const x=v.c*cs+1,y=v.r*cs+1;
+  const w=(v.dir==='h'?v.len:1)*cs-2,h=(v.dir==='v'?v.len:1)*cs-2;
+  cx.save();
+  cx.setLineDash([7,5]);cx.lineWidth=3.5;cx.strokeStyle='#f1c40f';
+  cx.beginPath();rr(cx,x,y,w,h,9);cx.stroke();cx.setLineDash([]);
+  const arrow=hint.dc>0||hint.ex?'▶':hint.dc<0?'◀':hint.dr>0?'▼':'▲';
+  cx.fillStyle='#f1c40f';cx.strokeStyle='rgba(0,0,0,.6)';cx.lineWidth=3;
+  cx.font='bold '+(cs*.42)+'px Inter,sans-serif';cx.textAlign='center';cx.textBaseline='middle';
+  cx.strokeText(arrow,x+w/2,y+h/2);cx.fillText(arrow,x+w/2,y+h/2);
+  cx.restore();
+}
+function clearHint(){
+  hint=null;if(hintTimer){clearTimeout(hintTimer);hintTimer=null}
+  const hm=document.getElementById('hm');if(hm)hm.textContent='';
 }
 function drawV(v,idx){
   const p=3,rad=7,tgt=idx<LEVELS[cur].nt;
@@ -278,6 +333,7 @@ function canExit(v,i){return v.dir==='h'&&v.r===2&&(allowFree||i<LEVELS[cur].nt)
 
 // ── Eingabe ──
 function onDown(e){
+  if(won)return;              // nach dem Sieg ist das Brett gesperrt (Zurück/Neustart geht)
   cv.setPointerCapture(e.pointerId);
   const rect=cv.getBoundingClientRect();
   const px=e.clientX-rect.left,py=e.clientY-rect.top;
@@ -308,9 +364,10 @@ function onUp(){
     v.c=drag.sc;v.r=drag.sr;snapshot();v.c=oc;v.r=or_;
     if(canExit(v,drag.i)&&v.c+v.len>G){v.out=true;v.c=G}
     mc++;document.getElementById('mc').textContent=mc;
-    document.getElementById('hm').textContent='';
+    clearHint();
   }
-  drag=null;draw();checkWin();
+  drag=null;draw();
+  if(moved)checkWin();
 }
 function clamp(idx,v,np,axis,g){
   const op=axis==='c'?v.c:v.r;if(np===op)return op;
@@ -336,8 +393,10 @@ function clamp(idx,v,np,axis,g){
 // ── Gewonnen? ──
 function checkWin(){
   const L=LEVELS[cur];
+  if(won)return;
   for(let i=0;i<L.nt;i++)if(!vehs[i].out)return;
-  solvedSet.add(lvId(L));saveP();buildGrid();
+  won=true;
+  solvedSet.add(lvId(L));buildGrid();
   document.getElementById('wm').textContent=mc;
   const opt=L.min,r=mc/opt;
   document.getElementById('wo').textContent=
@@ -391,6 +450,7 @@ function solveFrom(vs,nt,free){
 
 function showHint(){
   const L=LEVELS[cur];
+  clearHint();
   const res=solveFrom(vehs,L.nt,allowFree);
   const hm=document.getElementById('hm');
   if(!res){hm.textContent=(NEEDFREE.has(L.set+'-'+L.num)&&!allowFree)
@@ -398,17 +458,27 @@ function showHint(){
     :'Kein Weg mehr zum Ziel – bitte Neustart.';return}
   if(!res.f){hm.textContent='🎉 Schon gelöst!';return}
   const m=res.f,v=vehs[m.i];
-  const nm=m.i<L.nt?'Zielfahrzeug':'Fahrzeug #'+(m.i+1);
-  if(m.ex){hm.textContent='💡 '+nm+' durch die Lücke rausfahren – noch '+res.d+' Züge';return}
+  const nm=m.i<L.nt?'Zielfahrzeug':'gelb markierte Fahrzeug';
+  hint={i:m.i,ex:m.ex,dr:m.ex?0:m.r-v.r,dc:m.ex?1:m.c-v.c};
+  hintTimer=setTimeout(()=>{hint=null;hintTimer=null;draw()},6000);
+  draw();
+  if(m.ex){hm.textContent='💡 Das '+nm+' durch die Lücke rausfahren – noch '+res.d+(res.d===1?' Zug':' Züge');return}
   let dir,steps;
   if(v.dir==='h'){dir=m.c>v.c?'nach rechts':'nach links';steps=Math.abs(m.c-v.c)}
   else{dir=m.r>v.r?'nach unten':'nach oben';steps=Math.abs(m.r-v.r)}
-  hm.textContent='💡 '+nm+' '+dir+' ('+steps+(steps===1?' Feld':' Felder')+') – noch '+res.d+' Züge';
+  hm.textContent='💡 Das '+nm+' '+dir+' ('+steps+(steps===1?' Feld':' Felder')+') – noch '+res.d+(res.d===1?' Zug':' Züge');
 }
 
+// Levelwechsel per Taste nur mit Rückfrage, wenn schon gezogen wurde
+function keyStep(d){
+  const n=cur+d;if(n<0||n>=LEVELS.length)return;
+  if(mc>0&&!won&&!confirm('Level wechseln? Die bisherigen Züge gehen verloren.'))return;
+  step(d);
+}
 document.addEventListener('keydown',e=>{
-  if(e.key==='ArrowRight')step(1);
-  else if(e.key==='ArrowLeft')step(-1);
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  if(e.key==='ArrowRight'){e.preventDefault();keyStep(1)}
+  else if(e.key==='ArrowLeft'){e.preventDefault();keyStep(-1)}
   else if(e.key==='r'||e.key==='R')resetLvl();
   else if(e.key==='h'||e.key==='H')showHint();
   else if(e.key==='z'||e.key==='Z')undo();

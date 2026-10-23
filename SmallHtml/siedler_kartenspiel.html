@@ -153,7 +153,7 @@ dialog .schluss{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
 <div id="app">
   <header>
     <h1>Das schnelle Kartenspiel</h1>
-    <span class="sub">Catan · 2–4 Spieler · 10 Siegpunkte</span>
+    <span class="sub">Catan · 2–4 Spieler · 10 Siegpunkte · <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--gold)">itzwieseltal.wordpress.com</a></span>
     <span class="spacer"></span>
     <button class="btn" id="btn-neu">Neues Spiel</button>
     <button class="btn" id="btn-regeln">Regeln</button>
@@ -254,6 +254,10 @@ const BILD_AUSBAU = {kirche:'kirche',stadtburg:'stadtburg',haendlergilde:'haendl
 let S = null;              // Spielzustand
 let wahl = null;           // ausgewählte Handkarte (Index)
 let modus = null;          // laufende Interaktion
+let spielNr = 0;           // erhöht sich bei jedem neuen Spiel – alte Timer laufen ins Leere
+
+/* setTimeout, das nach einem Neustart nicht mehr feuert */
+function spaeter(fn, ms){ const nr = spielNr; setTimeout(() => { if(nr === spielNr) fn(); }, ms); }
 
 const $  = s => document.querySelector(s);
 const el = (t,c,txt) => { const n=document.createElement(t); if(c)n.className=c; if(txt!=null)n.textContent=txt; return n; };
@@ -264,6 +268,9 @@ const zaehl = h => { const c={}; RES.forEach(r=>c[r]=0); h.forEach(r=>c[r]++); r
 
 function neuesSpiel(anzahl){
   const b = BESTAND[anzahl];
+  spielNr++;
+  wahl = null; modus = null;
+  const dlg = document.querySelector('#dlg'); if(dlg && dlg.open) dlg.close();
 
   const stadtStapel = misch([
     ...Array(b.stadt.raeuber).fill('raeuber'),
@@ -283,6 +290,7 @@ function neuesSpiel(anzahl){
       strassen: 1,           // Startauslage: 1 Straße (A-Seite)
       ritter: 0,
       genutzt: {},
+      best: 0,               // eigener Punkterekord (Patt-Erkennung)
     })),
     vorratStadt: stadtStapel,
     vorrat: {strasse: b.strasse - anzahl, ritter: b.ritter, ausbau: b.ausbau.slice()},
@@ -292,7 +300,7 @@ function neuesSpiel(anzahl){
     tauschRest: 0, gebaut: {},
     abwerfen: 0,             // offene Abwürfe des menschlichen Spielers (Räuberüberfall)
     fortsetzen: null,        // Rückruf, wenn der Abwurf erledigt ist
-    ohneBau: 0, bestJe: 1,   // Züge ohne neuen Punkterekord – erkennt ein Patt
+    ohneBau: 0,              // Züge, in denen kein Spieler seinen eigenen Rekord verbessert hat
     log: [], vorbei:false,
   };
 
@@ -349,15 +357,14 @@ function planZahlung(p, kosten){
 
   const uniFrei = hatAusbau(p,'universitaet') && !p.genutzt.uni;
 
-  // Variante A: Universität deckt einen Fehlbetrag, Rest über 3:1
-  const versuch = (mitUni) => {
-    const rest = zaehl([]); RES.forEach(r=>rest[r]=c[r]);
+  // Universität deckt einen Fehlbetrag mit Rohstoff uniRes, Rest über 3:1
+  const versuch = (uniRes) => {
+    const rest = {...c};
     const zusatz = [];
     let offen = fehlt.length;
-    if(mitUni){
-      const r = RES.filter(r=>rest[r]>0).sort((a,b)=>rest[b]-rest[a])[0];
-      if(!r) return null;
-      rest[r]--; zusatz.push(r); offen--;
+    if(uniRes){
+      if(!rest[uniRes]) return null;
+      rest[uniRes]--; zusatz.push(uniRes); offen--;
     }
     for(let i=0;i<offen;i++){
       const r = RES.filter(r=>rest[r]>=3).sort((a,b)=>rest[b]-rest[a])[0];
@@ -367,9 +374,10 @@ function planZahlung(p, kosten){
     return zusatz;
   };
 
-  let z = versuch(false);
+  let z = versuch(null);
   if(z) return {plan:[...plan,...z], uni:false};
-  if(uniFrei){ z = versuch(true); if(z) return {plan:[...plan,...z], uni:true}; }
+  // jeden möglichen Ersatzrohstoff probieren – der häufigste ist nicht immer richtig
+  if(uniFrei) for(const r of RES){ z = versuch(r); if(z) return {plan:[...plan,...z], uni:true}; }
   return null;
 }
 
@@ -514,13 +522,16 @@ function zugBeginn(){
   S.phase = 'tausch';
   S.tauschRest = Math.max(1, aSeiten(p.strassen));
   logRaw('— '+p.name+' ist am Zug —','zug');
-  if(p.ki) setTimeout(kiZug, 550); else zeichne();
+  zeichne();                             // auch zwischen zwei Computerzügen aktualisieren
+  if(p.ki) spaeter(kiZug, 550);
 }
 
 function phaseWeiter(){
-  if(S.phase==='tausch'){ S.phase='bau'; }
-  else if(S.phase==='bau'){ nachziehen(); }
-  zeichne();
+  if(S.phase==='tausch'){ S.phase='bau'; zeichne(); }
+  else if(S.phase==='bau'){
+    S.phase='zieh'; wahl=null; modus=null; zeichne();   // Phase 3 kurz anzeigen
+    spaeter(nachziehen, 350);
+  }
 }
 
 function nachziehen(){
@@ -533,9 +544,12 @@ function nachziehen(){
   // Patt erkennen: bewegt sich der Punktestand über viele Runden nicht mehr,
   // ist das Spiel festgefahren (z. B. wenn sich zwei Spieler dieselbe Straße
   // immer wieder gegenseitig wegnehmen).
-  const best = Math.max(...S.spieler.map(sp));
-  if(best > S.bestJe){ S.bestJe = best; S.ohneBau = 0; } else S.ohneBau++;
-  if(!nochPunkteMoeglich() || S.ohneBau >= 25 * S.anzahl){ patt(); return; }
+  // Fortschritt = irgendein Spieler übertrifft seinen eigenen bisherigen Rekord.
+  let fortschritt = false;
+  S.spieler.forEach(q => { const n = sp(q); if(n > q.best){ q.best = n; fortschritt = true; } });
+  S.ohneBau = fortschritt ? 0 : S.ohneBau + 1;
+  if(!nochPunkteMoeglich()){ patt('erschoepft'); return; }
+  if(S.ohneBau >= 25 * S.anzahl){ patt('stillstand'); return; }
 
   S.dran = (S.dran + 1) % S.anzahl;      // immer im Uhrzeigersinn
   zugBeginn();
@@ -557,15 +571,17 @@ function nochPunkteMoeglich(){
   return false;
 }
 
-function patt(){
+function patt(grund){
   S.vorbei = true;
   const best = Math.max(...S.spieler.map(sp));
   const fuehrend = S.spieler.filter(p => sp(p) === best);
-  logRaw('Patt – seit vielen Zügen kann niemand mehr bauen. '+
-         'Vorne '+fuehrend.map(p=>p.name).join(' und ')+' mit '+best+' Siegpunkten.','zug');
+  const text = grund==='erschoepft'
+    ? 'Der Vorrat ist erschöpft und niemand kann mehr Siegpunkte gewinnen.'
+    : 'Seit '+S.ohneBau+' Zügen hat kein Spieler mehr einen neuen Punkterekord erreicht – das Spiel ist festgefahren.';
+  logRaw('Patt – '+text+' Vorne '+fuehrend.map(p=>p.name).join(' und ')+' mit '+best+' Siegpunkten.','zug');
   zeichne();
-  setTimeout(()=>zeigeDialog(
-    '<h3>Patt</h3><p>Der Vorrat ist erschöpft und niemand kann mehr bauen. '+
+  spaeter(()=>zeigeDialog(
+    '<h3>Patt</h3><p>'+text+' '+
     'Nach Siegpunkten führt '+fuehrend.map(p=>p.name).join(' und ')+' mit '+best+'.</p>'+
     '<p>Endstand: '+S.spieler.map(p=>p.name+' '+sp(p)).join(' · ')+'</p>'+
     '<div class="schluss"><button class="btn prim" onclick="this.closest(\'dialog\').close()">Schließen</button></div>'
@@ -577,7 +593,7 @@ function pruefeSieg(){
   if(g && !S.vorbei){
     S.vorbei = true;
     logRaw(g.name+' erreicht 10 Siegpunkte und gewinnt!','zug');
-    setTimeout(()=>zeigeDialog(
+    spaeter(()=>zeigeDialog(
       '<h3>'+(g.ki?g.name+' gewinnt':'Sie gewinnen!')+'</h3>'+
       '<p>Endstand: '+S.spieler.map(p=>p.name+' '+sp(p)).join(' · ')+'</p>'+
       '<div class="schluss"><button class="btn prim" onclick="this.closest(\'dialog\').close()">Schließen</button></div>'
@@ -656,14 +672,16 @@ function kiZug(){
 function kiEnde(){
   if(S.vorbei){ zeichne(); return; }
   if(S.abwerfen > 0){ S.fortsetzen = kiEnde; zeichne(); return; }  // wartet auf den Abwurf
-  setTimeout(() => { if(!S.vorbei) nachziehen(); else zeichne(); }, 500);
+  S.phase = 'zieh'; zeichne();
+  spaeter(() => { if(!S.vorbei) nachziehen(); else zeichne(); }, 500);
 }
 
 function kiZiel(p){
   // Bauziele in Prioritätsreihenfolge
   const l = [];
-  if(p.ritter   < 2) l.push(['ritter',   KOSTEN.ritter]);      // Motor: +1 nachziehen
-  if(p.strassen < 3) l.push(['strasse',  KOSTEN.strasse]);     // Motor: +1 Tausch
+  // Motor-Ziele nur, solange der Vorrat reicht – Wegnehmen lohnt sich dafür nicht
+  if(p.ritter   < 2 && S.vorrat.ritter  > 0) l.push(['ritter',  KOSTEN.ritter]);   // Motor: +1 nachziehen
+  if(p.strassen < 3 && S.vorrat.strasse > 0) l.push(['strasse', KOSTEN.strasse]);  // Motor: +1 Tausch
   if(p.siedlungen.some(s=>s.stadt && !s.ausbau)) l.push(['ausbau', ausbauKosten('kirche')]);
   if(p.siedlungen.some(s=>!s.stadt))             l.push(['stadt',    KOSTEN.stadt]);
   if(S.vorratStadt.length)                        l.push(['siedlung', KOSTEN.siedlung]);
@@ -717,12 +735,15 @@ function kiBau(p){
     baue(p,'stadt', p.siedlungen.find(s=>!s.stadt)); return true;
   }
   if(kannBauen(p,'siedlung')){ baue(p,'siedlung'); return true; }
-  if(p.ritter < 3 && kannBauen(p,'ritter')){ baue(p,'ritter'); return true; }
-  if(p.strassen < 4 && kannBauen(p,'strasse')){ baue(p,'strasse'); return true; }
+  // Aus dem Vorrat bauen ist immer gut. Einem Mitspieler wegnehmen nur, wenn die
+  // neue Karte eine B-Seite wird (+1 SP) – sonst holt er sie sich nur zurück.
+  const lohnt = (was, feld) => S.vorrat[was] > 0 || p[feld] % 2 === 1;
+  if(p.ritter < 3   && lohnt('ritter','ritter')    && kannBauen(p,'ritter')){ baue(p,'ritter'); return true; }
+  if(p.strassen < 4 && lohnt('strasse','strassen') && kannBauen(p,'strasse')){ baue(p,'strasse'); return true; }
   // Endspurt: jede B-Seite bringt 1 SP
   if(sp(p) >= 7){
-    if(kannBauen(p,'ritter')){ baue(p,'ritter'); return true; }
-    if(kannBauen(p,'strasse')){ baue(p,'strasse'); return true; }
+    if(lohnt('ritter','ritter')    && kannBauen(p,'ritter')){ baue(p,'ritter'); return true; }
+    if(lohnt('strasse','strassen') && kannBauen(p,'strasse')){ baue(p,'strasse'); return true; }
   }
   return false;
 }
@@ -899,7 +920,8 @@ function zeichneAktionen(){
       ' Rohstoffkarte(n) abgeben. Klicken Sie die Karten in Ihrer Hand an.';
     return;
   }
-  if(!meinZug){ H.textContent = S.spieler[S.dran].name+' überlegt …'; return; }
+  if(!meinZug){ H.textContent = S.spieler[S.dran].name+(S.phase==='zieh'?' zieht nach …':' überlegt …'); return; }
+  if(S.phase==='zieh'){ H.textContent = 'Sie ziehen nach …'; return; }
 
   const knopf = (label, aktiv, fn, unter) => {
     const b = el('button','btn');

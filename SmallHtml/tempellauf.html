@@ -84,6 +84,8 @@
   }
   .bilanz{display:flex; gap:38px; text-align:center;}
   .bilanz .wert{font-size:clamp(26px,7vw,40px);}
+  .bloglink{font-size:11px; letter-spacing:.18em; color:var(--gold); opacity:.6; text-decoration:none;}
+  .bloglink:hover{opacity:1; text-decoration:underline;}
   .rekordhinweis{font-size:12px; letter-spacing:.2em; text-transform:uppercase; color:var(--gold);}
 
   /* ---------- Kurvenwarnung ---------- */
@@ -137,6 +139,7 @@
     <button class="knopf" id="startknopf">Lauf starten</button>
     <div class="untertitel" style="font-size:11px; opacity:.4">Am Telefon quer halten, dann sieht man mehr Strecke</div>
     <button class="knopf leise" id="tonknopf">Ton: an</button>
+    <a class="bloglink" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
   </div>
 
   <div class="tafel aus" id="ende">
@@ -180,7 +183,7 @@ const SPRUNG_V   = 2900;
 const SCHWERKRAFT= 7600;
 const RUTSCH_DAUER = 0.85;
 const LUFTZEIT   = 2 * SPRUNG_V / SCHWERKRAFT;   // Dauer eines Sprungs
-const ABSPRUNG   = 0.35;                         // ideale Vorlaufzeit zum Absprung
+const ABSPRUNG   = LUFTZEIT / 2;                 // Scheitelpunkt über der Hindernismitte
 
 const JAEGER_START = 5000;   // größter Abstand der Wächter in Welteinheiten
 const JAEGER_ANFANG = 950;  // zu Laufbeginn sitzen sie einem im Nacken
@@ -349,7 +352,11 @@ function segErzeugen(i){
   }
 
   // Hindernisse nur auf freier Strecke, mit Sicherheitsabstand zur Pflichtkurve
-  const kurveNah = kurven.some(k => i > k.start - 24 && i < k.ende + 14);
+  // Die kommende Kurve steht erst ab ihrem ersten Segment in "kurven", davor
+  // hilft nur naechsteKurve. Im Vorlauf gilt jedes Wischen als Abbiegen, also
+  // darf dort kein Muster (samt Folgeteilen und Schachtlänge) mehr liegen.
+  const vorKurve = i > naechsteKurve - KURVE_VORLAUF - MIND_FOLGE() - 12;
+  const kurveNah = vorKurve || kurven.some(k => i < k.ende + 14);
   if (!kurveNah && i >= naechstesHindernis){
     const schwer = Math.min(1, i / 2200);
     letztesHindernisEnde = i;
@@ -453,7 +460,7 @@ function baueHindernis(s, i, schwer){
   } else if (art === 3){              // Loch: springen
     const laenge = 5 + wuerfel(5);    // lang genug, um überhaupt aufzufallen
     hindernisSetzen(i, { typ:"loch", spur:-1, tiefe:laenge * SEG, hoehe:0, laenge:laenge });
-    muenzenSetzen(i, laenge + 2, wuerfel(3), 700);
+    muenzenSetzen(i, Math.ceil(laenge / 2) + 1, wuerfel(3), 700);   // Reihe so lang wie der Schacht
   } else if (art === 4){              // Hürde einzeln mit Münzbogen darüber
     const sp = wuerfel(3);
     hindernisSetzen(i, { typ:"huerde", spur:sp, tiefe:150, hoehe:H_HUERDE });
@@ -469,7 +476,9 @@ function baueHindernis(s, i, schwer){
 const ERSATZ = { i:0, curve:0, y:0, hind:null, muenze:null, deko:null, kurve:null, stein:0.5, moos:false };
 function segment(i){
   if (!strecke.has(i)) vorausErzeugen(i);
-  return strecke.get(i) || ERSATZ;
+  // Hinter dem Start gibt es keine Segmente; die Höhe muss trotzdem stimmen,
+  // sonst entsteht am unteren Bildrand eine Stufe.
+  return strecke.get(i) || Object.assign({}, ERSATZ, { i:i, y:hoehe(i) });
 }
 function vorausErzeugen(bis){
   while (genBis < bis){ genBis++; if (!strecke.has(genBis)) segErzeugen(genBis); }
@@ -533,6 +542,7 @@ function neuStarten(){
   S.sichtbar = false;
   S.modus = "lauf";
   S.ursache = "";
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   hud.classList.remove("aus");
   menue.classList.add("aus");
   ende.classList.add("aus");
@@ -707,7 +717,9 @@ function sprungZielZeit(){
     for (const o of seg.hind){
       if (o.typ !== "loch" && o.typ !== "huerde") continue;
       if (o.typ === "huerde" && Math.abs(SPUREN[S.spur] - SPUREN[o.spur]) > 0.3) continue;
-      const d = o.z - S.pos;
+      // Gezielt wird auf die Mitte: bei langen Schächten reicht der Sprung
+      // sonst nicht bis zum Ende, vor allem nach einem Stolperer.
+      const d = o.z + o.tiefe / 2 - S.pos;
       if (d > -50 && d / S.tempo < naechste) naechste = d / S.tempo;
     }
   }
@@ -732,6 +744,7 @@ function rutschen(){
   if (S.modus !== "lauf") return;
   if (S.y > 0){ S.vy = -SPRUNG_V * 0.9; }   // aus der Luft nach unten stampfen
   S.rutscht = RUTSCH_DAUER;
+  S.sprungAbsicht = 0; S.sprungPuffer = 0;   // ein offener Sprung würde das Rutschen abbrechen
   ton(180, 0.16, "sawtooth", 0.04);
 }
 
@@ -743,6 +756,9 @@ document.addEventListener("keydown", function(e){
   else if (t === "ArrowDown"  || t === "s" || t === "S"){ rutschen(); e.preventDefault(); }
   else if (t === "p" || t === "P"){ pauseUmschalten(); }
   else if (t === "Enter"){
+    // Sonst klickt Enter zusätzlich den Knopf, der noch den Fokus hat
+    // (z. B. Ton aus beim Start, Pause gleich wieder an).
+    e.preventDefault();
     if (S.modus === "menue" || S.modus === "ende") neuStarten();
     else if (S.modus === "pause") pauseUmschalten();
   }
@@ -1260,8 +1276,12 @@ function zeichnen(){
   const horizont = liste.length ? liste[liste.length-1].p1.y : H*0.4;
   himmelZeichnen(S.kamX + x * 0.2, horizont);
 
+  // Kurvenneigung als leichtes Rollen um den Läufer. Ein senkrechtes Verschieben
+  // ließ die Szene in Pflichtkurven bis zu 96 px gegen den Himmel springen.
   ctx.save();
-  ctx.translate(0, S.neigung * 6);
+  ctx.translate(W/2, H*0.78);
+  ctx.rotate(S.neigung * 0.004);
+  ctx.translate(-W/2, -H*0.78);
 
   // von hinten nach vorne
   for (let n = liste.length - 1; n >= 0; n--){
@@ -1502,6 +1522,18 @@ function pruefen(){
   const idx = Math.floor(S.pos / SEG);
   const vorn = S.pos + 70, hinten = S.pos - 70;
 
+  // Ein Schacht ist bis zu 9 Segmente lang, sein Objekt steht aber nur im
+  // Startsegment. Deshalb direkt am Segment unter dem Läufer prüfen.
+  const unten = strecke.get(idx);
+  if (unten && unten.istLoch && S.y < 120){
+    let schacht = null;
+    for (let i = idx; i > idx - 12 && !schacht; i--){
+      const s = strecke.get(i);
+      if (s && s.hind) schacht = s.hind.find(o => o.typ === "loch") || null;
+    }
+    return tot("Schacht", "Hoch wischen zum Springen", schacht);
+  }
+
   for (let i = idx - 3; i <= idx + 2; i++){
     const s = strecke.get(i);
     if (!s) continue;
@@ -1592,7 +1624,10 @@ function schritt(dt){
 
   if (S.sprungAbsicht > 0 && S.y === 0){
     S.sprungAbsicht -= dt;
-    if (sprungZielZeit() <= ABSPRUNG || S.sprungAbsicht <= 0) abspringen();
+    const ziel = sprungZielZeit();
+    // Ziel weg (Spur gewechselt): Absicht verwerfen statt später grundlos springen
+    if (ziel === Infinity) S.sprungAbsicht = 0;
+    else if (ziel <= ABSPRUNG || S.sprungAbsicht <= 0) abspringen();
   }
 
   // Wächter
@@ -1659,7 +1694,10 @@ function rahmen(t){
   if (S.modus === "pause"){ return; }
 
   leistungPruefen(dt);
-  schritt(dt);
+  // Teilschritte: bei niedriger Bildrate und hohem Tempo würde der Läufer
+  // sonst zwischen zwei Bildern durch Hindernisse und Münzen hindurchspringen.
+  const teile = S.modus === "lauf" ? Math.max(1, Math.ceil(S.tempo * dt / 120)) : 1;
+  for (let k = 0; k < teile; k++) schritt(dt / teile);
   zeichnen();
   if (S.modus === "lauf") hudAktualisieren();
 }
@@ -1692,6 +1730,7 @@ function leistungPruefen(dt){
 }
 
 function pauseUmschalten(){
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
   if (S.modus === "lauf"){ S.modus = "pause"; pause.classList.remove("aus"); }
   else if (S.modus === "pause"){ S.modus = "lauf"; pause.classList.add("aus"); letzte = 0; }
 }

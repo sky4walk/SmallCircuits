@@ -375,7 +375,8 @@ function newGame(cfg){
     deck:[], discard:[], setsTraded:0,
     cur:0, phase:'setup', pool:0, sel:-1, tgt:-1, pendingMove:null,
     conquered:false, busy:false, dice:null, log:[], winner:-1, round:0, lastConquest:0,
-    picked:[]   /* für Kartentausch */
+    picked:[],  /* für Kartentausch */
+    forceTrade:false, byLimit:false
   };
   /* Kartenstapel */
   const syms=['i','k','a'];
@@ -393,7 +394,7 @@ function newGame(cfg){
     startTurn(0);
   } else {
     S.cur = 0;
-    log('<span class="big">Startaufstellung</span> — jede Macht bezieht Stellung.');
+    log('<span class="big">Startaufstellung</span> — reihum je eine Armee.');
     setupStep();
   }
   renderAll();
@@ -491,7 +492,7 @@ function buildMap(){
     const cnt=el('text',{class:'cnt',x:t.x,y:t.y+4.5});
     g.append(nm,disc,cnt); gCnt.append(g);
 
-    const hit=()=>onClick(t.i);
+    const hit=e=>onClick(t.i,e);
     land.addEventListener('click',hit); g.addEventListener('click',hit);
     return {g,land,disc,cnt,nm};
   });
@@ -515,7 +516,7 @@ function updateMap(){
     }
     else if(human){
       if(S.pendingMove){ cls=(t.i===S.pendingMove.from||t.i===S.pendingMove.to)?'sel':'dim'; }
-      else if(S.phase==='setup'||S.phase==='reinforce'){ if(o===me) cls='act'; }
+      else if(S.phase==='setup'||S.phase==='reinforce'||S.forceTrade){ if(o===me) cls='act'; }
       else if(S.phase==='attack'){
         if(S.sel<0){ if(o===me&&S.armies[t.i]>1) cls='act'; }
         else if(t.i===S.sel) cls='sel';
@@ -577,7 +578,7 @@ function renderCards(){
     box.append(d);
   });
   const btn=document.getElementById('btnTrade');
-  const canTrade = S.cur===hp.id && S.phase==='reinforce' && !S.busy;
+  const canTrade = S.cur===hp.id && !S.busy && (S.phase==='reinforce' || (S.forceTrade && hp.cards.length>=5));
   const valid = isSet(S.picked.map(k=>hp.cards[k]));
   btn.style.display = hp.cards.length?'block':'none';
   btn.disabled = !(canTrade&&valid);
@@ -621,13 +622,22 @@ function renderCmd(){
     const r=document.createElement('input'); r.type='range'; r.min=m.min; r.max=m.max; r.value=m.n;
     r.oninput=()=>{m.n=+r.value; val.textContent=m.n;};
     wrap.append(r,val); btns.append(wrap);
-    ctl('Nachrücken',()=>{ S.armies[m.from]-=m.n; S.armies[m.to]=m.n; S.pendingMove=null; renderAll(); });
+    ctl('Nachrücken',()=>{ S.armies[m.from]-=m.n; S.armies[m.to]=m.n; S.pendingMove=null;
+      if(S.sel>=0 && S.armies[S.sel]<2){ S.sel=-1; S.tgt=-1; }
+      renderAll(); });
+    return;
+  }
+  if(S.forceTrade){
+    pool.style.display='block'; pool.innerHTML=S.pool+'<small>Verstärkungen</small>';
+    if(p.cards.length>=5){ hint.innerHTML='<b>Sofort-Tauschpflicht:</b> durch das Auslöschen hast du sechs oder mehr Karten — tausche Sätze ein, bis du höchstens vier hast.'; return; }
+    hint.innerHTML='Stationiere die eingetauschten Armeen, danach geht der Angriff weiter. <b>Umschalt&#8202;+&#8202;Klick</b> setzt fünf auf einmal.';
+    if(!S.pool){ S.forceTrade=false; return renderCmd(); }
     return;
   }
   if(S.phase==='setup'){
     pool.style.display='block'; pool.innerHTML=p.toPlace+'<small>Armeen übrig</small>';
-    hint.innerHTML='Klicke auf eigene Gebiete, um Anfangsarmeen zu stationieren.';
-    ctl('Rest automatisch',()=>{ while(p.toPlace>0){ aiPlaceOne(p); p.toPlace--; } setupStep(); },'sec');
+    hint.innerHTML='Reihum setzt jede Macht eine Armee — klicke auf ein eigenes Gebiet.';
+    ctl('Rest automatisch',()=>{ while(p.toPlace>0){ aiPlaceOne(p); p.toPlace--; } S.cur=(S.cur+1)%S.players.length; setupStep(); },'sec');
     return;
   }
   if(S.phase==='reinforce'){
@@ -687,25 +697,28 @@ function renderAll(){ renderHeader(); updateMap(); renderPlayers(); renderCards(
    6. SPIELABLAUF
    ══════════════════════════════════════════════════════════════ */
 const sleep = ms=>new Promise(r=>setTimeout(r,ms));
+/* Pause, die meldet, ob die Partie inzwischen ersetzt wurde ("Neu" während eines KI-Zugs) */
+const pause = async (G,ms)=>{ await sleep(ms); return S===G; };
 
+/* Startaufstellung wie im Original: reihum setzt jede Macht genau eine Armee.
+   S.cur zeigt auf die Macht, die als Nächste setzt. */
 function setupStep(){
   const n=S.players.length;
-  for(let guard=0;guard<n+1;guard++){
-    /* nächste Macht mit offenen Startarmeen suchen */
-    let found=-1;
-    for(let k=0;k<n;k++){ const p=S.players[(S.cur+k)%n]; if(p.toPlace>0){ found=p.id; break; } }
-    if(found<0){ log('<span class="big">Startaufstellung abgeschlossen</span>'); startTurn(0); return; }
-    S.cur=found;
+  for(let guard=0;guard<2000;guard++){
+    if(S.players.every(p=>p.toPlace<=0)){
+      log('<span class="big">Startaufstellung abgeschlossen</span>'); startTurn(0); return; }
     const p=P();
-    if(!p.ai){ renderAll(); return; }       /* Mensch ist am Zug */
-    while(p.toPlace>0){ aiPlaceOne(p); p.toPlace--; }
+    if(p.toPlace>0){
+      if(!p.ai){ renderAll(); return; }     /* Mensch ist am Zug */
+      aiPlaceOne(p); p.toPlace--;
+    }
     S.cur=(S.cur+1)%n;
   }
   renderAll();
 }
 
 function startTurn(pid){
-  S.cur=pid; S.round++; S.sel=-1; S.tgt=-1; S.dice=null; S.conquered=false; S.picked=[]; S._fn=undefined;
+  S.cur=pid; S.round++; S.forceTrade=false; S.sel=-1; S.tgt=-1; S.dice=null; S.conquered=false; S.picked=[]; S._fn=undefined;
   if(S.round>=MAXTURNS && checkWin()) return;
   const p=P();
   if(!p.alive){ nextPlayer(); return; }
@@ -716,7 +729,7 @@ function startTurn(pid){
   renderAll();
   if(p.ai) runAI();
 }
-function setPhase(ph){ S.phase=ph; S.sel=-1; S.tgt=-1; S.dice=null; S._fn=undefined; S._reach=null; renderAll(); }
+function setPhase(ph){ S.forceTrade=false; S.phase=ph; S.sel=-1; S.tgt=-1; S.dice=null; S._fn=undefined; S._reach=null; renderAll(); }
 function nextPlayer(){
   const n=S.players.length; let k=S.cur;
   for(let c=0;c<n;c++){ k=(k+1)%n; if(S.players[k].alive){ startTurn(k); return; } }
@@ -748,7 +761,7 @@ function checkWin(){
   if(S.round>=MAXTURNS){
     let best=alive[0];
     for(const p of alive) if(terrsOf(p.id).length>terrsOf(best.id).length) best=p;
-    S.winner=best.id; S.phase='';
+    S.winner=best.id; S.phase=''; S.byLimit=true;
     log(`<span class="big">Zugbegrenzung erreicht — ${esc(best.name)} führt nach Gebieten</span>`);
     renderAll(); showEnd(); return true;
   }
@@ -779,12 +792,12 @@ function doRound(from,to){
   return res;
 }
 async function blitz(from,to){
-  const att=S.owner[from];
+  const att=S.owner[from], G=S;
   S.busy=true; renderAll();
   let guard=0;
   while(S.armies[from]>1 && S.owner[to]!==att && guard++<300){
     doRound(from,to); updateMap(); renderDice(); renderPlayers();
-    await sleep(180);
+    if(!await pause(G,180)) return;
   }
   S.busy=false;
   postAttack();
@@ -792,6 +805,7 @@ async function blitz(from,to){
 /* Nach jedem Gefecht: Ausscheiden und Sieg prüfen, Auswahl ggf. lösen */
 function postAttack(){
   S.players.forEach(p=>{ if(p.alive&&!terrsOf(p.id).length) checkElim(p.id,S.cur); });
+  if(P().cards.length>=6){ S.forceTrade=true; S.sel=-1; S.tgt=-1; }  /* Sofort-Tauschpflicht */
   if(S.tgt>=0 && S.owner[S.tgt]===S.cur){ S.tgt=-1; }        /* Ziel erobert */
   if(S.sel>=0 && S.armies[S.sel]<2){ S.sel=-1; S.tgt=-1; }   /* Basis erschöpft */
   if(!checkWin()) renderAll();
@@ -818,23 +832,22 @@ function findSet(cards){
 /* ══════════════════════════════════════════════════════════════
    7. MENSCHLICHE EINGABE
    ══════════════════════════════════════════════════════════════ */
-let shiftDown=false;
-addEventListener('keydown',e=>{if(e.key==='Shift')shiftDown=true;});
-addEventListener('keyup',e=>{if(e.key==='Shift')shiftDown=false;});
 
-function onClick(i){
+function onClick(i,ev){
   if(S.busy||S.winner>=0||S.pendingMove) return;
   const p=P(); if(p.ai) return;
   if(S.phase==='setup'){
     if(S.owner[i]!==p.id||p.toPlace<=0) return;
     S.armies[i]++; p.toPlace--;
-    if(p.toPlace<=0){ S.cur=(S.cur+1)%S.players.length; setupStep(); } else renderAll();
+    S.cur=(S.cur+1)%S.players.length; setupStep();   /* reihum: nach jeder Armee ist die nächste Macht dran */
     return;
   }
-  if(S.phase==='reinforce'){
+  if(S.phase==='reinforce'||S.forceTrade){
     if(S.owner[i]!==p.id||S.pool<=0||p.cards.length>=5) return;
-    const n=shiftDown?Math.min(5,S.pool):1;
-    S.armies[i]+=n; S.pool-=n; renderAll(); return;
+    const n=(ev&&ev.shiftKey)?Math.min(5,S.pool):1;
+    S.armies[i]+=n; S.pool-=n;
+    if(S.forceTrade && S.pool<=0) S.forceTrade=false;
+    renderAll(); return;
   }
   if(S.phase==='attack'){
     if(S.owner[i]===p.id){
@@ -855,7 +868,8 @@ function onClick(i){
   }
 }
 document.getElementById('btnTrade').onclick=()=>{
-  const p=P(); if(p.ai||S.phase!=='reinforce') return;
+  const p=P(); if(p.ai||S.busy) return;
+  if(!(S.phase==='reinforce' || (S.forceTrade && p.cards.length>=5))) return;
   if(!isSet(S.picked.map(k=>p.cards[k]))) return;
   tradeSet(p,[...S.picked]); renderAll();
 };
@@ -908,7 +922,7 @@ function aiPlaceOne(p){
 }
 
 async function runAI(){
-  const p=P();
+  const p=P(), G=S;
   S.busy=true; renderAll();
   const pace = {leicht:520,mittel:420,schwer:340,brutal:230}[p.level];
 
@@ -922,7 +936,7 @@ async function runAI(){
                 : p.level==='mittel' ? p.cards.length>=4 || nextBonus()>=8
                 : true;
     if(!must && !eager) break;
-    tradeSet(p,set); renderAll(); await sleep(pace);
+    tradeSet(p,set); renderAll(); if(!await pause(G,pace)) return;
   }
 
   /* --- Verstärkung --- */
@@ -957,7 +971,7 @@ async function runAI(){
     }
     log(`${nameOf(p)} stationiert die Verstärkungen.`);
   } else { while(S.pool>0){ S.armies[ts[0]]++; S.pool--; } }
-  renderAll(); await sleep(pace);
+  renderAll(); if(!await pause(G,pace)) return;
 
   /* --- Angriff --- */
   S.phase='attack'; renderHeader();
@@ -997,11 +1011,11 @@ async function runAI(){
     if(!best && stale>20 && attacks===0 && fallback && fallback.wp>0.30) best=fallback;
     if(!best) break;
     S.sel=best.from; S.tgt=best.to; renderAll();
-    await sleep(pace*0.7);
+    if(!await pause(G,pace*0.7)) return;
     let g=0;
     while(S.armies[best.from]>1 && S.owner[best.to]!==p.id && g++<300){
       doRound(best.from,best.to); updateMap(); renderDice(); renderPlayers();
-      await sleep(Math.max(70,pace*0.35));
+      if(!await pause(G,Math.max(70,pace*0.35))) return;
       /* Abbruch, wenn die Lage kippt — bei Stillstand wird länger durchgehalten */
       const bail = stale>16 ? 0.12 : 0.25;
       if(S.armies[best.from]>1 && winProb(S.armies[best.from],S.armies[best.to])<bail && p.level!=='leicht') break;
@@ -1016,15 +1030,22 @@ async function runAI(){
     }
     S.players.forEach(q=>{ if(q.alive&&!terrsOf(q.id).length) checkElim(q.id,p.id); });
     if(checkWin()){ S.busy=false; return; }
+    /* Sofort-Tauschpflicht: mit ≥6 Karten bis auf höchstens vier eintauschen und gleich stationieren */
+    if(p.cards.length>=6){
+      let tg=0;
+      while(p.cards.length>=5 && tg++<10){ const set=findSet(p.cards); if(!set) break; tradeSet(p,set); }
+      while(S.pool>0){ aiPlaceOne(p); S.pool--; }
+      renderAll(); if(!await pause(G,pace)) return;
+    }
     /* Ein müheloser Überrollangriff zählt nur anteilig — sonst kann eine
        überlegene Macht ihre Übermacht nie in Gebiete umsetzen. */
     attacks += best.wp>0.92 ? 0.2 : 1;
-    renderAll(); await sleep(pace*0.5);
+    renderAll(); if(!await pause(G,pace*0.5)) return;
   }
   S.sel=-1;S.tgt=-1;
 
   /* --- Verlegung --- */
-  S.phase='fortify'; renderAll(); await sleep(pace*0.6);
+  S.phase='fortify'; renderAll(); if(!await pause(G,pace*0.6)) return;
   const own=terrsOf(p.id);
   const safe=own.filter(i=>S.armies[i]>1&&!isBorder(i,p.id));
   if(safe.length){
@@ -1040,7 +1061,7 @@ async function runAI(){
       break;
     }
   }
-  renderAll(); await sleep(pace*0.6);
+  renderAll(); if(!await pause(G,pace*0.6)) return;
   S.busy=false;
   endTurn();
 }
@@ -1083,7 +1104,9 @@ function openSetup(){
     <div style="display:flex;gap:10px;margin-top:22px">
       <button class="act" id="go" style="flex:1">Spiel beginnen</button>
       <button class="act sec" id="rules2">Regeln</button>
-    </div>`;
+    </div>
+    <p class="sub" style="margin:14px 0 0;font-size:12px">Ist keine Macht auf „Mensch“ gestellt, spielen nur KIs — du schaust zu.
+      &nbsp;·&nbsp; <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--brass)">itzwieseltal.wordpress.com</a></p>`;
   const drawList=()=>{
     const l=document.getElementById('plist'); l.innerHTML='';
     for(let i=0;i<cfg.count;i++){
@@ -1109,7 +1132,6 @@ function openSetup(){
   document.querySelectorAll('#segCount [data-v]').forEach(b=>b.onclick=()=>{
     cfg.count=+b.dataset.v;
     document.querySelectorAll('#segCount [data-v]').forEach(x=>x.classList.toggle('on',x===b));
-    if(!cfg.players.slice(0,cfg.count).some(p=>!p.ai)) cfg.players[0].ai=false;
     drawList();
   });
   document.querySelectorAll('#segSetup [data-v]').forEach(b=>b.onclick=()=>{
@@ -1119,7 +1141,6 @@ function openSetup(){
   document.getElementById('rules2').onclick=openRules;
   document.getElementById('go').onclick=()=>{
     const ps=cfg.players.slice(0,cfg.count).map((p,i)=>({name:p.name||CNAMES[i],ai:p.ai,level:p.level}));
-    if(!ps.some(p=>!p.ai)) ps[0].ai=false;
     hideOv(); newGame({players:ps,autoSetup:cfg.autoSetup});
   };
 }
@@ -1139,7 +1160,7 @@ function openRules(){
            Der Wert steigt: 4, 6, 8, 10, 12, 15, dann jeweils +5 — gedeckelt bei <b>60</b>,
            damit späte Partien nicht in eine Armeenflut kippen.
            Passt eine Karte zu einem eigenen Gebiet, gibt es dort <b>+2</b> Armeen.</li>
-       <li>Ab <b>5</b> Karten auf der Hand herrscht Tauschpflicht.</li>
+       <li>Ab <b>5</b> Karten auf der Hand herrscht zu Zugbeginn Tauschpflicht.</li>
      </ul>
      <h4>Angriff</h4>
      <ul>
@@ -1148,8 +1169,11 @@ function openRules(){
        <li>Höchste Würfel werden paarweise verglichen. <b>Bei Gleichstand gewinnt der Verteidiger.</b></li>
        <li>Nach der Eroberung rücken mindestens so viele Armeen nach, wie Würfel geworfen wurden.</li>
        <li>Wer in einem Zug mindestens ein Gebiet erobert, erhält am Zugende eine Gebietskarte.</li>
-       <li>Wer eine Macht auslöscht, übernimmt deren Karten.</li>
+       <li>Wer eine Macht auslöscht, übernimmt deren Karten. Hat er dadurch <b>6 oder mehr</b>, muss er sofort tauschen, bis höchstens vier übrig sind, die Armeen stationieren und darf dann weiter angreifen.</li>
      </ul>
+     <h4>Startaufstellung</h4>
+     Automatisch oder selbst verteilt: Beim Selbstverteilen setzt jede Macht <b>reihum genau eine Armee</b>,
+     bis alle Startarmeen stehen.
      <h4>Verlegung</h4>
      Einmal pro Zug dürfen Armeen zwischen zwei eigenen Gebieten bewegt werden,
      die über eigene Gebiete <b>durchgehend verbunden</b> sind. Ein Gebiet bleibt immer besetzt.
@@ -1173,6 +1197,7 @@ function openRules(){
      Gebieten. In der Praxis endet eine Partie weit vorher — typisch sind 20 bis 150 Züge.
      <h4>Steuerung</h4>
      Klick auf ein Gebiet wählt aus. In der Verstärkungsphase setzt <b>Umschalt&#8202;+&#8202;Klick</b> fünf Armeen auf einmal.
+     <p style="margin-top:14px"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--brass)">itzwieseltal.wordpress.com</a></p>
    </div>
    <button class="act" id="close" style="margin-top:22px;width:100%">Zurück</button>`;
   document.getElementById('close').onclick=()=>{ if(S) hideOv(); else openSetup(); };
@@ -1181,9 +1206,10 @@ function openRules(){
 function showEnd(){
   const w=S.players[S.winner];
   ov.classList.remove('hide');
-  sheet.innerHTML=`<h1 style="font-size:32px">Weltherrschaft</h1>
-    <p class="sub"><b style="color:${w.color}">${esc(w.name)}</b> hält alle 42 Gebiete
-      nach ${S.round} Zügen. ${w.ai?'Die KI ('+LEVELS[w.level]+') hat gewonnen.':'Glückwunsch.'}</p>
+  sheet.innerHTML=`<h1 style="font-size:32px">${S.byLimit?'Zugbegrenzung':'Weltherrschaft'}</h1>
+    <p class="sub"><b style="color:${w.color}">${esc(w.name)}</b> ${S.byLimit
+        ? `führt nach Erreichen der Zugbegrenzung (${S.round} Züge) mit ${terrsOf(w.id).length} von 42 Gebieten.`
+        : `hält alle 42 Gebiete nach ${S.round} Zügen.`} ${w.ai?'Die KI ('+LEVELS[w.level]+') hat gewonnen.':'Glückwunsch.'}</p>
     <div style="display:flex;gap:10px"><button class="act" id="again" style="flex:1">Neues Spiel</button>
     <button class="act sec" id="look">Karte ansehen</button></div>`;
   document.getElementById('again').onclick=openSetup;

@@ -260,6 +260,7 @@
   .rule-body p{ margin:0 0 10px; }
   .rule-body ul{ margin:0 0 10px; padding-left:18px; }
   .rule-body b{ color:var(--text-light); }
+  footer a{ color:#a88d62; }
   footer{
     margin-top:30px;
     color:#6b5a44;
@@ -332,6 +333,7 @@
   <details class="rule-card">
     <summary><span class="num">3</span> Würfeln und Ziehen</summary>
     <div class="rule-body">
+      <p><b>Wer beginnt:</b> Zu Beginn würfelt jeder Spieler einen Würfel, bei Gleichstand wird wiederholt. Wer die höhere Zahl hat, beginnt und spielt als ersten Zug genau die beiden Zahlen dieses Eröffnungswurfs.</p>
       <p>Jeder Zug beginnt mit dem Wurf von zwei Würfeln. Du darfst dann zwei Steine bewegen &mdash; einen um die Augenzahl des ersten Würfels, einen um die Augenzahl des zweiten (oder beide Zahlen mit demselben Stein, hintereinander).</p>
       <p>Ein Stein darf nur auf ein Feld ziehen, das <b>frei</b> ist, <b>eigene Steine</b> trägt, oder auf dem genau <b>ein gegnerischer Stein</b> (ein "Blot") steht. Stehen dort zwei oder mehr gegnerische Steine, ist das Feld blockiert.</p>
       <p><b>Pasch:</b> Zeigen beide Würfel die gleiche Zahl, darfst du diese Zahl <b>viermal</b> spielen statt nur zweimal.</p>
@@ -373,7 +375,7 @@
   </details>
 </div>
 
-<footer>Backgammon &middot; eigenständige HTML/JS-Version &middot; keine externen Abhängigkeiten</footer>
+<footer>Backgammon &middot; eigenständige HTML/JS-Version &middot; keine externen Abhängigkeiten &middot; <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 
 <script>
 (function(){
@@ -427,9 +429,15 @@ let usedDiceFlags=[];
 let selected=null;
 let legalDestos=[];
 let gameOver=false;
-let awaitingRoll=true;
+let awaitingRoll=false; // erst nach der Farbwahl wird gewürfelt
 let busy=false; // blocks input during computer turn / animations
 let lastMove=null; // {from, to, color, hit} - used to highlight the most recent move on the board
+
+// Jede neue Partie erhöht gameId. Timer aus einer älteren Partie prüfen das
+// beim Feuern und tun dann nichts mehr (sonst zieht z. B. der Computer nach
+// "Neues Spiel" noch auf dem frisch aufgebauten Brett weiter).
+let gameId=0;
+function later(fn,ms){ const id=gameId; setTimeout(()=>{ if(id===gameId) fn(); },ms); }
 
 function initialState(){
   const points = new Array(24).fill(null).map(()=>({color:null,count:0}));
@@ -704,17 +712,20 @@ function renderBoard(){
   // bar checkers
   html += `<text x="${barX+BARW/2}" y="${GUTTER_TOP+GUTTER_BOTTOM>0?(GUTTER_TOP+GUTTER_BOTTOM)/2+4:0}" text-anchor="middle" font-size="9" font-family="Courier New, monospace" fill="#8a7355" opacity="0.7">BAR</text>`;
   {
-    const stepW=R*1.5;
-    for(let k=0;k<Math.min(state.bar.white,4);k++){
-      html+=checkerAt(barX+BARW/2, GUTTER_BOTTOM-8-k*stepW, 'white', R*0.9);
+    // Schwarz stapelt in der oberen Bar-Hälfte von oben nach unten, Weiß in der
+    // unteren von unten nach oben. So überlappen sich die Steine nie und das
+    // BAR-Label in der Mitte bleibt frei.
+    const rb=R*0.9, stepW=rb*2+3, maxBar=4, cx=barX+BARW/2;
+    const lbl=(n,y)=>`<text x="${cx}" y="${y}" text-anchor="middle" font-size="12" font-family="Courier New" font-weight="bold" fill="${cssvar('--brass-hi')}">${n}</text>`;
+    for(let k=0;k<Math.min(state.bar.black,maxBar);k++){
+      html+=checkerAt(cx, MARGIN+6+rb+k*stepW, 'black', rb);
     }
-    if(state.bar.white>4) html+=`<text x="${barX+BARW/2}" y="${GUTTER_BOTTOM-8-4*stepW-4}" text-anchor="middle" font-size="11" font-family="Courier New" fill="${cssvar('--brass-hi')}">+${state.bar.white-4}</text>`;
-    for(let k=0;k<Math.min(state.bar.black,4);k++){
-      html+=checkerAt(barX+BARW/2, GUTTER_TOP+8+k*stepW, 'black', R*0.9);
+    if(state.bar.black>maxBar) html+=lbl(state.bar.black, MARGIN+6+rb+(maxBar-1)*stepW+4);
+    for(let k=0;k<Math.min(state.bar.white,maxBar);k++){
+      html+=checkerAt(cx, BOARD_H-MARGIN-6-rb-k*stepW, 'white', rb);
     }
-    if(state.bar.black>4) html+=`<text x="${barX+BARW/2}" y="${GUTTER_TOP+8+4*stepW+12}" text-anchor="middle" font-size="11" font-family="Courier New" fill="${cssvar('--brass-hi')}">+${state.bar.black-4}</text>`;
+    if(state.bar.white>maxBar) html+=`<text x="${cx}" y="${BOARD_H-MARGIN-6-rb-(maxBar-1)*stepW+4}" text-anchor="middle" font-size="12" font-family="Courier New" font-weight="bold" fill="#241608">${state.bar.white}</text>`;
   }
-  const barHasHumanOrClickable = true;
   html += `<rect data-point="bar" x="${barX}" y="${MARGIN}" width="${BARW}" height="${BOARD_H-2*MARGIN}" fill="${selected==='bar'?'rgba(201,162,39,0.2)':'transparent'}" class="point-hit"/>`;
 
   // off trays
@@ -798,29 +809,44 @@ function colorLabel(c){ return c==='white'?'Weiß':'Schwarz'; }
 function newGame(mode, pColor){
   if(mode==='twoplayer'){ humanColor=null; computerColor=null; }
   else { humanColor=pColor; computerColor= pColor==='white'?'black':'white'; }
+  gameId++;
   state=initialState();
-  currentTurn='white';
   remainingDice=[]; lastRoll=[]; usedDiceFlags=[];
   selected=null; legalDestos=[];
-  gameOver=false; awaitingRoll=true; busy=false; lastMove=null;
+  gameOver=false; busy=false; lastMove=null;
   document.getElementById('log').innerHTML='';
   log(mode==='twoplayer' ? 'Neues Spiel gestartet — Zwei-Spieler-Modus (lokal).' : `Neues Spiel gestartet. Du spielst ${colorLabel(humanColor)}.`);
-  setStatus(`${colorLabel(currentTurn)} ist am Zug. ${isComputerTurn()?'Computer würfelt...':'Klicke „Würfeln“.'}`);
-  render();
-  if(isComputerTurn()) setTimeout(computerTurnStep,300);
+
+  // Eröffnungswurf nach offizieller Regel: Jeder würfelt einen Würfel, bei
+  // Gleichstand wird wiederholt. Wer höher würfelt, beginnt und spielt genau
+  // diese beiden Zahlen als ersten Zug (ein Pasch ist dabei nicht möglich).
+  let w, b;
+  do{
+    w=rand6(); b=rand6();
+    if(w===b) log(`Eröffnungswurf: Weiß ${w}, Schwarz ${b} — Gleichstand, nochmal.`);
+  } while(w===b);
+  currentTurn = w>b ? 'white' : 'black';
+  log(`Eröffnungswurf: Weiß ${w}, Schwarz ${b} — ${colorLabel(currentTurn)} beginnt mit ${w} / ${b}.`);
+  setDice([w,b]);
+  setStatus(`Eröffnungswurf: Weiß ${w}, Schwarz ${b}. ${colorLabel(currentTurn)} beginnt mit diesen Zahlen. ${isComputerTurn()?'Computer überlegt...':'Wähle einen Stein.'}`);
+  if(isComputerTurn()){ busy=true; later(computerTurnStep,900); }
 }
 
 function rand6(){ return 1+Math.floor(Math.random()*6); }
 
-function rollDice(){
-  if(gameOver||!awaitingRoll) return;
-  const d1=rand6(), d2=rand6();
-  lastRoll = d1===d2 ? [d1,d1,d1,d1] : [d1,d2];
+function setDice(roll){
+  lastRoll = roll;
   remainingDice = lastRoll.slice();
   usedDiceFlags = lastRoll.map(()=>false);
   awaitingRoll=false;
   render();
   document.querySelectorAll('.die').forEach(d=>d.classList.add('rolling'));
+}
+
+function rollDice(){
+  if(gameOver||!awaitingRoll||state===null) return;
+  const d1=rand6(), d2=rand6();
+  setDice(d1===d2 ? [d1,d1,d1,d1] : [d1,d2]);
 
   if(!hasAnyLegalMove(state,currentTurn,remainingDice)){
     let reason;
@@ -830,27 +856,26 @@ function rollDice(){
         const entry = currentTurn==='white' ? 24-d : d-1;
         return entry+1;
       });
-      reason = `${state.bar[currentTurn]} Stein(e) auf der Bar, aber Einstiegsfeld${points.length>1?'er':''} ${points.join(' und ')} ${points.length>1?'sind':'ist'} vom Gegner blockiert &mdash; kein Einstieg möglich, ganzer Zug entfällt.`;
+      reason = `${state.bar[currentTurn]} Stein(e) auf der Bar, aber Einstiegsfeld${points.length>1?'er':''} ${points.join(' und ')} ${points.length>1?'sind':'ist'} vom Gegner blockiert — kein Einstieg möglich, ganzer Zug entfällt.`;
     } else {
       reason = `kein gültiger Zug möglich mit ${lastRoll.join(' / ')}.`;
     }
-    setStatus(`${colorLabel(currentTurn)} würfelt ${lastRoll.join(' / ')} &mdash; ${reason}`);
-    log(`${colorLabel(currentTurn)}: ${lastRoll.join('-')} &mdash; ${reason}`);
+    setStatus(`${colorLabel(currentTurn)} würfelt ${lastRoll.join(' / ')} — ${reason}`);
+    log(`${colorLabel(currentTurn)}: ${lastRoll.join('-')} — ${reason}`);
     busy=true;
-    setTimeout(()=>{ busy=false; endTurn(); },1900);
+    later(()=>{ busy=false; endTurn(); },1900);
     return;
   }
   setStatus(`${colorLabel(currentTurn)} würfelt ${lastRoll.join(' / ')}. ${isComputerTurn()?'Computer überlegt...':'Wähle einen Stein.'}`);
-  if(isComputerTurn()) setTimeout(computerTurnStep,300);
+  if(isComputerTurn()) later(computerTurnStep,300);
 }
 
 function markDieUsed(dieVal){
   for(let i=0;i<remainingDice.length;i++){
     if(remainingDice[i]===dieVal){ remainingDice.splice(i,1); break; }
   }
-  let assigned=false;
   for(let i=0;i<lastRoll.length;i++){
-    if(lastRoll[i]===dieVal && !usedDiceFlags[i]){ usedDiceFlags[i]=true; assigned=true; break; }
+    if(lastRoll[i]===dieVal && !usedDiceFlags[i]){ usedDiceFlags[i]=true; break; }
   }
 }
 
@@ -863,7 +888,7 @@ function endTurn(){
   if(gameOver){ render(); return; }
   setStatus(`${colorLabel(currentTurn)} ist am Zug. ${isComputerTurn()?'Computer würfelt...':'Klicke „Würfeln“.'}`);
   render();
-  if(isComputerTurn()) setTimeout(computerTurnStep,300);
+  if(isComputerTurn()) later(computerTurnStep,300);
 }
 
 function checkWin(){
@@ -888,19 +913,21 @@ function applyMoveAndContinue(move){
   if(gameOver) return;
   if(remainingDice.length===0){
     busy=true;
-    setTimeout(()=>{ busy=false; endTurn(); }, 300);
+    later(()=>{ busy=false; endTurn(); }, 300);
   } else if(!hasAnyLegalMove(state,currentTurn,remainingDice)){
     const why = state.bar[currentTurn]>0
-      ? `weitere${state.bar[currentTurn]>1?'':'r'} Stein auf der Bar kann mit dem restlichen Wurf nicht einsteigen.`
+      ? (state.bar[currentTurn]>1
+          ? `die weiteren Steine auf der Bar können mit dem restlichen Wurf nicht einsteigen.`
+          : `der weitere Stein auf der Bar kann mit dem restlichen Wurf nicht einsteigen.`)
       : `für den restlichen Wurf gibt es keinen gültigen Zug mehr.`;
     setStatus(`${colorLabel(currentTurn)}: ${why} Zug endet hier.`);
-    log(`${colorLabel(currentTurn)}: Rest des Zugs entfällt &mdash; ${why}`);
+    log(`${colorLabel(currentTurn)}: Rest des Zugs entfällt — ${why}`);
     busy=true;
-    setTimeout(()=>{ busy=false; endTurn(); }, 1400);
+    later(()=>{ busy=false; endTurn(); }, 1400);
   } else if(isComputerTurn()){
-    setTimeout(computerTurnStep,900);
+    later(computerTurnStep,900);
   } else {
-    setStatus(`${colorLabel(currentTurn)} ist am Zug &mdash; ${remainingDice.length} Wurf/Würfe übrig.`);
+    setStatus(`${colorLabel(currentTurn)} ist am Zug — ${remainingDice.length} Wurf/Würfe übrig.`);
   }
 }
 
@@ -917,7 +944,7 @@ function handlePointClick(key){
   if(selected===null){
     if(state.bar[currentTurn]>0){
       if(key==='bar') selectSource('bar');
-      else setStatus('Du hast Steine auf der Bar &mdash; du musst zuerst wieder einsteigen.');
+      else setStatus('Du hast Steine auf der Bar — du musst zuerst wieder einsteigen.');
       return;
     }
     if(key==='bar'||key==='off') return;
@@ -925,7 +952,7 @@ function handlePointClick(key){
     if(!isNaN(idx) && state.points[idx].color===currentTurn && state.points[idx].count>0){
       const hasMove = legalMovesFrom(idx).length>0;
       if(hasMove) selectSource(idx);
-      else setStatus('Für diesen Stein gibt es keinen zulässigen Zug. Hinweis: Wenn möglich, müssen beide Würfel gespielt werden &mdash; Züge, die den zweiten Würfel verbauen würden, sind nicht erlaubt.');
+      else setStatus('Für diesen Stein gibt es keinen zulässigen Zug. Hinweis: Wenn möglich, müssen beide Würfel gespielt werden — Züge, die den zweiten Würfel verbauen würden, sind nicht erlaubt.');
     }
     return;
   }
@@ -936,7 +963,14 @@ function handlePointClick(key){
 
   const destKey = key==='off' ? 'off' : parseInt(key,10);
   const move = legalDestos.find(m=> m.to===destKey);
-  if(move){ applyMoveAndContinue(move); }
+  if(move){ applyMoveAndContinue(move); return; }
+
+  // Kein Zielfeld: Klick auf einen anderen eigenen Stein wählt direkt diesen
+  // aus, statt den Klick zu ignorieren.
+  if(typeof destKey==='number' && !isNaN(destKey) && state.bar[currentTurn]===0
+     && state.points[destKey].color===currentTurn && legalMovesFrom(destKey).length>0){
+    selectSource(destKey);
+  }
 }
 
 function legalMovesFrom(src){
@@ -986,9 +1020,6 @@ function scoreMove(s0,color,move){
       for(let d=1;d<=6;d++){
         const from = color==='white' ? p+d : p-d;
         if(from>=0&&from<=23 && s.points[from].color===opp && s.points[from].count>0) exposed++;
-        if(from<0||from>23){
-          // opponent could enter from bar and hit directly if applicable
-        }
       }
       score -= (3 + exposed*2.5);
     }
@@ -1005,7 +1036,7 @@ function computerTurnStep(){
   if(awaitingRoll){
     setStatus(`${colorLabel(computerColor)} würfelt...`);
     showRollingPlaceholder();
-    setTimeout(rollDice, 550);
+    later(rollDice, 550);
     return;
   }
   if(remainingDice.length===0){ busy=false; endTurn(); return; }
@@ -1026,10 +1057,10 @@ function computerTurnStep(){
   checkWin();
   if(gameOver){ busy=false; return; }
   if(remainingDice.length===0 || !hasAnyLegalMove(state,computerColor,remainingDice)){
-    setTimeout(()=>{ busy=false; endTurn(); },1000);
+    later(()=>{ busy=false; endTurn(); },1000);
   } else {
     setStatus(`Computer (${colorLabel(computerColor)}) zieht weiter...`);
-    setTimeout(computerTurnStep,1100);
+    later(computerTurnStep,1100);
   }
 }
 
@@ -1038,7 +1069,10 @@ document.getElementById('rollBtn').addEventListener('click', rollDice);
 document.getElementById('newGameBtn').addEventListener('click', ()=>{
   document.getElementById('colorPick').style.display='flex';
   setStatus('Wähle deine Farbe, um zu beginnen.');
-  state=initialState(); gameOver=false; lastRoll=[]; remainingDice=[]; selected=null; legalDestos=[];
+  gameId++; // laufende Timer der alten Partie ungültig machen
+  state=initialState(); gameOver=false; lastRoll=[]; remainingDice=[]; usedDiceFlags=[];
+  selected=null; legalDestos=[]; lastMove=null;
+  busy=false; awaitingRoll=false; humanColor=null; computerColor=null; currentTurn='white';
   render();
 });
 document.getElementById('pickWhite').addEventListener('click', ()=>{ document.getElementById('colorPick').style.display='none'; newGame('computer','white'); });

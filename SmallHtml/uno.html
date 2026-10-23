@@ -45,6 +45,7 @@
     flex-shrink: 0;
     transition: transform 0.15s, box-shadow 0.15s, margin-top 0.15s;
     font-family: 'Arial Black', 'Arial', sans-serif;
+    isolation: isolate; /* eigene Stapelebene: Ecken/Ovale scheinen nicht auf Nachbarkarten durch */
   }
 
   .card.red { background: #d72600; }
@@ -206,7 +207,7 @@
     box-shadow: 0 0 8px rgba(255,215,64,0.5);
   }
   #player-bottom .hand .card.not-playable {
-    opacity: 0.55;
+    filter: brightness(0.6) saturate(0.7); /* abdunkeln statt transparent: überlappende Karten scheinen nicht durch */
     cursor: not-allowed;
   }
   #player-bottom .hand .card.not-playable:hover {
@@ -278,7 +279,7 @@
   }
   #draw-pile-label {
     position: absolute;
-    bottom: -22px;
+    top: -18px;
     left: 50%;
     transform: translateX(-50%);
     color: rgba(255,255,255,0.7);
@@ -456,6 +457,28 @@
   }
   #log div { border-bottom: 1px solid rgba(255,255,255,0.1); padding: 2px 0; }
   #log div:last-child { border-bottom: none; }
+  #draw-pile.pass-mode .card { box-shadow: 0 0 10px #ffd740; }
+  #draw-pile.pass-mode #draw-pile-label { color: #ffd740; font-weight: 700; }
+
+  #overlay-box-inner .site-link {
+    margin: 20px 0 0;
+    font-size: 12px;
+  }
+  #overlay-box-inner .site-link a { color: #f9a825; text-decoration: none; }
+  #overlay-box-inner .site-link a:hover { text-decoration: underline; }
+
+  /* Schmale Bildschirme: Log nach unten rechts, kleiner */
+  @media (max-width: 700px) {
+    #log {
+      top: auto;
+      bottom: 150px;
+      width: 130px;
+      max-height: 58px;
+      font-size: 10px;
+      padding: 4px 6px;
+    }
+    #overlay-box-inner { padding: 30px 24px; }
+  }
 </style>
 </head>
 <body>
@@ -520,12 +543,13 @@
       <p>Klassisches Kartenspiel · 4 Spieler</p>
       <div class="subtitle" id="overlay-subtitle"></div>
       <button id="start-btn" onclick="startGame()">Neues Spiel</button>
+      <p class="site-link"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></p>
     </div>
   </div>
 </div>
 
 <!-- Log -->
-<div id="log" id="game-log"></div>
+<div id="log"></div>
 
 <script>
 // ==================== GAME STATE ====================
@@ -542,6 +566,8 @@ let currentColor = '';
 let gameActive = false;
 let waitingForColor = false;
 let pendingWildCard = null;
+let drawnCardIdx = -1;   // >= 0: Mensch hat gezogen und darf nur diese Karte spielen oder passen
+let msgTimer = null;
 
 // ==================== CARD CREATION ====================
 function createDeck() {
@@ -653,6 +679,7 @@ function nextPlayer(skip = false) {
 
 function playCard(playerIdx, cardIdx, chosenColor = null) {
   const card = hands[playerIdx].splice(cardIdx, 1)[0];
+  if (playerIdx === 0) drawnCardIdx = -1;
 
   if (card.color === 'wild') {
     card.originalColor = 'wild';
@@ -730,6 +757,7 @@ function aiTurn() {
       const card = hands[currentPlayer][idx];
       let color = null;
       if (card.color === 'wild') color = aiBestColor(currentPlayer);
+      renderAll(); // gezogene Karte kurz sichtbar machen
       setTimeout(() => {
         if (!gameActive) return;
         playCard(currentPlayer, idx, color);
@@ -791,8 +819,9 @@ function scheduleNext() {
 // ==================== HUMAN ACTIONS ====================
 function humanPlay(cardIdx) {
   if (!gameActive || currentPlayer !== 0 || waitingForColor) return;
+  if (drawnCardIdx >= 0 && cardIdx !== drawnCardIdx) return; // nach dem Ziehen nur die gezogene Karte
   const card = hands[0][cardIdx];
-  if (!canPlay(card)) return;
+  if (!card || !canPlay(card)) return;
 
   if (card.color === 'wild') {
     waitingForColor = true;
@@ -814,25 +843,42 @@ function chooseColor(color) {
   scheduleNext();
 }
 
-function humanDraw() {
-  if (!gameActive || currentPlayer !== 0 || waitingForColor) return;
-  const drawn = drawCards(1);
-  if (drawn.length === 0) return;
-  hands[0].push(...drawn);
-  logMsg('Du ziehst eine Karte');
-
-  // Can play drawn card?
-  const lastCard = hands[0][hands[0].length - 1];
-  if (canPlay(lastCard)) {
-    renderAll();
-    // Highlight it - player can choose to play or not
-    // For simplicity, just let them click it
-    return;
-  }
-
+function humanPass() {
+  drawnCardIdx = -1;
   nextPlayer();
   renderAll();
   scheduleNext();
+}
+
+function humanDraw() {
+  if (!gameActive || currentPlayer !== 0 || waitingForColor) return;
+
+  // Schon gezogen und gezogene Karte wäre spielbar: zweiter Klick = passen
+  if (drawnCardIdx >= 0) {
+    logMsg('Du passt');
+    humanPass();
+    return;
+  }
+
+  const drawn = drawCards(1);
+  if (drawn.length === 0) {
+    // Stapel und Ablage erschöpft: Zug abgeben statt hängen bleiben
+    logMsg('Keine Karte mehr zum Ziehen – du passt');
+    humanPass();
+    return;
+  }
+  hands[0].push(...drawn);
+  logMsg('Du ziehst eine Karte');
+
+  // Gezogene Karte spielbar? Dann spielen oder (Klick auf Stapel) passen
+  if (canPlay(drawn[0])) {
+    drawnCardIdx = hands[0].length - 1;
+    showMessage('Karte spielen oder Stapel klicken zum Passen', 1600);
+    renderAll();
+    return;
+  }
+
+  humanPass();
 }
 
 // ==================== RENDERING ====================
@@ -840,26 +886,48 @@ function renderAll() {
   // Human hand
   const h0 = document.getElementById('hand-0');
   h0.innerHTML = '';
+  const W = window.innerWidth, H = window.innerHeight;
+  // Kartenabstand an Platz anpassen, damit auch große Hände ganz sichtbar bleiben
+  const stepHuman = cardStep(hands[0].length, W - 16, 68, 50, 14);
   hands[0].forEach((card, i) => {
-    const playable = gameActive && currentPlayer === 0 && canPlay(card);
+    const playable = gameActive && currentPlayer === 0 && canPlay(card) &&
+                     (drawnCardIdx < 0 || i === drawnCardIdx);
     const div = document.createElement('div');
     div.innerHTML = renderCardHTML(card, true, i);
     const cardEl = div.firstChild;
     if (gameActive && currentPlayer === 0) {
       cardEl.classList.add(playable ? 'playable' : 'not-playable');
     }
+    if (i > 0) cardEl.style.marginLeft = (stepHuman - 68) + 'px';
     h0.appendChild(cardEl);
   });
 
   // AI hands (show backs)
+  // oben: auf breiten Bildschirmen Platz für das Log rechts oben freihalten
+  const stepTop  = cardStep(hands[2].length, W > 700 ? W - 440 : W - 16, 68, 30, 6);
+  const sideAvail = H - 2 * 150;
   for (let p = 1; p <= 3; p++) {
     const hEl = document.getElementById(`hand-${p}`);
-    hEl.innerHTML = '';
     const count = hands[p].length;
-    for (let i = 0; i < count; i++) {
-      hEl.innerHTML += renderCardBack();
+    let html = '';
+    for (let i = 0; i < count; i++) html += renderCardBack();
+    hEl.innerHTML = html;
+    const kids = hEl.children;
+    for (let i = 1; i < kids.length; i++) {
+      if (p === 2) {
+        kids[i].style.marginLeft = (stepTop - 68) + 'px';
+      } else {
+        const stepSide = cardStep(count, sideAvail, 100, 46, 5);
+        kids[i].style.marginTop = (stepSide - 100) + 'px';
+      }
     }
   }
+
+  // Ziehstapel: nach dem Ziehen einer spielbaren Karte wird er zum "Passen"-Knopf
+  const dpEl = document.getElementById('draw-pile');
+  const passMode = gameActive && currentPlayer === 0 && drawnCardIdx >= 0;
+  dpEl.classList.toggle('pass-mode', passMode);
+  document.getElementById('draw-pile-label').textContent = passMode ? 'Passen' : 'Ziehen';
 
   // Labels
   for (let p = 0; p < 4; p++) {
@@ -889,12 +957,22 @@ function renderAll() {
   document.getElementById('direction-indicator').textContent = direction === 1 ? '↻' : '↺';
 }
 
+// Abstand zwischen überlappenden Karten: höchstens maxStep, mindestens minStep,
+// sonst so, dass n Karten (Kartengröße size) in avail Pixel passen
+function cardStep(n, avail, size, maxStep, minStep) {
+  if (n <= 1) return maxStep;
+  return Math.max(minStep, Math.min(maxStep, Math.floor((avail - size) / (n - 1))));
+}
+
+window.addEventListener('resize', () => renderAll());
+
 // ==================== MESSAGES & LOG ====================
 function showMessage(text, duration = 1500) {
   const el = document.getElementById('message-overlay');
   el.textContent = text;
   el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), duration);
+  clearTimeout(msgTimer);
+  msgTimer = setTimeout(() => el.classList.remove('show'), duration);
 }
 
 function logMsg(msg) {
@@ -918,6 +996,8 @@ function startGame() {
   direction = 1;
   gameActive = true;
   waitingForColor = false;
+  pendingWildCard = null;
+  drawnCardIdx = -1;
 
   // Deal 7 cards each
   for (let p = 0; p < 4; p++) {

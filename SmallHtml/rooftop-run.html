@@ -22,10 +22,17 @@
     box-shadow: 0 0 60px rgba(0,0,0,.8);
     cursor: pointer;
   }
+  #blog {
+    position: fixed; right: 10px; bottom: 8px;
+    font: 12px "Lucida Console", "DejaVu Sans Mono", Monaco, monospace;
+    color: rgba(255,255,255,.45); text-decoration: none;
+  }
+  #blog:hover { color: #e6d29b; }
 </style>
 </head>
 <body>
 <div id="wrap"><canvas id="c" width="960" height="540"></canvas></div>
+<a id="blog" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
 <script>
 (() => {
 'use strict';
@@ -98,7 +105,6 @@ const COL = {
 // ---------------------------------------------------------------- Canvas
 const cv  = document.getElementById('c');
 const ctx = cv.getContext('2d', { alpha: false });
-ctx.imageSmoothingEnabled = true;
 
 function fit() {
   const s = Math.min(window.innerWidth / W, window.innerHeight / H);
@@ -340,7 +346,7 @@ function muteToggle() {
 // ---------------------------------------------------------------- Zustand
 let state = 'title';       // 'title' | 'play' | 'falling' | 'over'
 let buildings, crates, parts, camX, shake, bid, best = 0;
-let p, hold = false, coyote = 0, buffered = -1, deadT = 0, dustT = 0, flash = 0, finalM = 0;
+let p, hold = false, coyote = 0, buffered = -1, deadT = 0, flash = 0, finalM = 0;
 
 // Hintergrund-Ebene
 let mechs = [], towers = [], bombs = [], blasts = [], strikes = [], birds = [];
@@ -350,7 +356,7 @@ let towerX = 0, mechT = 2, bombT = 3, tid = 0;
 function reset() {
   buildings = []; crates = []; parts = []; birds = [];
   camX = 0; shake = 0; bid = 0; deadT = 0; flash = 0;
-  coyote = 0; buffered = -1; dustT = 0;
+  coyote = 0; buffered = -1;
 
   buildings.push({ id: bid++, x: -400, w: 1500, top: 380 });
   p = { x: 0, y: 380, vy: 0, vx: VX_START, ph: 0, ground: true, ang: 0, step: 0 };
@@ -430,7 +436,7 @@ function genNext() {
     b.room = { x1: b.x, x2: b.x + b.w, glass: [true, true] };
   } else if (!last.room && !b.crane && b.w > 300 && top <= 350 &&
              bid > 3 && Math.random() < SINK_CHANCE) {
-    b.sink = { on: false, t: 0, v: 0, total: 0, d: 0, puffT: 0, rumbleT: 0 };
+    b.sink = { on: false, t: 0, v: 0, total: 0, puffT: 0, rumbleT: 0 };
   }
 
   buildings.push(b);
@@ -501,9 +507,10 @@ function trySpawnStrike() {
   // teils 90 px hinter der Dachkante – zwei Sprünge in 0,1 s.
   const runup = clamp(p.vx * 0.40, 220, 400);
   // Der Zielpunkt darf anfangs außerhalb des Bildes liegen und hereinscrollen.
-  // 1,15 · vx minus 0,75 s Vorwarnung lässt garantiert 0,4 s Reaktionszeit
-  // NACH dem Einschlag – bei Vollgas sieht man nur 0,74 s weit.
-  const lo = p.x + Math.max(620, p.vx * 1.35);
+  // Mindestabstand = STRIKE_REACT + kürzeste Fallzeit (STRIKE_FALL + 0,05 s).
+  // Damit greift die Untergrenze von dur nie, und die Reaktionszeit NACH
+  // dem Einschlag ist bei jedem Tempo wirklich STRIKE_REACT.
+  const lo = p.x + Math.max(620, p.vx * (STRIKE_REACT + STRIKE_FALL + 0.05));
   const hi = p.x + Math.max(1100, p.vx * 2.50);
 
   const cand = [];
@@ -565,8 +572,12 @@ function strikeHit(s) {
   if (b && !b.room && !b.sink &&
       s.x - b.x > s.hw / 2 + 30 && b.x + b.w - s.x > s.hw / 2 + 30) {
     const i = buildings.indexOf(b);
-    const l = { id: bid++, x: b.x,             w: (s.x - s.hw / 2) - b.x,          top: b.top };
-    const r = { id: bid++, x: s.x + s.hw / 2,  w: (b.x + b.w) - (s.x + s.hw / 2),  top: b.top };
+    // Beide Hälften erben Fensterraster und -muster, damit die Fassade beim
+    // Einschlag nicht plötzlich anders aussieht.
+    const ox  = b.ox  !== undefined ? b.ox  : b.x;
+    const pat = b.pat !== undefined ? b.pat : b.id;
+    const l = { id: bid++, x: b.x,             w: (s.x - s.hw / 2) - b.x,          top: b.top, ox, pat, ow: b.ow || b.w };
+    const r = { id: bid++, x: s.x + s.hw / 2,  w: (b.x + b.w) - (s.x + s.hw / 2),  top: b.top, ox, pat, ow: b.ow || b.w };
     buildings.splice(i, 1, l, r);
     for (let k = crates.length - 1; k >= 0; k--) {
       const c = crates[k];
@@ -634,17 +645,21 @@ function updateSink(dt) {
   for (const b of buildings) {
     const s = b.sink;
     if (!s || !s.on) continue;
-    s.d = 0;
     s.t += dt;
     if (s.t < SINK_DELAY || s.total >= MAX_SINK) continue;
 
     s.v = Math.min(s.v + SINK_ACC * dt, SINK_VMAX);
     let d = s.v * dt;
     if (s.total + d > MAX_SINK) d = MAX_SINK - s.total;
-    s.total += d; s.d = d; b.top += d;
+    s.total += d; b.top += d;
 
     // Der Spieler sackt mit ab, statt frei zu fallen – sonst ruckelt es
     if (p.ground && p.x >= b.x && p.x <= b.x + b.w) p.y += d;
+
+    // Sitzende Tauben ebenso, sonst schweben sie über dem Dach
+    for (const q of birds) {
+      if (!q.fly && q.x >= b.x && q.x <= b.x + b.w) q.y += d;
+    }
 
     if (shake < 7) shake = 7;
     s.puffT -= dt;
@@ -832,6 +847,38 @@ function updateBG(dt) {
   }
 }
 
+// ---------------------------------------------------------------- Abbremsen
+// Die Häuser voraus wurden für das Tempo VOR dem Treffer gebaut. Nach einem
+// Blindgänger (× 0,5) oder zwei Kisten (× 0,38) wären Lücken bis 520 px
+// unerreichbar – bei Tempo 470 trägt ein flacher Sprung nur noch 460 px.
+// Deshalb: nie langsamer als die schon sichtbaren Lücken verlangen …
+function safeVx() {
+  let need = 300;
+  for (let i = 0; i < buildings.length - 1; i++) {
+    const a = buildings[i], n = buildings[i + 1];
+    if (a.x + a.w < p.x) continue;              // schon hinter uns
+    if (n.x - camX > W + 100) break;            // noch unsichtbar, wird neu gebaut
+    const gap = n.x - (a.x + a.w);
+    if (gap <= 0) continue;
+    const rise = (a.top + (a.sink && a.sink.total < MAX_SINK ? MAX_SINK - a.sink.total : 0)) - n.top;
+    let v = 300;
+    while (v < VX_MAX && maxJump(v, rise) * 0.92 < gap) v += 20;
+    need = Math.max(need, v);
+  }
+  return need;
+}
+
+// … und alles hinter dem rechten Bildrand mit dem neuen Tempo neu würfeln.
+function slowDown(f) {
+  p.vx = Math.min(p.vx, Math.max(300, p.vx * f, safeVx()));
+  const cut = camX + W + 100;
+  while (buildings.length > 2 && buildings[buildings.length - 1].x > cut) buildings.pop();
+  crates  = crates.filter(c => c.x < cut);
+  birds   = birds.filter(q => q.x < cut);
+  strikes = strikes.filter(s => s.x < cut);
+  // genNext() füllt im selben update() mit dem neuen p.vx wieder auf
+}
+
 // ---------------------------------------------------------------- Eingabe
 function jump() {
   if (state !== 'play') return;
@@ -863,7 +910,11 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM') { e.preventDefault(); if (!e.repeat) muteToggle(); return; }
   if (e.code === 'KeyR') {
     e.preventDefault();
-    if (!e.repeat && state !== 'title') { reset(); state = 'play'; }
+    if (!e.repeat && state !== 'title') {
+      // Abgebrochener Lauf zählt trotzdem für die Bestmarke
+      if (state === 'play') best = Math.max(best, Math.floor(p.x / PPM));
+      reset(); state = 'play';
+    }
     return;
   }
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'KeyX') {
@@ -877,7 +928,15 @@ addEventListener('keyup', e => {
 cv.addEventListener('mousedown', e => { e.preventDefault(); press(); });
 addEventListener('mouseup', release);
 cv.addEventListener('touchstart', e => { e.preventDefault(); press(); }, { passive: false });
-addEventListener('touchend', e => { e.preventDefault(); release(); }, { passive: false });
+// preventDefault nur auf dem Canvas – sonst wäre der Blog-Link per Touch tot
+addEventListener('touchend', e => { if (e.target === cv) e.preventDefault(); release(); }, { passive: false });
+// Fensterwechsel bei gedrückter Taste: ohne das bliebe hold für immer true
+addEventListener('blur', release);
+// Ton anhalten, solange der Tab im Hintergrund liegt (das Spiel steht dann auch)
+document.addEventListener('visibilitychange', () => {
+  if (!A.ctx) return;
+  if (document.hidden) A.ctx.suspend(); else A.ctx.resume();
+});
 
 // ---------------------------------------------------------------- Logik
 function die(crash) {
@@ -946,7 +1005,7 @@ function update(dt) {
           if (py0 <= b.top + 0.5) {              // Landung auf dem Dach
             if (!p.ground && p.vy > 400) { sfx.land(); puff(p.x, b.top, 9, 70, '#c6ccd6', 6); shake += 4; }
             p.y = b.top; p.vy = 0; ground = true;
-            if (buffered > 0) { buffered = -1; p.vy = -JUMP_V; ground = false; puff(p.x, p.y, 6, 80, '#c6ccd6', 5); }
+            if (buffered > 0) { buffered = -1; p.vy = -JUMP_V; ground = false; sfx.jump(); puff(p.x, p.y, 6, 80, '#c6ccd6', 5); }
           } else if (b.crane) {
             // Ein Ausleger hat keine Fassade – wer zu tief ankommt, fällt
             // einfach darunter durch, statt an einer unsichtbaren Wand zu sterben.
@@ -968,12 +1027,12 @@ function update(dt) {
             p.y > c.y - c.h && p.y - 44 < c.y) {
           c.alive = false;
           if (c.dud) {
-            p.vx = Math.max(300, p.vx * 0.50);
+            slowDown(0.50);
             sfx.clang(); shake += 20;
             puff(c.x + c.w / 2, c.y - c.h / 2, 26, 260, '#6a7180', 7);
             puff(c.x + c.w / 2, c.y - c.h / 2, 8, 150, COL.winLit, 4);
           } else {
-            p.vx = Math.max(300, p.vx * (c.slow || 0.62));
+            slowDown(c.slow || 0.62);
             sfx.crate(); shake += c.kind ? 8 : 13;
             puff(c.x + c.w / 2, c.y - c.h / 2, 20, 200, c.kind ? COL.furn : COL.crate, 7);
           }
@@ -997,7 +1056,7 @@ function update(dt) {
                 // in den Korridor gedrückt. Kostet Tempo statt des Laufs.
                 p.y = lim + 44;
                 p.vy = Math.max(p.vy, 60);
-                p.vx = Math.max(300, p.vx * 0.70);
+                slowDown(0.70);
                 sfx.glass(); shake += 18;
                 puff(wx, lim + 20, 30, 240, '#dfe8f2', 8, { life: [0.4, 1.2] });
                 puff(wx, lim + 10, 12, 120, COL.smoke, 5);
@@ -1073,16 +1132,22 @@ function drawBuilding(b) {
   ctx.fillStyle = b.sink ? COL.crack : COL.bldEdge;
   ctx.fillRect(x, y, w, 3);
 
-  // Fenster
-  const cols = Math.floor((w - 24) / 30);
+  // Fenster. Raster und Muster hängen am ursprünglichen Haus (ox, pat, ow),
+  // damit beide Hälften nach einem Raketeneinschlag unverändert bleiben.
+  const ox   = b.ox  !== undefined ? b.ox  : b.x;
+  const pat  = b.pat !== undefined ? b.pat : b.id;
+  const cols = Math.floor(((b.ow || b.w) - 24) / 30);
+  const c0   = Math.max(0, Math.ceil((b.x + 4 - ox - 14) / 30));
+  const c1   = Math.min(cols - 1, Math.floor((b.x + b.w - 4 - ox - 28) / 30));
+  const sx   = Math.round(ox - camX);
   const rows = Math.floor((H - y - 20) / 40) + 2;
-  for (let cx = 0; cx < cols; cx++) {
+  for (let cx = c0; cx <= c1; cx++) {
     for (let ry = 0; ry < rows; ry++) {
-      const k = b.id * 977 + cx * 31 + ry * 7;
+      const k = pat * 977 + cx * 31 + ry * 7;
       const v = hash(k);
       if (v < 0.18) continue;
       ctx.fillStyle = v > 0.93 ? COL.winLit : COL.win;
-      ctx.fillRect(x + 14 + cx * 30, y + 22 + ry * 40, 14, 20);
+      ctx.fillRect(sx + 14 + cx * 30, y + 22 + ry * 40, 14, 20);
     }
   }
 
@@ -1713,6 +1778,7 @@ function frame(now) {
   acc += dt;
   let guard = 0;
   while (acc >= STEP && guard++ < 12) { update(STEP); acc -= STEP; }
+  if (guard > 12) acc = 0;     // zu langsames Gerät: Rückstand verwerfen statt anzuhäufen
   draw();
 }
 

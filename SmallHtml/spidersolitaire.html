@@ -78,6 +78,8 @@ body {
   border:1.5px solid #0f2660; border-radius:4px; box-shadow:1px 0 2px rgba(0,0,0,0.3);
 }
 #stock-label { color:#a3d49a; font-size:10px; margin-top:2px; text-align:center; }
+#homelink { color:rgba(205,230,200,0.55); font-size:11px; text-decoration:none; align-self:center; }
+#homelink:hover { color:#fff; text-decoration:underline; }
 #foundation { display:flex; gap:3px; }
 .foundation-slot {
   width:clamp(30px,4.2vw,50px); aspect-ratio:2.5/3.5;
@@ -122,6 +124,9 @@ body {
 }
 #modal .diff-btns button:hover { background:#2a5a2a; border-color:#5a9b5a; }
 #modal .diff-btns button span { font-size:11px; color:#7ba67b; display:block; margin-top:2px; }
+#modal #btn-cancel { margin-top:12px; padding:6px 18px; border:1px solid #3a6b3a; border-radius:6px;
+  background:none; color:#a3d49a; font-size:12px; cursor:pointer; }
+#modal #btn-cancel:hover { background:rgba(255,255,255,0.08); }
 #win-content {
   background:#1c2e1c; border:2px solid #4a8b4a; border-radius:16px;
   padding:36px; color:#e0e0e0; text-align:center;
@@ -157,6 +162,7 @@ body {
   <div id="tableau"></div>
   <div id="bottombar">
     <div><div id="stock" onclick="dealFromStock()"></div><div id="stock-label"></div></div>
+    <a id="homelink" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
     <div id="foundation"></div>
   </div>
 </div>
@@ -165,7 +171,7 @@ body {
   <button onclick="startGame(1)">1 Farbe – Leicht<span>Nur Pik ♠</span></button>
   <button onclick="startGame(2)">2 Farben – Mittel<span>Pik ♠ & Herz ♥</span></button>
   <button onclick="startGame(4)">4 Farben – Schwer<span>Alle Farben</span></button>
-</div></div></div>
+</div><button id="btn-cancel" onclick="cancelNewGame()">Abbrechen</button></div></div>
 <div id="win-overlay"><div id="win-content"><h1>🎉 Gewonnen!</h1><p id="win-stats"></p><button onclick="showNewGame()">Nochmal spielen</button></div></div>
 <script>
 const CARD_DATA = {
@@ -243,6 +249,12 @@ let numSuits = 1, undoStack = [];
 let dragState = null, pendingDrag = null, didDrag = false;
 const DRAG_THRESHOLD = 6;
 let timerSeconds = 0, timerInterval = null, timerRunning = false, timerStarted = false, paused = false;
+let gameActive = false, timerWasRunning = false;
+let curFaceUpOff = 26;
+function isOverlayOpen() {
+  return document.getElementById('modal-overlay').classList.contains('show') ||
+         document.getElementById('win-overlay').classList.contains('show');
+}
 
 // ==============================================================
 // TIMER
@@ -259,7 +271,7 @@ function updateTimerDisplay() {
   document.getElementById('timer-display').textContent = String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 }
 function togglePause() {
-  if (!timerStarted) return;
+  if (!timerStarted || !gameActive || isOverlayOpen()) return;
   paused = !paused;
   const overlay = document.getElementById('pause-overlay');
   if (paused) { stopTimer(); overlay.classList.add('show'); document.getElementById('btn-pause').textContent = '▶'; }
@@ -296,7 +308,11 @@ function startGame(n) {
   numSuits = n;
   document.getElementById('modal-overlay').classList.remove('show');
   document.getElementById('win-overlay').classList.remove('show');
+  document.getElementById('pause-overlay').classList.remove('show');
+  clearHints();
+  dragState = null; pendingDrag = null; didDrag = false;
   resetTimer();
+  gameActive = true;
   const deck = buildDeck(n); shuffle(deck);
   columns = Array.from({length:10}, () => []);
   let idx = 0;
@@ -311,10 +327,19 @@ function startGame(n) {
 }
 
 function showNewGame() {
+  timerWasRunning = timerRunning;
   stopTimer();
   document.getElementById('win-overlay').classList.remove('show');
   document.getElementById('pause-overlay').classList.remove('show');
+  paused = false;
+  document.getElementById('btn-pause').textContent = '⏸';
+  document.getElementById('btn-cancel').style.display = gameActive ? '' : 'none';
   document.getElementById('modal-overlay').classList.add('show');
+}
+function cancelNewGame() {
+  if (!gameActive) return;
+  document.getElementById('modal-overlay').classList.remove('show');
+  if (timerWasRunning) startTimer();
 }
 
 function checkComplete(ci) {
@@ -327,7 +352,7 @@ function checkComplete(ci) {
   if (col.length > 0 && !col[col.length-1].faceUp) col[col.length-1].faceUp = true;
   render();
   if (completed === 8) {
-    stopTimer();
+    stopTimer(); gameActive = false; undoStack = [];
     const m = Math.floor(timerSeconds/60), s = timerSeconds%60;
     const tStr = String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
     setTimeout(() => {
@@ -340,9 +365,9 @@ function checkComplete(ci) {
 
 function moveCards(fc, fi, tc) {
   onFirstMove();
+  snapshot();
   const cards = columns[fc].splice(fi);
   const flipped = columns[fc].length > 0 && !columns[fc][columns[fc].length-1].faceUp;
-  undoStack.push({type:'move', fromCol:fc, toCol:tc, cards:[...cards], flipped, fromIdx:fi});
   columns[tc].push(...cards);
   if (flipped) columns[fc][columns[fc].length-1].faceUp = true;
   moves++; score = Math.max(0, score-1);
@@ -350,7 +375,8 @@ function moveCards(fc, fi, tc) {
 }
 
 function dealFromStock() {
-  if (!stock.length || paused) return;
+  if (!stock.length || paused || !gameActive) return;
+  clearHints();
   for (let c = 0; c < 10; c++) if (!columns[c].length) {
     render();
     const cols = document.querySelectorAll('.column');
@@ -359,24 +385,25 @@ function dealFromStock() {
     return;
   }
   onFirstMove();
+  snapshot();
   for (let c = 0; c < 10; c++) { const card = stock.pop(); card.faceUp = true; columns[c].push(card); }
-  undoStack.push({type:'deal'}); moves++; score = Math.max(0, score-1);
+  moves++; score = Math.max(0, score-1);
   for (let c = 0; c < 10; c++) checkComplete(c);
   render();
 }
 
+// Undo über vollständige Schnappschüsse: deckt auch abgelegte Farben,
+// dabei aufgedeckte Karten, Punkte und Zähler korrekt ab.
+const UNDO_LIMIT = 500;
+function snapshot() {
+  undoStack.push(JSON.stringify({columns, stock, completed, moves, score}));
+  if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+}
 function undo() {
-  if (!undoStack.length || paused) return;
-  const a = undoStack.pop();
-  if (a.type === 'move') {
-    if (a.flipped && columns[a.fromCol].length > 0) columns[a.fromCol][columns[a.fromCol].length-1].faceUp = false;
-    const cards = columns[a.toCol].splice(columns[a.toCol].length - a.cards.length);
-    columns[a.fromCol].push(...cards);
-    moves--; score = Math.min(500, score+1);
-  } else if (a.type === 'deal') {
-    for (let c = 9; c >= 0; c--) { const card = columns[c].pop(); card.faceUp = false; stock.push(card); }
-    moves--; score = Math.min(500, score+1);
-  }
+  if (!undoStack.length || paused || !gameActive || dragState) return;
+  clearHints();
+  const st = JSON.parse(undoStack.pop());
+  columns = st.columns; stock = st.stock; completed = st.completed; moves = st.moves; score = st.score;
   render();
 }
 
@@ -391,12 +418,22 @@ function render() {
 
   const tableau = document.getElementById('tableau');
   tableau.innerHTML = '';
-  const gameH = document.getElementById('game').clientHeight - 90;
-  let maxCards = 0;
-  for (const col of columns) if (col.length > maxCards) maxCards = col.length;
-  const maxOff = maxCards > 1 ? (gameH - 80) / (maxCards - 1) : 25;
-  const faceDownOff = Math.min(16, Math.max(8, maxOff * 0.55));
-  const faceUpOff = Math.min(26, Math.max(12, maxOff));
+  // Kartenhöhe aus der Spaltenbreite (aspect-ratio 2.5/3.5), dann die
+  // Abstände so stauchen, dass die längste Spalte in den Tisch passt.
+  const colW = Math.max(1, (tableau.clientWidth - 9 * 4) / 10);
+  const cardH = colW * 3.5 / 2.5;
+  const avail = Math.max(40, tableau.clientHeight - cardH - 4);
+  const FD = 16, FU = 26;
+  let need = 0;
+  for (const col of columns) {
+    let h = 0;
+    for (let i = 0; i < col.length - 1; i++) h += col[i].faceUp ? FU : FD;
+    if (h > need) need = h;
+  }
+  const f = need > avail ? avail / need : 1;
+  const faceDownOff = Math.max(3, FD * f);
+  const faceUpOff = Math.max(6, FU * f);
+  curFaceUpOff = faceUpOff;
 
   for (let c = 0; c < 10; c++) {
     const colDiv = document.createElement('div');
@@ -432,7 +469,7 @@ function render() {
   const deals = Math.ceil(stock.length / 10);
   for (let i = 0; i < deals; i++) {
     const p = document.createElement('div'); p.className = 'stock-pile';
-    if (i > 0) p.style.marginLeft = '-' + Math.max(14, 26) + 'px';
+    if (i > 0) p.style.marginLeft = '-26px';
     stockDiv.appendChild(p);
   }
   document.getElementById('stock-label').textContent = stock.length > 0 ? `${deals}×10` : 'Leer';
@@ -492,22 +529,36 @@ function findAllMoves() {
       if (!col[i].faceUp) break;
       if (!isSequence(col, i)) continue;
       const card = col[i], wouldFlip = i > 0 && !col[i-1].faceUp;
+      const parent = i > 0 ? col[i-1] : null;
+      // Liegt die Folge schon auf einer passenden Karte (Rang +1)?
+      const parentFits = parent && parent.faceUp && rankValue(parent.rank) === rankValue(card.rank) + 1;
+      const parentSameSuit = parentFits && parent.suit === card.suit;
+      // Länge der gleichfarbigen Folge, die oben auf der Quellspalte endet
+      const movedLen = col.length - i;
       for (let t = 0; t < 10; t++) {
         if (t === c || !canPlace(card, columns[t])) continue;
         let pri = 0;
         if (!columns[t].length) {
+          // Auf leere Spalte nur, wenn dadurch etwas frei wird bzw. aufgedeckt wird
+          if (parentFits) continue;
           if (wouldFlip) pri = 2; else if (i > 0) pri = 1; else continue;
         } else {
-          const top = columns[t][columns[t].length-1];
+          const tgt = columns[t];
+          const top = tgt[tgt.length-1];
+          // gleichfarbige Folge auf dem Ziel zählen (von oben nach unten)
+          let tgtRun = 0;
           if (top.suit === card.suit) {
-            pri = 10;
-            let run = col.length - i;
-            for (let k = columns[t].length-1; k >= 0; k--) {
-              if (!columns[t][k].faceUp || columns[t][k].suit !== card.suit) break;
-              if (k === columns[t].length-1 && rankValue(top.rank) === rankValue(card.rank)+1) run++;
-              else break;
+            tgtRun = 1;
+            for (let k = tgt.length-2; k >= 0; k--) {
+              const a = tgt[k], b = tgt[k+1];
+              if (!a.faceUp || a.suit !== b.suit || rankValue(a.rank) !== rankValue(b.rank) + 1) break;
+              tgtRun++;
             }
-            if (run >= 13) pri = 20;
+          }
+          if (parentSameSuit) continue;               // würde nur eine fertige Folge zerreißen
+          if (parentFits && top.suit !== card.suit) continue; // reines Hin- und Herschieben
+          if (top.suit === card.suit) {
+            pri = movedLen + tgtRun >= 13 ? 20 : 10;
           } else pri = 3;
           if (wouldFlip) pri += 1;
         }
@@ -527,11 +578,11 @@ function clearHints() {
 }
 
 function showHint() {
-  if (paused) return;
+  if (paused || !gameActive) return;
   clearHints();
   const all = findAllMoves();
   if (!all.length) {
-    if (stock.length) {
+    if (stock.length && columns.every(col => col.length)) {
       const s = document.getElementById('stock');
       s.style.boxShadow = '0 0 0 3px #4fc3f7,0 0 16px rgba(79,195,247,0.6)';
       hintTimeout = setTimeout(() => { s.style.boxShadow = ''; }, 2500);
@@ -552,7 +603,7 @@ function showHint() {
 // DRAG & DROP
 // ==============================================================
 function onDragStart(e) {
-  if (paused) return; e.preventDefault();
+  if (paused || e.button !== 0) return; e.preventDefault();
   const col = parseInt(e.currentTarget.dataset.col), idx = parseInt(e.currentTarget.dataset.idx);
   if (!isSequence(columns[col], idx)) return;
   didDrag = false; pendingDrag = {col, idx, x:e.clientX, y:e.clientY};
@@ -560,7 +611,7 @@ function onDragStart(e) {
   document.addEventListener('mouseup', onMouseUp);
 }
 function onTouchStart(e) {
-  if (paused) return; e.preventDefault();
+  if (paused || pendingDrag || dragState) return; e.preventDefault();
   const col = parseInt(e.currentTarget.dataset.col), idx = parseInt(e.currentTarget.dataset.idx);
   if (!isSequence(columns[col], idx)) return;
   const t = e.touches[0]; didDrag = false; pendingDrag = {col, idx, x:t.clientX, y:t.clientY};
@@ -589,7 +640,7 @@ function moveDragTo(x, y) {
   if (!dragState) return;
   const nx = x - dragState.offsetX, ny = y - dragState.offsetY;
   let py = ny;
-  dragState.els.forEach(el => { el.style.left = nx+'px'; el.style.top = py+'px'; py += 22; });
+  dragState.els.forEach(el => { el.style.left = nx+'px'; el.style.top = py+'px'; py += curFaceUpOff; });
 }
 function endDragAt(x, y) {
   if (!dragState) { pendingDrag = null; return; }
@@ -627,9 +678,13 @@ function onTouchEnd(e) {
 // KEYBOARD + INIT
 // ==============================================================
 document.addEventListener('keydown', e => {
-  if (e.ctrlKey && e.key === 'z') { e.preventDefault(); undo(); }
-  if (e.key === 'Escape' && timerStarted) togglePause();
-  if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey) showHint();
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); undo(); return; }
+  if (e.key === 'Escape') {
+    if (document.getElementById('modal-overlay').classList.contains('show')) { cancelNewGame(); return; }
+    if (timerStarted) togglePause();
+    return;
+  }
+  if ((e.key === 'h' || e.key === 'H') && !e.ctrlKey && !e.metaKey && !isOverlayOpen()) showHint();
 });
 window.addEventListener('resize', () => { if (columns.length) render(); });
 showNewGame();

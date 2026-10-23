@@ -153,6 +153,9 @@ canvas {
   min-height: 1.2em;
 }
 .hidden { display: none !important; }
+#footer { font-size: 0.8em; margin-bottom: 14px; }
+#footer a { color: #8ad; text-decoration: none; }
+#footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -221,14 +224,19 @@ canvas {
   <!-- Connected state -->
   <div id="netConnected" class="step hidden" style="align-items:center;">
     <div style="color:#6c6; font-weight:bold;">✔ Verbunden!</div>
-    <button id="btnDisconnect" class="danger">Trennen</button>
+    <div class="btn-row" style="justify-content:center;">
+      <button id="btnRematch" class="primary">Neue Partie</button>
+      <button id="btnDisconnect" class="danger">Trennen</button>
+    </div>
   </div>
 </div>
 
 <div id="status">Klicke "Neues Spiel" zum Starten.</div>
 <canvas id="board"></canvas>
 <div id="legend"></div>
-<div id="info">Stein anklicken → Zielfeld anklicken · Sprungketten möglich</div>
+<div id="info">Stein anklicken → Zielfeld anklicken · Sprungketten möglich · fremde Sternspitzen dürfen nur übersprungen werden<br>
+Gewonnen hat, wessen Zielspitze voll ist und mindestens einen eigenen Stein enthält.</div>
+<div id="footer"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a> · <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></div>
 
 <script>
 "use strict";
@@ -286,6 +294,8 @@ let validMoves = new Set();
 let jumpPath = [];
 let gameOver = false;
 let animating = false;
+let gameId = 0;            // wird bei jedem Neustart erhöht; alte Timer/Animationen prüfen dagegen
+let passCount = 0;         // aufeinanderfolgende Runden ohne Zug (Patt-Erkennung)
 
 // ─── Network State ──────────────────────────────────────────
 let netMode = false;       // true when playing over network
@@ -294,6 +304,9 @@ let localPlayerIdx = 0;    // which players[] index is local
 let peerConn = null;       // RTCPeerConnection
 let dataChannel = null;    // RTCDataChannel
 let netConnected = false;
+let netQueue = [];         // eingehende Züge, die noch nicht verarbeitet sind
+let userDisconnect = false; // Trennung wurde selbst ausgelöst
+let netGameNo = 0;         // Partienummer, damit Züge alter Partien verworfen werden
 
 const STUN_SERVERS = {
   iceServers: [
@@ -308,22 +321,43 @@ const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 let cellRadius = 18;
 let offsetX = 0, offsetY = 0;
+let viewW = 0, viewH = 0;  // logische (CSS-)Größe des Canvas
+
+// Abstand zweier Nachbarfelder = 1.1 * cellRadius → regelmäßiges Sechseckgitter
+const COL_STEP = 0.55;                    // pro Spalteneinheit (doppelte Koordinaten)
+const ROW_STEP = 1.1 * Math.sqrt(3) / 2;  // Zeilenabstand
 
 function resizeCanvas() {
-  const maxW = Math.min(window.innerWidth - 20, 600);
-  cellRadius = Math.max(12, Math.min(20, Math.floor(maxW / 30)));
-  const W = cellRadius * 28;
-  const H = cellRadius * 19 * Math.sqrt(3) * 0.5 + cellRadius * 2;
-  canvas.width = W;
-  canvas.height = H;
-  offsetX = W / 2;
-  offsetY = cellRadius * 1.5;
+  const maxW = Math.min(window.innerWidth - 20, 640);
+  const maxH = Math.max(300, window.innerHeight - 190);
+  // Brettbreite: 24 Spalteneinheiten + Rand; Höhe: 16 Zeilen + Rand
+  const rW = maxW / (24 * COL_STEP + 2);
+  const rH = maxH / (16 * ROW_STEP + 2.4);
+  cellRadius = Math.max(12, Math.floor(Math.min(rW, rH, 40)));
+  viewW = Math.round(cellRadius * (24 * COL_STEP + 2));
+  viewH = Math.round(cellRadius * (16 * ROW_STEP + 2.4));
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(viewW * dpr);
+  canvas.height = Math.round(viewH * dpr);
+  canvas.style.width = viewW + 'px';
+  canvas.style.height = viewH + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  offsetX = viewW / 2;
+  offsetY = cellRadius * 1.2;
 }
 
 function cellToPixel(r, c) {
-  const px = offsetX + (c - 12) * cellRadius * 0.55;
-  const py = offsetY + r * cellRadius * Math.sqrt(3) * 0.52;
+  const px = offsetX + (c - 12) * cellRadius * COL_STEP;
+  const py = offsetY + r * cellRadius * ROW_STEP;
   return {px, py};
+}
+
+function layoutBoard() {
+  resizeCanvas();
+  for (const cell of cells) {
+    const {px, py} = cellToPixel(cell.r, cell.c);
+    cell.px = px; cell.py = py;
+  }
 }
 
 // ─── Board Init ─────────────────────────────────────────────
@@ -388,15 +422,21 @@ function startGame() {
     for (const k of p.home) board[k] = pi;
   }
 
+  resetTurnState();
+  updateLegend();
+  updateStatus();
+  draw();
+}
+
+function resetTurnState() {
+  gameId++;
   currentPlayerIdx = 0;
   selectedKey = null;
   validMoves = new Set();
   jumpPath = [];
   gameOver = false;
   animating = false;
-  updateLegend();
-  updateStatus();
-  draw();
+  passCount = 0;
 }
 
 function startNetworkGame() {
@@ -424,12 +464,8 @@ function startNetworkGame() {
     if (isLocalPlayer) localPlayerIdx = i;
   }
 
-  currentPlayerIdx = 0;
-  selectedKey = null;
-  validMoves = new Set();
-  jumpPath = [];
-  gameOver = false;
-  animating = false;
+  resetTurnState();
+  netQueue = [];
   updateLegend();
   updateStatus();
   draw();
@@ -474,10 +510,21 @@ function getValidMoves(key) {
 }
 
 function isLegalMove(playerIndex, fromKey, toKey) {
-  const player = players.find(p => p.index === playerIndex);
-  const targetSet = new Set(player.target);
-  if (targetSet.has(fromKey) && !targetSet.has(toKey)) return false;
+  const targetZone = OPPOSITE[playerIndex];
+  const fromZone = cellMap[fromKey].zone;
+  const toZone = cellMap[toKey].zone;
+  // Wer im Ziel steht, bleibt im Ziel
+  if (fromZone === targetZone && toZone !== targetZone) return false;
+  // In fremden Sternspitzen darf man nicht stehen bleiben (nur durchspringen)
+  if (toZone !== -1 && toZone !== playerIndex && toZone !== targetZone) return false;
   return true;
+}
+
+function hasAnyMove(playerIndex) {
+  for (const pk of getPlayerPieces(playerIndex)) {
+    if (getFilteredMoves(playerIndex, pk).size > 0) return true;
+  }
+  return false;
 }
 
 function getFilteredMoves(playerIndex, key) {
@@ -490,17 +537,22 @@ function getFilteredMoves(playerIndex, key) {
 }
 
 // ─── Win Check ──────────────────────────────────────────────
+// Gewonnen: Zielspitze komplett besetzt und mindestens ein eigener Stein darin.
+// (Verhindert, dass ein Gegner durch einen zurückgelassenen Stein das Spiel blockiert.)
 function checkWin(playerIndex) {
   const player = players.find(p => p.index === playerIndex);
-  return player.target.every(k => board[k] === playerIndex);
+  return player.target.every(k => board[k] !== null) &&
+         player.target.some(k => board[k] === playerIndex);
 }
 
 // ─── AI ─────────────────────────────────────────────────────
+// Fortschrittsrichtung je Spieler (gleiche Größenordnung für alle Farben:
+// ein Schritt Richtung Ziel bringt jeweils ca. 6–7 Punkte)
 const PROGRESS_DIRS = {
-  0: [1, 0],
+  0: [6, 0],
   1: [4, -3],
   2: [-4, -3],
-  3: [-1, 0],
+  3: [-6, 0],
   4: [-4, 3],
   5: [4, 3],
 };
@@ -601,14 +653,32 @@ function aiMove(playerIndex) {
 // ─── Animation ──────────────────────────────────────────────
 function animateMove(from, to, playerIndex, callback) {
   animating = true;
+  const myGame = gameId;
   const fc = cellMap[from], tc = cellMap[to];
   const duration = 250;
   const start = performance.now();
   const color = PLAYER_COLORS[playerIndex];
+  let done = false;
 
   board[from] = null;
 
+  // Abschluss genau einmal – auch wenn requestAnimationFrame im
+  // Hintergrund-Tab pausiert (dann greift der Timer-Fallback).
+  function finish() {
+    if (done) return;
+    done = true;
+    if (myGame !== gameId) return;   // Spiel wurde inzwischen neu gestartet
+    board[to] = playerIndex;
+    animating = false;
+    callback();
+  }
+
+  if (document.hidden) { finish(); return; }
+  setTimeout(finish, duration + 100);
+
   function frame(now) {
+    if (done) return;
+    if (myGame !== gameId) { done = true; return; }
     const t = Math.min(1, (now - start) / duration);
     const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
     const x = fc.px + (tc.px - fc.px) * ease;
@@ -629,18 +699,18 @@ function animateMove(from, to, playerIndex, callback) {
     if (t < 1) {
       requestAnimationFrame(frame);
     } else {
-      board[to] = playerIndex;
-      animating = false;
-      callback();
+      finish();
     }
   }
   requestAnimationFrame(frame);
 }
 
 // ─── Turn Management ────────────────────────────────────────
-function nextTurn() {
+function nextTurn(moved = true) {
+  if (gameOver) return;
   const cp = getCurrentPlayer();
-  if (checkWin(cp.index)) {
+  if (moved) passCount = 0;
+  if (moved && checkWin(cp.index)) {
     gameOver = true;
     if (netMode) {
       if (cp.isLocal) {
@@ -662,22 +732,41 @@ function nextTurn() {
   currentPlayerIdx = (currentPlayerIdx + 1) % players.length;
   selectedKey = null;
   validMoves = new Set();
+  const np = getCurrentPlayer();
+  const g = gameId;
+
+  // Kein legaler Zug → Runde aussetzen (gilt für Mensch, KI und Netzwerkgegner;
+  // beide Netzwerkseiten rechnen das identisch aus und bleiben synchron)
+  if (!hasAnyMove(np.index)) {
+    passCount++;
+    draw();
+    if (passCount >= players.length) {
+      gameOver = true;
+      setStatus('Patt — niemand kann mehr ziehen.');
+      return;
+    }
+    setStatus(`${np.name} kann nicht ziehen und setzt aus.`);
+    setTimeout(() => { if (g === gameId) nextTurn(false); }, 1200);
+    return;
+  }
+
   updateStatus();
   draw();
 
-  const np = getCurrentPlayer();
   if (!netMode && !np.isHuman) {
-    setTimeout(doAiTurn, 400);
+    setTimeout(() => { if (g === gameId) doAiTurn(); }, 400);
   }
-  // In network mode, remote player's turn is just waiting — moves arrive via DataChannel
+  // Netzwerk: evtl. schon eingetroffenen Gegnerzug jetzt verarbeiten
+  if (netMode) processNetQueue();
 }
 
 function doAiTurn() {
-  if (gameOver) return;
+  if (gameOver || animating) return;
   const cp = getCurrentPlayer();
+  if (netMode || cp.isHuman) return;   // Sicherheitsnetz: KI zieht nie für Menschen
   const move = aiMove(cp.index);
   if (!move) {
-    nextTurn();
+    nextTurn(false);
     return;
   }
   animateMove(move.from, move.to, cp.index, () => {
@@ -689,14 +778,15 @@ function executeHumanMove(toKey) {
   if (!selectedKey || gameOver || animating) return;
   const cp = getCurrentPlayer();
 
-  // In network mode, only local player can move
-  if (netMode && !cp.isLocal) return;
+  // In network mode, only local player can move – und nur mit Verbindung
+  if (netMode && (!cp.isLocal || !netConnected)) return;
+  if (board[selectedKey] !== cp.index) return;
 
   const fromKey = selectedKey;
 
   // Send move to peer before animating
-  if (netMode && netConnected) {
-    netSend({ type: 'move', from: fromKey, to: toKey });
+  if (netMode) {
+    netSend({ type: 'move', game: netGameNo, from: fromKey, to: toKey });
   }
 
   animateMove(fromKey, toKey, cp.index, () => {
@@ -738,8 +828,8 @@ function handleInput(clientX, clientY) {
   if (netMode && !cp.isLocal) return;
 
   const rect = canvas.getBoundingClientRect();
-  const mx = (clientX - rect.left) * (canvas.width / rect.width);
-  const my = (clientY - rect.top) * (canvas.height / rect.height);
+  const mx = (clientX - rect.left) * (viewW / rect.width);
+  const my = (clientY - rect.top) * (viewH / rect.height);
   const cell = getClickedCell(mx, my);
   if (!cell) return;
 
@@ -767,7 +857,7 @@ canvas.addEventListener('touchend', (e) => {
 
 // ─── Rendering ──────────────────────────────────────────────
 function draw() {
-  const W = canvas.width, H = canvas.height;
+  const W = viewW, H = viewH;
   ctx.clearRect(0, 0, W, H);
 
   const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, W*0.6);
@@ -941,35 +1031,60 @@ function showNetStep(stepId) {
 }
 
 function cleanupPeer() {
-  if (dataChannel) { try { dataChannel.close(); } catch(e){} dataChannel = null; }
-  if (peerConn) { try { peerConn.close(); } catch(e){} peerConn = null; }
+  // Handler vorher lösen, damit verspätete Ereignisse der alten
+  // Verbindung keine Statusmeldungen mehr überschreiben
+  if (dataChannel) {
+    dataChannel.onopen = dataChannel.onclose = dataChannel.onmessage = null;
+    try { dataChannel.close(); } catch(e){}
+    dataChannel = null;
+  }
+  if (peerConn) {
+    peerConn.onicecandidate = peerConn.onconnectionstatechange = null;
+    peerConn.onicegatheringstatechange = peerConn.ondatachannel = null;
+    try { peerConn.close(); } catch(e){}
+    peerConn = null;
+  }
   netConnected = false;
+  netQueue = [];
+}
+
+function connectionLost(text) {
+  netConnected = false;
+  setNetStatus(text);
+  showNetStep('netStep1');
+  if (netMode && !gameOver) {
+    gameOver = true;               // Brett einfrieren, keine Züge ins Leere
+    gameId++;
+    animating = false;
+    setStatus('Verbindung zum Gegner verloren.');
+  }
 }
 
 function createPeerConnection() {
   cleanupPeer();
+  userDisconnect = false;
   peerConn = new RTCPeerConnection(STUN_SERVERS);
 
   // Collect ICE candidates into the SDP
-  peerConn.onicecandidate = (e) => {
-    if (!e.candidate) {
-      // ICE gathering complete — update the displayed SDP
-      if (netRole === 'host') {
-        document.getElementById('offerText').value = btoa(JSON.stringify(peerConn.localDescription));
-      } else {
-        document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
-      }
-    }
+  // Code bei jedem neuen Kandidaten aktualisieren – so ist er auch dann
+  // brauchbar, wenn die ICE-Sammlung (z. B. wegen nicht erreichbarem STUN) hängt
+  peerConn.onicecandidate = () => {
+    if (!peerConn || !peerConn.localDescription) return;
+    const code = btoa(JSON.stringify(peerConn.localDescription));
+    document.getElementById(netRole === 'host' ? 'offerText' : 'answerText').value = code;
   };
 
-  peerConn.onconnectionstatechange = () => {
-    if (peerConn.connectionState === 'disconnected' || peerConn.connectionState === 'failed') {
-      setNetStatus('Verbindung verloren.');
-      netConnected = false;
-      showNetStep('netStep1');
-      if (netMode && !gameOver) {
-        setStatus('Verbindung zum Gegner verloren.');
-      }
+  const pc = peerConn;
+  pc.onconnectionstatechange = () => {
+    if (pc !== peerConn) return;
+    const st = pc.connectionState;
+    if (st === 'disconnected') {
+      // oft nur kurzzeitig – WebRTC versucht selbst, die Verbindung zu halten
+      setNetStatus('Verbindung unterbrochen – warte…');
+    } else if (st === 'connected') {
+      if (netConnected) setNetStatus('');
+    } else if (st === 'failed') {
+      connectionLost('Verbindung verloren.');
     }
   };
 
@@ -982,20 +1097,13 @@ function setupDataChannel(channel) {
     netConnected = true;
     setNetStatus('');
     showNetStep('netConnected');
-    // Start game
-    initBoard();
-    resizeCanvas();
-    for (const cell of cells) {
-      const {px, py} = cellToPixel(cell.r, cell.c);
-      cell.px = px; cell.py = py;
-    }
-    startGame();
+    netGameNo = 0;
+    startNetworkGame();
   };
 
   dataChannel.onclose = () => {
-    netConnected = false;
-    setNetStatus('Verbindung geschlossen.');
-    showNetStep('netStep1');
+    if (userDisconnect) return;
+    connectionLost('Verbindung vom Gegner geschlossen.');
   };
 
   dataChannel.onmessage = (e) => {
@@ -1014,17 +1122,33 @@ function handleNetMessage(raw) {
   try { msg = JSON.parse(raw); } catch(e) { return; }
 
   if (msg.type === 'move') {
-    // Remote player made a move
-    const cp = getCurrentPlayer();
-    if (cp.isRemote) {
-      // Validate move exists
-      const validSet = getFilteredMoves(cp.index, msg.from);
-      if (board[msg.from] === cp.index && validSet.has(msg.to)) {
-        animateMove(msg.from, msg.to, cp.index, () => {
-          nextTurn();
-        });
-      }
-    }
+    if (msg.game !== netGameNo) return;   // Zug aus einer früheren Partie
+    // Nicht sofort ausführen, sondern einreihen: kommt der Zug an, während
+    // die eigene Animation noch läuft, wird er danach abgearbeitet.
+    netQueue.push(msg);
+    processNetQueue();
+  } else if (msg.type === 'restart') {
+    if (msg.game === netGameNo) return;   // beide haben gleichzeitig neu gestartet
+    netGameNo = msg.game;
+    startNetworkGame();
+    setNetStatus('Gegner hat eine neue Partie gestartet.');
+  }
+}
+
+function processNetQueue() {
+  if (!netMode || gameOver || animating || netQueue.length === 0) return;
+  const cp = getCurrentPlayer();
+  if (!cp.isRemote) return;          // noch nicht dran – Zug bleibt in der Warteschlange
+  const msg = netQueue.shift();
+  const validSet = cellMap[msg.from] ? getFilteredMoves(cp.index, msg.from) : new Set();
+  if (board[msg.from] === cp.index && validSet.has(msg.to)) {
+    animateMove(msg.from, msg.to, cp.index, () => {
+      nextTurn();
+    });
+  } else {
+    // Sollte nie passieren – dann sind die Bretter auseinandergelaufen
+    gameOver = true;
+    setStatus('Ungültiger Zug vom Gegner empfangen – bitte „Neue Partie“ starten.');
   }
 }
 
@@ -1040,20 +1164,51 @@ gameModeSelect.addEventListener('change', () => {
   localControls.classList.toggle('hidden', isNet);
   netPanel.classList.toggle('visible', isNet);
   if (isNet) {
+    // laufende lokale Partie anhalten (KI-Timer/Animationen werden ungültig)
+    gameId++;
+    animating = false;
+    gameOver = true;
     btnNew.classList.add('hidden');
     showNetStep('netStep1');
     setNetStatus('Wähle eine Rolle.');
+    setStatus('Netzwerkspiel: Rolle wählen und Codes austauschen.');
   } else {
-    btnNew.classList.remove('hidden');
-    netPanel.classList.remove('visible');
-    cleanupPeer();
-    netMode = false;
+    switchToLocal();
   }
 });
+
+function switchToLocal() {
+  userDisconnect = true;
+  cleanupPeer();
+  netMode = false;
+  netRole = null;
+  gameModeSelect.value = 'local';
+  localControls.classList.remove('hidden');
+  netPanel.classList.remove('visible');
+  btnNew.classList.remove('hidden');
+  startGame();   // frische lokale Partie statt des alten Netzwerkbretts
+}
+
+// Wartet, bis die ICE-Sammlung fertig ist – höchstens 5 s, danach wird der
+// bis dahin gesammelte Code verwendet (sonst hängt die Anzeige ggf. ewig).
+function waitForIce(textareaId, readyText) {
+  const pc = peerConn;
+  let done = false;
+  const ready = () => {
+    if (done || pc !== peerConn) return;
+    done = true;
+    document.getElementById(textareaId).value = btoa(JSON.stringify(pc.localDescription));
+    setNetStatus(readyText);
+  };
+  if (pc.iceGatheringState === 'complete') { ready(); return; }
+  pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') ready(); };
+  setTimeout(ready, 5000);
+}
 
 // Host flow
 document.getElementById('btnHost').addEventListener('click', async () => {
   netRole = 'host';
+  document.getElementById('answerInput').value = '';
   setNetStatus('Erstelle Einladung…');
   showNetStep('netStepHost');
 
@@ -1068,33 +1223,36 @@ document.getElementById('btnHost').addEventListener('click', async () => {
     document.getElementById('offerText').value = btoa(JSON.stringify(peerConn.localDescription));
     setNetStatus('Warte auf ICE-Kandidaten… (Code wird automatisch aktualisiert)');
 
-    // Wait for ICE gathering to finish for a clean SDP
-    if (peerConn.iceGatheringState === 'complete') {
-      setNetStatus('Code bereit — an Mitspieler senden!');
-    } else {
-      peerConn.onicegatheringstatechange = () => {
-        if (peerConn.iceGatheringState === 'complete') {
-          setNetStatus('Code bereit — an Mitspieler senden!');
-        }
-      };
-    }
+    waitForIce('offerText', 'Code bereit — an Mitspieler senden!');
   } catch(e) {
     setNetStatus('Fehler: ' + e.message);
   }
 });
 
+function copyText(ta, btnId) {
+  const ok = () => {
+    document.getElementById(btnId).textContent = '✓ Kopiert!';
+    setTimeout(() => document.getElementById(btnId).textContent = 'Kopieren', 2000);
+  };
+  const fallback = () => {               // z. B. ohne Zwischenablage-Berechtigung
+    try { ta.select(); if (document.execCommand('copy')) ok(); else setNetStatus('Bitte Code markieren und mit Strg+C kopieren.'); }
+    catch (e) { setNetStatus('Bitte Code markieren und mit Strg+C kopieren.'); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(ta.value).then(ok, fallback);
+  } else fallback();
+}
+
 document.getElementById('btnCopyOffer').addEventListener('click', () => {
   const ta = document.getElementById('offerText');
   ta.select();
-  navigator.clipboard.writeText(ta.value).then(() => {
-    document.getElementById('btnCopyOffer').textContent = '✓ Kopiert!';
-    setTimeout(() => document.getElementById('btnCopyOffer').textContent = 'Kopieren', 2000);
-  });
+  copyText(ta, 'btnCopyOffer');
 });
 
 document.getElementById('btnAcceptAnswer').addEventListener('click', async () => {
   const raw = document.getElementById('answerInput').value.trim();
   if (!raw) { setNetStatus('Bitte den Antwort-Code einfügen.'); return; }
+  if (!peerConn) { setNetStatus('Bitte zuerst „Spiel erstellen“ klicken.'); return; }
   try {
     const answer = JSON.parse(atob(raw));
     await peerConn.setRemoteDescription(new RTCSessionDescription(answer));
@@ -1107,6 +1265,9 @@ document.getElementById('btnAcceptAnswer').addEventListener('click', async () =>
 // Guest flow
 document.getElementById('btnJoin').addEventListener('click', () => {
   netRole = 'guest';
+  cleanupPeer();
+  document.getElementById('guestStep2').classList.add('hidden');
+  document.getElementById('answerText').value = '';
   setNetStatus('Einladungs-Code des Hosts einfügen.');
   showNetStep('netStepGuest');
 });
@@ -1126,20 +1287,9 @@ document.getElementById('btnProcessOffer').addEventListener('click', async () =>
     const answer = await peerConn.createAnswer();
     await peerConn.setLocalDescription(answer);
 
-    // Wait for ICE gathering
-    if (peerConn.iceGatheringState === 'complete') {
-      document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
-      setNetStatus('Antwort-Code bereit — an Host senden!');
-    } else {
-      document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
-      setNetStatus('Warte auf ICE-Kandidaten…');
-      peerConn.onicegatheringstatechange = () => {
-        if (peerConn.iceGatheringState === 'complete') {
-          document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
-          setNetStatus('Antwort-Code bereit — an Host senden!');
-        }
-      };
-    }
+    document.getElementById('answerText').value = btoa(JSON.stringify(peerConn.localDescription));
+    setNetStatus('Warte auf ICE-Kandidaten…');
+    waitForIce('answerText', 'Antwort-Code bereit — an Host senden!');
 
     document.getElementById('guestStep2').classList.remove('hidden');
   } catch(e) {
@@ -1150,53 +1300,37 @@ document.getElementById('btnProcessOffer').addEventListener('click', async () =>
 document.getElementById('btnCopyAnswer').addEventListener('click', () => {
   const ta = document.getElementById('answerText');
   ta.select();
-  navigator.clipboard.writeText(ta.value).then(() => {
-    document.getElementById('btnCopyAnswer').textContent = '✓ Kopiert!';
-    setTimeout(() => document.getElementById('btnCopyAnswer').textContent = 'Kopieren', 2000);
-  });
+  copyText(ta, 'btnCopyAnswer');
 });
 
 document.getElementById('btnDisconnect').addEventListener('click', () => {
-  cleanupPeer();
-  showNetStep('netStep1');
-  setNetStatus('Getrennt.');
-  setStatus('Klicke "Neues Spiel" zum Starten.');
-  gameModeSelect.value = 'local';
-  netMode = false;
-  localControls.classList.remove('hidden');
-  netPanel.classList.remove('visible');
-  btnNew.classList.remove('hidden');
+  switchToLocal();
+  setStatus('Getrennt. Neue lokale Partie – ' + document.getElementById('status').textContent);
+});
+
+document.getElementById('btnRematch').addEventListener('click', () => {
+  if (!netConnected) return;
+  netGameNo++;
+  netSend({ type: 'restart', game: netGameNo });
+  startNetworkGame();
+  setNetStatus('Neue Partie gestartet.');
 });
 
 // ─── Init ───────────────────────────────────────────────────
 btnNew.addEventListener('click', () => {
   if (netMode) return; // network games start via connection
-  initBoard();
-  resizeCanvas();
-  for (const cell of cells) {
-    const {px, py} = cellToPixel(cell.r, cell.c);
-    cell.px = px; cell.py = py;
-  }
   startGame();
 });
 
 window.addEventListener('resize', () => {
   if (cells.length === 0) return;
-  resizeCanvas();
-  for (const cell of cells) {
-    const {px, py} = cellToPixel(cell.r, cell.c);
-    cell.px = px; cell.py = py;
-  }
+  layoutBoard();
   draw();
 });
 
-// Auto-start local game
+// Board einmalig aufbauen, dann lokale Partie starten
 initBoard();
-resizeCanvas();
-for (const cell of cells) {
-  const {px, py} = cellToPixel(cell.r, cell.c);
-  cell.px = px; cell.py = py;
-}
+layoutBoard();
 startGame();
 
 </script>

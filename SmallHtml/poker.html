@@ -185,6 +185,10 @@ main{grid-area:table;display:grid;place-items:center;padding:14px;min-height:0}
 aside{grid-area:ledger;border-left:1px solid #2c2733;display:flex;flex-direction:column;min-height:0;background:rgba(0,0,0,.16)}
 .lhead{padding:11px 16px 9px;border-bottom:1px solid #2c2733;display:flex;justify-content:space-between;align-items:baseline}
 .lhead h2{margin:0;font-family:var(--display);font-size:14px;font-weight:500;letter-spacing:.03em}
+.lhead .blog{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--smoke);text-decoration:none}
+.lhead .blog:hover{color:var(--brass)}
+.sheet .foot{margin-top:24px;font-size:11.5px;color:var(--smoke)}
+.sheet .foot a{color:var(--brass)}
 .lhead span{font-size:9px;letter-spacing:.18em;text-transform:uppercase;color:var(--smoke)}
 .ledger{flex:1;overflow-y:auto;padding:6px 0 20px;font-family:var(--data);font-size:11.5px;line-height:1.55}
 .ledger .row{display:grid;grid-template-columns:52px 1fr auto;gap:8px;padding:3px 16px;border-bottom:1px solid rgba(255,255,255,.035)}
@@ -318,7 +322,7 @@ aside{grid-area:ledger;border-left:1px solid #2c2733;display:flex;flex-direction
   </div>
 
   <aside id="aside">
-    <div class="lhead"><h2>Kontobuch</h2><span id="lNote">alle Züge</span></div>
+    <div class="lhead"><h2>Kontobuch</h2><a class="blog" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal</a></div>
     <div class="ledger" id="ledger"></div>
   </aside>
 
@@ -459,7 +463,7 @@ function startLabel(c){
     const rk=c.map(x=>x.r).sort((a,b)=>b-a).map(r=>RANK_CH[r]).join("-");
     const n={}; c.forEach(x=>n[x.s]=(n[x.s]||0)+1);
     const sh=Object.values(n).sort((a,b)=>b-a).join("");
-    const tex=sh==="22"?"doppelt suited":sh==="4"?"monoton":sh[0]==="3"?"dreifarbig":sh[0]==="2"?"einfach suited":"rainbow";
+    const tex=sh==="22"?"doppelt suited":sh==="4"?"monoton":sh==="31"?"drei in einer Farbe":sh[0]==="2"?"einfach suited":"rainbow";
     return rk+" · "+tex;
   }
   return "";
@@ -527,16 +531,17 @@ function clearTimers(){ timers.forEach(clearTimeout); timers=[]; }
 
 function newGame(vid){
   clearTimers();
+  myTurn=false;
   const variant=vid||(G&&G.variant)||"nlhe";
   G={
     variant,
     players:SEATS.map((s,i)=>({
       i,name:s.name,trait:s.trait,human:!!s.human,agg:s.agg,tight:s.tight,bluff:s.bluff,
       stack:BUYIN,invested:BUYIN,cards:[],bet:0,total:0,
-      folded:false,allIn:false,acted:false,shown:false
+      folded:false,allIn:false,acted:false,capped:false,shown:false
     })),
     button:3,pot:0,board:[],deck:[],street:0,toCall:0,minRaise:BB,turn:-1,hand:0,
-    phase:"idle",drawList:[],drawFor:null,picks:new Set()
+    phase:"idle",acting:-1,drawList:[],drawFor:null,picks:new Set()
   };
   const V=VAR();
   document.getElementById("ledger").innerHTML="";
@@ -562,12 +567,12 @@ function newHand(){
   }
   G.hand++;
   G.button=(G.button+1)%4;
-  G.pot=0; G.board=[]; G.street=0; G.toCall=0; G.minRaise=BB; G.phase="bet";
+  G.pot=0; G.board=[]; G.street=0; G.toCall=0; G.minRaise=BB; G.phase="bet"; G.acting=-1;
   G.drawList=[]; G.drawFor=null; G.picks.clear();
   G.deck=shuffle(fullDeck());
   for(const p of P){
     p.cards=[]; for(let k=0;k<V.hole;k++) p.cards.push(G.deck.pop());
-    p.bet=0; p.total=0; p.folded=false; p.allIn=false; p.acted=false; p.shown=false;
+    p.bet=0; p.total=0; p.folded=false; p.allIn=false; p.acted=false; p.capped=false; p.shown=false;
   }
   log("head","Hand #"+G.hand,"Button: "+P[G.button].name);
   post(P[(G.button+1)%4],SB); post(P[(G.button+2)%4],BB);
@@ -596,7 +601,7 @@ function bounds(p){
     max=Math.min(cap,G.toCall+potTotal()+toCall);   // Pot nach dem Call, oben drauf
   }
   const min=Math.min(G.toCall+G.minRaise,cap,max);
-  return {min,max,can:max>G.toCall};
+  return {min,max,can:max>G.toCall&&!p.capped};
 }
 
 /* ============================================================================
@@ -608,7 +613,7 @@ function step(){
   let found=-1;
   for(let k=1;k<=4;k++){ const ix=(G.turn+k)%4; if(needsAction(G.players[ix])){ found=ix; break; } }
   if(found<0){ nextStreet(); return; }
-  G.turn=found;
+  G.turn=found; G.acting=found;
   const p=G.players[found];
   paint();
   if(p.human) enableControls();
@@ -616,8 +621,8 @@ function step(){
 }
 
 function nextStreet(){
-  for(const p of G.players){ G.pot+=p.bet; p.bet=0; p.acted=false; }
-  G.toCall=0; G.minRaise=BB;
+  for(const p of G.players){ G.pot+=p.bet; p.bet=0; p.acted=false; p.capped=false; }
+  G.toCall=0; G.minRaise=BB; G.acting=-1;
   if(live().length===1){ finish(); return; }
   const V=VAR();
 
@@ -652,15 +657,20 @@ function apply(p,a){
     const d=to-p.bet;
     p.stack-=d; p.bet=to; p.total+=d;
     const inc=to-G.toCall;
-    if(inc>=G.minRaise) G.minRaise=inc;
     const opening=G.toCall===0;
+    const full=opening||inc>=G.minRaise;                  // volle Erhöhung (oder Eröffnung)?
+    if(inc>=G.minRaise) G.minRaise=inc;
     G.toCall=to;
-    for(const o of G.players) if(o!==p&&!o.folded&&!o.allIn) o.acted=false;
+    for(const o of G.players){
+      if(o===p||o.folded||o.allIn) continue;
+      if(full){ o.acted=false; o.capped=false; }
+      else if(o.acted) o.capped=true;                     // zu kurzes All-in: nur noch mitgehen oder passen
+    }
     if(p.stack===0){ p.allIn=true; text="All-In "+fmt(to); }
     else text=(opening?"Setzt ":"Erhöht auf ")+fmt(to);
     kind="aggr";
   }
-  p.acted=true;
+  p.acted=true; p.capped=false;
   say(p,text,kind);
   log("row",p.name,text,(a.type==="fold"||a.type==="check")?"":fmt(p.stack));
   paint();
@@ -692,8 +702,8 @@ function doDraw(p,idx){
   paint();
 }
 function endDraw(){
-  G.phase="bet"; G.street=1;
-  for(const p of G.players) p.acted=false;
+  G.phase="bet"; G.street=1; G.acting=-1;
+  for(const p of G.players){ p.acted=false; p.capped=false; }
   announce(VAR().streets[1]);
   paint();
   if(live().filter(p=>!p.allIn).length<=1){ later(showdown,900); return; }
@@ -719,8 +729,10 @@ function aiDraw(p){
   }
   // vier zu einer Straße (Spanne ≤ 4) -> die fünfte weg
   for(const out of idx){
-    const rs=idx.filter(i=>i!==out).map(i=>c[i].r).sort((a,b)=>a-b);
-    if(new Set(rs).size===4&&rs[3]-rs[0]<=4) return [out];
+    for(const lowAce of [false,true]){
+      const rs=idx.filter(i=>i!==out).map(i=>lowAce&&c[i].r===14?1:c[i].r).sort((a,b)=>a-b);
+      if(new Set(rs).size===4&&rs[3]-rs[0]<=4) return [out];
+    }
   }
   const hi=Math.max(...c.map(x=>x.r));
   if(hi>=13){ const k=c.findIndex(x=>x.r===hi); return idx.filter(i=>i!==k); }   // Ass/König halten
@@ -740,14 +752,23 @@ function buildPots(){
       amount+=Math.min(c.amt,lv)-Math.min(c.amt,prev);
       if(c.amt>=lv){ all.push(c.p); if(!c.p.folded) elig.push(c.p); }
     }
-    if(amount>0) pots.push({amount,elig:elig.length?elig:all});
+    if(amount>0) pots.push({amount,elig:elig.length?elig:all,uncalled:all.length===1});
     prev=lv;
   }
   return pots;
 }
 function award(){
   const pots=buildPots(), winners=new Set();
-  pots.forEach((pot,pi)=>{
+  const real=pots.filter(x=>!x.uncalled).length;
+  let ri=0;
+  pots.forEach(pot=>{
+    if(pot.uncalled){                                     // niemand hat mitgehalten: zurück an den Setzer
+      const o=pot.elig[0]; o.stack+=pot.amount;
+      if(real>0) log("note",o.name+" bekommt "+fmt(pot.amount)+" zurück (nicht gedeckt).");
+      else winners.add(o);
+      return;
+    }
+    const pi=ri++;
     let best=null,ws=[];
     for(const p of pot.elig){
       const v=p.folded?[-1]:bestHand(p.cards,G.board);
@@ -756,7 +777,7 @@ function award(){
     }
     const share=Math.floor(pot.amount/ws.length), rest=pot.amount-share*ws.length;
     ws.forEach((w,k)=>{ w.stack+=share+(k<rest?1:0); winners.add(w); });
-    const label=pots.length>1?(pi===0?"Hauptpot":"Sidepot "+pi):"Pot";
+    const label=real>1?(pi===0?"Hauptpot":"Sidepot "+pi):"Pot";
     log("win",label+" → "+ws.map(w=>w.name).join(" & ")+(best&&best[0]>=0?" ("+handName(best)+")":""),fmt(pot.amount));
   });
   G.pot=0;
@@ -764,17 +785,18 @@ function award(){
   return winners;
 }
 function showdown(){
-  G.phase="show";
+  G.phase="show"; G.acting=-1;
   const l=live();
   for(const p of l) p.shown=true;
   const ranked=l.map(p=>({p,v:bestHand(p.cards,G.board)})).sort((a,b)=>cmp(b.v,a.v));
-  announce(ranked[0].p.name+": "+handName(ranked[0].v));
+  const top=ranked.filter(x=>cmp(x.v,ranked[0].v)===0);
+  announce(top.map(x=>x.p.name).join(" & ")+": "+handName(ranked[0].v)+(top.length>1?" — Split":""));
   const w=award();
   paint(w);
   later(newHand,3600);
 }
 function finish(){                                       // alle bis auf einen haben gepasst
-  G.phase="show";
+  G.phase="show"; G.acting=-1;
   for(const p of G.players){ G.pot+=p.bet; p.bet=0; }
   const w=award();
   const only=live()[0];
@@ -868,7 +890,7 @@ function paint(winners){
 
   P.forEach(p=>{
     p.el.classList.toggle("folded",p.folded);
-    p.el.classList.toggle("turn",(G.phase==="bet"&&G.turn===p.i&&!p.folded)||(G.phase==="draw"&&G.drawFor===p));
+    p.el.classList.toggle("turn",(G.phase==="bet"&&G.acting===p.i&&!p.folded)||(G.phase==="draw"&&G.drawFor===p));
     p.el.classList.toggle("won",!!winners&&winners.has(p));
     p.elStack.textContent=fmt(p.stack);
     p.elPlate.classList.toggle("broke",p.stack===0&&!p.allIn);
@@ -1011,7 +1033,8 @@ $("aSwap").onclick=doSwap;
 $("aKeep").onclick=()=>{ G.picks.clear(); doSwap(); };
 
 document.addEventListener("keydown",e=>{
-  if(e.target.tagName==="INPUT"||e.target.tagName==="SELECT") return;
+  if(e.target.tagName==="SELECT"||(e.target.tagName==="INPUT"&&e.target.type!=="range")) return;
+  if(e.key==="Escape"&&$("aside").classList.contains("open")){ $("aside").classList.remove("open"); return; }
   if(!$("rules").classList.contains("hide")){ if(e.key==="Escape") $("rules").classList.add("hide"); return; }
   const me=G.players[0];
   if(G.phase==="draw"&&G.drawFor===me){
@@ -1038,6 +1061,7 @@ $("bSpeed").onclick=e=>{
 $("variant").onchange=e=>{
   const v=e.target.value;
   if(v===G.variant) return;
+  if(G.hand>0&&!confirm("Variante wechseln? Das startet ein neues Spiel, die Bilanz wird zurückgesetzt.")){ e.target.value=G.variant; return; }
   newGame(v);
   showRules(true);                                   // Kurzinfo beim Wechsel
 };
@@ -1097,6 +1121,7 @@ function showRules(compact){
     for(const [n,nm,ex] of RANKING) h+='<tr><td>'+n+'</td><td>'+nm+'</td><td>'+ex+'</td></tr>';
     h+='</table>';
   }
+  h+='<p class="foot">Mehr Projekte: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a> · <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></p>';
   $("rulesBody").innerHTML=h;
   $("rules").classList.remove("hide");
 }

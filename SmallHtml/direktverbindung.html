@@ -40,6 +40,8 @@ h1{font:600 13px/1 var(--mono);letter-spacing:.24em;text-transform:uppercase;mar
   background:repeating-linear-gradient(90deg,var(--rule) 0 4px,transparent 4px 9px)}
 .rail.live .link .wire,.rail.busy .link .wire{background:var(--signal)}
 .rail.bad .link .wire{background:var(--bad)}
+.rail.warn .link .wire{background:#8A5B00;opacity:.6}
+.rail.warn .link .state{color:#8A5B00}
 .rail.busy .link .wire{opacity:.45}
 .link .wire::after{content:"";position:absolute;inset:0 auto 0 0;width:22%;
   background:linear-gradient(90deg,transparent,var(--paper),transparent);opacity:0}
@@ -87,7 +89,7 @@ label.check input{margin-top:3px;accent-color:var(--signal)}
   font:400 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--graphite);margin-bottom:8px}
 .codebox textarea{height:88px;word-break:break-all}
 .qrrow{display:flex;gap:18px;align-items:flex-start;margin-top:14px;flex-wrap:wrap}
-#qr{width:212px;height:212px;image-rendering:pixelated;border:1px solid var(--rule);background:#fff}
+#qr{max-width:100%;image-rendering:pixelated;border:1px solid var(--rule);background:#fff}
 #cam{width:212px;border:1px solid var(--rule);background:var(--ink)}
 .qrrow .side{flex:1;min-width:180px;font-size:13px;color:var(--graphite)}
 
@@ -247,7 +249,8 @@ footer{margin-top:44px;border-top:1px solid var(--rule);padding-top:14px;
 
 <footer>
   Alles läuft in dieser einen Datei. STUN-Server sehen nur, dass zwei Geräte nach ihrer öffentlichen Adresse fragen —
-  die Dateien selbst gehen direkt und DTLS-verschlüsselt von Gerät zu Gerät.
+  die Dateien selbst gehen direkt und DTLS-verschlüsselt von Gerät zu Gerät.<br>
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:inherit">itzwieseltal.wordpress.com</a>
 </footer>
 
 </main>
@@ -512,12 +515,15 @@ const QR = (() => {
 
   /** Zeichnet die Matrix auf ein Canvas. */
   function draw(canvas, text, opts = {}) {
-    const { ecl = 'L', quiet = 4, dark = '#000', light = '#fff', px = 4 } = opts;
+    const { ecl = 'L', quiet = 4, dark = '#000', light = '#fff', px = 4, target = 0 } = opts;
     const qr = encode(text, ecl);
     const dim = qr.size + quiet * 2;
-    const scale = Math.max(1, Math.round(px));
+    // Ganzzahliger Maßstab, damit jedes Modul gleich groß ist (sonst scannt es schlecht)
+    const scale = target ? Math.max(2, Math.floor(target / dim)) : Math.max(1, Math.round(px));
     canvas.width = dim * scale;
     canvas.height = dim * scale;
+    canvas.style.width = canvas.width + 'px';
+    canvas.style.height = canvas.height + 'px';
     const c = canvas.getContext('2d');
     c.fillStyle = light;
     c.fillRect(0, 0, canvas.width, canvas.height);
@@ -610,8 +616,7 @@ function buildSdp(p, type) {
   ];
   p.cands.forEach((c, i) => {
     const [ip, port, t] = c.split(',');
-    const fam = ip.includes(':') ? 'udp' : 'udp';
-    let line = `a=candidate:${i + 1} 1 ${fam} ${CAND_PRIO[t]} ${ip} ${port} typ ${CAND_TYP[t]}`;
+    let line = `a=candidate:${i + 1} 1 udp ${CAND_PRIO[t]} ${ip} ${port} typ ${CAND_TYP[t]}`;
     if (t !== 'h') line += ' raddr 0.0.0.0 rport 0';
     lines.push(line);
   });
@@ -679,6 +684,8 @@ function iceComplete(pc, hardMs = 9000, idleMs = 2500) {
 const CHUNK = 65536;
 const HIGH_WATER = 4 << 20;
 const LOW_WATER = 1 << 20;
+const COMMIT_EVERY = 64 << 20;   // .part regelmäßig festschreiben, damit Fortsetzen auch nach Absturz klappt
+const LOST = { lost: true };     // Antwort für Anmeldungen, deren Verbindung weg ist
 
 const S = {
   pc: null, dc: null, role: null, open: false,
@@ -706,8 +713,10 @@ function fmtRate(n) { return n < 1 ? '—' : fmtBytes(n) + '/s'; }
 function fmtEta(sec) {
   if (!isFinite(sec) || sec < 0) return '—';
   if (sec < 60) return Math.round(sec) + ' s';
-  if (sec < 3600) return Math.floor(sec / 60) + ' min ' + Math.round(sec % 60) + ' s';
-  return Math.floor(sec / 3600) + ' h ' + Math.round((sec % 3600) / 60) + ' min';
+  sec = Math.round(sec);
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ' + (sec % 60) + ' s';
+  const m = Math.round(sec / 60);
+  return Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
 }
 function safeName(s) {
   return s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+$/, '_').slice(0, 200) || '_';
@@ -754,29 +763,60 @@ function wireChannel(dc) {
   dc.binaryType = 'arraybuffer';
   dc.bufferedAmountLowThreshold = LOW_WATER;
   dc.addEventListener('open', () => {
+    if (S.dc !== dc) return;
     S.open = true;
     log('Kanal offen. Übertragung möglich.', 'ok');
     ctl({ t: 'hello', name: myName(), dir: !!S.dir });
     render();
     pump();
   });
-  dc.addEventListener('close', () => { S.open = false; log('Kanal geschlossen.', 'warn'); render(); });
-  dc.addEventListener('message', onMessage);
+  dc.addEventListener('close', () => {
+    if (S.dc !== dc) return;            // Ereignis eines alten Kanals nach Zurücksetzen
+    S.open = false;
+    dropLink();
+    log('Kanal geschlossen.', 'warn');
+    render();
+  });
+  dc.addEventListener('message', e => { if (S.dc === dc) onMessage(e); });
+}
+
+/* Verbindung weg: offene Anmeldungen lösen, Empfangsdateien sauber festschreiben. */
+function dropLink() {
+  for (const r of pending.values()) r(LOST);
+  pending.clear();
+  S.inb.forEach(rec => {
+    if (['wartet', 'receiving'].includes(rec.state)) rec.state = 'unterbrochen';
+    closeInbound(rec);
+  });
+  S.activeIn = null;
 }
 
 const myName = () => ($('#myname').value.trim() || 'Gerät');
 
+let offerBusy = false;
 async function makeOffer() {
-  resetPeer();
-  S.role = 'offer';
-  S.pc = newPeer();
-  wireChannel(S.pc.createDataChannel('drop', { ordered: true }));
-  await S.pc.setLocalDescription(await S.pc.createOffer());
-  setStage('gathering');
-  await iceComplete(S.pc);
-  await showCode(S.pc.localDescription);
-  $('#step-remote-label').textContent = 'Antwortcode der Gegenstelle einfügen';
-  log('Einladungscode erzeugt. An die Gegenstelle schicken oder QR zeigen.');
+  if (offerBusy) return;
+  offerBusy = true;
+  $('#btn-offer').disabled = true;
+  try {
+    resetPeer();
+    S.role = 'offer';
+    const pc = S.pc = newPeer();
+    wireChannel(pc.createDataChannel('drop', { ordered: true }));
+    await pc.setLocalDescription(await pc.createOffer());
+    setStage('gathering');
+    await iceComplete(pc);
+    if (S.pc !== pc) return;            // inzwischen zurückgesetzt
+    await showCode(pc.localDescription);
+    $('#step-remote-label').textContent = 'Antwortcode der Gegenstelle einfügen';
+    log('Einladungscode erzeugt. An die Gegenstelle schicken oder QR zeigen.');
+  } catch (e) {
+    log('Einladung fehlgeschlagen: ' + e.message, 'err');
+    setStage('failed');
+  } finally {
+    offerBusy = false;
+    $('#btn-offer').disabled = false;
+  }
 }
 
 async function acceptRemote() {
@@ -793,10 +833,12 @@ async function acceptRemote() {
       S.pc = newPeer();
       S.pc.addEventListener('datachannel', e => wireChannel(e.channel));
       await S.pc.setRemoteDescription(desc);
-      await S.pc.setLocalDescription(await S.pc.createAnswer());
+      const pc = S.pc;
+      await pc.setLocalDescription(await pc.createAnswer());
       setStage('gathering');
-      await iceComplete(S.pc);
-      await showCode(S.pc.localDescription);
+      await iceComplete(pc);
+      if (S.pc !== pc) return;          // inzwischen zurückgesetzt
+      await showCode(pc.localDescription);
       log('Antwortcode erzeugt. Zurück an die Gegenstelle schicken.');
     } else {
       if (!S.pc || S.role !== 'offer') return log('Antwortcode passt zu keiner offenen Einladung.', 'err');
@@ -811,10 +853,16 @@ async function acceptRemote() {
 
 function resetPeer() {
   stopScan();
-  if (S.pc) { try { S.pc.close(); } catch (e) {} }
+  const oldPc = S.pc;
   S.pc = null; S.dc = null; S.open = false; S.role = null;
-  S.inb.clear(); S.activeIn = null;
-  S.out.forEach(o => { if (['queued', 'asking', 'sending', 'paused'].includes(o.state)) o.state = 'queued'; });
+  if (oldPc) { try { oldPc.close(); } catch (e) {} }
+  dropLink();
+  S.inb.forEach(rec => { if (rec.url) URL.revokeObjectURL(rec.url); });
+  S.inb.clear();
+  S.out.forEach(o => {
+    if (['queued', 'asking', 'sending', 'paused'].includes(o.state)) o.state = 'queued';
+    else if (o.state === 'cancel') o.state = 'abgebrochen';
+  });
   $('#codeout').value = '';
   $('#qrwrap').hidden = true;
   render();
@@ -828,7 +876,7 @@ async function showCode(desc) {
   $('#codelen').textContent = code.length + ' Zeichen';
   $('#codeout-wrap').hidden = false;
   try {
-    const qr = QR.draw($('#qr'), code, { ecl: 'L', px: 4, dark: '#16181A', light: '#ffffff' });
+    const qr = QR.draw($('#qr'), code, { ecl: 'L', target: 240, dark: '#16181A', light: '#ffffff' });
     $('#qrver').textContent = 'QR Version ' + qr.version;
     $('#qrwrap').hidden = false;
   } catch (e) {
@@ -879,21 +927,29 @@ function onControl(m) {
     }
     case 'begin': {
       const rec = S.inb.get(m.id);
-      if (rec) { rec.got = m.offset; S.activeIn = rec; rec.state = 'receiving'; rec.t0 = performance.now(); render(); }
+      if (rec && ['wartet', 'receiving'].includes(rec.state)) {
+        rec.got = m.offset; S.activeIn = rec; rec.state = 'receiving'; rec.t0 = performance.now(); render();
+      }
       break;
     }
     case 'end': return finishInbound(m.id);
     case 'abort': {
-      const o = S.out.find(x => x.id === m.id);
-      if (o && ['sending', 'paused', 'asking'].includes(o.state)) { o.state = 'cancel'; }
-      const rec = S.inb.get(m.id);
-      if (rec && rec.state === 'receiving') {
-        rec.state = 'abgebrochen';
-        closeInbound(rec);
-        if (S.activeIn === rec) S.activeIn = null;
+      // IDs zählen auf beiden Seiten ab 1 — deshalb sagt side, welche Richtung gemeint ist.
+      if (m.side === 'tx') {
+        // Gegenstelle bricht ihren Versand ab → betrifft unseren Empfang
+        const rec = S.inb.get(m.id);
+        if (rec && ['wartet', 'receiving'].includes(rec.state)) {
+          rec.state = 'abgebrochen';
+          closeInbound(rec);
+          if (S.activeIn === rec) S.activeIn = null;
+        }
+      } else {
+        // Gegenstelle bricht ihren Empfang ab → betrifft unseren Versand
+        const o = S.out.find(x => x.id === m.id);
+        if (o && ['sending', 'paused', 'asking'].includes(o.state)) o.state = 'cancel';
+        const r = pending.get(m.id);
+        if (r) { pending.delete(m.id); r(null); }
       }
-      const r = pending.get(m.id);
-      if (r) { pending.delete(m.id); r(null); }
       render();
       break;
     }
@@ -916,20 +972,35 @@ async function onAsk(m) {
       const name = parts.pop();
       let dir = S.dir;
       for (const p of parts) dir = await dir.getDirectoryHandle(p, { create: true });
+      if (!name) throw new Error('Ungültiger Dateiname');
       rec.dir = dir; rec.name = name;
 
+      // Fortsetzen nur, wenn die .part wirklich zu dieser Datei gehört (Größe + Änderungszeit)
+      const sig = JSON.stringify({ size: m.size, mtime: m.mtime || 0 });
       let offset = 0;
       try {
         rec.part = await dir.getFileHandle(name + '.part');
         offset = (await rec.part.getFile()).size;
+        let info = '';
+        try { info = await (await (await dir.getFileHandle(name + '.part.info')).getFile()).text(); } catch (e) {}
+        if (info !== sig) offset = 0;
       } catch (e) {
         rec.part = await dir.getFileHandle(name + '.part', { create: true });
       }
       if (offset > m.size) offset = 0;
-      rec.writer = await rec.part.createWritable({ keepExistingData: offset > 0 });
-      if (offset) { await rec.writer.seek(offset); log(`Setze „${m.path}" bei ${fmtBytes(offset)} fort.`); }
+      const ih = await dir.getFileHandle(name + '.part.info', { create: true });
+      const iw = await ih.createWritable();
+      await iw.write(sig); await iw.close();
+
+      rec.w = await rec.part.createWritable({ keepExistingData: offset > 0 });
+      if (offset) { await rec.w.seek(offset); log(`Setze „${m.path}" bei ${fmtBytes(offset)} fort.`); }
+      rec.toDisk = true; rec.closed = false; rec.failed = false;
+      rec.pos = offset; rec.sinceCommit = 0;
       rec.got = offset;
       rec.chain = Promise.resolve();
+      if (rec.state !== 'wartet') {   // während der Vorbereitung abgebrochen / Verbindung weg
+        closeInbound(rec); ctl({ t: 'skip', id: m.id }); render(); return;
+      }
       ctl({ t: 'accept', id: m.id, offset });
     } else {
       if (m.size > 1.5e9) log(`„${m.path}" ist ${fmtBytes(m.size)} groß und landet ohne Zielordner komplett im Arbeitsspeicher.`, 'warn');
@@ -945,14 +1016,35 @@ async function onAsk(m) {
   render();
 }
 
+/* Alle Schreibzugriffe laufen nacheinander über rec.chain; rec.w wird nur dort angefasst. */
+function queueWrite(rec, fn) {
+  rec.chain = rec.chain.then(fn).catch(e => {
+    rec.failed = true;
+    rec.state = 'fehler'; rec.note = e.message;
+    render();
+  });
+}
+
 function onChunk(buf) {
   const rec = S.activeIn;
   if (!rec) return;
   const n = buf.byteLength;
   rec.got += n; S.rxBytes += n;
-  if (rec.writer) {
-    rec.chain = rec.chain.then(() => rec.writer.write(buf)).catch(e => {
-      rec.state = 'fehler'; rec.note = e.message;
+  if (rec.toDisk) {
+    if (rec.closed) return;
+    rec.sinceCommit += n;
+    const commit = rec.sinceCommit >= COMMIT_EVERY;
+    if (commit) rec.sinceCommit = 0;
+    queueWrite(rec, async () => {
+      if (!rec.w || rec.failed) return;
+      await rec.w.write(buf);
+      rec.pos += n;
+      if (commit) {
+        // close() schreibt die Daten wirklich in die .part — danach weiter anhängen
+        await rec.w.close();
+        rec.w = await rec.part.createWritable({ keepExistingData: true });
+        await rec.w.seek(rec.pos);
+      }
     });
   } else {
     rec.chunks.push(buf);
@@ -961,14 +1053,17 @@ function onChunk(buf) {
 
 async function finishInbound(id) {
   const rec = S.inb.get(id);
-  if (!rec) return;
+  if (!rec || !['wartet', 'receiving'].includes(rec.state)) return;
   rec.state = 'sichern';
+  if (S.activeIn === rec) S.activeIn = null;
   render();
   try {
-    if (rec.writer) {
+    if (rec.got !== rec.size)
+      throw new Error(`unvollständig (${fmtBytes(rec.got)} von ${fmtBytes(rec.size)})`);
+    if (rec.toDisk) {
+      closeInbound(rec);
       await rec.chain;
-      await rec.writer.close();
-      rec.writer = null;
+      if (rec.failed) throw new Error(rec.note || 'Schreibfehler');
       try {
         await rec.part.move(rec.name);
       } catch (e) {
@@ -977,6 +1072,7 @@ async function finishInbound(id) {
         await (await rec.part.getFile()).stream().pipeTo(ws);
         await rec.dir.removeEntry(rec.name + '.part');
       }
+      try { await rec.dir.removeEntry(rec.name + '.part.info'); } catch (e) {}
     } else {
       const blob = new Blob(rec.chunks);
       rec.chunks = [];
@@ -989,15 +1085,22 @@ async function finishInbound(id) {
     rec.state = 'fertig';
     log(`Empfangen: ${rec.path} (${fmtBytes(rec.size)})`, 'ok');
   } catch (e) {
+    closeInbound(rec);   // .part bleibt erhalten → später fortsetzbar
     rec.state = 'fehler'; rec.note = e.message;
     log('Speichern fehlgeschlagen: ' + e.message, 'err');
   }
-  if (S.activeIn === rec) S.activeIn = null;
   render();
 }
 
+/* Schreibt die .part fest (close() übernimmt die Daten erst in die Datei). */
 function closeInbound(rec) {
-  if (rec.writer) { rec.chain = rec.chain.then(() => rec.writer.close()).catch(() => {}); rec.writer = null; }
+  if (!rec.toDisk || rec.closed) return;
+  rec.closed = true;
+  queueWrite(rec, async () => {
+    const w = rec.w;
+    rec.w = null;
+    if (w) await w.close();
+  });
 }
 
 /* ---- Versand ---- */
@@ -1005,8 +1108,13 @@ function drain() {
   const dc = S.dc;
   if (!dc || dc.bufferedAmount <= HIGH_WATER) return null;
   return new Promise(res => {
-    const h = () => { dc.removeEventListener('bufferedamountlow', h); res(); };
+    const h = () => {
+      dc.removeEventListener('bufferedamountlow', h);
+      dc.removeEventListener('close', h);
+      res();
+    };
     dc.addEventListener('bufferedamountlow', h);
+    dc.addEventListener('close', h);   // sonst hängt der Versand nach Verbindungsabriss für immer
   });
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -1027,21 +1135,29 @@ async function sendOne(item) {
   item.state = 'asking'; render();
   const answer = await new Promise(res => {
     pending.set(item.id, res);
-    ctl({ t: 'ask', id: item.id, path: item.path, size: item.size });
-    setTimeout(() => { if (pending.delete(item.id)) res(null); }, 60000);
+    ctl({ t: 'ask', id: item.id, path: item.path, size: item.size, mtime: item.file.lastModified || 0 });
+    setTimeout(() => { if (pending.get(item.id) === res) { pending.delete(item.id); res(null); } }, 60000);
   });
+  if (answer === LOST) { if (item.state !== 'cancel') item.state = 'queued'; else item.state = 'abgebrochen'; render(); return; }
   if (!answer) { item.state = item.state === 'cancel' ? 'abgebrochen' : 'übersprungen'; render(); return; }
+  // Abbrechen/Pause, die während der Anmeldung gedrückt wurden, nicht überschreiben
+  if (item.state === 'cancel') {
+    ctl({ t: 'abort', id: item.id, side: 'tx' });
+    item.state = 'abgebrochen'; render(); return;
+  }
+  const startPaused = item.state === 'paused';
 
   let off = Math.min(answer.offset || 0, item.size);
-  item.sent = off; item.state = 'sending'; item.base = off;
+  item.sent = off; item.state = startPaused ? 'paused' : 'sending'; item.base = off;
   ctl({ t: 'begin', id: item.id, offset: off });
   render();
 
   try {
     while (off < item.size) {
-      if (item.state === 'cancel') { ctl({ t: 'abort', id: item.id }); item.state = 'abgebrochen'; render(); return; }
-      if (item.state === 'paused') { await sleep(200); continue; }
+      if (item.state === 'cancel') { ctl({ t: 'abort', id: item.id, side: 'tx' }); item.state = 'abgebrochen'; render(); return; }
       if (!S.open) { item.state = 'queued'; render(); return; }
+      if (item.state === 'paused') { await sleep(200); continue; }
+      if (item.state !== 'sending') return;   // z. B. durch Zurücksetzen neu eingereiht
       const wait = drain();
       if (wait) await wait;
       const end = Math.min(off + CHUNK, item.size);
@@ -1165,7 +1281,7 @@ function rowFor(o, dir) {
   const meta = el('div', 'row-meta');
   const active = ['sending', 'receiving'].includes(o.state);
   let stat = { queued: 'wartet', asking: 'meldet an', sending: 'sendet', receiving: 'empfängt', paused: 'pausiert', sichern: 'sichern' }[o.state] || o.state;
-  meta.append(el('span', 'stat s-' + (o.state === 'fertig' ? 'ok' : ['fehler', 'abgebrochen'].includes(o.state) ? 'bad' : active ? 'live' : 'idle'), stat));
+  meta.append(el('span', 'stat s-' + (o.state === 'fertig' ? 'ok' : ['fehler', 'abgebrochen', 'unterbrochen'].includes(o.state) ? 'bad' : active ? 'live' : 'idle'), stat));
   if (active) {
     const rate = dir === 'out' ? S.txRate : S.rxRate;
     meta.append(el('span', 'dim live-meta', `${fmtBytes(done)} · ${fmtRate(rate)} · noch ${fmtEta(rate ? (o.size - done) / rate : Infinity)}`));
@@ -1185,7 +1301,7 @@ function rowFor(o, dir) {
     if (['fertig', 'abgebrochen', 'fehler', 'übersprungen'].includes(o.state))
       acts.append(btn('Entfernen', () => { S.out = S.out.filter(x => x !== o); render(); }));
   } else {
-    if (o.state === 'receiving') acts.append(btn('Abbrechen', () => { ctl({ t: 'abort', id: o.id }); o.state = 'abgebrochen'; closeInbound(o); if (S.activeIn === o) S.activeIn = null; render(); }));
+    if (o.state === 'receiving') acts.append(btn('Abbrechen', () => { ctl({ t: 'abort', id: o.id, side: 'rx' }); o.state = 'abgebrochen'; closeInbound(o); if (S.activeIn === o) S.activeIn = null; render(); }));
     if (o.url) { const a = el('a', 'act', 'Erneut laden'); a.href = o.url; a.download = safeName(o.path.split('/').join('_')); acts.append(a); }
   }
   meta.append(acts);
@@ -1225,7 +1341,6 @@ function render() {
   const busy = S.out.some(o => ['sending', 'asking', 'paused'].includes(o.state)) || S.activeIn;
   $('#rail').classList.toggle('flow', !!busy && S.open);
   $('#rates').textContent = S.open ? `↑ ${fmtRate(S.txRate)}   ↓ ${fmtRate(S.rxRate)}` : '';
-  $$('.needs-link').forEach(n => { n.disabled = !S.open; });
 }
 
 /* Ratenmessung */
@@ -1290,6 +1405,8 @@ function init() {
 
   const drop = $('#drop');
   ['dragenter', 'dragover'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add('over'); }));
+  // Datei neben die Zone fallen lassen darf die Seite nicht verlassen (sonst ist die Verbindung weg)
+  ['dragover', 'drop'].forEach(t => window.addEventListener(t, e => e.preventDefault()));
   ['dragleave', 'drop'].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); if (t === 'dragleave' && drop.contains(e.relatedTarget)) return; drop.classList.remove('over'); }));
   drop.addEventListener('drop', async e => {
     const items = [...(e.dataTransfer.items || [])];

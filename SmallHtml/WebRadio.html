@@ -19,7 +19,8 @@ body {
 }
 
 .radio {
-  width: 580px;
+  width: 100%;
+  max-width: 580px;
   background: #2a1f0e;
   border-radius: 18px 18px 14px 14px;
   border: 3px solid #1a1208;
@@ -84,14 +85,14 @@ body {
 
 .dial-nums {
   position: absolute;
-  top: 0; left: 12px; right: 12px; bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  inset: 0;
   pointer-events: none;
 }
 
 .dial-nums span {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
   font-family: 'Special Elite', monospace;
   font-size: 9px;
   color: rgba(255, 180, 60, 0.45);
@@ -442,6 +443,25 @@ input[type=range].vol-dial::-moz-range-thumb {
   letter-spacing: 0.05em;
 }
 
+.site-link {
+  display: block;
+  margin-top: 10px;
+  text-align: center;
+  font-family: 'Special Elite', monospace;
+  font-size: 10px;
+  color: rgba(255,180,60,0.4);
+  text-decoration: none;
+  letter-spacing: 0.05em;
+}
+.site-link:hover { color: rgba(255,200,80,0.8); }
+
+@media (max-width: 520px) {
+  body { padding: 8px; }
+  .radio { padding: 14px 12px 16px; }
+  .speaker-grille { width: 80px; }
+  .btn-label { font-size: 7px; }
+}
+
 .error-bar {
   background: #1a0a0a;
   border: 1px solid #4a1a1a;
@@ -471,9 +491,7 @@ input[type=range].vol-dial::-moz-range-thumb {
 
     <div class="display-area">
       <div class="dial-window" aria-label="Frequenzskala">
-        <div class="dial-nums">
-          <span>87</span><span>90</span><span>93</span><span>96</span><span>99</span><span>102</span><span>108</span>
-        </div>
+        <div class="dial-nums" id="dialNums"></div>
         <div class="dial-marker" id="dialMarker"></div>
         <div class="dial-station-label" id="dialFreqLabel">— MHz</div>
       </div>
@@ -495,24 +513,24 @@ input[type=range].vol-dial::-moz-range-thumb {
     </div>
   </div>
 
-  <div class="knobs-row" aria-hidden="true">
-    <div class="knob-group">
+  <div class="knobs-row">
+    <div class="knob-group" aria-hidden="true">
       <div class="knob vol-knob"></div>
       <div class="knob-label">Lautstärke</div>
     </div>
     <div class="vol-slider-wrap">
-      <input type="range" class="vol-dial" id="volSlider" min="0" max="100" value="80" orient="vertical" aria-label="Lautstärke">
-      <div class="knob-label">Vol</div>
+      <input type="range" class="vol-dial" id="volSlider" min="0" max="100" value="80" aria-label="Lautstärke">
+      <div class="knob-label" aria-hidden="true">Vol</div>
     </div>
-    <div class="knob-group">
+    <div class="knob-group" aria-hidden="true">
       <div class="knob tone-knob"></div>
       <div class="knob-label">Bass</div>
     </div>
-    <div class="knob-group">
+    <div class="knob-group" aria-hidden="true">
       <div class="knob tone-knob"></div>
       <div class="knob-label">Höhen</div>
     </div>
-    <div class="knob-group">
+    <div class="knob-group" aria-hidden="true">
       <div class="knob tone-knob"></div>
       <div class="knob-label">Balance</div>
     </div>
@@ -569,42 +587,66 @@ input[type=range].vol-dial::-moz-range-thumb {
   </div>
 
   <div class="error-bar" id="errorBar"></div>
+  <a class="site-link" href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
 </div>
 
 <audio id="audioEl" preload="none"></audio>
 
 <script>
+// UKW-Skala: linear 87,5 … 108 MHz
+const DIAL_MIN = 87.5, DIAL_MAX = 108;
+const DIAL_LEFT = 6, DIAL_RIGHT = 94;   // Prozent der Fensterbreite
+
 const STATIONS = {
-  br24: { name: 'BR 24', genre: 'Nachrichten & Info', freq: '87.6 — 106.9 MHz', dialPct: 0.04, stream: 'https://dispatcher.rndfnk.com/br/br24/live/mp3/low', fallback: 'https://dispatcher.rndfnk.com/br/br24/live/aac/low' },
-  dlf:  { name: 'Deutschlandfunk', genre: 'Nachrichten & Kultur', freq: 'DAB+ / Stream', dialPct: 0.25, stream: 'https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3?aggregator=web' },
-  gong: { name: 'Gong 97.1', genre: 'Classic Rock', freq: '97.1 MHz', dialPct: 0.56, stream: 'https://edge03.streamonkey.net/fhn-gong971/stream/mp3' },
-  n1:   { name: 'Hit Radio N1', genre: 'Aktuelle Hits', freq: '92.9 MHz', dialPct: 0.38, stream: 'https://webstream.hitradion1.de/hitradion1' },
-  chari:{ name: 'Charivari 98.6', genre: 'Pop & Hits', freq: '98.6 MHz', dialPct: 0.63, stream: 'https://frontend.streamonkey.net/fhn-986charivari' },
-  radioz:{ name: 'Radio Z', genre: 'Community Radio', freq: '95.8 MHz', dialPct: 0.48, stream: 'https://stream.radio-z.net/live-128k' },
-  off:  null
+  br24:  { name: 'BR 24',           genre: 'Nachrichten & Info',   freq: 'Stream',        mhz: null,  dialPct: 0.04, stream: 'https://dispatcher.rndfnk.com/br/br24/live/mp3/low', fallback: 'https://dispatcher.rndfnk.com/br/br24/live/aac/low' },
+  dlf:   { name: 'Deutschlandfunk', genre: 'Nachrichten & Kultur', freq: 'DAB+ / Stream', mhz: null,  dialPct: 0.96, stream: 'https://st01.sslstream.dlf.de/dlf/01/128/mp3/stream.mp3?aggregator=web' },
+  gong:  { name: 'Gong 97.1',       genre: 'Classic Rock',         freq: '97.1 MHz',      mhz: 97.1,  stream: 'https://edge03.streamonkey.net/fhn-gong971/stream/mp3' },
+  n1:    { name: 'Hit Radio N1',    genre: 'Aktuelle Hits',        freq: '92.9 MHz',      mhz: 92.9,  stream: 'https://webstream.hitradion1.de/hitradion1' },
+  chari: { name: 'Charivari 98.6',  genre: 'Pop & Hits',           freq: '98.6 MHz',      mhz: 98.6,  stream: 'https://frontend.streamonkey.net/fhn-986charivari' },
+  radioz:{ name: 'Radio Z',         genre: 'Community Radio',      freq: '95.8 MHz',      mhz: 95.8,  stream: 'https://stream.radio-z.net/live-128k' }
 };
 
-const audio = document.getElementById('audioEl');
-const nameEl = document.getElementById('stationName');
-const subEl = document.getElementById('stationSub');
-const genreEl = document.getElementById('stationGenre');
-const dotEl = document.getElementById('statusDot');
-const marker = document.getElementById('dialMarker');
-const freqDisp = document.getElementById('freqDisplay');
+const audio     = document.getElementById('audioEl');
+const nameEl    = document.getElementById('stationName');
+const subEl     = document.getElementById('stationSub');
+const genreEl   = document.getElementById('stationGenre');
+const dotEl     = document.getElementById('statusDot');
+const marker    = document.getElementById('dialMarker');
+const freqDisp  = document.getElementById('freqDisplay');
 const dialLabel = document.getElementById('dialFreqLabel');
-const errorBar = document.getElementById('errorBar');
+const dialNums  = document.getElementById('dialNums');
+const errorBar  = document.getElementById('errorBar');
 const volSlider = document.getElementById('volSlider');
-const tubes = ['tube1','tube2','tube3','tube4'].map(id => document.getElementById(id));
+const buttons   = document.querySelectorAll('.preset-btn');
+const tubes     = ['tube1','tube2','tube3','tube4'].map(id => document.getElementById(id));
 
-let currentId = null;
-let triedFallback = false;
+let currentId   = null;   // gewählter Sender
+let token       = 0;      // Zähler je Abspielversuch – alte Callbacks werden daran erkannt
+let urlIndex    = 0;      // 0 = stream, 1 = fallback
+let retries     = 0;      // Wiederverbindungen nach Abriss
+let failing     = false;  // verhindert doppelte Fehlerbehandlung (error-Event + play()-Promise)
+let tubeTimers  = [];
+let errorTimer  = null;
+
+function mhzToPct(mhz) { return (mhz - DIAL_MIN) / (DIAL_MAX - DIAL_MIN); }
+function pctToLeft(p)  { return DIAL_LEFT + (DIAL_RIGHT - DIAL_LEFT) * p; }
+
+// Skala mit derselben Abbildung wie der Zeiger aufbauen
+[88, 92, 96, 100, 104, 108].forEach(f => {
+  const sp = document.createElement('span');
+  sp.textContent = f;
+  sp.style.left = pctToLeft(mhzToPct(f)) + '%';
+  dialNums.appendChild(sp);
+});
 
 function setDialPosition(pct) {
-  const minLeft = 12, maxLeft = 88;
-  marker.style.left = (minLeft + (maxLeft - minLeft) * pct) + '%';
+  marker.style.left = pctToLeft(Math.min(1, Math.max(0, pct))) + '%';
 }
 
+function clearTubeTimers() { tubeTimers.forEach(clearTimeout); tubeTimers = []; }
+
 function setOff() {
+  clearTubeTimers();
   nameEl.textContent = '— kein Sender —';
   nameEl.className = 'station-name-big off';
   subEl.className = 'station-sub off';
@@ -614,77 +656,120 @@ function setOff() {
   dialLabel.textContent = '— MHz';
   setDialPosition(0.5);
   tubes.forEach(t => t.classList.remove('active'));
-  errorBar.style.display = 'none';
+  buttons.forEach(b => b.classList.remove('active'));
 }
 
-function setPlaying(id) {
+function setTuning(id) {
   const s = STATIONS[id];
   nameEl.textContent = s.name;
   nameEl.className = 'station-name-big';
   subEl.className = 'station-sub';
-  genreEl.textContent = s.genre;
-  dotEl.className = 'status-dot on';
+  genreEl.textContent = 'verbinde …';
+  dotEl.className = 'status-dot';
   freqDisp.textContent = s.freq;
-  dialLabel.textContent = s.freq.includes('MHz') ? s.freq : 'Stream';
-  setDialPosition(s.dialPct);
-  tubes.forEach((t, i) => setTimeout(() => t.classList.add('active'), i * 120));
+  dialLabel.textContent = s.mhz ? s.freq : 'Stream';
+  setDialPosition(s.mhz ? mhzToPct(s.mhz) : s.dialPct);
+  buttons.forEach(b => b.classList.toggle('active', b.dataset.id === id));
+  clearTubeTimers();
+  tubes.forEach(t => t.classList.remove('active'));
+  tubes.forEach((t, i) => tubeTimers.push(setTimeout(() => t.classList.add('active'), i * 120)));
+}
+
+function setOnAir() {
+  if (!currentId) return;
+  genreEl.textContent = STATIONS[currentId].genre;
+  dotEl.className = 'status-dot on';
 }
 
 function showError(name) {
+  clearTimeout(errorTimer);
   errorBar.textContent = 'Kein Empfang: ' + name + ' — Verbindung fehlgeschlagen';
   errorBar.style.display = 'block';
-  setTimeout(() => { errorBar.style.display = 'none'; }, 4000);
+  errorTimer = setTimeout(() => { errorBar.style.display = 'none'; }, 4000);
 }
 
-function playStation(id) {
-  const s = STATIONS[id];
-  triedFallback = false;
-  audio.src = s.stream;
+function hideError() { clearTimeout(errorTimer); errorBar.style.display = 'none'; }
+
+function releaseAudio() {
+  audio.pause();
+  audio.removeAttribute('src');   // src = '' würde die Seiten-URL laden und ein error-Event auslösen
   audio.load();
-  currentId = id;
-  setPlaying(id);
-  errorBar.style.display = 'none';
-  audio.play().catch(() => tryFallback(id));
 }
 
-function tryFallback(id) {
-  const s = STATIONS[id];
-  if (!triedFallback && s.fallback) {
-    triedFallback = true;
-    audio.src = s.fallback;
-    audio.load();
-    audio.play().catch(() => { stopAll(); showError(s.name); });
+function urlsOf(s) { return s.fallback ? [s.stream, s.fallback] : [s.stream]; }
+
+function startUrl() {
+  const s = STATIONS[currentId];
+  const my = ++token;
+  failing = false;
+  audio.src = urlsOf(s)[urlIndex];
+  audio.play().catch(err => {
+    if (my !== token) return;                 // veralteter Versuch (Senderwechsel)
+    if (err && err.name === 'AbortError') return;
+    if (err && err.name === 'NotAllowedError') { stopAll(); showError(s.name + ' (Autoplay blockiert)'); return; }
+    handleFailure(my);
+  });
+}
+
+function handleFailure(my) {
+  if (my !== token || failing || !currentId) return;
+  failing = true;
+  const s = STATIONS[currentId];
+  if (urlIndex + 1 < urlsOf(s).length) {      // nächste Adresse probieren
+    urlIndex++;
+    startUrl();
   } else {
+    const name = s.name;
     stopAll();
-    showError(s.name);
+    showError(name);
   }
 }
 
-function stopAll() {
-  audio.pause();
-  audio.src = '';
-  currentId = null;
-  setOff();
-  document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+function playStation(id) {
+  currentId = id;
+  urlIndex = 0;
+  retries = 0;
+  hideError();
+  setTuning(id);
+  startUrl();
 }
 
-document.querySelectorAll('.preset-btn').forEach(btn => {
+function stopAll() {
+  token++;                 // laufende Versuche ungültig machen
+  currentId = null;
+  releaseAudio();
+  setOff();
+}
+
+buttons.forEach(btn => {
   btn.addEventListener('click', () => {
     const id = btn.dataset.id;
-    if (id === 'off') { stopAll(); return; }
-    if (currentId === id) { stopAll(); return; }
-    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    if (currentId) { audio.pause(); audio.src = ''; }
-    tubes.forEach(t => t.classList.remove('active'));
+    if (id === 'off' || currentId === id) { stopAll(); return; }
     playStation(id);
   });
 });
 
-audio.addEventListener('error', () => { if (currentId) tryFallback(currentId); });
+audio.addEventListener('playing', () => { retries = 0; setOnAir(); });
+audio.addEventListener('waiting', () => { if (currentId) { genreEl.textContent = 'puffere …'; dotEl.className = 'status-dot'; } });
+
+audio.addEventListener('error', () => {
+  if (!currentId) return;
+  // Abriss während laufender Sendung: zweimal neu verbinden, dann Fallback
+  if (dotEl.classList.contains('on') && retries < 2) {
+    retries++;
+    genreEl.textContent = 'verbinde neu …';
+    startUrl();
+    return;
+  }
+  handleFailure(token);
+});
+
+// Livestreams senden kein 'ended' – wenn doch, ist die Verbindung weg
+audio.addEventListener('ended', () => { if (currentId) { retries++; startUrl(); } });
+
 volSlider.addEventListener('input', () => { audio.volume = volSlider.value / 100; });
 
-audio.volume = 0.8;
+audio.volume = volSlider.value / 100;
 setOff();
 </script>
 </body>

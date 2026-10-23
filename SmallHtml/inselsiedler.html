@@ -180,7 +180,7 @@
         <select id="npl"><option>3</option><option selected>4</option></select>
         <button id="newgame">Neu mischen</button>
       </div>
-      <p class="muted" style="margin:10px 0 0">Du spielst gegen drei KI-Gegner. Die vollständigen Regeln findest du unten im Feld <b>Spielregeln</b>.</p>
+      <p class="muted" style="margin:10px 0 0">Du spielst gegen <span id="nai">drei</span> KI-Gegner. Die vollständigen Regeln findest du unten im Feld <b>Spielregeln</b>.</p>
     </div>
 
     <div class="card">
@@ -383,6 +383,7 @@
       <h2>Spielverlauf</h2>
       <div id="log"></div>
     </div>
+    <p class="muted" style="margin:0;text-align:center">Mehr Projekte auf <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--brass-hi)">itzwieseltal.wordpress.com</a></p>
   </aside>
 </div>
 
@@ -565,6 +566,8 @@ const handSize=p=>RES.reduce((s,r)=>s+p.res[r],0);
 
 /* ---------- Neues Spiel ---------- */
 function newGame(seedStr,nPlayers,humans){
+  GEN++;
+  if(typeof document!=="undefined" && document.getElementById && document.getElementById("overlay")) closeModal();
   rnd=mulberry32(hashStr(seedStr||"catan"));
   const geo=buildGeometry();
   G={
@@ -607,7 +610,8 @@ function canSettle(vi,p,setup){
   if(!setup && p.settlements.length>=LIMIT.siedlung) return false;
   if(v.building) return false;
   for(const n of v.adj) if(G.verts[n].building) return false;
-  if(setup) return true;
+  // Im Aufbau muss noch eine freie Kante für die Startstraße anliegen
+  if(setup) return v.edges.some(ei=>G.edges[ei].road===null);
   return v.edges.some(ei=>G.edges[ei].road===p.id);
 }
 function canRoad(ei,p,setupVertex){
@@ -676,12 +680,13 @@ function roadLength(p){
   const used=new Set();
   function dfs(v,len){
     if(len>best) best=len;
+    // Eine fremde Siedlung/Stadt beendet den Weg – die Kante dorthin zählt aber mit
+    const b=G.verts[v].building;
+    if(b && b.owner!==p.id) return;
     for(const ei of G.verts[v].edges){
       if(!set.has(ei)||used.has(ei)) continue;
       const e=G.edges[ei];
       const nv=e.v[0]===v?e.v[1]:e.v[0];
-      const b=G.verts[nv].building;
-      if(b && b.owner!==p.id) continue;
       used.add(ei); dfs(nv,len+1); used.delete(ei);
     }
   }
@@ -689,8 +694,6 @@ function roadLength(p){
     const e=G.edges[ei];
     for(const v of e.v){
       const nv=e.v[0]===v?e.v[1]:e.v[0];
-      const b=G.verts[nv].building;
-      if(b && b.owner!==p.id) continue;
       used.add(ei); dfs(nv,1); used.delete(ei);
     }
   }
@@ -698,17 +701,21 @@ function roadLength(p){
 }
 function updateLongest(){
   G.players.forEach(p=>p.roadLen=roadLength(p));
-  let holder=G.longest.p, len=holder>=0?G.players[holder].roadLen:0;
-  if(holder>=0 && len<5){ holder=-1; len=4; }
-  let bestLen = holder>=0 ? len : 4;
-  let best=holder;
-  G.players.forEach(p=>{
-    if(p.roadLen>bestLen && p.roadLen>=5){ bestLen=p.roadLen; best=p.id; }
-  });
-  if(best!==G.longest.p){
-    G.longest={p:best,len:bestLen};
-    if(best>=0) logMsg(pn(G.players[best])+" hat jetzt die <b>längste Handelsstraße</b> ("+bestLen+").");
-  } else if(best>=0){ G.longest.len=G.players[best].roadLen; }
+  const holder=G.longest.p;
+  const max=Math.max(...G.players.map(p=>p.roadLen));
+  let best=-1;
+  if(max>=5){
+    if(holder>=0 && G.players[holder].roadLen===max) best=holder;   // Gleichstand: Besitzer behält
+    else {
+      const top=G.players.filter(p=>p.roadLen===max);
+      best = top.length===1 ? top[0].id : -1;                       // mehrere gleichauf: niemand
+    }
+  }
+  if(best!==holder){
+    if(best<0 && holder>=0) logMsg(pn(G.players[holder])+" verliert die <b>längste Handelsstraße</b>.");
+    G.longest={p:best,len:best>=0?max:4};
+    if(best>=0) logMsg(pn(G.players[best])+" hat jetzt die <b>längste Handelsstraße</b> ("+max+").");
+  } else if(best>=0){ G.longest.len=max; }
 }
 function updateLargest(p){
   if(p.knights>=3 && p.knights > G.largest.n){
@@ -973,22 +980,29 @@ function bestRoad(p){
   return best;
 }
 function aiTryTradeFor(p,cost){
-  // fehlende Rohstoffe per Bank/Hafen beschaffen, wenn Überschuss da ist
+  // fehlende Rohstoffe per Bank/Hafen beschaffen, wenn Überschuss da ist.
+  // Erst auf einer Kopie planen – getauscht wird nur, wenn der Bau danach sicher klappt.
+  const res=Object.assign({},p.res), bank=Object.assign({},G.bank), plan=[];
   for(let guard=0; guard<6; guard++){
-    const need=RES.filter(r=>(cost[r]||0)>p.res[r]);
-    if(!need.length) return true;
+    const need=RES.filter(r=>(cost[r]||0)>res[r]);
+    if(!need.length) break;
     const want=need[0];
+    if(bank[want]<1) return false;
     let src=null;
     RES.forEach(r=>{
-      if((cost[r]||0)>0 && p.res[r]<=(cost[r]||0)) return;
+      if((cost[r]||0)>0 && res[r]<=(cost[r]||0)) return;
       const rate=tradeRate(p,r);
-      const spare=p.res[r]-(cost[r]||0);
-      if(spare>=rate && (!src || p.res[r]>p.res[src])) src=r;
+      const spare=res[r]-(cost[r]||0);
+      if(spare>=rate && (!src || res[r]>res[src])) src=r;
     });
     if(!src) return false;
-    if(!bankTrade(p,src,want)) return false;
+    const rate=tradeRate(p,src);
+    res[src]-=rate; bank[src]+=rate; res[want]++; bank[want]--;
+    plan.push([src,want]);
   }
-  return false;
+  if(RES.some(r=>(cost[r]||0)>res[r])) return false;
+  for(const [src,want] of plan){ if(!bankTrade(p,src,want)) return false; }
+  return true;
 }
 function aiAction(){
   if(G.phase!=="spiel"||G.winner>=0) return;
@@ -1040,13 +1054,15 @@ function aiPlayCard(p,c){
   c.used=true; p.devPlayedThisTurn=true;
   if(c.t==="strassenbau"){
     logMsg(pn(p)+" spielt <b>Straßenbau</b>.");
-    for(let i=0;i<2;i++){ const e=bestRoad(p); if(e>=0) doRoad(e,p,true); }
+    let built=0;
+    for(let i=0;i<2;i++){ const e=bestRoad(p); if(e>=0){ doRoad(e,p,true); built++; } }
+    logMsg(pn(p)+" baut "+(built===1?"eine Straße":built+" Straßen")+" gratis.");
   } else if(c.t==="erfindung"){
     logMsg(pn(p)+" spielt <b>Erfindung</b>.");
     for(let i=0;i<2;i++){
-      let want=RES[0],ws=-1;
-      RES.forEach(r=>{ const s=(COST.siedlung[r]||0)+(COST.stadt[r]||0)*0.5-p.res[r]; if(s>ws){ws=s;want=r;} });
-      give(p,want,1);
+      let want=null,ws=-1e9;
+      RES.forEach(r=>{ if(G.bank[r]<1) return; const s=(COST.siedlung[r]||0)+(COST.stadt[r]||0)*0.5-p.res[r]; if(s>ws){ws=s;want=r;} });
+      if(want) give(p,want,1);
     }
   } else if(c.t==="monopol"){
     let best=RES[0],bs=-1;
@@ -1060,7 +1076,7 @@ function aiPlayCard(p,c){
 /* --- Wie viel ist der KI ein einzelner Rohstoff wert? --- */
 function aiGoal(p){
   if(p.settlements.length && p.cities.length<LIMIT.stadt) return COST.stadt;
-  if(p.settlements.length+p.cities.length<LIMIT.siedlung && bestSettleSpot(p)>=0) return COST.siedlung;
+  if(p.settlements.length<LIMIT.siedlung && bestSettleSpot(p)>=0) return COST.siedlung;
   if(p.roads.size<LIMIT.strasse && bestRoad(p)>=0) return COST.strasse;
   return COST.karte;
 }
@@ -1116,7 +1132,9 @@ function buildAIOffer(p){
 }
 
 /* ---------- Zugsteuerung ---------- */
-function schedule(fn,ms){ setTimeout(fn, G && G.fast?0:ms); }
+// Jedes neue Spiel erhöht GEN – Timer aus einer alten Partie laufen dann ins Leere.
+let GEN=0;
+function schedule(fn,ms){ const g=GEN; setTimeout(()=>{ if(g===GEN) fn(); }, G && G.fast?0:ms); }
 function maybeAI(){
   if(G.winner>=0) return;
   const p=cur();
@@ -1540,6 +1558,8 @@ function updateUI(){
   const p=cur();
   const myTurn = p.human;
 
+  const nai=document.getElementById("nai");
+  if(nai) nai.textContent=["keine","einen","zwei","drei"][G.players.filter(q=>!q.human).length]||String(G.players.length-1);
   document.getElementById("d1").textContent=G.dice[0]||"–";
   document.getElementById("d2").textContent=G.dice[1]||"–";
 
@@ -1554,7 +1574,7 @@ function updateUI(){
   else if(G.sub==="raeuber") msg = myTurn ? "<b>Räuber:</b> klicke auf ein Feld." : p.name+" versetzt den Räuber …";
   else if(G.sub==="wuerfeln") msg = myTurn ? "Du bist dran – <b>würfeln</b>." : p.name+" ist am Zug …";
   else if(UI.mode) msg = "Klicke auf die markierte Stelle ("+({strasse:"Straße",siedlung:"Siedlung",stadt:"Stadt"}[UI.mode])+")"+(UI.freeRoads?" – noch "+UI.freeRoads+" gratis":"")+".";
-  else msg = myTurn ? "Handeln oder bauen – dann Zug beenden." : p.name+" ist am Zug …";
+  else msg = myTurn ? "Handeln oder bauen – dann Zug beenden."+(UI.freeRoads?" Du hast noch <b>"+UI.freeRoads+" Gratisstraße"+(UI.freeRoads>1?"n":"")+"</b>.":"") : p.name+" ist am Zug …";
   document.getElementById("prompt").innerHTML=msg;
 
   // Spielerliste
@@ -1736,8 +1756,10 @@ function humanPlayDev(i){
   if(c.t==="erfindung"){
     askResource("Erfindung: zwei Rohstoffe wählen",2,picked=>{
       c.used=true; me.devPlayedThisTurn=true;
-      picked.forEach(r=>give(me,r,1));
-      logMsg(pn(me)+" nimmt "+picked.map(r=>RESNAME[r]).join(" und ")+" aus dem Vorrat.");
+      const got=picked.filter(r=>give(me,r,1)>0);
+      logMsg(got.length
+        ? pn(me)+" nimmt "+got.map(r=>RESNAME[r]).join(" und ")+" aus dem Vorrat."+(got.length<picked.length?" (Vorrat teilweise leer)":"")
+        : pn(me)+" spielt Erfindung, aber der Vorrat ist leer.");
       updateUI(); render();
     });
     return;
@@ -1764,11 +1786,12 @@ function bindUI(){
     if(G.sub!=="wuerfeln"||!cur().human) return;
     rollDice(); render(); updateUI(); 
   };
-  const setMode=m=>{ UI.mode = UI.mode===m?null:m; if(UI.mode!=="strasse") UI.freeRoads=0; updateUI(); render(); };
+  // Gratisstraßen der Straßenbau-Karte bleiben erhalten, auch wenn man zwischendurch den Modus wechselt
+  const setMode=m=>{ UI.mode = UI.mode===m?null:m; updateUI(); render(); };
   document.getElementById("b-road").onclick=()=>setMode("strasse");
   document.getElementById("b-settle").onclick=()=>setMode("siedlung");
   document.getElementById("b-city").onclick=()=>setMode("stadt");
-  document.getElementById("b-dev").onclick=()=>{ const me=G.players[0]; if(!canAfford(me,COST.karte))return; buyDev(me); updateUI(); render(); };
+  document.getElementById("b-dev").onclick=()=>{ const me=G.players[0]; if(!canAfford(me,COST.karte))return; buyDev(me); updateUI(); render(); checkWin(); };
   document.getElementById("b-end").onclick=()=>{ if(cur().human && G.sub==="aktion") endTurn(); };
   document.getElementById("b-bank").onclick=()=>{
     const me=G.players[0];
