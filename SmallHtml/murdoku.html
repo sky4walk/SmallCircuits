@@ -125,6 +125,8 @@ ol.clues{margin:0;padding-left:20px}
 ol.clues li{margin-bottom:7px;cursor:pointer}
 ol.clues li.done{opacity:.4;text-decoration:line-through}
 ol.clues li.bad{color:var(--victim);opacity:1;text-decoration:none}
+.foot{margin-top:18px;font-size:12.5px;color:var(--dim)}
+.foot a{color:var(--wall)}
 .status{min-height:2.6em;font-size:14px}
 .status.good{color:var(--gold)}
 .status.bad{color:var(--victim)}
@@ -188,9 +190,10 @@ details p{margin:8px 0 0;color:var(--dim);font-size:13.5px}
     <div class="card">
       <details>
         <summary>Regeln</summary>
-        <p>In jeder Reihe und in jeder Spalte steht höchstens eine Person. Möbelfelder und das Opferfeld bleiben frei. Genau eine Person hielt sich im Raum des Opfers auf — sie ist die Täterin oder der Täter. Ein Rechtsklick auf ein Feld markiert es als ausgeschlossen, ein Klick auf einen Hinweis hakt ihn ab. Jeder Fall lässt sich Schritt für Schritt herleiten — Raten ist nie nötig.</p>
+        <p>In jeder Reihe und in jeder Spalte steht höchstens eine Person. Möbelfelder und das Opferfeld bleiben frei. Genau eine Person hielt sich im Raum des Opfers auf — sie ist die Täterin oder der Täter. Ein Rechtsklick auf ein Feld markiert es als ausgeschlossen, ein Klick auf einen Hinweis hakt ihn ab. „Direkt neben“ heißt waagrecht oder senkrecht angrenzend, nicht diagonal. Bei 7×7 gehört die mittlere Reihe zu keiner Hälfte und die mittlere Spalte zu keinem Flügel. Jeder Fall lässt sich Schritt für Schritt herleiten — Raten ist nie nötig.</p>
       </details>
     </div>
+    <p class="foot">Mehr Bastelprojekte: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></p>
   </div>
 </div>
 
@@ -338,6 +341,9 @@ function randomSolution(rnd, N, K, owner, victim, blocked) {
 }
 
 /* ---------- Hinweise ---------- */
+// Hälften: bei ungeradem N liegt die Mittellinie in keiner Hälfte
+const inNorth = (v, N) => v < Math.floor(N / 2);
+const inSouth = (v, N) => v >= Math.ceil(N / 2);
 function roomPhrase(room, kasus) {
   const { name, art } = room;
   if (kasus === "in") {
@@ -390,10 +396,15 @@ function makeClues(rnd, puz, pos) {
       add({ type: "edge", vars: [i], i, val: false, weight: 2,
         text: `${nameOf(i)} stand nirgends an einer Außenwand.` });
     }
-    add({ type: "half", vars: [i], i, axis: "r", north: r < N / 2, weight: 1,
-      text: `${nameOf(i)} war in der ${r < N / 2 ? "nördlichen" : "südlichen"} Hälfte des Hauses.` });
-    add({ type: "half", vars: [i], i, axis: "c", north: c < N / 2, weight: 1,
-      text: `${nameOf(i)} war im ${c < N / 2 ? "westlichen" : "östlichen"} Flügel.` });
+    // Bei ungerader Größe gehört die Mittellinie zu keiner Hälfte
+    if (inNorth(r, N) || inSouth(r, N)) {
+      add({ type: "half", vars: [i], i, axis: "r", north: inNorth(r, N), weight: 1,
+        text: `${nameOf(i)} war in der ${inNorth(r, N) ? "nördlichen" : "südlichen"} Hälfte des Hauses.` });
+    }
+    if (inNorth(c, N) || inSouth(c, N)) {
+      add({ type: "half", vars: [i], i, axis: "c", north: inNorth(c, N), weight: 1,
+        text: `${nameOf(i)} war im ${inNorth(c, N) ? "westlichen" : "östlichen"} Flügel.` });
+    }
     if (r === rowOf(victim)) {
       add({ type: "vline", vars: [i], i, axis: "r", weight: 2,
         text: `${nameOf(i)} stand auf gleicher Höhe wie ${puz.victim_name}.` });
@@ -402,7 +413,7 @@ function makeClues(rnd, puz, pos) {
       add({ type: "vline", vars: [i], i, axis: "c", weight: 2,
         text: `${nameOf(i)} stand in derselben Spalte wie ${puz.victim_name}.` });
     }
-    if (roomCount(rid) === 1) {
+    if (roomCount(rid) === 1 && rid !== vRoom) {
       add({ type: "alone", vars: null, i, weight: 3,
         text: `${nameOf(i)} war allein in einem Raum.` });
     } else {
@@ -468,7 +479,7 @@ function clueHolds(clue, pos, puz) {
     case "half": {
       const p = pos[clue.i];
       const v = clue.axis === "r" ? row(p) : col(p);
-      return (v < N / 2) === clue.north;
+      return clue.north ? inNorth(v, N) : inSouth(v, N);
     }
     case "vline": {
       const p = pos[clue.i];
@@ -738,7 +749,9 @@ function buildCase(seed, levelKey) {
 
     const pool = shuffle(rnd, makeClues(rnd, puz, pos));
     const hard = levelKey === "schwer";
-    pool.sort((a, b) => (hard ? a.weight - b.weight : b.weight - a.weight) + (rnd() - 0.5) * 2.5);
+    // Schlüssel vorab würfeln: gleiche Fallnummer = gleicher Fall in jedem Browser
+    for (const cl of pool) cl._k = (hard ? cl.weight : -cl.weight) + (rnd() - 0.5) * 2.5;
+    pool.sort((a, b) => a._k - b._k);
 
     // aufbauen, bis der Fall Schritt für Schritt lösbar ist
     const chosen = [];
@@ -1018,21 +1031,25 @@ function reveal(){
 $("#neu").addEventListener("click", () => newCase(undefined, $("#level").value));
 $("#level").addEventListener("change", () => newCase(undefined, $("#level").value));
 $("#reset").addEventListener("click", () => {
-  place = new Array(C.K).fill(-1); notes = new Set(); solved = false;
+  place = new Array(C.K).fill(-1); notes = new Set(); solved = false; selected = -1;
+  C.clues.forEach((cl) => { cl.done = false; });
   drawPlan(); drawPins(); drawClues(); setStatus("Feld geräumt.");
 });
 $("#pruefen").addEventListener("click", check);
 $("#loesen").addEventListener("click", reveal);
 
-(function start(){
+function fromHash(){
   const m = /fall=(\d+)&stufe=(\w+)/.exec(location.hash);
   if (m && ["leicht","mittel","schwer"].includes(m[2])){
+    if (C && C.seed === parseInt(m[1], 10) && C.level === m[2]) return true;
     $("#level").value = m[2];
     newCase(parseInt(m[1], 10), m[2]);
-  } else {
-    newCase(undefined, $("#level").value);
+    return true;
   }
-})();
+  return false;
+}
+window.addEventListener("hashchange", fromHash);
+if (!fromHash()) newCase(undefined, $("#level").value);
 </script>
 </body>
 </html>
