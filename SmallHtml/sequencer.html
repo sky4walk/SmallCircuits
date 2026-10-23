@@ -40591,11 +40591,24 @@ function selectTrack(idx) {
 }
 
 function deleteTrack(idx) {
-  if (tracks.length <= 1) return;
   const tr = tracks[idx];
+  if (!tr) return;
   if ((tr.notes.length || tr.events.length) && !confirm(`Spur "${tr.name}" mit ${tr.notes.length} Noten löschen?`)) return;
+  if (recording) toggleRecord();
+  for (const [k, h] of [...liveHeld]) if (h.tr === tr) { releaseLiveVoices(h); liveHeld.delete(k); }
   if (tr._rt) { releaseTrackVoices(tr, audioCtx.currentTime, true); try { tr._rt.strip.fader.disconnect(); } catch (e) {} }
+  lastTake = lastTake.filter(x => x.tr !== tr);
+  document.getElementById('undo-take-btn').disabled = !lastTake.length;
   tracks.splice(idx, 1);
+  if (!tracks.length) {
+    // Ohne Spur geht nichts – es bleibt eine frische, leere Spur stehen
+    activeTrackIdx = 0;
+    addTrack('Spur 1', 0);
+    if (isPlaying) { const rt = runtime(tracks[0]); rt.ni = 0; rt.ei = 0; }
+    renderGrid(); buildLaneSelect(); drawLane(); updateStatus();
+    statusMsg('Letzte Spur gelöscht – neue leere Spur angelegt');
+    return;
+  }
   if (idx < activeTrackIdx) activeTrackIdx--;
   if (activeTrackIdx >= tracks.length) activeTrackIdx = tracks.length - 1;
   renderTrackList(); renderGrid(); buildLaneSelect(); drawLane(); updateStatus();
@@ -40698,7 +40711,15 @@ function buildPianoKeys() {
     if (name === 'C') label.textContent = `C${Math.floor(m / 12) - 1}`;
     else if (!isBlack && cellH >= 14) label.textContent = name;
     key.appendChild(label);
-    key.addEventListener('mousedown', (e) => { e.preventDefault(); previewNote(m); });
+    key.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      try { key.releasePointerCapture(e.pointerId); } catch (err) {}   // Touch: Glissando erlauben
+      screenKeyDown = true;
+      screenKeyOn(m);
+    });
+    key.addEventListener('pointerenter', () => { if (screenKeyDown) screenKeyOn(m); });
+    key.addEventListener('pointerleave', () => { if (screenKeyDown) screenKeyOff(m); });
     container.appendChild(key);
     keyEls[m] = key;
   }
@@ -40708,6 +40729,26 @@ function buildPianoKeys() {
 function previewNote(pitch) {
   noteOn(pitch, 100, activeTrackIdx, 0.5);
 }
+
+// Bildschirm-Klaviatur: läuft über denselben Weg wie ein MIDI-Keyboard,
+// damit gespielte Töne bei laufender Aufnahme in der Spur landen.
+// Eigener Pseudo-Kanal 16, damit sich Maus und echtes Keyboard nicht in die Quere kommen.
+const SCREEN_CH = 16;
+let screenKeyDown = false;
+function screenKeyOn(pitch) {
+  const ctx = getAudioCtx();
+  liveNoteOn(SCREEN_CH, pitch, 100, ctx.currentTime);
+}
+function screenKeyOff(pitch) {
+  liveNoteOff(SCREEN_CH, pitch, 64, audioCtx ? audioCtx.currentTime : 0);
+}
+function screenKeysAllOff() {
+  screenKeyDown = false;
+  for (const h of [...liveHeld.values()]) if (h.ch === SCREEN_CH) screenKeyOff(h.pitch);
+}
+document.addEventListener('pointerup', screenKeysAllOff);
+document.addEventListener('pointercancel', screenKeysAllOff);
+window.addEventListener('blur', screenKeysAllOff);
 
 // ========== LINEAL ==========
 function buildTimeRuler() {
@@ -41248,9 +41289,18 @@ function rebuildAll() {
 }
 
 function clearAll() {
-  if (!confirm('Alle Noten, Controller, Liedtext und Marker löschen?')) return;
+  if (!confirm('Alle Spuren samt Noten, Controller, Liedtext und Marker löschen?')) return;
+  liveStopAll();
   withPlaybackPaused(() => {
-    tracks.forEach(t => { t.notes = []; t.events = []; t._cache = null; });
+    for (const tr of tracks) if (tr._rt) {
+      try { releaseTrackVoices(tr, audioCtx.currentTime, true); } catch (e) {}
+      try { tr._rt.strip.fader.disconnect(); } catch (e) {}
+    }
+    tracks = [];
+    activeTrackIdx = 0;
+    lastTake = [];
+    document.getElementById('undo-take-btn').disabled = true;
+    addTrack('Spur 1', 0);
     song.meta = []; song.sysex = []; song.title = '';
     buildLyrics(); rebuildAll(); renderTrackList(); buildLaneSelect(); updateStatus();
   });
@@ -41810,7 +41860,7 @@ function liveNoteOn(ch, pitch, vel, t) {
     if (!keyLightFrame) keyLightFrame = requestAnimationFrame(updateKeyLights);
   }
   liveHeld.set(key, { tr, ch, pitch, vel, voices, hit, drum, pos: recPosAt(t) });
-  midiActivity(`K${ch + 1} ${noteLabel(pitch).padEnd(4)} v${String(vel).padStart(3)} → ${tr.name}`);
+  midiActivity(`${ch === SCREEN_CH ? 'Maus' : 'K' + (ch + 1)} ${noteLabel(pitch).padEnd(4)} v${String(vel).padStart(3)} → ${tr.name}`);
 }
 
 function liveNoteOff(ch, pitch, offVel, t) {
@@ -41950,7 +42000,7 @@ function toggleRecord() {
   lastTake = [];
   setRecording(true);
   if (!isPlaying) startSeq();
-  if (!midiAccess) statusMsg('Aufnahme läuft – für ein Keyboard erst „🔌 Verbinden“ klicken');
+  if (!midiAccess) statusMsg(`Aufnahme in „${tracks[activeTrackIdx].name}“ – auf der Klaviatur links spielen oder für ein Keyboard „🔌 Verbinden“ klicken`);
   else statusMsg(`Aufnahme in „${tracks[activeTrackIdx].name}“ – die Schleife läuft weiter, jeder Durchlauf wird dazugespielt`);
 }
 
