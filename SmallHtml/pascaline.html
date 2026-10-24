@@ -1237,11 +1237,17 @@ const P02=7.6,P05=11.55,P06=5.1;
 const A06_0=2*BETA_CB+180-180/28-P05;
 // pawl
 const PH=[43.43,43.17], TIP=[-20.98,-1.125];
-const B0=Math.atan2(TIP[1],TIP[0]);
-const HB=Math.atan2(AX.B[1]-PH[1],AX.B[0]-PH[0]);
-function tipAt(d){const a=HB-d-B0,c=Math.cos(a),s=Math.sin(a);return [PH[0]+c*TIP[0]-s*TIP[1],PH[1]+s*TIP[0]+c*TIP[1],a];}
-function solvePawl(r){let lo=0,hi=1.4;for(let i=0;i<30;i++){const m=(lo+hi)/2,t=tipAt(m);const d=Math.hypot(t[0]-AX.B[0],t[1]-AX.B[1]);if(d<r)lo=m;else hi=m;}return tipAt((lo+hi)/2);}
-const t0=solvePawl(12.4); const GAMMA=Math.atan2(t0[1]-AX.B[1],t0[0]-AX.B[0])/D2R;
+// Halterung (4x3) steckt fest in der schraegen Gehaeuseoeffnung (4.5x3.5, um 69.8deg gedreht),
+// Plaettchen oben; nur die Blattfeder biegt sich um ROOT (lokal y,z) vom Rastrad weg.
+const PA=69.79*D2R, ROOT=[-2.5,-1.125];
+function tipAt(dl){const c=Math.cos(dl),s=Math.sin(dl),ly=ROOT[0]+c*(TIP[0]-ROOT[0])-s*(TIP[1]-ROOT[1]),lz=ROOT[1]+s*(TIP[0]-ROOT[0])+c*(TIP[1]-ROOT[1]);
+  const C=Math.cos(PA),S=Math.sin(PA);return [PH[0]+C*ly-S*lz,PH[1]+S*ly+C*lz,dl];}
+function solvePawl(r){const dist=t=>Math.hypot(t[0]-AX.B[0],t[1]-AX.B[1]);if(dist(tipAt(0))>=r)return tipAt(0);
+  let lo=0,hi=0.5;for(let i=0;i<30;i++){const m=(lo+hi)/2;if(dist(tipAt(m))<r)lo=m;else hi=m;}return tipAt((lo+hi)/2);}
+function bendPawl(p,dl){const a=p.mesh.geometry.attributes.position,o=p.orig,c=Math.cos(dl),s=Math.sin(dl);
+  for(let i=0;i<a.count;i++){const y=o[3*i+1],z=o[3*i+2];if(y<-2.5){const dy=y-ROOT[0],dz=z-ROOT[1];a.setY(i,ROOT[0]+c*dy-s*dz);a.setZ(i,ROOT[1]+s*dy+c*dz);}}
+  a.needsUpdate=true;p.mesh.geometry.computeVertexNormals();}
+const t0=tipAt(0); const GAMMA=Math.atan2(t0[1]-AX.B[1],t0[0]-AX.B[0])/D2R;
 const C04=(()=>{let best=0,bd=1e9;for(let n=0;n<4;n++){const th=((-GAMMA-90*n-16.5)%36+36)%36;const d=36-th;if(d<bd){bd=d;best=90*n;}}return best;})();
 function ratchetR(th){const u=(((th-16.5)%36)+36)%36/36;return 11.82+3.18*(1-u)*(1-u);}
 // ---------- machine ----------
@@ -1288,8 +1294,8 @@ function build(n){
     if(!lastM)P.shA=mount('Pascaline_12','shaft',1,0,AX.A,z);
     // pawl
     const pg=new THREE.Group(); pg.position.set(43.96,PH[0],PH[1]+z);
-    const pm=new THREE.Mesh(geo('Pascaline_10'),MAT.pawl); pm.castShadow=true; pg.add(pm); root.add(pg);
-    P.pawl={outer:pg,mesh:pm,cat:'pawl',base:pg.position.clone(),xc:46,internal:true};
+    const pm=new THREE.Mesh(geo('Pascaline_10').clone(),MAT.pawl); pm.castShadow=true; pm.rotation.x=PA; pg.add(pm); root.add(pg);
+    P.pawl={outer:pg,mesh:pm,cat:'pawl',base:pg.position.clone(),xc:46,internal:true,orig:Float32Array.from(pm.geometry.attributes.position.array)};
     P.dial.mesh.userData.mod=k; clickables.push(P.dial.mesh);
     for(const key in P){const p=P[key]; p.mod=k; if(p.internal&&p.xc===undefined)p.xc=25;}
     P.g02.carryMat=null;
@@ -1330,8 +1336,7 @@ function update(){
     P.cg.mesh.material=act?MAT_ACT:MAT.carry; P.g02.mesh.material=act?MAT_ACT2:MAT.inter;
     // pawl
     const th=-GAMMA-(36*f+C04);
-    const t=solvePawl(ratchetR(th));
-    P.pawl.mesh.rotation.x=t[2];
+    bendPawl(P.pawl,solvePawl(ratchetR(th))[2]);
   }
   // explode
   const e=explode;
@@ -1529,11 +1534,14 @@ function phi(k) = k==0 ? ein[0] : ein[k] + G(phi(k-1));                         
 AXA=[${AX.A}]; AXB=[${AX.B}]; AXC=[${AX.C}];   // (Höhe, Tiefe) der drei Achsen im Modul
 CG07=${f(CG.P07)}; CG13=${f(CG.P13)}; FULL07=${FULL.P07}; FULL13=${FULL.P13};
 P02=${P02}; P06=${P06}; A06_0=${f(A06_0)}; C04=${f(C04)}; GAMMA=${f(GAMMA)};
-PH=[${PH}]; TIP=[${TIP}]; B0=${f(B0/D2R)}; HB=${f(HB/D2R)};
+PH=[${PH}]; TIP=[${TIP}]; PA=${f(PA/D2R)}; ROOT=[${ROOT}];
 function ratchetR(th) = let(u=((th-16.5)%36+36)%36/36) 11.82+3.18*(1-u)*(1-u);
-function tipAt(d) = let(a=HB-d-B0) [PH[0]+cos(a)*TIP[0]-sin(a)*TIP[1], PH[1]+sin(a)*TIP[0]+cos(a)*TIP[1], a];
-function solvePawl(r,lo=0,hi=80,i=0) = i>=24 ? tipAt((lo+hi)/2) :
-   let(m=(lo+hi)/2, t=tipAt(m)) norm([t[0]-AXB[0],t[1]-AXB[1]])<r ? solvePawl(r,m,hi,i+1) : solvePawl(r,lo,m,i+1);
+// Federklinke: Halterung fest in der Oeffnung (Winkel PA), Blatt biegt um ROOT (Winkel d)
+function tipAt(d) = let(ly=ROOT[0]+cos(d)*(TIP[0]-ROOT[0])-sin(d)*(TIP[1]-ROOT[1]), lz=ROOT[1]+sin(d)*(TIP[0]-ROOT[0])+cos(d)*(TIP[1]-ROOT[1]))
+   [PH[0]+cos(PA)*ly-sin(PA)*lz, PH[1]+sin(PA)*ly+cos(PA)*lz, d];
+function tipDist(d) = let(t=tipAt(d)) norm([t[0]-AXB[0],t[1]-AXB[1]]);
+function solvePawl(r,lo=0,hi=28,i=0) = tipDist(0)>=r ? tipAt(0) : i>=24 ? tipAt((lo+hi)/2) :
+   let(m=(lo+hi)/2) tipDist(m)<r ? solvePawl(r,m,hi,i+1) : solvePawl(r,lo,m,i+1);
 
 // ---- Montage-Helfer (intern y = oben, z = Modulreihe) ----
 MP=[[0,0,1,0],[1,0,0,0],[0,1,0,0],[0,0,0,1]];   // Teilachse -> +x
@@ -1562,7 +1570,11 @@ module modul(k) {
   color("#a9b0ba") { place(0,AXC,1,aC,k) P_Pascaline_09(); place(36,AXB,1,aB,k) P_Pascaline_11(); if (k<N-1) place(0,AXA,1,h02,k) P_Pascaline_12(); }
   // Federklinke
   t=solvePawl(ratchetR(-GAMMA-(36*f+C04)));
-  color("#d94848") translate([43.96+(46-25.5)*1.1*e, PH[0]+80*e, PH[1]+50*k+40*k*e]) rotate([t[2],0,0]) P_Pascaline_10();
+  color("#d94848") translate([43.96+(46-25.5)*1.1*e, PH[0]+80*e, PH[1]+50*k+40*k*e]) rotate([PA,0,0]) {
+    intersection() { P_Pascaline_10(); translate([-5,-2.5,-3]) cube([13,6,6]); }                         // Halterung
+    translate([0,ROOT[0],ROOT[1]]) rotate([t[2],0,0]) translate([0,-ROOT[0],-ROOT[1]])
+      intersection() { P_Pascaline_10(); translate([-5,-23,-3]) cube([13,20.5,6]); }                       // Blattfeder
+  }
 }
 module pascaline() {
   e=EXPLODE;
