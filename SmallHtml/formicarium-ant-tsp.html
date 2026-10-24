@@ -488,7 +488,9 @@
       </div>
 
       <footer class="note">
-        Ant System with light elitism: every edge fades by ρ each cycle, then each ant deposits scent proportional to <code style="font-family:var(--font-mono)">1 / tour length</code>, with a small bonus laid down on the best tour found so far.
+        Ant System with light elitism: every edge fades by ρ each cycle, then each ant deposits scent proportional to <code style="font-family:var(--font-mono)">1 / tour length</code>, with a small bonus laid down on the best tour found so far. No trail ever fades below a small floor, so forgotten edges can still be rediscovered.
+        <br><br>
+        <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
       </footer>
 
     </div>
@@ -559,22 +561,27 @@
   const CITY_RADIUS = 6;
   const BASE_PX_PER_SEC = 150;
   const MIN_CITY_SPACING = 26;
+  const TAU_MIN = 1e-4;   // pheromone floor: no edge ever fades to exactly 0
 
   // ---------------------------------------------------------------
   // Canvas sizing (crisp on hi-dpi screens)
+  // Only the backing store is sized here; the CSS size (width:100%,
+  // height:clamp(...)) stays in charge, so the canvas keeps reacting
+  // to viewport changes. The world is rescaled with the canvas.
   // ---------------------------------------------------------------
+  let lastW = 0, lastH = 0;
   function resizeCanvas(){
-    const rect = glassEl.getBoundingClientRect();
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) return;
     const dpr = window.devicePixelRatio || 1;
     canvas.width  = Math.round(rect.width  * dpr);
     canvas.height = Math.round(rect.height * dpr);
-    canvas.style.width  = rect.width + 'px';
-    canvas.style.height = rect.height + 'px';
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (lastW > 0 && lastH > 0 && (rect.width !== lastW || rect.height !== lastH)){
+      rescaleWorld(rect.width / lastW, rect.height / lastH);
+    }
+    lastW = rect.width; lastH = rect.height;
   }
-  const ro = new ResizeObserver(resizeCanvas);
-  ro.observe(glassEl);
-  resizeCanvas();
 
   // ---------------------------------------------------------------
   // Geometry helpers
@@ -582,8 +589,31 @@
   function dst(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
 
   function rectSize(){
-    const r = glassEl.getBoundingClientRect();
+    const r = canvas.getBoundingClientRect();
     return { w: r.width, h: r.height };
+  }
+
+  function tourLen(tour){
+    let L = 0;
+    for (let k=0;k<tour.length;k++) L += dist[tour[k]][tour[(k+1)%tour.length]];
+    return L;
+  }
+
+  // keep cities inside the sand when the canvas changes size
+  function rescaleWorld(sx, sy){
+    if (!cities.length) return;
+    for (const c of cities){ c.x *= sx; c.y *= sy; }
+    computeDistances();            // pheromone is kept
+    for (const a of ants){
+      if (a.done || a.to < 0){
+        const c = cities[a.from];
+        if (c) a.pos = { x: c.x, y: c.y };
+      }
+    }
+    if (best.tour){
+      best.length = tourLen(best.tour);
+      readBest.textContent = best.length.toFixed(1) + ' px';
+    }
   }
 
   function randomCities(count){
@@ -606,6 +636,11 @@
   // Matrix (re)building
   // ---------------------------------------------------------------
   function rebuildMatrices(){
+    computeDistances();
+    resetPheromone();
+  }
+
+  function computeDistances(){
     n = cities.length;
     dist = Array.from({length:n}, () => new Array(n).fill(0));
     for (let i=0;i<n;i++){
@@ -617,7 +652,6 @@
     let sum = 0, cnt = 0;
     for (let i=0;i<n;i++) for (let j=i+1;j<n;j++){ sum += dist[i][j]; cnt++; }
     avgEdge = cnt ? (sum / cnt) : 1;
-    resetPheromone();
   }
 
   function resetPheromone(){
@@ -648,7 +682,12 @@
     if (hitIdx >= 0){
       cities.splice(hitIdx, 1);
     } else {
+      if (cities.some(c => dst(c, {x,y}) < MIN_CITY_SPACING)){
+        editHint.textContent = 'Too close to another city';
+        return;
+      }
       cities.push({x, y});
+      editHint.textContent = 'Click the sand to place a city · click a city to remove it';
     }
     rebuildMatrices();
     renderStatic();
@@ -657,13 +696,23 @@
   // ---------------------------------------------------------------
   // Controls: live value labels
   // ---------------------------------------------------------------
+  // The label always shows the alpha the ants actually use.
   function syncLabels(){
-    vAlpha.textContent = (running && elAdaptAlpha.checked ? alphaRuntime : parseFloat(elAlpha.value)).toFixed(2);
+    vAlpha.textContent = alphaRuntime.toFixed(2);
     vBeta.textContent  = parseFloat(elBeta.value).toFixed(1);
     vRho.textContent   = parseFloat(elRho.value).toFixed(2);
     vSpeed.textContent = parseFloat(elSpeed.value).toFixed(1) + '×';
   }
-  [elAlpha, elBeta, elRho, elSpeed].forEach(el => el.addEventListener('input', syncLabels));
+  [elBeta, elRho, elSpeed].forEach(el => el.addEventListener('input', syncLabels));
+  // moving the slider applies at once (in adapt mode it sets a new starting point)
+  elAlpha.addEventListener('input', () => {
+    alphaRuntime = parseFloat(elAlpha.value);
+    syncLabels();
+  });
+  elAdaptAlpha.addEventListener('change', () => {
+    if (!elAdaptAlpha.checked) alphaRuntime = parseFloat(elAlpha.value);
+    syncLabels();
+  });
   syncLabels();
 
   // ---------------------------------------------------------------
@@ -684,7 +733,13 @@
     }
     if (!candidates.length) return -1;
     if (!isFinite(total) || total <= 0){
-      return candidates[Math.floor(Math.random()*candidates.length)].j;
+      // pheromone term degenerated: fall back to the distance heuristic alone
+      let ht = 0;
+      for (const c of candidates){ c.score = Math.pow(1/dist[fromIdx][c.j], beta); ht += c.score; }
+      if (!isFinite(ht) || ht <= 0){
+        return candidates[Math.floor(Math.random()*candidates.length)].j;
+      }
+      total = ht;
     }
     let r = Math.random() * total;
     for (const c of candidates){
@@ -708,6 +763,7 @@
         tour: [start],
         progress: 0,
         tourLength: 0,
+        returning: false,
         done: false,
         pos: { x: cities[start].x, y: cities[start].y },
         heading: 0
@@ -731,7 +787,9 @@
   function finishCycle(){
     const rho = parseFloat(elRho.value);
     // evaporation
-    for (let i=0;i<n;i++) for (let j=0;j<n;j++) if (i!==j) pher[i][j] *= (1 - rho);
+    for (let i=0;i<n;i++) for (let j=0;j<n;j++){
+      if (i!==j) pher[i][j] = Math.max(TAU_MIN, pher[i][j] * (1 - rho));
+    }
 
     // deposit per ant
     const Q = avgEdge;
@@ -791,40 +849,57 @@
     for (const a of ants){
       if (a.done) continue;
 
-      const from = cities[a.from];
-      const to   = cities[a.to];
-      const segLen = dist[a.from][a.to] || 0.0001;
+      // distance this ant may travel in this frame; any surplus after
+      // reaching a city carries over to the next edge
+      let budget = dtSec * speed;
 
-      a.progress += (dtSec * speed) / segLen;
-      a.heading = Math.atan2(to.y - from.y, to.x - from.x);
+      while (budget > 0 && !a.done){
+        const segLen = dist[a.from][a.to] || 0.0001;
+        const remaining = (1 - a.progress) * segLen;
 
-      if (a.progress >= 1){
+        if (budget < remaining){
+          a.progress += budget / segLen;
+          budget = 0;
+          break;
+        }
+
+        // reached the target city
+        budget -= remaining;
         a.progress = 0;
         a.from = a.to;
-        a.pos = { x: cities[a.from].x, y: cities[a.from].y };
+
+        if (a.returning){
+          // back at the start city — tour closed
+          a.tourLength = tourLen(a.tour);
+          a.done = true;
+          break;
+        }
+
         a.visited.add(a.from);
         a.tour.push(a.from);
 
         const nxt = chooseNext(a.from, a.visited);
         if (nxt === -1){
-          // tour complete — close the loop back to the start city
-          a.tourLength = 0;
-          for (let k=0;k<a.tour.length;k++){
-            const c1 = a.tour[k];
-            const c2 = a.tour[(k+1)%a.tour.length];
-            a.tourLength += dist[c1][c2];
-          }
-          a.done = true;
+          // all cities visited — walk the closing edge home
+          a.returning = true;
+          a.to = a.tour[0];
         } else {
           a.to = nxt;
         }
+      }
+
+      const from = cities[a.from];
+      if (a.done){
+        a.pos = { x: from.x, y: from.y };
       } else {
+        const to = cities[a.to];
+        a.heading = Math.atan2(to.y - from.y, to.x - from.x);
         a.pos = {
           x: from.x + (to.x - from.x) * a.progress,
           y: from.y + (to.y - from.y) * a.progress
         };
+        stillOut++;
       }
-      if (!a.done) stillOut++;
     }
 
     readAnts.textContent = stillOut;
@@ -957,8 +1032,15 @@
         editHint.textContent = 'Place at least 3 cities first';
         return;
       }
-      if (cycle === 0 && ants.length === 0){
-        alphaRuntime = parseFloat(elAlpha.value);
+      const limit = parseInt(elCycleLimit.value, 10) || 0;
+      if (limit > 0 && cycle >= limit){
+        editHint.textContent = 'Cycle limit reached — raise it or reset trails';
+        return;
+      }
+      // fresh start, or the previous cycle already finished (e.g. stopped by
+      // the cycle limit): begin a new cycle instead of re-evaluating the old ants
+      if (ants.length === 0 || ants.every(a => a.done)){
+        if (cycle === 0) alphaRuntime = parseFloat(elAlpha.value);
         startCycle();
       }
       running = true;
@@ -1037,6 +1119,8 @@
   // ---------------------------------------------------------------
   cities = [];
   rebuildMatrices();
+  resizeCanvas();
+  new ResizeObserver(resizeCanvas).observe(canvas);
   setEditable(true);
   renderStatic();
 
