@@ -39,6 +39,22 @@ footer{margin-top:18px;font-size:11.5px;color:var(--mut);border-top:1px solid va
 footer a{color:var(--brass)}
 #log{font:12px ui-monospace,monospace;color:var(--mut);min-height:16px;margin-top:6px}
 @media (max-width:800px){#app{grid-template-columns:1fr;grid-template-rows:55vh auto;height:auto}#view{height:55vh;order:-1}#side{border-right:0}}
+
+#explain{position:absolute;left:12px;top:12px;width:min(400px,calc(100% - 24px));background:rgba(17,19,22,.88);border:1px solid #3a3e47;border-radius:8px;padding:10px 12px;font-size:13px;line-height:1.45;color:#ece6d8;pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.35)}
+#explain h3{margin:0 0 4px;font:600 11px system-ui;letter-spacing:1.2px;text-transform:uppercase;color:#d2a64b}
+#explain .ctx{color:#9fb6c9;font-size:12.5px;margin-bottom:5px}
+#explain .ctx:empty{display:none}
+#explain .now{min-height:2.9em}
+#explain .now b{color:#f4d58a}
+#explain .lat{font:12px ui-monospace,Consolas,monospace;color:#cfe3c0;margin-top:4px;white-space:pre-wrap}
+#explain ol{margin:6px 0 0;padding-left:18px;color:#a39d90;font-size:12px;max-height:7.5em;overflow:hidden}
+#explain ol:empty{display:none}
+#explain.off{display:none}
+@media (max-width:800px){#explain{font-size:12px;top:auto;bottom:34px}}
+#explain .pause{margin-top:6px;color:#e0b23a;font-weight:600}
+#explain .next{pointer-events:auto;margin-top:8px;background:#d2a64b;color:#1b1d22;border:0;border-radius:6px;padding:6px 14px;font:600 13px system-ui;cursor:pointer;display:none}
+#explain.wait .next{display:inline-block}
+#explain.wait{border-color:#d2a64b}
 </style>
 </head>
 <body>
@@ -71,6 +87,8 @@ footer a{color:var(--brass)}
   <div class="row"><span class="hint" style="width:100%">Explosionsansicht</span><input type="range" id="explode" min="0" max="1" step="0.01" value="0"></div>
   <div class="row"><label><input type="checkbox" id="xray" checked> Gehäuse durchsichtig</label></div>
   <div class="row"><label><input type="checkbox" id="autorot"> Langsam drehen</label></div>
+  <div class="row"><label><input type="checkbox" id="exOn" checked> Erklärung einblenden</label><label><input type="checkbox" id="exSlow" checked> Zeitlupe beim Übertrag</label></div>
+  <div class="row"><label><input type="checkbox" id="exStep"> Schrittweise: nach jedem Schritt anhalten</label><button id="exNext2" disabled>Weiter ▶</button></div>
   <div class="row"><span class="hint">Module:</span><input type="number" id="nmod" min="2" max="8" value="5" style="width:70px"><button id="bN">übernehmen</button></div>
 
   <h2>OpenSCAD-Export</h2>
@@ -92,12 +110,14 @@ footer a{color:var(--brass)}
 
   <footer>
   Modell: „Mechanical calculator (modular design)“ von José Campos, Printables, Lizenz CC BY 4.0.<br>
+  Schwesterseite: <a href="rechenuhr.html">Schickards Rechenuhr (1623)</a><br>
   Webseite: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a> · <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
   </footer>
 </aside>
 <main id="view">
   <div id="cams"><button data-cam="front">Wählscheiben</button><button data-cam="top">Oben</button><button data-cam="iso">Schräg</button><button data-cam="back">Mechanik</button><button id="bShot" title="Aktuelle Ansicht als JPG speichern (doppelte Auflösung)">📷 JPG</button></div>
   <div id="hud">Ziehen: drehen · Rechtsklick: verschieben · Mausrad: zoomen</div>
+  <div id="explain"><h3>Was passiert gerade?</h3><div class="ctx" id="exCtx"></div><div class="now" id="exNow"></div><button class="next" id="exNext">Weiter ▶</button><ol id="exHist" reversed></ol></div>
 </main>
 </div>
 <script>/* three.js r128 – MIT License – https://threejs.org */
@@ -1335,35 +1355,77 @@ function readout(){
 // ---------- animation queue ----------
 let queue=[],cur=null,speed=1;
 function enqueue(task){queue.push(task);}
-function addNumber(n,label){
+function addNumber(n,label,ex){
   const ds=String(n).replace(/\D/g,'').split('').reverse().map(Number);
   if(!ds.length)return;
   if(ds.length>N)log(`Zahl hat mehr Stellen als Module (${N}) – oberste Stellen entfallen`);
-  enqueue({log:label||('+ '+n)});
+  enqueue({log:label||('+ '+n),ex});
   ds.forEach((d,k)=>{if(k<N&&d>0)enqueue({k,delta:d});});
 }
 function tick(dt){
-  if(!cur&&queue.length){cur=queue.shift();
-    if(cur.log!==undefined){log(cur.log);cur=null;return;}
+  if(stepWait&&!queue.some(q=>q.log===undefined))stepWait=false;
+  if(!cur&&queue.length){if(stepWait)return;cur=queue.shift();
+    if(cur.log!==undefined){log(cur.log);exSetCtx(cur.ex||cur.log);cur=null;return;}
     if(cur.zero){cur.from=inp.slice();cur.to=cur.to||new Array(N).fill(0);cur.dur=cur.dur||1.4;}
     else{cur.from=inp[cur.k];cur.dur=0.32*cur.delta+(cur.k>0?0.15:0);}
     cur.t=0;}
   if(!cur)return;
-  cur.t+=dt*speed; const u=Math.min(1,cur.t/cur.dur), e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;
+  cur.t+=dt*speed*exSlowFactor(); const u=Math.min(1,cur.t/cur.dur), e=u<.5?2*u*u:1-Math.pow(-2*u+2,2)/2;
   if(cur.zero){for(let k=0;k<N;k++)inp[k]=cur.from[k]+(cur.to[k]-cur.from[k])*e;}
   else inp[cur.k]=cur.from+cur.delta*e;
-  if(u>=1){if(cur.zero)for(let k=0;k<N;k++)inp[k]=cur.to[k];cur=null;}
+  if(exAnyCarry())cur.carried=true;
+  if(u>=1){if(cur.zero)for(let k=0;k<N;k++)inp[k]=cur.to[k];const c=cur;cur=null;update();exDone(c);stepAfter(c);}
   update();
 }
 function log(t){document.getElementById('log').textContent=t;}
+
+// ---------- Erklärung ----------
+const PLACE=['Einer','Zehner','Hunderter','Tausender','Zehntausender','Hunderttausender','Millionen','Zehnmillionen'];
+const PL=k=>PLACE[k]||('10^'+k);
+let exCtx='',exHist=[],exLast='',exHistLast='';
+function exSetCtx(t){exCtx=t||'';}
+function exPush(t){exHist.unshift(t);if(exHist.length>6)exHist.pop();}
+function exDigit(k){return ((Math.round(PHI()[k])%10)+10)%10;}
+function exWin(p){const r=((p%10)+10)%10;return r>9.0001&&r<9.9999;}
+function exChain(k){const P=PHI(),ch=[];for(let j=k;j<P.length&&exWin(P[j]);j++)ch.push(j);return ch;}
+function exAnyCarry(){const P=PHI();for(let j=0;j<P.length;j++)if(exWin(P[j]))return true;return false;}
+function exSlowFactor(){return ($('exSlow').checked&&exAnyCarry())?0.3:1;}
+function exRender(now,lat){
+  $('explain').classList.toggle('off',!$('exOn').checked);$('explain').classList.toggle('wait',stepWait);
+  const html=now+(lat?`<div class="lat">${lat}</div>`:'');
+  if(html!==exLast){$('exNow').innerHTML=html;exLast=html;}
+  if($('exCtx').textContent!==exCtx)$('exCtx').textContent=exCtx;
+  const h=exHist.map(x=>`<li>${x}</li>`).join('');if(h!==exHistLast){$('exHist').innerHTML=h;exHistLast=h;}
+}
+
+function PHI(){return phi;}
+let exPrevT='',exPrevL='';
+function exNarrate(){
+  if(stepWait){exRender(exPrevT+`<div class="pause">⏸ Schritt erledigt${exHist[0]?': '+exHist[0]:''} – weiter mit „Weiter“ oder Pfeiltaste →</div>`,exPrevL);return;}
+  let t='';
+  if(cur&&cur.zero){t=(cur.to&&cur.to.some(v=>v))?'<b>Vorbereitung:</b> Die Stellen werden direkt auf ihre Startwerte gestellt.':'<b>Nullstellen:</b> Alle Stellen werden zurück auf 0 gedreht. Beim Original stellte man dazu alle Räder auf 9 und addierte 1 – der Übertrag lief dann einmal durch die ganze Maschine.';}
+  else if(cur&&cur.k!==undefined){const k=cur.k,d=Math.abs(cur.delta),x=exDigit(k);
+    t=`<b>${PL(k)}stelle:</b> Die Wählscheibe wird um ${d} Ziffer${d>1?'n':''} weitergedreht. Auf ihrer Achse sitzt Zahnrad 06, es greift 1:1 in Zahnrad 05 – so dreht sich die Ziffernwalze mit. Bei jeder Ziffer rastet die Federklinke (rot) ins Rastrad ein. Im Fenster: Addition <b>${x}</b>, Subtraktion <b>${9-x}</b>.`;
+    const ch=exChain(k);
+    if(ch.length){const j=ch[0];
+      if(j>=N-1)t+=` <b>Überlauf:</b> Die höchste Stelle springt von 9 auf 0. Ein Nachbarmodul gibt es nicht mehr – dieser Übertrag geht verloren.`;
+      else t+=` <b>Übertrag:</b> Die ${PL(j)}stelle springt gerade von 9 auf 0. Nur in diesem Moment greifen die 4 Zähne am Übertragsrad (orange) in das Zwischenrad 02 (türkis). Das Zwischenrad kämmt mit der vollen Zahnlage im Nachbarmodul und dreht die ${PL(j+1)}stelle um genau eine Ziffer weiter – deren Wählscheibe dreht sich dabei mit.`;
+      const n=ch.length+(ch[ch.length-1]<N-1?1:0);
+      if(n>2)t+=` <b>Kettenübertrag:</b> ${n} Stellen bewegen sich gleichzeitig. Beim Nachbau muss die Hand sie alle mitdrehen; Pascals Original speicherte dafür Energie in einem fallenden Hebel, dem Sautoir.`;}
+  } else {t=`<b>Bereit.</b> Die Walzen zeigen in der Addition-Zeile <b>${$('rdA').textContent}</b>, in der Subtraktion-Zeile das Neunerkomplement <b>${$('rdS').textContent}</b>. Gib eine Zahl ein oder klicke eine Wählscheibe an.`;}
+  exPrevT=t;exPrevL='';exRender(t,'');
+}
+function exDone(c){if(c.k!==undefined)exPush(`${c.delta>0?'+':'−'}${Math.abs(c.delta)} an der ${PL(c.k)}stelle → ${$('rdA').textContent}${c.carried?' (mit Übertrag)':''}`);
+  else if(c.zero&&!(c.to&&c.to.some(v=>v)))exPush('auf 0 gestellt');}
+
 // ---------- UI ----------
 const $=id=>document.getElementById(id);
-$('bAdd').onclick=()=>addNumber($('num').value);
-$('bSub').onclick=()=>addNumber($('num').value,'− '+$('num').value+' (Ergebnis: Subtraktions-Zeile)');
+$('bAdd').onclick=()=>{const v=$('num').value;addNumber(v,undefined,`Addieren von ${v}: Jede Ziffer wird an ihrer eigenen Stelle eingedreht, angefangen bei den Einern. Die Überträge erledigt die Maschine selbst.`);};
+$('bSub').onclick=()=>{const v=$('num').value;addNumber(v,'− '+v+' (Ergebnis: Subtraktions-Zeile)',`Subtrahieren nach Pascal: Die Maschine kann nur vorwärts drehen. Darum wird ${v} ganz normal addiert. Weil die Subtraktions-Zeile immer 9 − Ziffer zeigt, steht dort danach „Minuend − ${v}“.`);};
 $('bMin').onclick=()=>{const v=$('num').value.replace(/\D/g,'')||'0';const max=BigInt('9'.repeat(N));let m=BigInt(v);if(m>max)m=max;
-  queue=[];cur=null;enqueue({zero:true});enqueue({log:'Minuend '+m+' eingestellt'});addNumber((max-m).toString(),'Minuend '+m+' wird eingestellt …');};
-$('bDemo').onclick=()=>{queue=[];cur=null;const n9=N-1;enqueue({log:'Vorbereiten: '+'9'.repeat(n9)});enqueue({zero:true});
-  enqueue({zero:true,to:Array.from({length:N},(_,k)=>k<n9?9:0),dur:1.6});addNumber(1,'+ 1 → Übertrag läuft durch alle Stellen');};
+  queue=[];cur=null;enqueue({zero:true});enqueue({log:'Minuend '+m+' eingestellt'});addNumber((max-m).toString(),'Minuend '+m+' wird eingestellt …',`Minuend ${m} einstellen: Es wird ${max} − ${m} = ${max-m} eingedreht. Die Subtraktions-Zeile zeigt 9 − Ziffer, also genau ${m}. Danach den Subtrahenden mit „− Subtrahieren“ eindrehen.`);};
+$('bDemo').onclick=()=>{queue=[];cur=null;const n9=N-1;enqueue({log:'Vorbereiten: '+'9'.repeat(n9),ex:'Vorbereitung: Alle Stellen außer der höchsten werden auf 9 gestellt.'});enqueue({zero:true});
+  enqueue({zero:true,to:Array.from({length:N},(_,k)=>k<n9?9:0),dur:1.6});addNumber(1,'+ 1 → Übertrag läuft durch alle Stellen','Jetzt wird an den Einern 1 addiert. Jede 9 springt auf 0 und gibt ihren Übertrag an die nächste Stelle weiter – eine Kettenreaktion durch die ganze Maschine.');};
 $('bZero').onclick=()=>{queue=[];cur=null;enqueue({zero:true});enqueue({log:'auf 0 gestellt'});};
 $('speed').oninput=e=>speed=+e.target.value;
 $('explode').oninput=e=>{explode=+e.target.value;update();};
@@ -1388,7 +1450,7 @@ renderer.domElement.addEventListener('pointerup',e=>{
   const r=renderer.domElement.getBoundingClientRect();
   mouse.set((e.clientX-r.left)/r.width*2-1,-(e.clientY-r.top)/r.height*2+1);
   ray.setFromCamera(mouse,camera);const h=ray.intersectObjects(clickables.filter(m=>m.parent.parent.visible));
-  if(h.length){const k=h[0].object.userData.mod;enqueue({k,delta:1});log('Stelle 10^'+k+' +1');}
+  if(h.length){const k=h[0].object.userData.mod;enqueue({k,delta:1});log(PL(k)+'stelle +1');}
 });
 // camera
 let currentCam='iso';
@@ -1405,7 +1467,7 @@ document.querySelectorAll('#cams button').forEach(b=>b.onclick=()=>frameCamera(b
 function resize(){const w=view.clientWidth,h=view.clientHeight;renderer.setSize(w,h);camera.aspect=w/h;camera.updateProjectionMatrix();}
 addEventListener('resize',resize);
 let last=performance.now();
-function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;tick(dt);
+function loop(now){const dt=Math.min(.05,(now-last)/1000);last=now;tick(dt);exNarrate();
   if($('autorot').checked){const c=controls.target;const v=camera.position.clone().sub(c);v.applyAxisAngle(new THREE.Vector3(0,1,0),dt*0.25);camera.position.copy(c).add(v);}
   controls.update();renderer.render(scene,camera);requestAnimationFrame(loop);}
 
@@ -1539,6 +1601,15 @@ function screenshot(){
   document.body.appendChild(a);a.click();a.remove();
 }
 $('bShot').onclick=screenshot;
+
+// ---------- Schrittbetrieb ----------
+let stepWait=false;
+function weiter(){if(stepWait){stepWait=false;$('exNext2').disabled=true;}}
+$('exNext').onclick=weiter;$('exNext2').onclick=weiter;
+$('exStep').onchange=e=>{if(!e.target.checked)weiter();};
+addEventListener('keydown',e=>{const tg=e.target.tagName;if(tg==='INPUT'||tg==='TEXTAREA')return;
+  if(e.key==='ArrowRight'||(e.key===' '&&tg!=='BUTTON')||e.key==='Enter'&&tg!=='BUTTON'){if(stepWait){e.preventDefault();weiter();}}});
+function stepAfter(c){if($('exStep').checked&&!c.wait&&queue.some(q=>q.log===undefined)){stepWait=true;$('exNext2').disabled=false;}}
 
 resize();build(5);requestAnimationFrame(loop);
 </script>
