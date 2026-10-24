@@ -139,6 +139,7 @@ body{display:flex;justify-content:center;align-items:center;min-height:100vh;
     <button class="file-btn" id="btnNew">✕ New</button>
   </div>
   <div class="info" id="info"></div>
+  <div class="info"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#887868">itzwieseltal.wordpress.com</a></div>
   <input type="file" id="fileInput" accept=".hp65,.txt" style="display:none">
 </div>
 
@@ -155,6 +156,8 @@ const RMNEM={};for(const[k,v]of Object.entries(MNEM))RMNEM[v]=k;
 Object.assign(RMNEM,{'*':'mul','/':'div','SIN⁻¹':'asin','COS⁻¹':'acos','TAN⁻¹':'atan',
   'CLX':'clx','X<>Y':'swap','PI':'pi','ABS':'abs','SQRT':'sqrt','N!':'fact',
   'X<=Y?':'testXleY','X=0?':'testXeq0','X!=0?':'testXne0','X>0?':'testXgt0'});
+
+const KNOWN=new Set([...Object.keys(MNEM),'clr','FIX']);
 
 function toMnem(s){if(!s)return'';if(/^(LBL|GTO|GSB|STO\+?|RCL|RTN)\b/.test(s))return s;return MNEM[s]||s}
 function fromMnem(m){m=m.trim();if(!m)return null;
@@ -188,10 +191,10 @@ LBL 2              ;
 RCL 1              ; Ergebnis anzeigen
 RTN                ;`},
 
-quadratic:{name:'Quadratische Gl. (ax²+bx+c)',desc:'c ENTER b ENTER a → Taste A · x₁ in X, x₂ in Y',code:`\
+quadratic:{name:'Quadratische Gl. (ax²+bx+c)',desc:'c ENTER b ENTER a → Taste A · x₂ in X, x₁ in Y (x↔y)',code:`\
 ; Quadratische Gleichung ax²+bx+c=0
 ; Eingabe: c ENTER b ENTER a, Taste A
-; Ergebnis: x1 in X, x2 in Y
+; Ergebnis: x2 in X, x1 in Y
 ; R0=a, R1=b, R2=c, R3=√D
 ;
 LBL A              ;
@@ -315,10 +318,11 @@ RCL 1              ;
 +                  ;
 STO 1              ; d++
 x²                 ; d²
-RCL 0              ;
-x≤y?               ; N ≤ d²? (alle geprüft)
-GTO 2              ; → prim
-GTO 1              ; weiter prüfen
+RCL 0              ; Y=d², X=N
+x↔y                ; Y=N, X=d²
+x≤y?               ; d² ≤ N? → weiter prüfen
+GTO 1              ;
+GTO 2              ; d² > N → prim
 LBL 3              ; teilbar
 RCL 1              ;
 RCL 0              ;
@@ -542,7 +546,7 @@ class HP65{
   digit(d){if(this.error)this.clearError();
     if(!this.entering){if(this.liftEnabled)this.lift();this.buf='';this.entering=true;this.enteringExp=false}
     if(this.enteringExp){const p=this.buf.split('e');if((p[1]||'').replace('-','').length>=2)return;this.buf+=d}
-    else{if(this.buf.replace(/[-.]/, '').length>=10)return;this.buf+=d}
+    else{if(this.buf.replace(/[-.]/g,'').length>=10)return;this.buf+=d}
     this.x=parseFloat(this.buf)||0}
   decimal(){if(this.error)this.clearError();
     if(!this.entering){if(this.liftEnabled)this.lift();this.buf='0.';this.entering=true;this.enteringExp=false}
@@ -592,12 +596,19 @@ class HP65{
   scanLabels(){this.labels={};for(let i=0;i<100;i++){const s=this.prgm[i];
     if(s&&s.startsWith('LBL '))this.labels[s.split(' ')[1]]=i}}
   togglePrgm(){this.prgmMode=!this.prgmMode;if(!this.prgmMode)this.scanLabels();this.pc=0}
-  runStop(){if(this.running){this.running=false;clearInterval(this.runTimer)}
-    else{this.scanLabels();this.running=true;
+  stop(){this.running=false;if(this.runTimer){clearInterval(this.runTimer);this.runTimer=null}}
+  runStop(){if(this.running){this.stop()}
+    else{this.finishEntry();this.scanLabels();this.running=true;
       this.runTimer=setInterval(()=>{if(!this.running||this.pc>=100||!this.prgm[this.pc]){
-        this.running=false;clearInterval(this.runTimer);ui.update();return}
-        const s=this.prgm[this.pc];this.pc++;this.executeStep(s);ui.update()},60)}}
-  singleStep(){if(this.pc<100&&this.prgm[this.pc]){const s=this.prgm[this.pc];this.pc++;this.executeStep(s)}}
+        this.stop();ui.update();return}
+        const s=this.prgm[this.pc];this.pc++;this.executeStep(s);
+        if(this.error)this.stop();ui.update()},60)}}
+  // Tasten A–E / GSB A–E von der Tastatur: neuer Lauf, RTN hält an
+  startAt(l){if(this.running)return;this.finishEntry();this.scanLabels();this.retStack=[];
+    const a=this.labels[l];if(a===undefined){this.error=true;return}this.pc=a;this.runStop()}
+  jump(l){const a=this.labels[l];if(a===undefined){this.error=true;this.stop();return false}this.pc=a;return true}
+  singleStep(){if(this.prgmMode){if(this.pc<99)this.pc++;return}
+    this.finishEntry();this.scanLabels();if(this.pc<100&&this.prgm[this.pc]){const s=this.prgm[this.pc];this.pc++;this.executeStep(s)}}
 
   testXleY(){this.finishEntry();if(!(this.x<=this.y))this.pc++}
   testXeq0(){this.finishEntry();if(this.x!==0)this.pc++}
@@ -608,11 +619,12 @@ class HP65{
     const parts=step.split(' ');const cmd=parts[0];const arg=parts[1];
     switch(cmd){
       case 'LBL':break;
-      case 'GTO':{const a=this.labels[arg];if(a!==undefined)this.pc=a;}break;
-      case 'GSB':this.retStack.push(this.pc);{const a=this.labels[arg];if(a!==undefined)this.pc=a;}break;
-      case 'RTN':if(this.retStack.length)this.pc=this.retStack.pop();else this.running=false;break;
+      case 'GTO':this.jump(arg);break;
+      case 'GSB':{const ret=this.pc;if(this.jump(arg))this.retStack.push(ret)}break;
+      case 'RTN':if(this.retStack.length)this.pc=this.retStack.pop();else{this.stop();this.pc=0}break;
       case 'STO':if(arg&&arg.includes('+'))this.stoAdd(parseInt(arg));else this.sto(parseInt(arg));break;
       case 'STO+':this.stoAdd(parseInt(arg));break;
+      case 'FIX':break;case 'NOP':break;
       case 'RCL':this.rcl(parseInt(arg));break;
       case 'x≤y?':this.testXleY();break;case 'x=0?':this.testXeq0();break;
       case 'x≠0?':this.testXne0();break;case 'x>0?':this.testXgt0();break;
@@ -626,6 +638,7 @@ class HP65{
     return lines.join('\n')+'\n'}
 
   loadProgram(text){
+    this.loadWarn='';
     this.prgm=new Array(100).fill(null);this.prgmComments=new Array(100).fill(null);
     this.prgmHeader=[];this.labels={};this.pc=0;this.retStack=[];
     this.running=false;if(this.runTimer)clearInterval(this.runTimer);
@@ -636,9 +649,15 @@ class HP65{
       inHeader=false;
       const si=raw.indexOf(';');const instrPart=si>=0?raw.substring(0,si).trim():trimmed;
       const commentPart=si>=0?raw.substring(si).trim():null;
-      if(!instrPart||step>=100)continue;
-      const action=fromMnem(instrPart);
-      if(action){this.prgm[step]=action;this.prgmComments[step]=commentPart;step++}}
+      if(!instrPart)continue;
+      // Mehrstellige Zahlen (500, 1.6, 0.4 …) wie am Original in Einzelschritte zerlegen
+      const steps=/^(\d+\.?\d*|\.\d+)$/.test(instrPart)&&instrPart.length>1
+        ?[...instrPart].map(c=>c==='.'?'decimal':'d'+c):[fromMnem(instrPart)];
+      for(let k=0;k<steps.length;k++){const action=steps[k];if(!action)continue;
+        if(step>=100){this.loadWarn=(this.loadWarn||'')+'Programm länger als 100 Schritte – Rest abgeschnitten. ';break}
+        if(!KNOWN.has(action)&&!/^(LBL|GTO|GSB|STO\+?|RCL|FIX) \S+$/.test(action)&&action!=='RTN'&&action!=='NOP')
+          this.loadWarn=(this.loadWarn||'')+'Unbekannt: „'+instrPart+'“. ';
+        this.prgm[step]=action;this.prgmComments[step]=k===0?commentPart:null;step++}}
     this.scanLabels();this.prgmMode=false;this.pc=0}
 
   clearProgram(){this.prgm=new Array(100).fill(null);this.prgmComments=new Array(100).fill(null);
@@ -651,6 +670,7 @@ class HP65{
     if(abs===0)return' 0.          ';
     if(abs>=1e10||abs<1e-1){let e=Math.floor(Math.log10(abs));let m=abs/Math.pow(10,e);
       if(m>=10){m/=10;e++}if(m<1){m*=10;e--}
+      if(m.toFixed(9)==='10.000000000'){m=1;e++}
       return sign+m.toFixed(9)+(e<0?'-':' ')+String(Math.abs(e)).padStart(2,'0')}
     const intD=Math.max(1,Math.floor(Math.log10(abs))+1);
     let s=abs.toFixed(Math.min(9,10-intD));if(s.length>11)s=s.substring(0,11);
@@ -683,7 +703,7 @@ const KEYS=[
   ['√x','dark','sqrt','%','pct','INT','intPart'],
   ['yˣ','dark','pow','|x|','abs','FRC','fracPart'],
   ['R↓','dark','rollDown','π','pi','n!','fact'],
-  ['x↔y','dark','swap','','','',''],
+  ['x↔y','dark','swap','RTN','_rtn','',''],
   ['STO','dark','_sto','STO+','_stoadd','',''],
   ['RCL','dark','_rcl','','','',''],
   ['SIN','dark','sin','SIN⁻¹','asin','',''],
@@ -720,14 +740,14 @@ const ui={
     document.getElementById('btnNew').addEventListener('click',()=>{hp.clearProgram();hp.clr();this.update();this.infoEl.textContent=''});
     fileIn.addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;
       const r=new FileReader();r.onload=()=>{hp.loadProgram(r.result);hp.clr();this.update();
-        this.infoEl.textContent='Geladen: '+f.name};r.readAsText(f);fileIn.value=''});
+        this.infoEl.textContent='Geladen: '+f.name+(hp.loadWarn?' – '+hp.loadWarn:'')};r.readAsText(f);fileIn.value=''});
     const calc=document.getElementById('calcBody');
     calc.addEventListener('dragover',e=>{e.preventDefault();calc.classList.add('drop-target')});
     calc.addEventListener('dragleave',()=>calc.classList.remove('drop-target'));
     calc.addEventListener('drop',e=>{e.preventDefault();calc.classList.remove('drop-target');
       const f=e.dataTransfer.files[0];if(!f)return;
       const r=new FileReader();r.onload=()=>{hp.loadProgram(r.result);hp.clr();this.update();
-        this.infoEl.textContent='Geladen: '+f.name};r.readAsText(f)})},
+        this.infoEl.textContent='Geladen: '+f.name+(hp.loadWarn?' – '+hp.loadWarn:'')};r.readAsText(f)})},
 
   initSwitches(){
     const swPower=document.getElementById('swPower');
@@ -788,20 +808,23 @@ const ui={
 
   processAction(action){if(!action)return;
     if(hp.pending){const dMatch=action.match(/^d(\d)$/);const lblMatch=action.match(/^_label([A-E])$/);
-      if(dMatch||lblMatch){const arg=dMatch?dMatch[1]:lblMatch[1];
+      if(dMatch||(lblMatch&&!['sto','rcl','stoadd','fix'].includes(hp.pending))){const arg=dMatch?dMatch[1]:lblMatch[1];
         const cmdMap={sto:'STO',rcl:'RCL',stoadd:'STO+',gto:'GTO',gsb:'GSB',lbl:'LBL'};
         const cmd=cmdMap[hp.pending]||hp.pending.toUpperCase();
         if(hp.prgmMode){hp.recordStep(cmd+' '+arg)}
         else{switch(hp.pending){
           case 'sto':hp.sto(parseInt(arg));break;case 'rcl':hp.rcl(parseInt(arg));break;
           case 'stoadd':hp.stoAdd(parseInt(arg));break;
-          case 'gto':hp.scanLabels();{const a=hp.labels[arg];if(a!==undefined)hp.pc=a;}break;
-          case 'gsb':hp.scanLabels();hp.retStack.push(hp.pc);{const a=hp.labels[arg];if(a!==undefined)hp.pc=a;}break;
+          case 'gto':hp.scanLabels();hp.jump(arg);break;
+          case 'gsb':hp.startAt(arg);break;
           case 'lbl':hp.labels[arg]=hp.pc;break;case 'fix':break}}
         hp.pending=null;return}hp.pending=null}
     // PRGM recording — allow rs but exclude meta keys
-    if(hp.prgmMode&&!['f','g','prgm','sst','bst'].includes(action)&&!action.startsWith('_')){
-      hp.recordStep(action);return}
+    if(hp.prgmMode){
+      const lm=action.match(/^_(?:label|gsb)([A-E])$/);
+      if(lm){hp.recordStep('GSB '+lm[1]);return}
+      if(action==='_rtn'){hp.recordStep('RTN');return}
+      if(!['f','g','prgm','sst','bst'].includes(action)&&!action.startsWith('_')){hp.recordStep(action);return}}
     this.executeAction(action)},
 
   executeAction(action){switch(action){
@@ -828,11 +851,9 @@ const ui={
     case 'prgm':hp.togglePrgm();break;case 'rs':hp.runStop();break;
     case 'sst':hp.singleStep();break;case 'bst':if(hp.pc>0)hp.pc--;break;
     case '_labelA':case '_labelB':case '_labelC':case '_labelD':case '_labelE':
-      {const l=action.slice(-1);hp.scanLabels();hp.retStack.push(hp.pc);
-       const a=hp.labels[l];if(a!==undefined)hp.pc=a;hp.runStop();}break;
     case '_gsbA':case '_gsbB':case '_gsbC':case '_gsbD':case '_gsbE':
-      {const l=action.charAt(action.length-1);hp.scanLabels();hp.retStack.push(hp.pc);
-       const a=hp.labels[l];if(a!==undefined)hp.pc=a;hp.runStop();}break;
+      hp.startAt(action.slice(-1));break;
+    case '_rtn':hp.retStack=[];hp.pc=0;break;
     case 'testXleY':hp.testXleY();break;case 'testXeq0':hp.testXeq0();break;
     case 'testXne0':hp.testXne0();break;case 'testXgt0':hp.testXgt0();break}},
 

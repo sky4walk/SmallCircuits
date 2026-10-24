@@ -449,6 +449,28 @@
     color: #6a8a6a;
     font-family: Arial, sans-serif;
   }
+  /* Terminal (ASR-33) */
+  .terminal-area { width: 900px; margin-top: 16px; }
+  .terminal-head {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px; color: #6a8a6a; letter-spacing: 1px; margin-bottom: 4px;
+    font-family: Arial, sans-serif;
+  }
+  .terminal-head label { display: flex; gap: 4px; align-items: center; cursor: pointer; }
+  .terminal {
+    height: 150px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+    background: #0d0c08; color: #e8d9a8; border: 1px solid #3a3420; border-radius: 2px;
+    padding: 8px; font-family: 'Courier New', monospace; font-size: 13px; line-height: 1.35;
+    cursor: text;
+  }
+  .terminal:focus { outline: none; border-color: #8a7a3a; box-shadow: 0 0 6px #5a4a1a; }
+  .terminal .term-cursor { opacity: 0.25; }
+  .terminal:focus .term-cursor { opacity: 1; animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .footer { margin-top: 20px; font-size: 11px; color: #6a8a6a; font-family: Arial, sans-serif; }
+  .footer a { color: #88cc88; }
+
   .speed-control select {
     background: #1a2a1a;
     color: #88cc88;
@@ -547,7 +569,7 @@
         <option value="200" selected>2 Hz</option>
         <option value="50">20 Hz</option>
         <option value="10">100 Hz</option>
-        <option value="1">Fast</option>
+        <option value="fast">Fast (~300 kHz)</option>
       </select>
     </div>
   </div>
@@ -564,6 +586,18 @@
     <div class="status-item">Steps: <span class="status-val" id="st-steps">0</span></div>
     <div class="status-item">State: <span class="status-val" id="st-state">HALTED</span></div>
   </div>
+</div>
+
+<!-- Terminal -->
+<div class="terminal-area">
+  <div class="terminal-head">
+    <span>FERNSCHREIBER (ASR-33) · Geräte 03/04 · zum Tippen hineinklicken</span>
+    <span style="display:flex; gap:10px; align-items:center;">
+      <label><input type="checkbox" id="term-upper" checked> nur Großbuchstaben</label>
+      <button class="asm-btn" onclick="clearTerminal()">Löschen</button>
+    </span>
+  </div>
+  <div class="terminal" id="term-out" tabindex="0"></div>
 </div>
 
 <!-- Konsole -->
@@ -619,61 +653,70 @@
 
   <!-- Help Panel -->
   <div class="console-panel" id="tab-help">
-    <div style="font-family:'Courier New',monospace; font-size:11px; color:#88aa88; line-height:1.7; height:260px; overflow-y:auto; padding:8px; background:#0a0f0a; border:1px solid #1a3a1a; border-radius:2px; white-space:pre;">PDP-8/E INSTRUCTION SET (8 Opcodes, 12-Bit Wort)
+    <div style="font-family:'Courier New',monospace; font-size:11px; color:#88aa88; line-height:1.7; height:260px; overflow-y:auto; padding:8px; background:#0a0f0a; border:1px solid #1a3a1a; border-radius:2px; white-space:pre;">PDP-8/E BEFEHLSSATZ (12-Bit-Wort, alle Zahlen oktal)
 
-FORMAT: [ooo][ppp][iiiiiiiii]
-        ooo = Opcode (3 Bit), ppp = Page/Indirect (3 Bit), addr = Adresse (7 Bit)
+FORMAT MRI:  [ooo][I][Z][aaaaaaa]
+  ooo = Opcode (3 Bit), I = indirekt (0400), Z = aktuelle Seite (0200),
+  a = Offset in der Seite (7 Bit, 0000-0177)
 
-SPEICHER-REFERENZ BEFEHLE (MRI):
-  Bit 11-9  | Oktal | Mnemonik | Funktion
-  ----------+-------+----------+------------------------------------------
-  000       |  0    | AND      | AC = AC AND M[addr]
-  001       |  1    | TAD      | AC = AC + M[addr]  (12-Bit, Link = Übertrag)
-  010       |  2    | ISZ      | M[addr]++; skip nächste Instr. wenn == 0
-  011       |  3    | DCA      | M[addr] = AC; AC = 0
-  100       |  4    | JMS      | M[addr] = PC; PC = addr+1  (Subroutine-Sprung)
-  101       |  5    | JMP      | PC = addr  (Sprung)
+SPEICHER-REFERENZ (MRI):
+  0 AND  AC = AC AND M[EA]
+  1 TAD  AC = AC + M[EA]  (Übertrag komplementiert L)
+  2 ISZ  M[EA]+1, nächsten Befehl überspringen wenn 0
+  3 DCA  M[EA] = AC, AC = 0
+  4 JMS  M[EA] = PC, PC = EA+1  (Unterprogramm, Rücksprung mit JMP I)
+  5 JMP  PC = EA
 
 ADRESSIERUNG:
-  Bit 7 (I-Bit)    = 0 direkt, 1 indirekt (Adresse zeigt auf Adresse)
-  Bit 8 (Z-Bit)    = 0 Seite 0 (0000-0177), 1 aktuelle Seite (128-Wort-Blöcke)
+  Z=0 Seite 0 (0000-0177), Z=1 aktuelle Seite (128-Wort-Block des Befehls)
+  I=1 indirekt: EA = M[EA]; Zeiger in 0010-0017 werden vorher +1 (Autoindex)
 
-REGISTER-REFERENZ (OPR, Opcode 111, Bit 8=0):
-  7200 CLA     AC = 0
-  7100 CLL     Link = 0
-  7040 CMA     AC = ~AC (Komplement)
-  7020 CML     Link = ~Link
-  7001 IAC     AC = AC + 1
-  7010 RAR     Rotate AC+Link right
-  7004 RAL     Rotate AC+Link left
-  7300 CLA CLL  AC = 0, Link = 0  (häufig als Initialisierung)
+OPR GRUPPE 1 (7000):  Reihenfolge CLA/CLL → CMA/CML → IAC → Rotation
+  CLA 7200  CLL 7100  CMA 7040  CML 7020  IAC 7001
+  RAR 7010  RAL 7004  RTR 7012  RTL 7006  BSW 7002
+  CIA 7041  STL 7120  STA 7240  GLK 7204  NOP 7000
 
-I/O TRANSFER (IOT, Opcode 110):
-  6031 KSF     Skip wenn Tastatur bereit
-  6036 KRB     AC = Tastaturpuffer
-  6041 TSF     Skip wenn Terminal bereit
-  6046 TLS     Ausgabe AC auf Terminal
+OPR GRUPPE 2 (7400):  Skip → CLA → OSR → HLT
+  SMA 7500  SZA 7440  SNL 7420  (Bedingungen ODER-verknüpft)
+  SPA 7510  SNA 7450  SZL 7430  (umgekehrt, UND-verknüpft)
+  SKP 7410  CLA 7600  OSR 7404  LAS 7604  HLT 7402
 
-ASSEMBLER SYNTAX:
-  /           Kommentar
-  *ADDR       Startadresse setzen (z.B. *200)
-  LABEL,      Labeldeklaration
-  Label=VALUE  Konstantendefinition
-  DECIMAL     Dezimalmodus für folgende Zahlen
-  OCTAL       Oktalmodus (Standard)
-  $           Programmende / Startadresse
+OPR GRUPPE 3 (7401, ohne EAE):
+  MQA 7501  MQL 7421  SWP 7521  CAM 7621  ACL 7701
+
+IOT (6000):
+  ION 6001  IOF 6002  SKON 6000  SRQ 6003  GTF 6004  RTF 6005  CAF 6007
+  Tastatur:       KSF 6031  KCC 6032  KRS 6034  KRB 6036  KCF 6030
+  Fernschreiber:  TSF 6041  TCF 6042  TPC 6044  TLS 6046  SPF 6040
+  Eingabezeichen kommen mit gesetztem Bit 0200 (ASR-33), z.B. CR = 0215.
+  Ein Interrupt legt den PC in 0000 ab und springt nach 0001 (ION aus).
+
+FRONTPLATTE:
+  LOAD ADD  PC = Switch Register
+  START     AC, L, MQ, ION, Flags löschen und ab PC laufen
+  CONT      ab PC weiterlaufen (ohne Löschen)
+  DEP/EXAM  M[PC] schreiben bzw. lesen, PC+1
+
+ASSEMBLER (PAL-8-Teilmenge):
+  / Kommentar        *200  Adresse setzen      PAGE  nächste Seite
+  LABEL,  Marke      NAME=WERT  Symbol         DECIMAL / OCTAL  Zahlenbasis
+  .  aktuelle Adresse (z.B. JMP .-1)           "A  Zeichen (0301)
+  Ausdrücke mit + und -  (z.B. TAD TAB+3, -7, TEXT-1)
+  TAD I ZEIGER  indirekt
+  $200  Programmende, Startadresse 0200 (ohne Wert: erstes Wort)
+  Bei Fehlern wird nichts geladen.
 
 BEISPIEL - Addition 2+3:
-  *200        / Lade ab Adresse 200 (oktal)
-  CLA CLL     / Akkumulator und Link löschen
-  TAD V1      / AC = AC + Wert1
-  TAD V2      / AC = AC + Wert2
-  DCA RESULT  / Ergebnis speichern
-  HLT         / Halt (7402)
-  V1, 0002    / Konstante 2
-  V2, 0003    / Konstante 3
-  RESULT, 0  / Ergebnisspeicher
-  $200        / Startadresse = 200</div>
+  *200
+          CLA CLL
+          TAD V1
+          TAD V2
+          DCA RESULT
+          HLT
+  V1,     2
+  V2,     3
+  RESULT, 0
+  $200</div>
   </div>
 </div>
 
@@ -682,15 +725,32 @@ BEISPIEL - Addition 2+3:
 // PDP-8/E SIMULATOR KERN
 // ==========================================
 const MEM_SIZE = 4096;
+const W = 0o7777;                    // 12-Bit-Maske
 let mem = new Uint16Array(MEM_SIZE);
 let AC = 0, PC = 0o200, LINK = 0, MQ = 0;
 let MA = 0, MB = 0, SR = 0;
+let ION = 0, ionDelay = 0;           // ION wirkt erst nach dem folgenden Befehl
+let kbdFlag = 0, kbdBuf = 0, ttyFlag = 0;
+let kbdQueue = [];
 let running = false, halted = true;
 let stepCount = 0;
 let runInterval = null;
-let runSpeed = 200;
+let runSpeed = '200';
 let changedAddrs = new Set();
 let lastPC = 0;
+
+// Geschwindigkeit: [Intervall in ms, Befehle pro Intervall]
+const SPEEDS = {
+  '500':  [500, 1],
+  '200':  [200, 1],
+  '50':   [50, 1],
+  '10':   [10, 1],
+  'fast': [16, 5000],
+};
+
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
 // === LED SETUP ===
 function makeLEDs(containerId, count, extraClass) {
@@ -707,7 +767,6 @@ function makeLEDs(containerId, count, extraClass) {
     col.appendChild(lbl);
     col.appendChild(led);
     c.appendChild(col);
-    // Gruppenabstand
     if (i > 0 && i % 3 === 0) {
       const gap = document.createElement('div');
       gap.className = 'led-gap';
@@ -742,32 +801,21 @@ function makeSwitches(containerId, count) {
   }
 }
 
-function makeMiscLEDs() {
-  const c = document.getElementById('leds-misc');
-  // Link LED
-  const linkCol = document.createElement('div'); linkCol.className = 'led-col';
-  const linkLbl = document.createElement('div'); linkLbl.className = 'led-bit-label'; linkLbl.textContent = 'L';
-  const linkLed = document.createElement('div'); linkLed.className = 'led link'; linkLed.id = 'led-link';
-  linkCol.appendChild(linkLbl); linkCol.appendChild(linkLed); c.appendChild(linkCol);
-
-  const g = document.createElement('div'); g.className = 'led-gap'; g.style.width='12px'; c.appendChild(g);
-
-  // Run LED
-  const runCol = document.createElement('div'); runCol.className = 'led-col';
-  const runLbl = document.createElement('div'); runLbl.className = 'led-bit-label'; runLbl.textContent = 'RUN';
-  const runLed = document.createElement('div'); runLed.className = 'led run'; runLed.id = 'led-run';
-  runCol.appendChild(runLbl); runCol.appendChild(runLed); c.appendChild(runCol);
-
-  const g2 = document.createElement('div'); g2.className = 'led-gap'; g2.style.width='12px'; c.appendChild(g2);
-
-  // Ion LED
-  const ionCol = document.createElement('div'); ionCol.className = 'led-col';
-  const ionLbl = document.createElement('div'); ionLbl.className = 'led-bit-label'; ionLbl.textContent = 'ION';
-  const ionLed = document.createElement('div'); ionLed.className = 'led ion'; ionLed.id = 'led-ion';
-  ionCol.appendChild(ionLbl); ionCol.appendChild(ionLed); c.appendChild(ionCol);
+function makeMiscLED(c, label, cls, id) {
+  const col = document.createElement('div'); col.className = 'led-col';
+  const lbl = document.createElement('div'); lbl.className = 'led-bit-label'; lbl.textContent = label;
+  const led = document.createElement('div'); led.className = 'led ' + cls; led.id = id;
+  col.appendChild(lbl); col.appendChild(led); c.appendChild(col);
+  const g = document.createElement('div'); g.className = 'led-gap'; g.style.width = '12px'; c.appendChild(g);
 }
 
-// Init LEDs/Schalter
+function makeMiscLEDs() {
+  const c = document.getElementById('leds-misc');
+  makeMiscLED(c, 'L',   'link', 'led-link');
+  makeMiscLED(c, 'RUN', 'run',  'led-run');
+  makeMiscLED(c, 'ION', 'ion',  'led-ion');
+}
+
 makeLEDs('leds-pc', 12);
 makeLEDs('leds-ma', 12);
 makeLEDs('leds-mb', 12);
@@ -775,14 +823,11 @@ makeLEDs('leds-ac', 12);
 makeMiscLEDs();
 makeSwitches('switches-sr', 12);
 
-// === LED UPDATE ===
+// === ANZEIGE ===
 function setLEDs(prefix, val, count) {
   for (let i = 0; i < count; i++) {
     const led = document.getElementById(prefix + '-' + i);
-    if (led) {
-      if ((val >> i) & 1) led.classList.add('on');
-      else led.classList.remove('on');
-    }
+    if (led) led.classList.toggle('on', ((val >> i) & 1) === 1);
   }
 }
 
@@ -791,12 +836,9 @@ function updateDisplay() {
   setLEDs('leds-ma', MA, 12);
   setLEDs('leds-mb', MB, 12);
   setLEDs('leds-ac', AC, 12);
-
-  const linkLed = document.getElementById('led-link');
-  if (LINK) linkLed.classList.add('on'); else linkLed.classList.remove('on');
-
-  const runLed = document.getElementById('led-run');
-  if (running) runLed.classList.add('on'); else runLed.classList.remove('on');
+  document.getElementById('led-link').classList.toggle('on', !!LINK);
+  document.getElementById('led-run').classList.toggle('on', running);
+  document.getElementById('led-ion').classList.toggle('on', !!ION);
 
   document.getElementById('st-pc').textContent = oct(PC,4);
   document.getElementById('st-ac').textContent = oct(AC,4);
@@ -807,6 +849,7 @@ function updateDisplay() {
   document.getElementById('st-sr').textContent = oct(SR,4);
   document.getElementById('st-steps').textContent = stepCount;
   document.getElementById('st-state').textContent = running ? 'RUNNING' : 'HALTED';
+  renderTerminal();
 }
 
 function toggleSwitch(bit) {
@@ -817,31 +860,25 @@ function toggleSwitch(bit) {
   document.getElementById('st-sr').textContent = oct(SR,4);
 }
 
-// === OCTAL HELPERS ===
 function oct(v, digits) {
-  return (v & 0xFFF).toString(8).padStart(digits,'0');
+  return (v & W).toString(8).padStart(digits,'0');
 }
 
-function toOct12(s) {
-  const v = parseInt(s, 8);
-  return isNaN(v) ? null : v & 0xFFF;
-}
-
-// === FRONTPLATTE BUTTONS ===
+// === FRONTPLATTE ===
 function fpLoadAddr() {
-  PC = SR & 0xFFF;
+  PC = SR & W;
   MA = PC;
-  logStep(`LOAD ADDR: PC = ${oct(PC,4)}`);
+  logStep(`LOAD ADD: PC = ${oct(PC,4)}`);
   updateDisplay();
 }
 
 function fpDeposit() {
-  mem[PC] = SR & 0xFFF;
-  MB = SR;
+  mem[PC] = SR & W;
+  MA = PC;
+  MB = SR & W;
   changedAddrs.add(PC);
   logStep(`DEP: M[${oct(PC,4)}] = ${oct(SR,4)}`);
-  PC = (PC + 1) & 0xFFF;
-  MA = PC;
+  PC = (PC + 1) & W;
   updateDisplay();
 }
 
@@ -849,59 +886,74 @@ function fpExamine() {
   MA = PC;
   MB = mem[PC];
   logStep(`EXAM: M[${oct(PC,4)}] = ${oct(MB,4)}`);
-  PC = (PC + 1) & 0xFFF;
+  PC = (PC + 1) & W;
   updateDisplay();
 }
 
-function fpStart() {
-  PC = SR & 0xFFF;
+// START (PDP-8/E): löscht AC, L, MQ, ION und alle Geräte-Flags, startet am PC.
+// Der PC wird vorher mit LOAD ADD (oder durch den Assembler) gesetzt.
+function resetCPU() {
   AC = 0; LINK = 0; MQ = 0;
+  ION = 0; ionDelay = 0;
+  kbdFlag = 0; ttyFlag = 0; kbdQueue = [];
+}
+
+function fpStart() {
+  stopRunning();
+  resetCPU();
   stepCount = 0;
   halted = false;
-  logStep(`START: PC = ${oct(PC,4)}, AC/L cleared`);
-  fpContinue();
+  logStep(`START bei PC = ${oct(PC,4)} (AC, L, MQ, ION und Flags gelöscht)`);
+  startRunning();
 }
 
 function fpContinue() {
-  if (halted && !running) {
-    halted = false;
-  }
+  halted = false;
   startRunning();
 }
 
 function fpStop() {
+  if (!running) return;
   stopRunning();
-  logHalt('STOP pressed');
+  logHalt(`STOP bei PC=${oct(PC,4)}`);
 }
 
 function fpSingleStep() {
   stopRunning();
   halted = false;
   executeStep();
+  flushLog();
   updateDisplay();
 }
 
-// === EXECUTION ===
+// === AUSFÜHRUNG ===
+function logEnabled() {
+  return !(running && runSpeed === 'fast');
+}
+
 function startRunning() {
   if (running) return;
   running = true;
   halted = false;
-  updateDisplay();
+  const [delay, n] = SPEEDS[runSpeed];
+  if (runSpeed === 'fast') logStep('Fast-Modus: Befehlslog ausgesetzt');
   runInterval = setInterval(() => {
-    if (!running) { clearInterval(runInterval); return; }
-    executeStep();
+    for (let i = 0; i < n && running; i++) executeStep();
+    flushLog();
     updateDisplay();
-  }, runSpeed);
+  }, delay);
+  updateDisplay();
 }
 
 function stopRunning() {
   running = false;
   if (runInterval) { clearInterval(runInterval); runInterval = null; }
+  flushLog();
   updateDisplay();
 }
 
 function updateSpeed() {
-  runSpeed = parseInt(document.getElementById('run-speed').value);
+  runSpeed = document.getElementById('run-speed').value;
   if (running) {
     stopRunning();
     startRunning();
@@ -911,203 +963,308 @@ function updateSpeed() {
 function executeStep() {
   if (halted) { stopRunning(); return; }
 
+  // Interrupt: JMS 0000 erzwingen, ION aus
+  if (ION && !ionDelay && (kbdFlag || ttyFlag)) {
+    mem[0] = PC; changedAddrs.add(0);
+    if (logEnabled()) logStep(`INTERRUPT: PC ${oct(PC,4)} → M[0000], weiter bei 0001`);
+    PC = 1;
+    ION = 0;
+  }
+  if (ionDelay) ionDelay--;
+
   lastPC = PC;
   MA = PC;
-  MB = mem[PC] & 0xFFF;
+  MB = mem[PC];
   const IR = MB;
-  PC = (PC + 1) & 0xFFF;
+  PC = (PC + 1) & W;
   stepCount++;
 
-  const opcode = (IR >> 9) & 0x7;
-  const indirect = (IR >> 8) & 0x1;
-  const currentPage = (IR >> 7) & 0x1;
-  const offset = IR & 0x7F;
-
-  // Effektive Adresse für MRI-Befehle (Opcodes 0-5)
+  const opcode = IR >> 9;
   let ea = 0;
+
+  // Effektive Adresse für MRI (Opcodes 0-5)
   if (opcode <= 5) {
-    if (currentPage) ea = (lastPC & 0xF80) | offset;
-    else ea = offset;
-    if (indirect) {
-      // Indirekte Adressierung (Auto-Increment für 0010-0017)
-      if (ea >= 0o10 && ea <= 0o17) {
-        mem[ea] = (mem[ea] + 1) & 0xFFF;
+    ea = (IR & 0o200) ? ((lastPC & 0o7600) | (IR & 0o177)) : (IR & 0o177);
+    if (IR & 0o400) {
+      if (ea >= 0o10 && ea <= 0o17) {          // Autoindex-Register
+        mem[ea] = (mem[ea] + 1) & W;
+        changedAddrs.add(ea);
       }
-      ea = mem[ea] & 0xFFF;
+      ea = mem[ea];
     }
+    MA = ea;
   }
 
-  let instName = '';
-
-  switch(opcode) {
-    case 0o0: { // AND
-      instName = `AND ${oct(ea,4)}`;
-      AC = (AC & mem[ea]) & 0xFFF;
+  switch (opcode) {
+    case 0: // AND
+      AC &= mem[ea];
+      MB = mem[ea];
       break;
-    }
-    case 0o1: { // TAD
-      instName = `TAD ${oct(ea,4)}`;
+    case 1: { // TAD
       const sum = AC + mem[ea];
-      if (sum > 0xFFF) LINK ^= 1;
-      AC = sum & 0xFFF;
+      if (sum > W) LINK ^= 1;
+      AC = sum & W;
+      MB = mem[ea];
       break;
     }
-    case 0o2: { // ISZ
-      instName = `ISZ ${oct(ea,4)}`;
-      mem[ea] = (mem[ea] + 1) & 0xFFF;
+    case 2: // ISZ
+      mem[ea] = (mem[ea] + 1) & W;
       changedAddrs.add(ea);
-      if (mem[ea] === 0) PC = (PC + 1) & 0xFFF;
+      MB = mem[ea];
+      if (mem[ea] === 0) PC = (PC + 1) & W;
       break;
-    }
-    case 0o3: { // DCA
-      instName = `DCA ${oct(ea,4)}`;
+    case 3: // DCA
       mem[ea] = AC;
       changedAddrs.add(ea);
+      MB = AC;
       AC = 0;
       break;
-    }
-    case 0o4: { // JMS
-      instName = `JMS ${oct(ea,4)}`;
+    case 4: // JMS
       mem[ea] = PC;
       changedAddrs.add(ea);
-      PC = (ea + 1) & 0xFFF;
+      MB = PC;
+      PC = (ea + 1) & W;
       break;
-    }
-    case 0o5: { // JMP
-      instName = `JMP ${oct(ea,4)}`;
+    case 5: // JMP
       PC = ea;
       break;
-    }
-    case 0o6: { // IOT
-      instName = `IOT ${oct(IR&0x1FF,4)}`;
-      // Vereinfachte IOT-Implementierung
+    case 6: // IOT
       handleIOT(IR);
       break;
-    }
-    case 0o7: { // OPR
-      instName = disasmOPR(IR);
+    case 7: // OPR
       handleOPR(IR);
       break;
-    }
   }
 
-  MA = ea || lastPC;
-  logInst(lastPC, IR, instName);
+  if (logEnabled()) logInst(lastPC, IR, disasm(IR, lastPC));
 }
 
+function rotL() { const l = LINK; LINK = (AC >> 11) & 1; AC = ((AC << 1) | l) & W; }
+function rotR() { const l = LINK; LINK = AC & 1; AC = (AC >> 1) | (l << 11); }
+
 function handleOPR(IR) {
-  if ((IR & 0x400) === 0) {
-    // Group 1
-    if (IR & 0x080) AC = 0;          // CLA
-    if (IR & 0x040) LINK = 0;        // CLL
-    if (IR & 0x020) AC = (~AC) & 0xFFF; // CMA
-    if (IR & 0x010) LINK ^= 1;       // CML
-    if (IR & 0x001) {                 // IAC
-      const sum = AC + 1;
-      if (sum > 0xFFF) LINK ^= 1;
-      AC = sum & 0xFFF;
+  if ((IR & 0o400) === 0) {
+    // ---- Gruppe 1: CLA/CLL → CMA/CML → IAC → Rotation ----
+    if (IR & 0o200) AC = 0;                 // CLA
+    if (IR & 0o100) LINK = 0;               // CLL
+    if (IR & 0o040) AC = (~AC) & W;         // CMA
+    if (IR & 0o020) LINK ^= 1;              // CML
+    if (IR & 0o001) {                       // IAC
+      AC = (AC + 1) & W;
+      if (AC === 0) LINK ^= 1;
     }
-    // Rotation (nach IAC)
-    if ((IR & 0x006) === 0x004) {   // RAL
-      const lbit = LINK;
-      LINK = (AC >> 11) & 1;
-      AC = ((AC << 1) | lbit) & 0xFFF;
-    } else if ((IR & 0x006) === 0x002) { // RAR
-      const lbit = LINK;
-      LINK = AC & 1;
-      AC = ((AC >> 1) | (lbit << 11)) & 0xFFF;
-    } else if ((IR & 0x006) === 0x006) { // RTL
-      for(let i=0;i<2;i++){const l=LINK;LINK=(AC>>11)&1;AC=((AC<<1)|l)&0xFFF;}
-    }
-  } else if ((IR & 0x401) === 0x400) {
-    // Group 2
-    let skip = false;
-    if ((IR & 0x040) && (AC & 0x800)) skip = true; // SMA
-    if ((IR & 0x020) && (AC === 0))   skip = true; // SZA
-    if ((IR & 0x010) && LINK === 0)   skip = true; // SNL (wait, SNL skips if L!=0)
-    // Correction: SNL skips if L=1
-    if (IR & 0x010) { skip = (skip || LINK !== 0); }
-    // Actually recompute properly:
-    // Let me redo group2 properly
-    skip = false;
-    const sma = (IR & 0x040) !== 0;
-    const sza = (IR & 0x020) !== 0;
-    const snl = (IR & 0x010) !== 0;
-    const rev = (IR & 0x008) !== 0; // SPA/SNA/SZL (inverted)
-    if (!rev) {
-      if (sma && (AC & 0x800)) skip = true;
-      if (sza && AC === 0)     skip = true;
-      if (snl && LINK !== 0)   skip = true;
-    } else {
-      skip = true;
-      if (sma && (AC & 0x800)) skip = false;
-      if (sza && AC === 0)     skip = false;
-      if (snl && LINK !== 0)   skip = false;
-    }
-    if (skip) PC = (PC + 1) & 0xFFF;
-    if (IR & 0x080) AC = 0;   // CLA
-    if (IR & 0x004) {          // OSR
-      AC = (AC | SR) & 0xFFF;
-    }
-    if (IR & 0x002) {          // HLT
+    const twice = (IR & 0o002) !== 0;
+    if (IR & 0o004)      { rotL(); if (twice) rotL(); }        // RAL / RTL
+    else if (IR & 0o010) { rotR(); if (twice) rotR(); }        // RAR / RTR
+    else if (twice)      AC = ((AC & 0o77) << 6) | (AC >> 6);  // BSW (8/E)
+  } else if ((IR & 0o001) === 0) {
+    // ---- Gruppe 2: Skip-Test → CLA → OSR → HLT ----
+    const cond = ((IR & 0o100) && (AC & 0o4000)) ||  // SMA / SPA
+                 ((IR & 0o040) && AC === 0)       ||  // SZA / SNA
+                 ((IR & 0o020) && LINK !== 0);        // SNL / SZL
+    const skip = (IR & 0o010) ? !cond : !!cond;       // Bit 0010 kehrt um (SKP = 7410)
+    if (skip) PC = (PC + 1) & W;
+    if (IR & 0o200) AC = 0;                 // CLA
+    if (IR & 0o004) AC |= SR;               // OSR
+    if (IR & 0o002) {                       // HLT
       halted = true;
       stopRunning();
       logHalt(`HLT bei PC=${oct(lastPC,4)}, AC=${oct(AC,4)}, L=${LINK}`);
     }
+  } else {
+    // ---- Gruppe 3: MQ-Befehle (ohne EAE) ----
+    if (IR & 0o200) AC = 0;                 // CLA
+    const mqa = IR & 0o100, mql = IR & 0o020;
+    if (mqa && mql) { const t = MQ; MQ = AC; AC = t; }   // SWP
+    else if (mql)   { MQ = AC; AC = 0; }                 // MQL
+    else if (mqa)   { AC |= MQ; }                        // MQA
+  }
+}
+
+// === I/O ===
+function skipNext() { PC = (PC + 1) & W; }
+
+function loadNextKey() {
+  if (!kbdFlag && kbdQueue.length) {
+    kbdBuf = kbdQueue.shift();
+    kbdFlag = 1;
   }
 }
 
 function handleIOT(IR) {
-  // Nur grundlegende IOT-Behandlung
+  const dev = (IR >> 3) & 0o77, fn = IR & 7;
+  switch (dev) {
+    case 0o00: // Prozessor / Interrupt-System
+      switch (fn) {
+        case 0: if (ION) skipNext(); ION = 0; ionDelay = 0; break;        // SKON
+        case 1: ION = 1; ionDelay = 1; break;                             // ION
+        case 2: ION = 0; ionDelay = 0; break;                             // IOF
+        case 3: if (kbdFlag || ttyFlag) skipNext(); break;                // SRQ
+        case 4: AC = (LINK << 11) | ((kbdFlag || ttyFlag) ? 0o1000 : 0)   // GTF
+                   | (ION ? 0o200 : 0); break;
+        case 5: LINK = (AC >> 11) & 1; ION = 1; ionDelay = 1; break;      // RTF
+        case 6: break;                                                    // SGT (EAE)
+        case 7: AC = 0; LINK = 0; ION = 0; ionDelay = 0;                  // CAF
+                kbdFlag = 0; ttyFlag = 0; break;
+      }
+      break;
+    case 0o03: // Tastatur
+      if (fn === 0) kbdFlag = 0;                       // KCF
+      if ((fn & 1) && kbdFlag) skipNext();             // KSF
+      if (fn & 2) { AC = 0; kbdFlag = 0; }             // KCC
+      if (fn & 4) AC |= kbdBuf;                        // KRS
+      loadNextKey();
+      break;
+    case 0o04: // Fernschreiber
+      if (fn === 0) ttyFlag = 1;                       // SPF
+      if ((fn & 1) && ttyFlag) skipNext();             // TSF
+      if (fn & 2) ttyFlag = 0;                         // TCF
+      if (fn & 4) { ttyPut(AC & 0o177); ttyFlag = 1; } // TPC / TLS (sofort fertig)
+      break;
+    default:
+      break;  // nicht vorhandenes Gerät: wirkt wie NOP
+  }
+}
+
+// === TERMINAL ===
+let termText = '', termLastCR = false, termDirty = true;
+const TERM_MAX = 20000;
+
+function ttyPut(c) {
+  if (c === 13) { termText += '\n'; termLastCR = true; }
+  else if (c === 10) { if (!termLastCR) termText += '\n'; termLastCR = false; }
+  else {
+    termLastCR = false;
+    if (c === 8) { if (termText && !termText.endsWith('\n')) termText = termText.slice(0, -1); }
+    else if (c >= 32 && c < 127) termText += String.fromCharCode(c);
+  }
+  if (termText.length > TERM_MAX) termText = termText.slice(-TERM_MAX);
+  termDirty = true;
+}
+
+function renderTerminal() {
+  if (!termDirty) return;
+  termDirty = false;
+  const el = document.getElementById('term-out');
+  el.textContent = termText;
+  el.appendChild(Object.assign(document.createElement('span'), { className: 'term-cursor', textContent: '█' }));
+  el.scrollTop = el.scrollHeight;
+}
+
+function clearTerminal() {
+  termText = ''; termLastCR = false; termDirty = true;
+  renderTerminal();
+}
+
+function termKey(e) {
+  let c = null;
+  if (e.key === 'Enter') c = 13;
+  else if (e.key === 'Backspace' || e.key === 'Delete') c = 127;    // RUBOUT
+  else if (e.key === 'Escape') c = 27;
+  else if (e.key === 'Tab') c = 9;
+  else if (e.ctrlKey && e.key.length === 1) {
+    const k = e.key.toUpperCase().charCodeAt(0);
+    if (k >= 64 && k < 96) c = k - 64;
+  }
+  else if (e.key.length === 1 && !e.metaKey && !e.altKey) {
+    c = e.key.charCodeAt(0);
+    if (document.getElementById('term-upper').checked && c >= 97 && c <= 122) c -= 32;
+  }
+  if (c === null || c > 127) return;
+  e.preventDefault();
+  kbdQueue.push(c | 0o200);           // ASR-33: Bit 0200 gesetzt
+  loadNextKey();
+}
+
+document.getElementById('term-out').addEventListener('keydown', termKey);
+
+// === DISASSEMBLER ===
+const MRI_NAMES = ['AND', 'TAD', 'ISZ', 'DCA', 'JMS', 'JMP'];
+const IOT_NAMES = {
+  0o6000:'SKON', 0o6001:'ION', 0o6002:'IOF', 0o6003:'SRQ', 0o6004:'GTF', 0o6005:'RTF', 0o6006:'SGT', 0o6007:'CAF',
+  0o6030:'KCF',  0o6031:'KSF', 0o6032:'KCC', 0o6034:'KRS', 0o6036:'KRB',
+  0o6040:'SPF',  0o6041:'TSF', 0o6042:'TCF', 0o6044:'TPC', 0o6046:'TLS',
+};
+
+function disasm(IR, pc) {
+  const op = IR >> 9;
+  if (op <= 5) {
+    const a = (IR & 0o200) ? ((pc & 0o7600) | (IR & 0o177)) : (IR & 0o177);
+    return MRI_NAMES[op] + ((IR & 0o400) ? ' I ' : ' ') + oct(a, 4);
+  }
+  if (op === 6) return IOT_NAMES[IR] || `IOT ${oct(IR,4)}`;
+  return disasmOPR(IR);
 }
 
 function disasmOPR(IR) {
-  if ((IR & 0x401) === 0x402) return 'HLT';
-  if (IR === 0x7300) return 'CLA CLL';
-  if (IR === 0x7200) return 'CLA';
-  if (IR === 0x7100) return 'CLL';
-  if (IR === 0x7040) return 'CMA';
-  if (IR === 0x7020) return 'CML';
-  if (IR === 0x7001) return 'IAC';
-  if (IR === 0x7010) return 'RAR';
-  if (IR === 0x7004) return 'RAL';
-  if (IR === 0x7402) return 'HLT';
-  if (IR === 0x7600) return 'CLA CLL (G1)';
-  return `OPR ${oct(IR,4)}`;
+  const p = [];
+  if ((IR & 0o400) === 0) {
+    if (IR & 0o200) p.push('CLA');
+    if (IR & 0o100) p.push('CLL');
+    if (IR & 0o040) p.push('CMA');
+    if (IR & 0o020) p.push('CML');
+    if (IR & 0o001) p.push('IAC');
+    const tw = IR & 0o002;
+    if (IR & 0o004)      p.push(tw ? 'RTL' : 'RAL');
+    else if (IR & 0o010) p.push(tw ? 'RTR' : 'RAR');
+    else if (tw)         p.push('BSW');
+  } else if ((IR & 0o001) === 0) {
+    const rev = IR & 0o010;
+    if (IR & 0o100) p.push(rev ? 'SPA' : 'SMA');
+    if (IR & 0o040) p.push(rev ? 'SNA' : 'SZA');
+    if (IR & 0o020) p.push(rev ? 'SZL' : 'SNL');
+    if (rev && !(IR & 0o160)) p.push('SKP');
+    if (IR & 0o200) p.push('CLA');
+    if (IR & 0o004) p.push('OSR');
+    if (IR & 0o002) p.push('HLT');
+  } else {
+    if (IR & 0o200) p.push('CLA');
+    const mqa = IR & 0o100, mql = IR & 0o020;
+    if (mqa && mql) p.push('SWP');
+    else { if (mqa) p.push('MQA'); if (mql) p.push('MQL'); }
+    if (IR & 0o056) p.push(`EAE(${oct(IR & 0o056, 2)})`);
+  }
+  return p.length ? p.join(' ') : 'NOP';
 }
 
 // === LOG ===
 const MAX_LOG = 200;
 let logLines = [];
+let logDirty = false;
+
+function pushLog(html) {
+  logLines.push(html);
+  if (logLines.length > 2 * MAX_LOG) logLines = logLines.slice(-MAX_LOG);
+  logDirty = true;
+}
 
 function logStep(msg) {
-  logLines.push(`<span class="log-step">; ${msg}</span>`);
-  if (logLines.length > MAX_LOG) logLines.shift();
+  pushLog(`<span class="log-step">; ${esc(msg)}</span>`);
   flushLog();
 }
 
 function logInst(pc, ir, name) {
-  if (stepCount % 1 === 0) {
-    logLines.push(
-      `<span class="log-step">[${stepCount.toString().padStart(5,'0')}] </span>` +
-      `<span class="log-step">PC:${oct(pc,4)} </span>` +
-      `<span class="log-inst">${oct(ir,4)} ${name.padEnd(16)}</span>` +
-      `<span class="log-reg"> AC:${oct(AC,4)} L:${LINK}</span>`
-    );
-    if (logLines.length > MAX_LOG) logLines.shift();
-    // Nur alle N Schritte rendern um Performance zu sparen
-    if (stepCount % 5 === 0 || !running) flushLog();
-  }
+  pushLog(
+    `<span class="log-step">[${stepCount.toString().padStart(5,'0')}] PC:${oct(pc,4)} </span>` +
+    `<span class="log-inst">${oct(ir,4)} ${esc(name.padEnd(16))}</span>` +
+    `<span class="log-reg"> AC:${oct(AC,4)} L:${LINK}</span>`
+  );
 }
 
 function logHalt(msg) {
-  logLines.push(`<span class="log-halt">;;; ${msg} ;;;</span>`);
+  pushLog(`<span class="log-halt">;;; ${esc(msg)} ;;;</span>`);
   flushLog();
 }
 
+function logErr(msg) {
+  pushLog(`<span class="log-err">; FEHLER: ${esc(msg)}</span>`);
+}
+
 function flushLog() {
+  if (!logDirty) return;
+  logDirty = false;
   const el = document.getElementById('exec-log');
-  el.innerHTML = logLines.join('\n');
+  el.innerHTML = logLines.slice(-MAX_LOG).join('\n');
   el.scrollTop = el.scrollHeight;
 }
 
@@ -1119,23 +1276,22 @@ function clearLog() {
 // === MEMORY DUMP ===
 function refreshMemDump() {
   const el = document.getElementById('mem-dump');
-  let lines = [];
-  let hasContent = false;
+  const lines = [];
   for (let a = 0; a < MEM_SIZE; a += 8) {
-    let row = mem.slice(a, a+8);
-    if (row.every(v => v === 0) && !changedAddrs.has(a)) continue;
-    hasContent = true;
+    let used = false;
+    for (let i = 0; i < 8; i++) if (mem[a+i] || changedAddrs.has(a+i)) used = true;
+    if (!used) continue;
     let line = oct(a,4) + ': ';
     for (let i = 0; i < 8; i++) {
-      const addr = a+i;
+      const addr = a + i;
       const val = oct(mem[addr],4);
-      if (addr === lastPC) line += `<span class="pc-row">[${val}]</span> `;
+      if (addr === PC) line += `<span class="pc-row">[${val}]</span> `;
       else if (changedAddrs.has(addr)) line += `<span class="changed">${val}</span>  `;
       else line += val + '  ';
     }
     lines.push(line);
   }
-  el.innerHTML = hasContent ? lines.join('\n') : '-- Speicher ist leer (alle Nullen) --';
+  el.innerHTML = lines.length ? lines.join('\n') : '-- Speicher ist leer (alle Nullen) --';
 }
 
 function clearMem() {
@@ -1145,193 +1301,197 @@ function clearMem() {
   logStep('Speicher gelöscht');
 }
 
-// === ASSEMBLER ===
-// Unterstützt: Labels, AND TAD ISZ DCA JMS JMP, OPR (CLA CLL CMA CML IAC RAL RAR HLT),
-//              numerische Literale (oktal), *ORG, $START, Kommentare /
-
-const OPR_MAP = {
-  'NOP':  0o7000,
-  'CLA':  0o7200, 'CLL':  0o7100, 'CMA':  0o7040, 'CML':  0o7020,
-  'IAC':  0o7001, 'RAL':  0o7004, 'RAR':  0o7010, 'RTL':  0o7006, 'RTR':  0o7012,
-  'SMA':  0o7500, 'SZA':  0o7440, 'SNL':  0o7420, 'SPA':  0o7510, 'SNA':  0o7450, 'SZL': 0o7430,
-  'SKP':  0o7410,
-  'OSR':  0o7404, 'HLT':  0o7402,
+// === ASSEMBLER (PAL-8-Teilmenge) ===
+const OPR_SYMS = {
+  NOP:0o7000, IAC:0o7001, BSW:0o7002, RAL:0o7004, RTL:0o7006, RAR:0o7010, RTR:0o7012,
+  CML:0o7020, CMA:0o7040, CIA:0o7041, CLL:0o7100, STL:0o7120, CLA:0o7200, GLK:0o7204, STA:0o7240,
+  SMA:0o7500, SZA:0o7440, SNL:0o7420, SPA:0o7510, SNA:0o7450, SZL:0o7430, SKP:0o7410,
+  OSR:0o7404, HLT:0o7402, LAS:0o7604,
+  MQA:0o7501, MQL:0o7421, SWP:0o7521, CAM:0o7621, ACL:0o7701,
 };
+const IOT_SYMS = Object.fromEntries(Object.entries(IOT_NAMES).map(([v, n]) => [n, +v]));
+const MRI_SYMS = { AND:0o0000, TAD:0o1000, ISZ:0o2000, DCA:0o3000, JMS:0o4000, JMP:0o5000 };
 
-function assembleAndLoad() {
-  const src = document.getElementById('asm-src').value;
+// Gruppe eines OPR-Symbols (0 = passt zu jeder Gruppe: NOP, CLA)
+function oprGroup(v) {
+  if (v === 0o7000 || v === 0o7200) return 0;
+  if ((v & 0o400) === 0) return 1;
+  return (v & 0o001) ? 3 : 2;
+}
+
+// Ausdruck: Terme mit + und -, Terme sind Zahl, Symbol, "." oder "X (Zeichen)
+function evalExpr(src, ctx) {
+  const s = src.trim();
+  if (!s) throw new Error('Operand fehlt');
+  let i = 0, val = 0, sign = 1, expectTerm = true;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch === ' ' || ch === '\t') { i++; continue; }
+    if (!expectTerm) {
+      if (ch === '+') { sign = 1;  expectTerm = true; i++; continue; }
+      if (ch === '-') { sign = -1; expectTerm = true; i++; continue; }
+      throw new Error(`Unerwartetes '${s.slice(i)}' in '${s}'`);
+    }
+    if (ch === '-') { sign = -sign; i++; continue; }
+    if (ch === '+') { i++; continue; }
+    let term;
+    if (ch === '"') {
+      if (i + 1 >= s.length) throw new Error('Zeichen nach " fehlt');
+      term = 0o200 | (s.charCodeAt(i + 1) & 0o177);
+      i += 2;
+    } else if (ch === '.') {
+      term = ctx.addr; i++;
+    } else if (/[0-9]/.test(ch)) {
+      let j = i; while (j < s.length && /[0-9]/.test(s[j])) j++;
+      const t = s.slice(i, j);
+      if (ctx.radix === 8 && /[89]/.test(t)) throw new Error(`'${t}' ist keine Oktalzahl (DECIMAL vergessen?)`);
+      term = parseInt(t, ctx.radix); i = j;
+    } else if (/[A-Za-z_]/.test(ch)) {
+      let j = i; while (j < s.length && /[A-Za-z0-9_]/.test(s[j])) j++;
+      const name = s.slice(i, j).toUpperCase(); i = j;
+      if (ctx.labels[name] !== undefined) term = ctx.labels[name];
+      else if (ctx.pass === 2) throw new Error(`Unbekanntes Symbol oder Befehl: ${name}`);
+      else term = 0;
+    } else {
+      throw new Error(`Unerwartetes Zeichen '${ch}' in '${s}'`);
+    }
+    val += sign * term; sign = 1; expectTerm = false;
+  }
+  if (expectTerm) throw new Error(`Ausdruck unvollständig: '${s}'`);
+  return ((val % 4096) + 4096) % 4096;
+}
+
+// Kommentar (/) abschneiden, aber nicht innerhalb eines Zeichenliterals "/
+function stripComment(line) {
+  for (let i = 0; i < line.length; i++) {
+    if (line[i] === '"') { i++; continue; }
+    if (line[i] === '/') return line.slice(0, i);
+  }
+  return line;
+}
+
+function assemble(src) {
   const lines = src.split('\n');
-  const output = [];
   const labels = {};
-  let org = 0o200;
-  let startAddr = 0o200;
-  let errors = [];
-  let assembledList = [];
+  const errors = [];
+  let words = [], listing = [];
+  let startAddr = null, firstAddr = null;
 
-  // Zwei-Pass-Assembler
-  for (let asmPass = 1; asmPass <= 2; asmPass++) {
-    const pass = asmPass;
-    if (pass === 2) { assembledList.length = 0; output.length = 0; }
-    let addr = org;
-    let decimalMode = false;
+  for (let pass = 1; pass <= 2; pass++) {
+    words = []; listing = [];
+    let addr = 0o200, radix = 8;
 
     for (let li = 0; li < lines.length; li++) {
-      let line = lines[li];
-      // Kommentar
-      const ci = line.indexOf('/');
-      if (ci >= 0) line = line.substring(0, ci);
-      line = line.trim();
+      const lineNo = li + 1;
+      const code = stripComment(lines[li]);
+      let line = code.trim();
       if (!line) continue;
+      const ctx = { labels, addr, radix, pass };
 
-      // ORG
-      if (line.startsWith('*')) {
-        addr = parseInt(line.slice(1).trim(), decimalMode ? 10 : 8) & 0xFFF;
-        continue;
-      }
-
-      // Startadresse
-      if (line.startsWith('$')) {
-        const sa = line.slice(1).trim();
-        if (sa) startAddr = parseInt(sa, 8) & 0xFFF;
-        continue;
-      }
-
-      // Radix
-      if (line === 'DECIMAL') { decimalMode = true; continue; }
-      if (line === 'OCTAL')   { decimalMode = false; continue; }
-
-      // Label=VALUE Definition
-      const eqMatch = line.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$/i);
-      if (eqMatch) {
-        if (pass === 1) labels[eqMatch[1].toUpperCase()] = parseInt(eqMatch[2].trim(), 8) & 0xFFF;
-        continue;
-      }
-
-      // Label: am Zeilenanfang
-      const lblMatch = line.match(/^([A-Z_][A-Z0-9_]*),\s*(.*)/i);
-      let rest = line;
-      if (lblMatch) {
-        if (pass === 1) labels[lblMatch[1].toUpperCase()] = addr;
-        rest = lblMatch[2].trim();
-        if (!rest) continue;
-      }
-
-      // Tokens parsen
-      const tokens = rest.split(/\s+/);
-      const mnem = tokens[0].toUpperCase();
-
-      // Reine Zahl (Datenwort)
-      if (/^[0-7]+$/.test(tokens[0]) && tokens.length === 1) {
-        const val = parseInt(tokens[0], 8) & 0xFFF;
-        if (pass === 2) {
-          assembledList.push({addr: addr, val: val});
-          output.push(`${oct(addr,4)}: ${oct(val,4)}    / ${tokens[0]}`);
+      try {
+        if (line.startsWith('*')) { addr = evalExpr(line.slice(1), ctx); continue; }
+        if (line.startsWith('$')) {
+          if (line.slice(1).trim()) startAddr = evalExpr(line.slice(1), ctx);
+          break;                                       // $ = Programmende
         }
-        addr++;
-        continue;
-      }
+        const kw = line.toUpperCase();
+        if (kw === 'DECIMAL') { radix = 10; continue; }
+        if (kw === 'OCTAL')   { radix = 8;  continue; }
+        if (kw === 'PAGE')    { addr = (addr + 0o177) & 0o7600; continue; }
 
-      // OPR Gruppe (können mehrere kombiniert werden: CLA CLL, usw.)
-      let oprVal = 0; let isOpr = false;
-      let allOpr = true;
-      for (const t of tokens) {
-        const tu = t.toUpperCase();
-        if (OPR_MAP[tu] !== undefined) { oprVal |= OPR_MAP[tu]; isOpr = true; }
-        else { allOpr = false; break; }
-      }
+        const eq = line.match(/^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$/i);
+        if (eq) { labels[eq[1].toUpperCase()] = evalExpr(eq[2], ctx); continue; }
 
-      if (allOpr && isOpr) {
-        if (pass === 2) {
-          assembledList.push({addr: addr, val: oprVal & 0xFFF});
-          output.push(`${oct(addr,4)}: ${oct(oprVal,4)}    / ${tokens.join(' ')}`);
-        }
-        addr++;
-        continue;
-      }
-
-      // MRI Befehle: AND TAD ISZ DCA JMS JMP
-      const MRI = { AND:0, TAD:1, ISZ:2, DCA:3, JMS:4, JMP:5 };
-      if (MRI[mnem] !== undefined) {
-        let indirect = 0, zpflag = 0;
-        let labelRef = tokens[1] ? tokens[1].toUpperCase() : null;
-        let indirect_flag = false;
-
-        // Indirekter Sprung: JMP I LABEL oder JMP I 0177
-        if (tokens[1] && tokens[1].toUpperCase() === 'I') {
-          indirect = 1;
-          labelRef = tokens[2] ? tokens[2].toUpperCase() : null;
-        }
-
-        if (pass === 2) {
-          let ea = 0;
-          if (labelRef) {
-            if (labels[labelRef] !== undefined) {
-              ea = labels[labelRef];
-            } else {
-              // Versuch als Oktalzahl
-              ea = parseInt(labelRef, 8);
-              if (isNaN(ea)) { errors.push(`Unbekanntes Label: ${labelRef} (Zeile ${li+1})`); ea = 0; }
-            }
+        // Ein oder mehrere Labels "NAME,"
+        let m;
+        while ((m = line.match(/^([A-Z_][A-Z0-9_]*)\s*,\s*(.*)$/i))) {
+          const name = m[1].toUpperCase();
+          if (pass === 1) {
+            if (labels[name] !== undefined && labels[name] !== addr)
+              errors.push(`Label ${name} doppelt definiert (Zeile ${lineNo})`);
+            labels[name] = addr;
           }
-
-          // Zero-Page oder aktuelle Seite?
-          const eaPage = ea >> 7;
-          const curPage = addr >> 7;
-          if (eaPage === 0) zpflag = 0;
-          else if (eaPage === curPage) zpflag = 1;
-          else { errors.push(`Adressierungsfehler: ${oct(ea,4)} nicht auf Seite 0 oder aktueller Seite (Zeile ${li+1})`); zpflag = 1; }
-
-          const ir = (MRI[mnem] << 9) | (zpflag << 7) | (indirect << 8) | (ea & 0x7F);
-          assembledList.push({addr: addr, val: ir & 0xFFF});
-          output.push(`${oct(addr,4)}: ${oct(ir,4)}    / ${mnem}${indirect?' I':''} ${oct(ea,4)}`);
+          line = m[2].trim();
         }
-        addr++;
-        continue;
-      }
+        if (!line) continue;
 
-      // PAGE0 / CUR. PAGE LABEL als numerischer Wert
-      if (/^[0-7]+$/.test(mnem)) {
-        const val = parseInt(mnem, decimalMode ? 10 : 8) & 0xFFF;
+        const tokens = line.split(/\s+/);
+        const mnem = tokens[0].toUpperCase();
+        let val;
+
+        if (MRI_SYMS[mnem] !== undefined) {
+          let ops = tokens.slice(1);
+          let ind = 0;
+          if (ops.length && ops[0].toUpperCase() === 'I') { ind = 0o400; ops = ops.slice(1); }
+          if (ops.length && ops[0].toUpperCase() === 'Z') ops = ops.slice(1);
+          const ea = evalExpr(ops.join(' '), ctx);
+          let z = 0;
+          if ((ea & 0o7600) === 0) z = 0;
+          else if ((ea & 0o7600) === (addr & 0o7600)) z = 0o200;
+          else if (pass === 2) throw new Error(`Adresse ${oct(ea,4)} liegt weder auf Seite 0 noch auf der aktuellen Seite ${oct(addr & 0o7600,4)}`);
+          val = MRI_SYMS[mnem] | ind | z | (ea & 0o177);
+        } else if (IOT_SYMS[mnem] !== undefined && tokens.length === 1) {
+          val = IOT_SYMS[mnem];
+        } else if (tokens.every(t => OPR_SYMS[t.toUpperCase()] !== undefined)) {
+          val = 0; let grp = 0;
+          for (const t of tokens) {
+            const v = OPR_SYMS[t.toUpperCase()], g = oprGroup(v);
+            if (g && grp && g !== grp) throw new Error(`'${line}' mischt OPR-Gruppe ${grp} und ${g}`);
+            if (g) grp = g;
+            val |= v;
+          }
+        } else {
+          if (tokens.length > 1 && /^[A-Z_]/i.test(tokens[0]) && labels[mnem] === undefined)
+            throw new Error(`Unbekannter Befehl: ${tokens[0]}`);
+          val = evalExpr(line, ctx);                   // Datenwort / Ausdruck
+        }
+
         if (pass === 2) {
-          assembledList.push({addr: addr, val: val});
-          output.push(`${oct(addr,4)}: ${oct(val,4)}    / ${mnem}`);
+          if (firstAddr === null) firstAddr = addr;
+          words.push({ addr, val });
+          listing.push(`${oct(addr,4)}: ${oct(val,4)}   ${code.trim()}`);
         }
-        addr++;
-        continue;
-      }
-
-      if (pass === 2) {
-        errors.push(`Unbekannter Befehl: '${mnem}' (Zeile ${li+1})`);
+        addr = (addr + 1) & W;
+      } catch (e) {
+        if (pass === 2) errors.push(`${e.message} (Zeile ${lineNo})`);
+        // Fehlerhafte Befehlszeile belegt trotzdem ein Wort, damit die Folgeadressen stimmen
+        if (!/^[*$]/.test(line) && !/^[A-Z_][A-Z0-9_]*\s*=/i.test(line)) addr = (addr + 1) & W;
       }
     }
   }
+  if (startAddr === null) startAddr = firstAddr === null ? 0o200 : firstAddr;
+  return { words, listing, errors, startAddr };
+}
 
-  // Programm in Speicher laden
-  let loadedCount = 0;
-  for (const {addr: a, val} of assembledList) {
-    mem[a] = val;
-    changedAddrs.add(a);
-    loadedCount++;
+function assembleAndLoad() {
+  const res = assemble(document.getElementById('asm-src').value);
+  const outEl = document.getElementById('asm-out');
+
+  if (res.errors.length) {
+    outEl.textContent = `; *** ${res.errors.length} FEHLER – nichts geladen ***\n;\n` +
+      res.errors.map(e => '; ' + e).join('\n') + '\n;\n' + res.listing.join('\n');
+    logStep(`Assemblierung fehlgeschlagen (${res.errors.length} Fehler)`);
+    res.errors.forEach(logErr);
+    flushLog();
+    showTab('assembler');
+    return;
   }
 
-  // PC auf Startadresse
-  PC = startAddr;
+  stopRunning();
+  changedAddrs.clear();
+  for (const { addr, val } of res.words) {
+    mem[addr] = val;
+    changedAddrs.add(addr);
+  }
+  PC = res.startAddr;
   MA = PC;
-  halted = false;
+  halted = true;
 
-  const outEl = document.getElementById('asm-out');
-  let outText = `; === ASSEMBLIERT (${loadedCount} Worte ab ${oct(startAddr,4)}) ===\n`;
-  outText += `; Startadresse: ${oct(startAddr,4)}\n;\n`;
-  outText += output.join('\n');
-  if (errors.length) outText += '\n;\n; FEHLER:\n' + errors.map(e => '; *** ' + e).join('\n');
-  outEl.textContent = outText;
-
-  logStep(`Geladen: ${loadedCount} Wörter. Start: ${oct(startAddr,4)}`);
-  if (errors.length) errors.forEach(e => logLines.push(`<span class="log-err">; FEHLER: ${e}</span>`));
-
+  outEl.textContent = `; === ASSEMBLIERT: ${res.words.length} Worte, Start ${oct(PC,4)} ===\n` +
+    `; PC steht auf ${oct(PC,4)} – START drücken.\n;\n` + res.listing.join('\n');
+  logStep(`Geladen: ${res.words.length} Wörter. PC = ${oct(PC,4)}`);
   updateDisplay();
   refreshMemDump();
-  // Bleib auf dem Assembler-Tab damit man den Output sieht
   showTab('assembler');
 }
 
@@ -1346,95 +1506,172 @@ function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.getElementById('tab-' + name).classList.add('active');
   const tabs = ['assembler','memory','log','help'];
-  const idx = tabs.indexOf(name);
-  document.querySelectorAll('.tab')[idx].classList.add('active');
+  document.querySelectorAll('.tab')[tabs.indexOf(name)].classList.add('active');
   if (name === 'memory') refreshMemDump();
 }
 
 // === BEISPIELPROGRAMME ===
 const EXAMPLES = {
   'Addition': `/ PDP-8 Addition: 2+3=5
-*200        / Code ab Adresse 200 (oktal)
-CLA CLL     / Akkumulator und Link löschen
-TAD V1      / AC = 0 + 2 = 2
-TAD V2      / AC = 2 + 3 = 5
-DCA RESULT  / RESULT = AC = 5, AC = 0
-HLT         / Halt
-V1, 0002    / Konstante 2
-V2, 0003    / Konstante 3
-RESULT, 0   / Ergebnisspeicher
+*200
+        CLA CLL     / AC und Link löschen
+        TAD V1      / AC = 0 + 2
+        TAD V2      / AC = 2 + 3
+        DCA RESULT  / RESULT = 5, AC = 0
+        HLT
+V1,     2
+V2,     3
+RESULT, 0
 $200`,
 
-  'Countdown': `/ Countdown von 7 bis 0
-/ ISZ zählt hoch bis 0 und überspringt dann
+  'Countdown': `/ Countdown: ISZ zählt -7 hoch bis 0
 *200
-CLA CLL
-CMA         / AC = 7777 (alle Bits 1)
-TAD START   / AC = 7777 + 0007 = 0006? nein:
-/ Einfacher: Zähler direkt setzen
-DCA CNT     / CNT = AC (nach CLA ergibt: setze CNT)
-/ Lade -7 als Twos-Complement
-CLA
-TAD NEGVAL  / AC = 7771 (das ist -7)
-DCA CNT
-LOOP, ISZ CNT / CNT++; skip wenn CNT==0
-JMP LOOP    / Weiter
-HLT
-NEGVAL, 7771 / -7 in Zweierkompl. (4096-7=4089=0x0FF9=7771 oktal)
-CNT, 0
+        CLA CLL
+        TAD NEGVAL  / AC = 7771 (= -7)
+        DCA CNT
+LOOP,   ISZ CNT     / CNT+1, überspringen wenn 0
+        JMP LOOP
+        HLT         / CNT ist jetzt 0
+NEGVAL, -7          / Assembler bildet das Zweierkomplement
+CNT,    0
 $200`,
 
-  'Subroutine': `/ Subroutine-Demo mit JMS
+  'Subroutine': `/ Unterprogramm mit JMS
 *200
-CLA CLL
-TAD VAL1    / Wert laden
-JMS DOUBLE  / Subroutine: verdoppelt AC
-DCA RES1    / Ergebnis 1 sichern
-TAD VAL2
-JMS DOUBLE  / Nochmal verdoppeln
-DCA RES2
-HLT
+        CLA CLL
+        TAD VAL1
+        JMS DOUBLE  / verdoppelt AC
+        DCA RES1    / soll 0006 sein
+        TAD VAL2
+        JMS DOUBLE
+        DCA RES2    / soll 0012 (= 10 dez.) sein
+        HLT
 /
-/ Subroutine DOUBLE: Verdoppelt AC (RAL = *2)
-DOUBLE, 0   / Rücksprungadresse (JMS legt PC hier ab)
-RAL         / AC = AC * 2 (Rotate Left = Shift links)
-JMP I DOUBLE / Indirekter Sprung zurück
+/ DOUBLE: AC = AC * 2 (CLL RAL)
+DOUBLE, 0           / Rücksprungadresse
+        CLL RAL
+        JMP I DOUBLE
 /
-VAL1, 0003  / 3
-VAL2, 0005  / 5
-RES1, 0     / Ergebnis 1 (soll 6 sein)
-RES2, 0     / Ergebnis 2 (soll 12 sein = 14 oktal)
+VAL1,   3
+VAL2,   5
+RES1,   0
+RES2,   0
 $200`,
 
-  'Bitwise AND': `/ Bitweise AND Beispiel
+  'Bitwise AND': `/ Bitweises AND
 *200
-CLA CLL
-TAD MASKA   / AC = MASKA
-AND MASKB   / AC = MASKA AND MASKB
-DCA RESULT  / Ergebnis speichern
-HLT
-MASKA, 0777  / 0000 111 111 111
-MASKB, 3333  / 011 011 011 011
-RESULT, 0    / Erwartet: 0333
+        CLA CLL
+        TAD MASKA
+        AND MASKB
+        DCA RESULT  / erwartet 0333
+        HLT
+MASKA,  0777
+MASKB,  3333
+RESULT, 0
 $200`,
 
-  'Schleifen-Zähler': `/ Schleife: 10 Iterationen (dezimal)
-/ Nutzt ISZ als Loop-Counter
+  'Multiplikation': `/ 6 x 7 durch wiederholte Addition
 *200
-CLA CLL
-TAD NVAL    / AC = -10 (in Zweierkompl.)
-DCA COUNT
-LOOP, ISZ COUNT / COUNT++; skip wenn 0
-JMP LOOP
-/ Schleife fertig
-TAD COUNT   / AC sollte 0 sein
-HLT
-NVAL, 7766  / -10 oktal: 4096-10=4086=0xFF6=7766_8
-COUNT, 0
+        CLA CLL
+        TAD B
+        CIA         / AC = -B (CMA IAC)
+        DCA CNT
+        TAD A       / AC aufsummieren
+        ISZ CNT
+        JMP .-2
+        DCA PROD    / 42 dez. = 0052 oktal
+        HLT
+A,      6
+B,      7
+CNT,    0
+PROD,   0
+$200`,
+
+  'Schleifen-Zähler': `/ Schleife: 10 Durchläufe
+DECIMAL
+*128        / = 0200 oktal
+        CLA CLL
+        TAD NVAL
+        DCA COUNT
+LOOP,   ISZ COUNT
+        JMP LOOP
+        TAD COUNT   / AC ist jetzt 0
+        HLT
+NVAL,   -10         / dezimal -10 = 7766 oktal
+COUNT,  0
+OCTAL
+$200`,
+
+  'Hallo Welt': `/ Text auf dem Fernschreiber ausgeben
+/ Nutzt das Autoindex-Register 0010
+*200
+START,  CLA CLL
+        TAD PTRINI  / Zeiger auf TEXT-1
+        DCA 10
+LOOP,   TAD I 10    / 0010 wird vorher erhöht
+        SNA         / 0 = Textende
+        JMP ENDE
+        JMS TYPE
+        JMP LOOP
+ENDE,   HLT
+        JMP START
+/ TYPE: gibt das Zeichen in AC aus, AC = 0 danach
+TYPE,   0
+        TLS         / Zeichen ausgeben
+        TSF         / warten bis fertig
+        JMP .-1
+        CLA
+        JMP I TYPE
+PTRINI, TEXT-1
+TEXT,   "H
+        "A
+        "L
+        "L
+        "O
+        240         / Leerzeichen
+        "W
+        "E
+        "L
+        "T
+        "!
+        215         / CR
+        212         / LF
+        0
+$200`,
+
+  'Echo': `/ Echo: Terminal anklicken und tippen
+/ ESC beendet das Programm
+*200
+LOOP,   KSF         / Taste da?
+        JMP .-1     / nein: warten
+        KRB         / AC = Zeichen, Flag löschen
+        DCA CHR
+        TAD CHR
+        TAD MESC    / ESC?
+        SNA CLA
+        HLT         / ja: Ende
+        TAD CHR
+        JMS TYPE
+        TAD CHR
+        TAD MCR     / CR? dann LF hinterher
+        SZA CLA
+        JMP LOOP
+        TAD LF
+        JMS TYPE
+        JMP LOOP
+TYPE,   0
+        TLS
+        TSF
+        JMP .-1
+        CLA
+        JMP I TYPE
+CHR,    0
+MESC,   -233        / ESC mit Bit 0200
+MCR,    -215        / CR mit Bit 0200
+LF,     212
 $200`,
 };
 
-// Beispiel-Buttons bauen
 const exDiv = document.getElementById('example-btns');
 for (const [name, code] of Object.entries(EXAMPLES)) {
   const btn = document.createElement('button');
@@ -1447,8 +1684,8 @@ for (const [name, code] of Object.entries(EXAMPLES)) {
   exDiv.appendChild(btn);
 }
 
-// Initial
 updateDisplay();
 </script>
+<div class="footer">Mehr zu alten Rechnern: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></div>
 </body>
 </html>
