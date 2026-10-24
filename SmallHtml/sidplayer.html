@@ -2,6 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SID Player</title>
 <style>
   :root{
@@ -16,7 +17,7 @@
   body{
     margin:0; min-height:100vh; background:var(--bg);
     font-family:'Courier New', monospace; color:var(--text);
-    display:flex; align-items:center; justify-content:center; padding:24px;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; padding:24px 16px;
   }
   .player{
     background:var(--panel); border:3px solid var(--c64-blue);
@@ -34,7 +35,7 @@
   }
   .drop.drag{ background:rgba(124,124,255,0.15); }
   #fileInput{ display:none; }
-  .meta{ font-size:13px; line-height:1.6; margin-bottom:14px; min-height:64px; }
+  .meta{ font-size:13px; line-height:1.6; margin-bottom:14px; min-height:64px; word-break:break-word; }
   .meta .label{ color:var(--accent); }
   canvas#scope{
     width:100%; height:80px; background:#0d0d1a; border:1px solid var(--c64-blue);
@@ -55,6 +56,8 @@
   #subtunes button{ padding:4px 10px; background:#333366; }
   #subtunes button.active{ background:var(--accent); }
   #status{ font-size:12px; color:#8888cc; min-height:16px; }
+  footer{ margin-top:14px; font-size:12px; color:#8888cc; text-align:center; }
+  footer a{ color:var(--c64-lightblue); }
 </style>
 </head>
 <body>
@@ -74,6 +77,7 @@
 
   <div class="controls">
     <button id="playBtn" disabled>&#9654; Play</button>
+    <button id="pauseBtn" disabled>&#10074;&#10074; Pause</button>
     <button id="stopBtn" disabled>&#9632; Stop</button>
   </div>
 
@@ -91,18 +95,27 @@
 
   <div id="status"></div>
 </div>
+<footer>
+  Mehr Basteleien: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+  &middot; <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
+</footer>
 
 <script>
 /* ============================================================
    SID PLAYER
-   6502-CPU + SID-Chip-Emulation laufen komplett innerhalb eines
-   AudioWorkletProcessor, damit die play()-Routine cycle-genau
-   zum Referenztakt (PAL 985248 Hz / NTSC 1022727 Hz) aufgerufen
-   wird statt über einen ungenauen setInterval-Timer im Main-Thread.
+   6502-CPU, CIA1/CIA2, VIC-Rasterzähler und SID laufen komplett in
+   einem AudioWorkletProcessor. Die CPU läuft durchgehend zyklusgenau
+   gegen den Audiotakt; init/play werden – wie beim PSID-Treiber von
+   sidplay – aus einer Leerlaufschleife heraus angesprungen. Dadurch
+   blockiert nichts den Audio-Thread, und NMIs (CIA2-Digis) laufen
+   auch während init/play weiter.
    ============================================================ */
 
 // ---------- Worklet-Code als String (läuft in eigenem Audio-Thread) ----------
 const workletCode = `
+// ============================================================
+// 6502 / 6510 (inkl. stabiler illegaler Opcodes)
+// ============================================================
 class CPU6502 {
   constructor(readFn, writeFn){
     this.read = readFn;
@@ -110,8 +123,9 @@ class CPU6502 {
     this.reset();
   }
   reset(){
-    this.a=0; this.x=0; this.y=0; this.sp=0xFD; this.pc=0;
+    this.a=0; this.x=0; this.y=0; this.sp=0xFF; this.pc=0;
     this.n=false; this.v=false; this.b=false; this.d=false; this.i=true; this.z=false; this.c=false;
+    this.jam=false; this.px=0; this.extra=0;
   }
   getP(){
     return (this.n?0x80:0)|(this.v?0x40:0)|0x20|(this.b?0x10:0)|(this.d?0x08:0)|(this.i?0x04:0)|(this.z?0x02:0)|(this.c?0x01:0);
@@ -123,7 +137,6 @@ class CPU6502 {
   push(v){ this.write(0x100+this.sp, v&0xff); this.sp=(this.sp-1)&0xff; }
   pop(){ this.sp=(this.sp+1)&0xff; return this.read(0x100+this.sp); }
   irq(){
-    if(this.i) return 0;
     this.push((this.pc>>8)&0xff); this.push(this.pc&0xff);
     this.push(this.getP()&~0x10);
     this.i = true;
@@ -131,6 +144,7 @@ class CPU6502 {
     return 7;
   }
   nmi(){
+    this.jam = false;
     this.push((this.pc>>8)&0xff); this.push(this.pc&0xff);
     this.push(this.getP()&~0x10);
     this.i = true;
@@ -141,117 +155,108 @@ class CPU6502 {
   fetch(){ const v=this.read(this.pc); this.pc=(this.pc+1)&0xffff; return v; }
   fetch16(){ const lo=this.fetch(), hi=this.fetch(); return lo|(hi<<8); }
 
-  // addressing modes: return {addr, extra}
-  imm(){ const a=this.pc; this.pc=(this.pc+1)&0xffff; return {addr:a, extra:0}; }
-  zp(){ return {addr:this.fetch(), extra:0}; }
-  zpx(){ return {addr:(this.fetch()+this.x)&0xff, extra:0}; }
-  zpy(){ return {addr:(this.fetch()+this.y)&0xff, extra:0}; }
-  abs(){ return {addr:this.fetch16(), extra:0}; }
-  absx(){ const base=this.fetch16(); const addr=(base+this.x)&0xffff; return {addr, extra:((base&0xff00)!==(addr&0xff00))?1:0}; }
-  absy(){ const base=this.fetch16(); const addr=(base+this.y)&0xffff; return {addr, extra:((base&0xff00)!==(addr&0xff00))?1:0}; }
+  // Adressierungsarten: liefern die Adresse, setzen this.px bei Seitenwechsel
+  imm(){ const a=this.pc; this.pc=(a+1)&0xffff; return a; }
+  zp(){ return this.fetch(); }
+  zpx(){ return (this.fetch()+this.x)&0xff; }
+  zpy(){ return (this.fetch()+this.y)&0xff; }
+  abs(){ return this.fetch16(); }
+  absx(){ const b=this.fetch16(), a=(b+this.x)&0xffff; this.px=((b^a)&0xff00)?1:0; return a; }
+  absy(){ const b=this.fetch16(), a=(b+this.y)&0xffff; this.px=((b^a)&0xff00)?1:0; return a; }
   ind(){
-    const ptr=this.fetch16();
-    const lo=this.read(ptr);
-    const hi=this.read((ptr&0xff00)|((ptr+1)&0xff)); // 6502 page-wrap bug
-    return {addr: lo|(hi<<8), extra:0};
+    const p=this.fetch16();
+    return this.read(p) | (this.read((p&0xff00)|((p+1)&0xff))<<8); // 6502-Seitenfehler
   }
   indx(){
-    const zp=(this.fetch()+this.x)&0xff;
-    const lo=this.read(zp), hi=this.read((zp+1)&0xff);
-    return {addr: lo|(hi<<8), extra:0};
+    const z=(this.fetch()+this.x)&0xff;
+    return this.read(z) | (this.read((z+1)&0xff)<<8);
   }
   indy(){
-    const zp=this.fetch();
-    const lo=this.read(zp), hi=this.read((zp+1)&0xff);
-    const base=lo|(hi<<8);
-    const addr=(base+this.y)&0xffff;
-    return {addr, extra:((base&0xff00)!==(addr&0xff00))?1:0};
+    const z=this.fetch();
+    const b=this.read(z) | (this.read((z+1)&0xff)<<8);
+    const a=(b+this.y)&0xffff;
+    this.px=((b^a)&0xff00)?1:0;
+    return a;
   }
 
   step(){
+    if(this.jam) return 2;
     const op=this.fetch();
-    const i=OPS[op];
-    if(!i){ return 2; } // unknown/illegal opcode -> treat as NOP
-    let ea=null, extra=0;
-    if(i.mode){ const r=this[i.mode](); ea=r.addr; extra=r.extra; }
-    i.fn.call(this, ea);
-    return i.cycles + (i.pageExtra?extra:0);
-  }
-
-  branch(cond, addr){
-    const off=this.read(addr); this.pc=(this.pc+0)&0xffff; // addr already consumed via imm-like fetch below
+    const ins=OPS[op];
+    this.px=0; this.extra=0;
+    const ea = ins.mode ? this[ins.mode]() : 0;
+    ins.fn.call(this, ea, op);
+    return ins.cycles + (ins.pageExtra?this.px:0) + this.extra;
   }
 }
 
-// ----- Instruction implementations -----
+// ----- ALU-Hilfsfunktionen -----
 function ADC(cpu, v){
+  const cin = cpu.c?1:0;
   if(cpu.d){
-    let lo=(cpu.a&0x0f)+(v&0x0f)+(cpu.c?1:0);
+    let lo=(cpu.a&0x0f)+(v&0x0f)+cin;
     let hi=(cpu.a>>4)+(v>>4);
     if(lo>9){ lo+=6; hi++; }
-    let result = (hi<<4)|(lo&0x0f);
-    cpu.z = ((cpu.a+v+(cpu.c?1:0))&0xff)===0;
-    cpu.n = !!(result&0x80);
-    cpu.v = (((cpu.a^v)&0x80)===0) && (((cpu.a^result)&0x80)!==0);
-    if(hi>9){ result+=0x60; }
-    cpu.c = result>0xff;
-    cpu.a = result & 0xff;
+    cpu.z = ((cpu.a+v+cin)&0xff)===0;
+    cpu.n = !!(hi&0x08);
+    cpu.v = !!(~(cpu.a^v) & (cpu.a^(hi<<4)) & 0x80);
+    if(hi>9){ hi+=6; }
+    cpu.c = hi>15;
+    cpu.a = ((hi<<4)|(lo&0x0f)) & 0xff;
   } else {
-    const sum = cpu.a + v + (cpu.c?1:0);
-    cpu.v = (((cpu.a^v)&0x80)===0) && (((cpu.a^sum)&0x80)!==0);
+    const sum = cpu.a + v + cin;
+    cpu.v = !!(~(cpu.a^v) & (cpu.a^sum) & 0x80);
     cpu.c = sum>0xff;
     cpu.a = sum & 0xff;
     cpu.setNZ(cpu.a);
   }
 }
 function SBC(cpu, v){
+  const bin = cpu.c?0:1;
+  const diff = cpu.a - v - bin;
   if(cpu.d){
-    const borrowIn = cpu.c?0:1;
-    let diff = cpu.a - v - borrowIn;
-    let lo = (cpu.a&0x0f) - (v&0x0f) - borrowIn;
+    let lo = (cpu.a&0x0f) - (v&0x0f) - bin;
     let hi = (cpu.a>>4) - (v>>4);
-    if(lo<0){ lo+=10; hi--; }
-    if(hi<0){ hi+=10; }
-    const bin = (cpu.a - v - borrowIn) & 0x1ff;
-    cpu.v = (((cpu.a^v)&0x80)!==0) && (((cpu.a^(bin&0xff))&0x80)!==0);
-    cpu.c = (cpu.a - v - borrowIn) >= 0;
-    cpu.setNZ(bin&0xff);
+    if(lo<0){ lo-=6; hi--; }
+    if(hi<0){ hi-=6; }
+    cpu.v = !!((cpu.a^v) & (cpu.a^diff) & 0x80);
+    cpu.c = diff >= 0;
+    cpu.setNZ(diff&0xff);
     cpu.a = ((hi<<4)|(lo&0x0f)) & 0xff;
   } else {
-    const val = v ^ 0xff;
-    const sum = cpu.a + val + (cpu.c?1:0);
-    cpu.v = (((cpu.a^val)&0x80)===0) && (((cpu.a^sum)&0x80)!==0);
-    cpu.c = sum>0xff;
-    cpu.a = sum & 0xff;
+    cpu.v = !!((cpu.a^v) & (cpu.a^diff) & 0x80);
+    cpu.c = diff >= 0;
+    cpu.a = diff & 0xff;
     cpu.setNZ(cpu.a);
   }
 }
+function CMP(cpu, reg, v){ cpu.c = reg>=v; cpu.setNZ((reg-v)&0xff); }
+function ASL(c,v){ c.c=!!(v&0x80); v=(v<<1)&0xff; c.setNZ(v); return v; }
+function LSR(c,v){ c.c=!!(v&1); v=v>>1; c.setNZ(v); return v; }
+function ROL(c,v){ const o=c.c?1:0; c.c=!!(v&0x80); v=((v<<1)|o)&0xff; c.setNZ(v); return v; }
+function ROR(c,v){ const o=c.c?0x80:0; c.c=!!(v&1); v=(v>>1)|o; c.setNZ(v); return v; }
+function INC(c,v){ v=(v+1)&0xff; c.setNZ(v); return v; }
+function DEC(c,v){ v=(v-1)&0xff; c.setNZ(v); return v; }
 
-const OPS = {};
-function def(op, mode, cycles, fn, pageExtra){ OPS[op] = {mode, cycles, fn, pageExtra}; }
+const OPS = new Array(256);
+function def(op, mode, cycles, fn, pageExtra){ OPS[op] = {mode, cycles, fn, pageExtra:!!pageExtra}; }
 
-// Loads/Stores
-def(0xA9,'imm',2,function(a){ this.a=this.read(a); this.setNZ(this.a); });
-def(0xA5,'zp',3,function(a){ this.a=this.read(a); this.setNZ(this.a); });
-def(0xB5,'zpx',4,function(a){ this.a=this.read(a); this.setNZ(this.a); });
-def(0xAD,'abs',4,function(a){ this.a=this.read(a); this.setNZ(this.a); });
-def(0xBD,'absx',4,function(a){ this.a=this.read(a); this.setNZ(this.a); },true);
-def(0xB9,'absy',4,function(a){ this.a=this.read(a); this.setNZ(this.a); },true);
-def(0xA1,'indx',6,function(a){ this.a=this.read(a); this.setNZ(this.a); });
-def(0xB1,'indy',5,function(a){ this.a=this.read(a); this.setNZ(this.a); },true);
+// Lesebefehle in 8 Adressierungsarten (ORA/AND/EOR/ADC/LDA/CMP/SBC)
+function aluGroup(base, fn){
+  def(base+0x09,'imm',2,fn); def(base+0x05,'zp',3,fn); def(base+0x15,'zpx',4,fn);
+  def(base+0x0D,'abs',4,fn); def(base+0x1D,'absx',4,fn,true); def(base+0x19,'absy',4,fn,true);
+  def(base+0x01,'indx',6,fn); def(base+0x11,'indy',5,fn,true);
+}
+aluGroup(0x00, function(a){ this.a|=this.read(a); this.setNZ(this.a); });
+aluGroup(0x20, function(a){ this.a&=this.read(a); this.setNZ(this.a); });
+aluGroup(0x40, function(a){ this.a^=this.read(a); this.setNZ(this.a); });
+aluGroup(0x60, function(a){ ADC(this, this.read(a)); });
+aluGroup(0xA0, function(a){ this.a=this.read(a); this.setNZ(this.a); });
+aluGroup(0xC0, function(a){ CMP(this,this.a,this.read(a)); });
+aluGroup(0xE0, function(a){ SBC(this, this.read(a)); });
+def(0xEB,'imm',2,function(a){ SBC(this, this.read(a)); }); // illegales SBC #imm
 
-def(0xA2,'imm',2,function(a){ this.x=this.read(a); this.setNZ(this.x); });
-def(0xA6,'zp',3,function(a){ this.x=this.read(a); this.setNZ(this.x); });
-def(0xB6,'zpy',4,function(a){ this.x=this.read(a); this.setNZ(this.x); });
-def(0xAE,'abs',4,function(a){ this.x=this.read(a); this.setNZ(this.x); });
-def(0xBE,'absy',4,function(a){ this.x=this.read(a); this.setNZ(this.x); },true);
-
-def(0xA0,'imm',2,function(a){ this.y=this.read(a); this.setNZ(this.y); });
-def(0xA4,'zp',3,function(a){ this.y=this.read(a); this.setNZ(this.y); });
-def(0xB4,'zpx',4,function(a){ this.y=this.read(a); this.setNZ(this.y); });
-def(0xAC,'abs',4,function(a){ this.y=this.read(a); this.setNZ(this.y); });
-def(0xBC,'absx',4,function(a){ this.y=this.read(a); this.setNZ(this.y); },true);
-
+// STA (kein Zusatzzyklus, feste Zykluszahl)
 def(0x85,'zp',3,function(a){ this.write(a,this.a); });
 def(0x95,'zpx',4,function(a){ this.write(a,this.a); });
 def(0x8D,'abs',4,function(a){ this.write(a,this.a); });
@@ -260,13 +265,97 @@ def(0x99,'absy',5,function(a){ this.write(a,this.a); });
 def(0x81,'indx',6,function(a){ this.write(a,this.a); });
 def(0x91,'indy',6,function(a){ this.write(a,this.a); });
 
+def(0xA2,'imm',2,function(a){ this.x=this.read(a); this.setNZ(this.x); });
+def(0xA6,'zp',3,function(a){ this.x=this.read(a); this.setNZ(this.x); });
+def(0xB6,'zpy',4,function(a){ this.x=this.read(a); this.setNZ(this.x); });
+def(0xAE,'abs',4,function(a){ this.x=this.read(a); this.setNZ(this.x); });
+def(0xBE,'absy',4,function(a){ this.x=this.read(a); this.setNZ(this.x); },true);
+def(0xA0,'imm',2,function(a){ this.y=this.read(a); this.setNZ(this.y); });
+def(0xA4,'zp',3,function(a){ this.y=this.read(a); this.setNZ(this.y); });
+def(0xB4,'zpx',4,function(a){ this.y=this.read(a); this.setNZ(this.y); });
+def(0xAC,'abs',4,function(a){ this.y=this.read(a); this.setNZ(this.y); });
+def(0xBC,'absx',4,function(a){ this.y=this.read(a); this.setNZ(this.y); },true);
 def(0x86,'zp',3,function(a){ this.write(a,this.x); });
 def(0x96,'zpy',4,function(a){ this.write(a,this.x); });
 def(0x8E,'abs',4,function(a){ this.write(a,this.x); });
-
 def(0x84,'zp',3,function(a){ this.write(a,this.y); });
 def(0x94,'zpx',4,function(a){ this.write(a,this.y); });
 def(0x8C,'abs',4,function(a){ this.write(a,this.y); });
+
+def(0xE0,'imm',2,function(a){ CMP(this,this.x,this.read(a)); });
+def(0xE4,'zp',3,function(a){ CMP(this,this.x,this.read(a)); });
+def(0xEC,'abs',4,function(a){ CMP(this,this.x,this.read(a)); });
+def(0xC0,'imm',2,function(a){ CMP(this,this.y,this.read(a)); });
+def(0xC4,'zp',3,function(a){ CMP(this,this.y,this.read(a)); });
+def(0xCC,'abs',4,function(a){ CMP(this,this.y,this.read(a)); });
+def(0x24,'zp',3,function(a){ const v=this.read(a); this.z=(this.a&v)===0; this.n=!!(v&0x80); this.v=!!(v&0x40); });
+def(0x2C,'abs',4,function(a){ const v=this.read(a); this.z=(this.a&v)===0; this.n=!!(v&0x80); this.v=!!(v&0x40); });
+
+// Read-Modify-Write: wie der echte 6502 wird erst der alte, dann der neue Wert
+// geschrieben (wichtig für das übliche "INC $D019"/"ASL $D019" zum IRQ-Quittieren)
+function rmw(op){ return function(a){ const v=this.read(a); this.write(a,v); this.write(a, op(this,v)); }; }
+function rmwGroup(base, op){
+  const f=rmw(op);
+  def(base+0x06,'zp',5,f); def(base+0x16,'zpx',6,f); def(base+0x0E,'abs',6,f); def(base+0x1E,'absx',7,f);
+}
+rmwGroup(0x00, ASL); rmwGroup(0x20, ROL); rmwGroup(0x40, LSR); rmwGroup(0x60, ROR);
+rmwGroup(0xC0, DEC); rmwGroup(0xE0, INC);
+def(0x0A,null,2,function(){ this.a=ASL(this,this.a); });
+def(0x4A,null,2,function(){ this.a=LSR(this,this.a); });
+def(0x2A,null,2,function(){ this.a=ROL(this,this.a); });
+def(0x6A,null,2,function(){ this.a=ROR(this,this.a); });
+
+// Illegale RMW-Kombinationen (SLO, RLA, SRE, RRA, DCP, ISC)
+function illRmwGroup(base, fn){
+  def(base+0x07,'zp',5,fn); def(base+0x17,'zpx',6,fn); def(base+0x0F,'abs',6,fn);
+  def(base+0x1F,'absx',7,fn); def(base+0x1B,'absy',7,fn); def(base+0x03,'indx',8,fn); def(base+0x13,'indy',8,fn);
+}
+illRmwGroup(0x00, function(a){ let v=this.read(a); this.write(a,v); v=ASL(this,v); this.write(a,v); this.a|=v; this.setNZ(this.a); });
+illRmwGroup(0x20, function(a){ let v=this.read(a); this.write(a,v); v=ROL(this,v); this.write(a,v); this.a&=v; this.setNZ(this.a); });
+illRmwGroup(0x40, function(a){ let v=this.read(a); this.write(a,v); v=LSR(this,v); this.write(a,v); this.a^=v; this.setNZ(this.a); });
+illRmwGroup(0x60, function(a){ let v=this.read(a); this.write(a,v); v=ROR(this,v); this.write(a,v); ADC(this,v); });
+illRmwGroup(0xC0, function(a){ let v=this.read(a); this.write(a,v); v=(v-1)&0xff; this.write(a,v); CMP(this,this.a,v); });
+illRmwGroup(0xE0, function(a){ let v=this.read(a); this.write(a,v); v=(v+1)&0xff; this.write(a,v); SBC(this,v); });
+
+// LAX / SAX
+const LAX=function(a){ this.a=this.x=this.read(a); this.setNZ(this.a); };
+def(0xA7,'zp',3,LAX); def(0xB7,'zpy',4,LAX); def(0xAF,'abs',4,LAX);
+def(0xBF,'absy',4,LAX,true); def(0xA3,'indx',6,LAX); def(0xB3,'indy',5,LAX,true);
+def(0xAB,'imm',2,LAX);
+const SAX=function(a){ this.write(a, this.a&this.x); };
+def(0x87,'zp',3,SAX); def(0x97,'zpy',4,SAX); def(0x8F,'abs',4,SAX); def(0x83,'indx',6,SAX);
+
+// Weitere illegale Immediate-Befehle
+def(0x0B,'imm',2,function(a){ this.a&=this.read(a); this.setNZ(this.a); this.c=this.n; });  // ANC
+def(0x2B,'imm',2,function(a){ this.a&=this.read(a); this.setNZ(this.a); this.c=this.n; });  // ANC
+def(0x4B,'imm',2,function(a){ this.a=LSR(this, this.a&this.read(a)); });                     // ALR
+def(0x6B,'imm',2,function(a){                                                                // ARR
+  const t=this.a&this.read(a); this.a=((t>>1)|(this.c?0x80:0))&0xff; this.setNZ(this.a);
+  this.c=!!(this.a&0x40); this.v=!!(((this.a>>6)^(this.a>>5))&1);
+});
+def(0xCB,'imm',2,function(a){ const t=this.a&this.x, v=this.read(a); this.c=t>=v; this.x=(t-v)&0xff; this.setNZ(this.x); }); // SBX
+def(0x8B,'imm',2,function(a){ this.a=(this.a|0xEE)&this.x&this.read(a); this.setNZ(this.a); });   // ANE (instabil)
+// Instabile Speicherbefehle (Näherung über High-Byte+1)
+function hiPlus1(a, idx){ return ((((a-idx)&0xffff)>>8)+1)&0xff; }
+def(0x9F,'absy',5,function(a){ this.write(a, this.a&this.x&hiPlus1(a,this.y)); }); // SHA
+def(0x93,'indy',6,function(a){ this.write(a, this.a&this.x&hiPlus1(a,this.y)); }); // SHA
+def(0x9E,'absy',5,function(a){ this.write(a, this.x&hiPlus1(a,this.y)); });        // SHX
+def(0x9C,'absx',5,function(a){ this.write(a, this.y&hiPlus1(a,this.x)); });        // SHY
+def(0x9B,'absy',5,function(a){ this.sp=this.a&this.x; this.write(a, this.sp&hiPlus1(a,this.y)); }); // TAS
+def(0xBB,'absy',4,function(a){ const v=this.read(a)&this.sp; this.a=this.x=this.sp=v; this.setNZ(v); },true); // LAS
+
+// NOPs mit Operanden (Operanden müssen übersprungen werden!)
+const NOP=function(){};
+const NOPR=function(a){ this.read(a); };
+for(const op of [0x1A,0x3A,0x5A,0x7A,0xDA,0xFA,0xEA]) def(op,null,2,NOP);
+for(const op of [0x80,0x82,0x89,0xC2,0xE2]) def(op,'imm',2,NOP);
+for(const op of [0x04,0x44,0x64]) def(op,'zp',3,NOP);
+for(const op of [0x14,0x34,0x54,0x74,0xD4,0xF4]) def(op,'zpx',4,NOP);
+def(0x0C,'abs',4,NOPR);
+for(const op of [0x1C,0x3C,0x5C,0x7C,0xDC,0xFC]) def(op,'absx',4,NOPR,true);
+// JAM/KIL: CPU bleibt stehen
+for(const op of [0x02,0x12,0x22,0x32,0x42,0x52,0x62,0x72,0x92,0xB2,0xD2,0xF2])
+  def(op,null,2,function(){ this.jam=true; this.pc=(this.pc-1)&0xffff; });
 
 // Transfers
 def(0xAA,null,2,function(){ this.x=this.a; this.setNZ(this.x); });
@@ -275,119 +364,16 @@ def(0xBA,null,2,function(){ this.x=this.sp; this.setNZ(this.x); });
 def(0x8A,null,2,function(){ this.a=this.x; this.setNZ(this.a); });
 def(0x9A,null,2,function(){ this.sp=this.x; });
 def(0x98,null,2,function(){ this.a=this.y; this.setNZ(this.a); });
-
 // Stack
 def(0x48,null,3,function(){ this.push(this.a); });
 def(0x68,null,4,function(){ this.a=this.pop(); this.setNZ(this.a); });
 def(0x08,null,3,function(){ this.push(this.getP()|0x10); });
 def(0x28,null,4,function(){ this.setP(this.pop()); });
-
-// Arithmetic
-def(0x69,'imm',2,function(a){ ADC(this, this.read(a)); });
-def(0x65,'zp',3,function(a){ ADC(this, this.read(a)); });
-def(0x75,'zpx',4,function(a){ ADC(this, this.read(a)); });
-def(0x6D,'abs',4,function(a){ ADC(this, this.read(a)); });
-def(0x7D,'absx',4,function(a){ ADC(this, this.read(a)); },true);
-def(0x79,'absy',4,function(a){ ADC(this, this.read(a)); },true);
-def(0x61,'indx',6,function(a){ ADC(this, this.read(a)); });
-def(0x71,'indy',5,function(a){ ADC(this, this.read(a)); },true);
-
-def(0xE9,'imm',2,function(a){ SBC(this, this.read(a)); });
-def(0xE5,'zp',3,function(a){ SBC(this, this.read(a)); });
-def(0xF5,'zpx',4,function(a){ SBC(this, this.read(a)); });
-def(0xED,'abs',4,function(a){ SBC(this, this.read(a)); });
-def(0xFD,'absx',4,function(a){ SBC(this, this.read(a)); },true);
-def(0xF9,'absy',4,function(a){ SBC(this, this.read(a)); },true);
-def(0xE1,'indx',6,function(a){ SBC(this, this.read(a)); });
-def(0xF1,'indy',5,function(a){ SBC(this, this.read(a)); },true);
-
-// Compare
-function CMP(cpu, reg, v){ const r=(reg-v)&0x1ff; cpu.c = reg>=v; cpu.setNZ((reg-v)&0xff); }
-def(0xC9,'imm',2,function(a){ CMP(this,this.a,this.read(a)); });
-def(0xC5,'zp',3,function(a){ CMP(this,this.a,this.read(a)); });
-def(0xD5,'zpx',4,function(a){ CMP(this,this.a,this.read(a)); });
-def(0xCD,'abs',4,function(a){ CMP(this,this.a,this.read(a)); });
-def(0xDD,'absx',4,function(a){ CMP(this,this.a,this.read(a)); },true);
-def(0xD9,'absy',4,function(a){ CMP(this,this.a,this.read(a)); },true);
-def(0xC1,'indx',6,function(a){ CMP(this,this.a,this.read(a)); });
-def(0xD1,'indy',5,function(a){ CMP(this,this.a,this.read(a)); },true);
-def(0xE0,'imm',2,function(a){ CMP(this,this.x,this.read(a)); });
-def(0xE4,'zp',3,function(a){ CMP(this,this.x,this.read(a)); });
-def(0xEC,'abs',4,function(a){ CMP(this,this.x,this.read(a)); });
-def(0xC0,'imm',2,function(a){ CMP(this,this.y,this.read(a)); });
-def(0xC4,'zp',3,function(a){ CMP(this,this.y,this.read(a)); });
-def(0xCC,'abs',4,function(a){ CMP(this,this.y,this.read(a)); });
-
-// Logic
-def(0x29,'imm',2,function(a){ this.a&=this.read(a); this.setNZ(this.a); });
-def(0x25,'zp',3,function(a){ this.a&=this.read(a); this.setNZ(this.a); });
-def(0x35,'zpx',4,function(a){ this.a&=this.read(a); this.setNZ(this.a); });
-def(0x2D,'abs',4,function(a){ this.a&=this.read(a); this.setNZ(this.a); });
-def(0x3D,'absx',4,function(a){ this.a&=this.read(a); this.setNZ(this.a); },true);
-def(0x39,'absy',4,function(a){ this.a&=this.read(a); this.setNZ(this.a); },true);
-def(0x21,'indx',6,function(a){ this.a&=this.read(a); this.setNZ(this.a); });
-def(0x31,'indy',5,function(a){ this.a&=this.read(a); this.setNZ(this.a); },true);
-
-def(0x09,'imm',2,function(a){ this.a|=this.read(a); this.setNZ(this.a); });
-def(0x05,'zp',3,function(a){ this.a|=this.read(a); this.setNZ(this.a); });
-def(0x15,'zpx',4,function(a){ this.a|=this.read(a); this.setNZ(this.a); });
-def(0x0D,'abs',4,function(a){ this.a|=this.read(a); this.setNZ(this.a); });
-def(0x1D,'absx',4,function(a){ this.a|=this.read(a); this.setNZ(this.a); },true);
-def(0x19,'absy',4,function(a){ this.a|=this.read(a); this.setNZ(this.a); },true);
-def(0x01,'indx',6,function(a){ this.a|=this.read(a); this.setNZ(this.a); });
-def(0x11,'indy',5,function(a){ this.a|=this.read(a); this.setNZ(this.a); },true);
-
-def(0x49,'imm',2,function(a){ this.a^=this.read(a); this.setNZ(this.a); });
-def(0x45,'zp',3,function(a){ this.a^=this.read(a); this.setNZ(this.a); });
-def(0x55,'zpx',4,function(a){ this.a^=this.read(a); this.setNZ(this.a); });
-def(0x4D,'abs',4,function(a){ this.a^=this.read(a); this.setNZ(this.a); });
-def(0x5D,'absx',4,function(a){ this.a^=this.read(a); this.setNZ(this.a); },true);
-def(0x59,'absy',4,function(a){ this.a^=this.read(a); this.setNZ(this.a); },true);
-def(0x41,'indx',6,function(a){ this.a^=this.read(a); this.setNZ(this.a); });
-def(0x51,'indy',5,function(a){ this.a^=this.read(a); this.setNZ(this.a); },true);
-
-def(0x24,'zp',3,function(a){ const v=this.read(a); this.z=(this.a&v)===0; this.n=!!(v&0x80); this.v=!!(v&0x40); });
-def(0x2C,'abs',4,function(a){ const v=this.read(a); this.z=(this.a&v)===0; this.n=!!(v&0x80); this.v=!!(v&0x40); });
-
-// Shifts/Rotates (accumulator + memory)
-def(0x0A,null,2,function(){ this.c=!!(this.a&0x80); this.a=(this.a<<1)&0xff; this.setNZ(this.a); });
-def(0x06,'zp',5,function(a){ let v=this.read(a); this.c=!!(v&0x80); v=(v<<1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0x16,'zpx',6,function(a){ let v=this.read(a); this.c=!!(v&0x80); v=(v<<1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0x0E,'abs',6,function(a){ let v=this.read(a); this.c=!!(v&0x80); v=(v<<1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0x1E,'absx',7,function(a){ let v=this.read(a); this.c=!!(v&0x80); v=(v<<1)&0xff; this.write(a,v); this.setNZ(v); });
-
-def(0x4A,null,2,function(){ this.c=!!(this.a&1); this.a=this.a>>1; this.setNZ(this.a); });
-def(0x46,'zp',5,function(a){ let v=this.read(a); this.c=!!(v&1); v=v>>1; this.write(a,v); this.setNZ(v); });
-def(0x56,'zpx',6,function(a){ let v=this.read(a); this.c=!!(v&1); v=v>>1; this.write(a,v); this.setNZ(v); });
-def(0x4E,'abs',6,function(a){ let v=this.read(a); this.c=!!(v&1); v=v>>1; this.write(a,v); this.setNZ(v); });
-def(0x5E,'absx',7,function(a){ let v=this.read(a); this.c=!!(v&1); v=v>>1; this.write(a,v); this.setNZ(v); });
-
-def(0x2A,null,2,function(){ const c=this.c; this.c=!!(this.a&0x80); this.a=((this.a<<1)|(c?1:0))&0xff; this.setNZ(this.a); });
-def(0x26,'zp',5,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&0x80); v=((v<<1)|(c?1:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x36,'zpx',6,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&0x80); v=((v<<1)|(c?1:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x2E,'abs',6,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&0x80); v=((v<<1)|(c?1:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x3E,'absx',7,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&0x80); v=((v<<1)|(c?1:0))&0xff; this.write(a,v); this.setNZ(v); });
-
-def(0x6A,null,2,function(){ const c=this.c; this.c=!!(this.a&1); this.a=((this.a>>1)|(c?0x80:0))&0xff; this.setNZ(this.a); });
-def(0x66,'zp',5,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&1); v=((v>>1)|(c?0x80:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x76,'zpx',6,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&1); v=((v>>1)|(c?0x80:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x6E,'abs',6,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&1); v=((v>>1)|(c?0x80:0))&0xff; this.write(a,v); this.setNZ(v); });
-def(0x7E,'absx',7,function(a){ let v=this.read(a); const c=this.c; this.c=!!(v&1); v=((v>>1)|(c?0x80:0))&0xff; this.write(a,v); this.setNZ(v); });
-
-// Inc/Dec
-def(0xE6,'zp',5,function(a){ const v=(this.read(a)+1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xF6,'zpx',6,function(a){ const v=(this.read(a)+1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xEE,'abs',6,function(a){ const v=(this.read(a)+1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xFE,'absx',7,function(a){ const v=(this.read(a)+1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xC6,'zp',5,function(a){ const v=(this.read(a)-1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xD6,'zpx',6,function(a){ const v=(this.read(a)-1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xCE,'abs',6,function(a){ const v=(this.read(a)-1)&0xff; this.write(a,v); this.setNZ(v); });
-def(0xDE,'absx',7,function(a){ const v=(this.read(a)-1)&0xff; this.write(a,v); this.setNZ(v); });
+// Inc/Dec Register
 def(0xE8,null,2,function(){ this.x=(this.x+1)&0xff; this.setNZ(this.x); });
 def(0xC8,null,2,function(){ this.y=(this.y+1)&0xff; this.setNZ(this.y); });
 def(0xCA,null,2,function(){ this.x=(this.x-1)&0xff; this.setNZ(this.x); });
 def(0x88,null,2,function(){ this.y=(this.y-1)&0xff; this.setNZ(this.y); });
-
 // Flags
 def(0x18,null,2,function(){ this.c=false; });
 def(0x38,null,2,function(){ this.c=true; });
@@ -397,14 +383,14 @@ def(0xB8,null,2,function(){ this.v=false; });
 def(0xD8,null,2,function(){ this.d=false; });
 def(0xF8,null,2,function(){ this.d=true; });
 
-// Branches (relative addressing handled inline)
-function branchOp(flagCheck){
+// Verzweigungen: +1 Zyklus wenn genommen, +1 bei Seitenwechsel
+function branchOp(cond){
   return function(){
     const off=this.fetch();
-    const signed = off<0x80?off:off-256;
-    if(flagCheck(this)){
+    if(cond(this)){
       const old=this.pc;
-      this.pc=(this.pc+signed)&0xffff;
+      this.pc=(old + (off<0x80?off:off-256))&0xffff;
+      this.extra = 1 + (((old^this.pc)&0xff00)?1:0);
     }
   };
 }
@@ -417,7 +403,7 @@ def(0x10,null,2,branchOp(c=>!c.n)); // BPL
 def(0x50,null,2,branchOp(c=>!c.v)); // BVC
 def(0x70,null,2,branchOp(c=>c.v));  // BVS
 
-// Jumps / calls
+// Sprünge / Unterprogramme
 def(0x4C,'abs',3,function(a){ this.pc=a; });
 def(0x6C,'ind',5,function(a){ this.pc=a; });
 def(0x20,null,6,function(){
@@ -442,202 +428,301 @@ def(0x40,null,6,function(){
   const lo=this.pop(), hi=this.pop();
   this.pc=lo|(hi<<8);
 });
-def(0xEA,null,2,function(){});
 
 // ============================================================
-// SID chip emulation
+// CIA 6526 (Timer A/B, ICR)
 // ============================================================
-const ATTACK_MS  = [2,8,16,24,38,56,68,80,100,250,500,800,1000,3000,5000,8000];
-const DECREL_MS  = [6,24,48,72,114,168,204,240,300,750,1500,2400,3000,9000,15000,24000];
-// exponential decay bands (reSID-style): counter compared against these thresholds slows decrement
-function expDivisor(level){
-  if(level>93) return 1;
-  if(level>54) return 2;
-  if(level>26) return 4;
-  if(level>14) return 8;
-  if(level>6) return 16;
-  return 30;
+class CIA {
+  constructor(){ this.reset(); }
+  reset(){
+    this.taLatch=0xffff; this.ta=0xffff; this.tbLatch=0xffff; this.tb=0xffff;
+    this.cra=0; this.crb=0; this.icrMask=0; this.icrFlags=0;
+    this.regs=new Uint8Array(16).fill(0xff);
+  }
+  get irq(){ return (this.icrFlags & this.icrMask & 0x1f) !== 0; }
+  read(r){
+    switch(r){
+      case 0x00: case 0x01: return 0xff;           // Ports: keine Taste gedrückt
+      case 0x04: return this.ta & 0xff;
+      case 0x05: return (this.ta>>8) & 0xff;
+      case 0x06: return this.tb & 0xff;
+      case 0x07: return (this.tb>>8) & 0xff;
+      case 0x0d: {
+        const v = (this.icrFlags & 0x1f) | (this.irq?0x80:0);
+        this.icrFlags = 0;                          // Lesen quittiert
+        return v;
+      }
+      case 0x0e: return this.cra & 0xef;
+      case 0x0f: return this.crb & 0xef;
+      default: return this.regs[r];
+    }
+  }
+  write(r, v){
+    switch(r){
+      case 0x04: this.taLatch=(this.taLatch&0xff00)|v; break;
+      case 0x05: this.taLatch=(this.taLatch&0x00ff)|(v<<8); if(!(this.cra&1)) this.ta=this.taLatch; break;
+      case 0x06: this.tbLatch=(this.tbLatch&0xff00)|v; break;
+      case 0x07: this.tbLatch=(this.tbLatch&0x00ff)|(v<<8); if(!(this.crb&1)) this.tb=this.tbLatch; break;
+      case 0x0d:
+        if(v & 0x80) this.icrMask |= (v & 0x1f);
+        else this.icrMask &= ~(v & 0x1f);
+        break;
+      case 0x0e: if(v&0x10) this.ta=this.taLatch; this.cra=v&0xef; break;
+      case 0x0f: if(v&0x10) this.tb=this.tbLatch; this.crb=v&0xef; break;
+      default: this.regs[r]=v;
+    }
+  }
+  tick(c){
+    let aUnder = 0;
+    if(this.cra & 1){
+      let t = this.ta - c;
+      while(t < 0){                                 // Periode = Latch+1 Takte
+        aUnder++; this.icrFlags |= 0x01;
+        if(this.cra & 0x08){ this.cra &= ~1; t = this.taLatch; break; }
+        t += this.taLatch + 1;
+      }
+      this.ta = t;
+    }
+    if(this.crb & 1){
+      const mode = this.crb & 0x60;
+      const dec = mode===0x00 ? c : (mode===0x40 ? aUnder : 0);
+      if(dec){
+        let t = this.tb - dec;
+        while(t < 0){
+          this.icrFlags |= 0x02;
+          if(this.crb & 0x08){ this.crb &= ~1; t = this.tbLatch; break; }
+          t += this.tbLatch + 1;
+        }
+        this.tb = t;
+      }
+    }
+  }
 }
+
+// ============================================================
+// SID 6581 / 8580
+// ============================================================
+// Echte Zählerperioden des SID-Hüllkurvengenerators (Takte pro Schritt)
+const RATE = [9,32,63,95,149,220,267,313,392,977,1954,3126,3907,11720,19532,31251];
+function expDivisor(level){
+  if(level>=93) return 1;
+  if(level>=54) return 2;
+  if(level>=26) return 4;
+  if(level>=14) return 8;
+  if(level>=6) return 16;
+  if(level>0) return 30;
+  return 1;
+}
+const ENV_ATTACK=0, ENV_DECAY=1, ENV_RELEASE=2;
 
 class Voice {
   constructor(){
-    this.freq=0; this.pw=0x0800; this.ctrl=0;
-    this.ad=0; this.sr=0;
-    this.acc=0; // 24-bit phase accumulator
-    this.noiseShift=0x7ffff8;
-    this.envState='release'; this.envValue=0; this.envCounter=0; this.expCounter=0;
-    this.prevGate=false;
+    this.freq=0; this.pw=0; this.ctrl=0; this.ad=0; this.sr=0;
+    this.acc=0;                    // 24-Bit-Phasenakku
+    this.noiseShift=0x7ffff8;      // 23-Bit-LFSR
+    this.env=0; this.envState=ENV_RELEASE; this.rateCnt=0;
+    this.msbRose=false; this.over=0;
   }
-  writeCtrl(v, clockHz){
-    const gate = !!(v&1);
-    if(gate && !this.prevGate){ this.envState='attack'; }
-    else if(!gate && this.prevGate){ this.envState='release'; }
-    this.prevGate = gate;
-    this.ctrl = v;
+  writeCtrl(v){
+    const gate=!!(v&1), prevGate=!!(this.ctrl&1);
+    if(gate && !prevGate) this.envState=ENV_ATTACK;
+    else if(!gate && prevGate) this.envState=ENV_RELEASE;
+    if(v&0x08){ this.acc=0; this.noiseShift=0x7fffff; }   // Test-Bit
+    this.ctrl=v;
   }
-  advanceEnvelope(cyclesElapsed, clockHz){
-    const attackRate = ATTACK_MS[this.ad>>4] * clockHz / 1000;
-    const decayRate = DECREL_MS[this.ad&0x0f] * clockHz / 1000;
-    const releaseRate = DECREL_MS[this.sr&0x0f] * clockHz / 1000;
-    this.envCounter += cyclesElapsed;
-    if(this.envState==='attack'){
-      const stepPeriod = attackRate/255;
-      while(this.envCounter>=stepPeriod && this.envState==='attack'){
-        this.envCounter-=stepPeriod;
-        this.envValue++;
-        if(this.envValue>=255){ this.envValue=255; this.envState='decay'; }
+  clockNoise(){
+    const bit = ((this.noiseShift>>22)^(this.noiseShift>>17))&1;
+    this.noiseShift = ((this.noiseShift<<1)|bit) & 0x7fffff;
+  }
+  advance(c){
+    this.msbRose=false;
+    if(this.ctrl & 0x08){ this.acc=0; return; }
+    const a0=this.acc, a1=a0+this.freq*c;
+    // Rauschen: jede steigende Flanke von Bit 19 taktet das LFSR
+    let n = Math.floor((a1-0x80000)/0x100000) - Math.floor((a0-0x80000)/0x100000);
+    if(n>32) n=32;
+    while(n-- > 0) this.clockNoise();
+    // steigende MSB-Flanke für Hard-Sync merken (inkl. Restzeit danach)
+    const k = Math.floor((a1-0x800000)/0x1000000) - Math.floor((a0-0x800000)/0x1000000);
+    if(k>0 && this.freq>0){ this.msbRose=true; this.over=((a1-0x800000)%0x1000000)/this.freq; }
+    this.acc = a1 % 0x1000000;
+  }
+  advanceEnvelope(c){
+    this.rateCnt += c;
+    let guard = 0;
+    for(;;){
+      let period;
+      if(this.envState===ENV_ATTACK) period = RATE[this.ad>>4];
+      else if(this.envState===ENV_DECAY) period = RATE[this.ad&0x0f]*expDivisor(this.env);
+      else period = RATE[this.sr&0x0f]*expDivisor(this.env);
+      if(this.rateCnt < period) break;
+      if(++guard > 16){ this.rateCnt %= period; break; }
+      this.rateCnt -= period;
+      if(this.envState===ENV_ATTACK){
+        this.env++;
+        if(this.env>=255){ this.env=255; this.envState=ENV_DECAY; }
+      } else if(this.envState===ENV_DECAY){
+        // Decay und Sustain sind ein Zustand: es wird nur abwärts gezählt,
+        // solange der Pegel über dem Sustain-Wert liegt (nie aufwärts)
+        if(this.env > (this.sr>>4)*17) this.env--;
+      } else {
+        if(this.env>0) this.env--;
       }
-    } else if(this.envState==='decay'){
-      const sustain = ((this.sr>>4)&0x0f) * 17; // 0..255
-      const stepPeriod = decayRate/255 * expDivisor(this.envValue);
-      while(this.envCounter>=stepPeriod && this.envState==='decay'){
-        this.envCounter-=stepPeriod;
-        if(this.envValue>sustain){ this.envValue--; }
-        if(this.envValue<=sustain){ this.envValue=sustain; this.envState='sustain'; break; }
-      }
-    } else if(this.envState==='sustain'){
-      // holds until gate off
-    } else if(this.envState==='release'){
-      const stepPeriod = releaseRate/255 * expDivisor(this.envValue);
-      while(this.envCounter>=stepPeriod && this.envState==='release'){
-        this.envCounter-=stepPeriod;
-        if(this.envValue>0){ this.envValue--; } else break;
-      }
     }
   }
-  step(cyclesElapsed){
-    const prevAcc = this.acc;
-    this.acc = (this.acc + this.freq*cyclesElapsed) % 16777216;
-    // noise LFSR clocked on bit19 rising edges (approximate: clock proportional to bit19 toggles)
-    const prevBit19 = (prevAcc>>19)&1, curBit19=(this.acc>>19)&1;
-    if(curBit19 && !prevBit19){
-      const bit = ((this.noiseShift>>22)^(this.noiseShift>>17))&1;
-      this.noiseShift = ((this.noiseShift<<1)|bit) & 0x7fffff;
+  // 12-Bit-Wellenformausgang, -1 = keine Wellenform gewählt
+  wave(srcAcc){
+    const w=(this.ctrl>>4)&0x0f;
+    if(!w) return -1;
+    const acc=this.acc|0;
+    let out=0xfff;
+    if(w&1){ // Dreieck, ggf. mit Ringmodulation (MSB XOR Quelle)
+      const msb = ((this.ctrl&0x04) ? ((acc^srcAcc)>>23) : (acc>>23)) & 1;
+      let t=(acc>>11)&0xfff;
+      if(msb) t^=0xfff;
+      out&=t;
     }
-  }
-  output(){
-    if(this.ctrl & 0x08) return 0; // test bit -> silence
-    const top = (this.acc>>16)&0xff; // top 8 bits of 24-bit acc (~12-bit resolution scaled)
-    const waveBits = (this.ctrl>>4)&0x0f;
-    let saw=0, tri=0, pulse=0, noise=0;
-    const has = {
-      tri: !!(waveBits&1), saw: !!(waveBits&2), pul: !!(waveBits&4), noi: !!(waveBits&8)
-    };
-    if(has.saw) saw = top; // 0..255 ramp
-    if(has.tri){
-      const msb = (this.acc>>23)&1;
-      let t = ((this.acc>>15)&0x1ff);
-      tri = msb ? (0x1ff-t) : t;
-      tri = (tri>>1)&0xff;
+    if(w&2) out &= (acc>>12)&0xfff;
+    if(w&4) out &= ((this.ctrl&0x08) || ((acc>>12)&0xfff) >= this.pw) ? 0xfff : 0;
+    if(w&8){
+      const n=this.noiseShift;
+      const nz = ((n>>22)&1)<<7 | ((n>>20)&1)<<6 | ((n>>16)&1)<<5 | ((n>>13)&1)<<4 |
+                 ((n>>11)&1)<<3 | ((n>>7)&1)<<2 | ((n>>4)&1)<<1 | ((n>>2)&1);
+      out &= nz<<4;
     }
-    if(has.pul){
-      const pwThreshold = (this.pw & 0x0fff) << 4; // scale 12-bit pw to 16-bit acc-top comparison range
-      pulse = ((this.acc>>8)&0xffff) >= pwThreshold ? 255 : 0;
-    }
-    if(has.noi){
-      const n = this.noiseShift;
-      noise = ((n>>22)&1)<<7 | ((n>>20)&1)<<6 | ((n>>16)&1)<<5 | ((n>>13)&1)<<4 |
-              ((n>>11)&1)<<3 | ((n>>7)&1)<<2 | ((n>>4)&1)<<1 | ((n>>2)&1);
-    }
-    // combine active waveforms (approximation: AND when multiple bits set)
-    const active=[];
-    if(has.tri) active.push(tri);
-    if(has.saw) active.push(saw);
-    if(has.pul) active.push(pulse);
-    if(has.noi) active.push(noise);
-    let combined = 128;
-    if(active.length===1) combined = active[0];
-    else if(active.length>1){ combined = active.reduce((a,b)=>a&b, 0xff); }
-    const sample = (combined - 128) / 128; // -1..1
-    return sample * (this.envValue/255);
+    return out;
   }
 }
 
 class SID {
-  constructor(clockHz){
-    this.clockHz = clockHz;
-    this.voices = [new Voice(), new Voice(), new Voice()];
-    this.fcLo=0; this.fcHi=0; this.resFilt=0; this.modeVol=15;
-    this.filterOn = true;
-    // state-variable (Chamberlin) filter state per output
+  constructor(model){
+    this.voices=[new Voice(), new Voice(), new Voice()];
+    this.fcLo=0; this.fcHi=0; this.resFilt=0; this.modeVol=0;
+    this.filterOn=true;
     this.lp=0; this.bp=0;
-    // Digi/Sample-Näherung: manche Tunes schreiben das Lautstärkeregister
-    // ($D418) sehr schnell (mehrere kHz), um über die DAC-Nichtlinearität
-    // des echten SID zusätzliche PCM-Samples abzuspielen. Wir behandeln
-    // diese schnellen Schreibzugriffe selbst als Audiosignal (DC-Block).
-    this.digiDcIn = 0; this.digiDcOut = 0;
+    this.dcIn=0; this.dcOut=0;
+    this.setModel(model||6581);
   }
+  setModel(m){ this.model = (m==8580) ? 8580 : 6581; }
   writeRegister(reg, val){
-    const v = this.voices;
-    switch(true){
-      case reg>=0 && reg<=6: this.writeVoice(0, reg, val); break;
-      case reg>=7 && reg<=13: this.writeVoice(1, reg-7, val); break;
-      case reg>=14 && reg<=20: this.writeVoice(2, reg-14, val); break;
-      case reg===21: this.fcLo=val; break;
-      case reg===22: this.fcHi=val; break;
-      case reg===23: this.resFilt=val; break;
-      case reg===24: this.modeVol=val; break;
+    reg &= 0x1f;
+    if(reg<7) this.writeVoice(0, reg, val);
+    else if(reg<14) this.writeVoice(1, reg-7, val);
+    else if(reg<21) this.writeVoice(2, reg-14, val);
+    else if(reg===21) this.fcLo=val;
+    else if(reg===22) this.fcHi=val;
+    else if(reg===23) this.resFilt=val;
+    else if(reg===24) this.modeVol=val;
+  }
+  readRegister(reg){
+    reg &= 0x1f;
+    if(reg===0x19 || reg===0x1a) return 0xff;              // Paddles: nicht angeschlossen
+    if(reg===0x1b){                                        // OSC3: oberste 8 Bit der Wellenform von Stimme 3
+      const w=this.voices[2].wave(this.voices[1].acc|0);
+      return w<0 ? 0 : (w>>4);
     }
+    if(reg===0x1c) return this.voices[2].env;              // ENV3
+    return 0;                                              // Schreibregister
   }
   writeVoice(idx, r, val){
-    const vo = this.voices[idx];
+    const vo=this.voices[idx];
     switch(r){
       case 0: vo.freq=(vo.freq&0xff00)|val; break;
       case 1: vo.freq=(vo.freq&0x00ff)|(val<<8); break;
       case 2: vo.pw=(vo.pw&0x0f00)|val; break;
       case 3: vo.pw=(vo.pw&0x00ff)|((val&0x0f)<<8); break;
-      case 4: vo.writeCtrl(val, this.clockHz); break;
+      case 4: vo.writeCtrl(val); break;
       case 5: vo.ad=val; break;
       case 6: vo.sr=val; break;
     }
   }
-  process(cyclesElapsed){
-    let voiceOut=[0,0,0];
+  cutoffHz(){
+    const reg=((this.fcHi<<3)|(this.fcLo&0x07))&0x7ff;
+    const x=reg/2047;
+    // 8580: nahezu linear bis ~12,5 kHz; 6581: unten flach (~200 Hz), dann steil (Näherung)
+    return this.model===8580 ? 30 + x*12470 : 200 + 17800*Math.pow(x, 2.2);
+  }
+  process(c){
+    const vs=this.voices;
+    for(let i=0;i<3;i++) vs[i].advance(c);
+    // Hard-Sync: Stimme 1<-3, 2<-1, 3<-2
     for(let i=0;i<3;i++){
-      this.voices[i].step(cyclesElapsed);
-      this.voices[i].advanceEnvelope(cyclesElapsed, this.clockHz);
-      voiceOut[i]=this.voices[i].output();
+      const v=vs[i], s=vs[(i+2)%3];
+      if((v.ctrl&0x02) && s.msbRose && !(v.ctrl&0x08)) v.acc=(v.freq*s.over)%0x1000000;
     }
-    const filtSelect = this.resFilt & 0x0f; // bits 0-2 voice1-3, bit3 external
+    const out=[0,0,0];
+    for(let i=0;i<3;i++){
+      const v=vs[i];
+      v.advanceEnvelope(c);
+      const w=v.wave(vs[(i+2)%3].acc|0);
+      out[i] = w<0 ? 0 : ((w-2048)/2048) * (v.env/255);
+    }
+    const filtSelect = this.resFilt & 0x07;
     const voice3Off = !!(this.modeVol & 0x80);
     let filtered=0, unfiltered=0;
     for(let i=0;i<3;i++){
-      if(i===2 && voice3Off && !(filtSelect&(1<<i))) continue; // voice3 off when not routed through filter and disabled
-      if(filtSelect & (1<<i)) filtered += voiceOut[i];
-      else unfiltered += voiceOut[i];
+      if(filtSelect & (1<<i)) filtered += out[i];
+      else if(!(i===2 && voice3Off)) unfiltered += out[i];   // 3OFF wirkt nur ungefiltert
     }
     let filterOutput = filtered;
     if(this.filterOn){
-      const cutoffReg = ((this.fcHi<<3)|(this.fcLo&0x07)) & 0x7ff; // 11-bit
-      const cutoffHz = 30 + (cutoffReg/2047)*10000; // approximate SID cutoff mapping
-      const q = 1.0 / (0.5 + ((this.resFilt>>4)&0x0f)/15 * 3.5);
-      const f = 2*Math.sin(Math.PI*Math.min(cutoffHz,18000)/this.sampleRateHint);
-      this.bp += f*this.lp;
-      const hp = filtered - this.lp - q*this.bp;
-      this.lp += f*this.bp;
-      const mode = (this.resFilt>>4)&0x0f; // reuse low bits of modeVol actually below
-      const modeBits = (this.modeVol>>4)&0x07; // LP=1,BP=2,HP=4 combos via bits 4-6 of modeVol reg... approximate
-      let out=0; let any=false;
-      if(this.modeVol & 0x10){ out+=this.lp; any=true; }
-      if(this.modeVol & 0x20){ out+=this.bp; any=true; }
-      if(this.modeVol & 0x40){ out+=hp; any=true; }
-      filterOutput = any ? out : filtered;
+      // Chamberlin-State-Variable-Filter, 2-fach überabgetastet (stabil bis in den kHz-Bereich)
+      const sr=this.sampleRateHint;
+      const hz=Math.min(this.cutoffHz(), sr*0.45);
+      const f=2*Math.sin(Math.PI*hz/(2*sr));
+      const res=(this.resFilt>>4)&0x0f;
+      const damp = this.model===8580 ? 1.4 - res*0.085 : 1.4 - res*0.075;
+      let hp=0;
+      for(let k=0;k<2;k++){
+        this.lp += f*this.bp;
+        hp = filtered - this.lp - damp*this.bp;
+        this.bp += f*hp;
+      }
+      if(this.lp>4) this.lp=4; else if(this.lp<-4) this.lp=-4;
+      if(this.bp>4) this.bp=4; else if(this.bp<-4) this.bp=-4;
+      let o=0;
+      if(this.modeVol & 0x10) o+=this.lp;
+      if(this.modeVol & 0x20) o+=this.bp;
+      if(this.modeVol & 0x40) o+=hp;
+      filterOutput = o;                 // kein Modus gewählt -> gefilterte Stimmen stumm
     }
-    const master = (this.modeVol & 0x0f)/15;
-    let mix = (filterOutput + unfiltered) * master;
-    // Digi/Sample-Näherung: DC-blockiertes Signal aus dem rohen Lautstärke-
-    // Registerwert addieren. Bei normalem Spielbetrieb (seltene, langsame
-    // Lautstärkeänderungen) bleibt der Effekt vernachlässigbar; bei schnell
-    // getakteten Digi-Playern rekonstruiert der Hochpass ein hörbares Signal.
-    const rawVol = master*2 - 1;
-    const digiOut = rawVol - this.digiDcIn + 0.995*this.digiDcOut;
-    this.digiDcIn = rawVol; this.digiDcOut = digiOut;
-    mix += digiOut * 0.9;
-    // soft clip
-    if(mix>1) mix=1; if(mix<-1) mix=-1;
-    return mix;
+    const master=(this.modeVol & 0x0f)/15;
+    // Der 6581 hat einen deutlichen DC-Anteil im Mischer; dadurch werden schnelle
+    // Schreibzugriffe auf das Lautstärkeregister (Digis) hörbar. Beim 8580 ist er
+    // fast null. Anschließend wird – wie durch den Koppelkondensator am Audio-
+    // ausgang – der Gleichanteil per Hochpass (~15 Hz) entfernt.
+    const bias = this.model===8580 ? 0.02 : 0.25;
+    const mix = ((filterOutput + unfiltered)/3 + bias) * master;
+    const R = Math.exp(-2*Math.PI*15/this.sampleRateHint);
+    const y = mix - this.dcIn + R*this.dcOut;
+    this.dcIn=mix; this.dcOut=y;
+    let s=y;
+    if(s>1) s=1; else if(s<-1) s=-1;    // Begrenzung (sollte im Normalfall nicht greifen)
+    return s;
   }
 }
+
+// ============================================================
+// Minimal-KERNAL ($E000-$FFFF), nur sichtbar wenn HIRAM gesetzt
+// ============================================================
+function buildKernal(){
+  const k=new Uint8Array(0x2000).fill(0x60);    // unbekannte KERNAL-Aufrufe: RTS
+  const put=(addr, bytes)=>{ for(let i=0;i<bytes.length;i++) k[addr-0xe000+i]=bytes[i]; };
+  put(0xFF48,[0x48,0x8A,0x48,0x98,0x48,0x6C,0x14,0x03]); // IRQ: PHA TXA PHA TYA PHA JMP ($0314)
+  put(0xEA31,[0x4C,0x7E,0xEA]);                         // JMP $EA7E
+  put(0xEA7E,[0xAD,0x0D,0xDC]);                         // LDA $DC0D (CIA1-IRQ quittieren)
+  put(0xEA81,[0x68,0xA8,0x68,0xAA,0x68,0x40]);          // PLA TAY PLA TAX PLA RTI
+  put(0xFE43,[0x78,0x6C,0x18,0x03]);                    // NMI: SEI JMP ($0318)
+  put(0xFE47,[0x40]);                                   // Default-NMI-Handler: RTI
+  put(0xFE66,[0x4C,0x7E,0xEA]);                         // BRK-Default
+  put(0xFEBC,[0x68,0xA8,0x68,0xAA,0x68,0x40]);          // PLA TAY PLA TAX PLA RTI
+  put(0xFFFA,[0x43,0xFE, 0xE2,0xFC, 0x48,0xFF]);        // NMI, RESET, IRQ
+  return k;
+}
+const KERNAL = buildKernal();
+
+// Leerlauf-Adresse des Treibers: $0001 ist der CPU-Port, dort liegt nie Code.
+const IDLE = 0x0001;
 
 // ============================================================
 // Worklet Processor
@@ -646,279 +731,243 @@ class SidPlayerProcessor extends AudioWorkletProcessor {
   constructor(){
     super();
     this.mem = new Uint8Array(65536);
-    this.cpu = new CPU6502(
-      (addr)=>this.memRead(addr),
-      (addr,val)=>this.memWrite(addr,val)
-    );
+    this.cpu = new CPU6502((a)=>this.memRead(a), (a,v)=>this.memWrite(a,v));
+    this.cia1 = new CIA(); this.cia2 = new CIA();
+    this.vicRegs = new Uint8Array(0x40);
     this.sid = null;
-    this.ready=false;
-    this.playing=false;
-    this.clockHz = 985248;
-    this.refreshRate = 50;
-    this.cyclesSincePlay = 0;
-    this.initAddr=0; this.playAddr=0;
+    this.ready=false; this.playing=false;
+    this.gain=0.8; this.filterOn=true; this.model=6581;
     this.port.onmessage = (e)=>this.handleMessage(e.data);
-    this.stopAddr = 0x0001;
-    // CIA1 Timer A + interrupt state
-    this.ciaTimerALatch = 0xffff;
-    this.ciaTimerACounter = 0xffff;
-    this.ciaTimerARunning = false;
-    this.ciaTimerAOneshot = false;
-    this.ciaIcrMask = 0;
-    this.ciaIcrFlags = 0;
-    // CIA2 Timer A -> NMI (edge-triggered, non maskable)
-    this.cia2TimerALatch = 0xffff;
-    this.cia2TimerACounter = 0xffff;
-    this.cia2TimerARunning = false;
-    this.cia2TimerAOneshot = false;
-    this.cia2IcrMask = 0;
-    this.cia2IcrFlags = 0;
-    this.nmiPending = false;
-    // VIC raster interrupt state
-    this.vicIrqMask = 0;
-    this.vicIrqFlags = 0;
-    this.vicRasterCompare = 0; // 9-bit target line for raster IRQ
-    this.vicD011lower = 0;
-    this.rasterLine = 0;
-    this.rasterCycleAccum = 0;
-    this.totalRasterLines = 312;
-    this.cyclesPerLine = 63;
-    this.useIrqMode = false;
   }
-  irqLineAsserted(){
-    return ((this.ciaIcrFlags & this.ciaIcrMask) !== 0) || ((this.vicIrqFlags & this.vicIrqMask) !== 0);
-  }
+
+  // ---------- Speicher mit $01-Banking ----------
+  cpuPort(){ return (this.mem[1] | (~this.mem[0])) & 7; }
   memRead(addr){
-    addr &= 0xffff;
-    if(addr>=0xd400 && addr<=0xd7ff){
-      const reg = (addr-0xd400) % 25;
-      if(reg===0x1b){ // OSC3
-        const n = this.sid.voices[2].noiseShift;
-        return ((n>>15)&0xff);
-      }
-      if(reg===0x1c){ // ENV3
-        return this.sid.voices[2].envValue;
-      }
+    if(addr >= 0xd000){
+      const p=this.cpuPort();
+      if(addr >= 0xe000) return (p & 2) ? KERNAL[addr-0xe000] : this.mem[addr];
+      if((p & 4) && (p & 3)) return this.ioRead(addr);
     }
-    if(addr===0xdc0d){ // CIA1 ICR read: return flags, clear on read
-      const v = (this.ciaIcrFlags & 0x1f) | (this.irqLineAsserted()?0x80:0);
-      this.ciaIcrFlags = 0;
-      return v;
-    }
-    if(addr===0xdd0d){ // CIA2 ICR read (NMI source ack)
-      const v = (this.cia2IcrFlags & 0x1f) | (this.cia2IcrFlags?0x80:0);
-      this.cia2IcrFlags = 0;
-      return v;
-    }
-    if(addr===0xd019){ // VIC IRQ flag read
-      const v = (this.vicIrqFlags & 0x0f) | (this.vicIrqFlags?0x80:0);
-      return v;
-    }
-    if(addr===0xd012){ return this.rasterLine & 0xff; }
-    if(addr===0xd011){ return (this.vicD011lower & 0x7f) | (((this.rasterLine>>8)&1)<<7); }
     return this.mem[addr];
   }
   memWrite(addr,val){
-    addr&=0xffff; val&=0xff;
+    if(addr >= 0xd000 && addr < 0xe000){
+      const p=this.cpuPort();
+      if((p & 4) && (p & 3)){ this.ioWrite(addr, val); return; }
+    }
     this.mem[addr]=val;
-    if(addr>=0xd400 && addr<=0xd7ff && this.sid){
-      this.sid.writeRegister((addr-0xd400)%25, val);
-      return;
-    }
-    if(addr===0xdc04){ this.ciaTimerALatch = (this.ciaTimerALatch&0xff00)|val; return; }
-    if(addr===0xdc05){ this.ciaTimerALatch = (this.ciaTimerALatch&0x00ff)|(val<<8); this.ciaTimerACounter=this.ciaTimerALatch; return; }
-    if(addr===0xdc0e){ // CRA
-      this.ciaTimerARunning = !!(val&0x01);
-      this.ciaTimerAOneshot = !!(val&0x08);
-      if(val&0x10){ this.ciaTimerACounter = this.ciaTimerALatch; } // force load
-      return;
-    }
-    if(addr===0xdc0d){ // ICR mask write
-      if(val & 0x80){ this.ciaIcrMask |= (val & 0x1f); }
-      else { this.ciaIcrMask &= ~(val & 0x1f); }
-      return;
-    }
-    if(addr===0xdd04){ this.cia2TimerALatch = (this.cia2TimerALatch&0xff00)|val; return; }
-    if(addr===0xdd05){ this.cia2TimerALatch = (this.cia2TimerALatch&0x00ff)|(val<<8); this.cia2TimerACounter=this.cia2TimerALatch; return; }
-    if(addr===0xdd0e){
-      this.cia2TimerARunning = !!(val&0x01);
-      this.cia2TimerAOneshot = !!(val&0x08);
-      if(val&0x10){ this.cia2TimerACounter = this.cia2TimerALatch; }
-      return;
-    }
-    if(addr===0xdd0d){
-      if(val & 0x80){ this.cia2IcrMask |= (val & 0x1f); }
-      else { this.cia2IcrMask &= ~(val & 0x1f); }
-      return;
-    }
-    if(addr===0xd01a){ // VIC IRQ enable
-      this.vicIrqMask = val & 0x0f;
-      return;
-    }
-    if(addr===0xd019){ // VIC IRQ flag ack (write 1 to clear)
-      this.vicIrqFlags &= ~val;
-      return;
-    }
-    if(addr===0xd012){ this.vicRasterCompare = (this.vicRasterCompare&0x100)|val; return; }
-    if(addr===0xd011){ this.vicD011lower = val & 0x7f; this.vicRasterCompare = (this.vicRasterCompare&0xff)|((val&0x80)?0x100:0); return; }
   }
-  tickCia(cycles){
-    if(this.ciaTimerARunning){
-      this.ciaTimerACounter -= cycles;
-      while(this.ciaTimerACounter<=0){
-        this.ciaIcrFlags |= 0x01;
-        if(this.ciaTimerAOneshot){ this.ciaTimerARunning=false; this.ciaTimerACounter=0; break; }
-        this.ciaTimerACounter += Math.max(this.ciaTimerALatch,1);
-      }
+  ioRead(addr){
+    if(addr < 0xd400) return this.vicRead(addr & 0x3f);
+    if(addr < 0xd800) return this.sid.readRegister(addr);
+    if(addr < 0xdc00) return this.mem[addr] | 0xf0;          // Farb-RAM (4 Bit)
+    if(addr < 0xdd00) return this.cia1.read(addr & 0x0f);
+    if(addr < 0xde00) return this.cia2.read(addr & 0x0f);
+    return 0xff;                                             // offener Bus I/O1/I/O2
+  }
+  ioWrite(addr, val){
+    if(addr < 0xd400) this.vicWrite(addr & 0x3f, val);
+    else if(addr < 0xd800) this.sid.writeRegister(addr, val);
+    else if(addr < 0xdc00) this.mem[addr] = val & 0x0f;
+    else if(addr < 0xdd00) this.cia1.write(addr & 0x0f, val);
+    else if(addr < 0xde00) this.cia2.write(addr & 0x0f, val);
+  }
+
+  // ---------- VIC (nur Rasterzähler und Raster-IRQ) ----------
+  vicRead(r){
+    switch(r){
+      case 0x11: return (this.vicRegs[0x11] & 0x7f) | ((this.rasterLine & 0x100) ? 0x80 : 0);
+      case 0x12: return this.rasterLine & 0xff;
+      case 0x19: return (this.vicIrqFlags & 0x0f) | 0x70 | ((this.vicIrqFlags & this.vicIrqMask) ? 0x80 : 0);
+      case 0x1a: return this.vicIrqMask | 0xf0;
+      default: return this.vicRegs[r];
     }
-    if(this.cia2TimerARunning){
-      this.cia2TimerACounter -= cycles;
-      while(this.cia2TimerACounter<=0){
-        this.cia2IcrFlags |= 0x01;
-        if(this.cia2IcrMask & 0x01){ this.nmiPending = true; } // edge-triggered NMI
-        if(this.cia2TimerAOneshot){ this.cia2TimerARunning=false; this.cia2TimerACounter=0; break; }
-        this.cia2TimerACounter += Math.max(this.cia2TimerALatch,1);
-      }
+  }
+  vicWrite(r, val){
+    this.vicRegs[r]=val;
+    switch(r){
+      case 0x11: this.rasterCompare = (this.rasterCompare & 0xff) | ((val & 0x80) ? 0x100 : 0); break;
+      case 0x12: this.rasterCompare = (this.rasterCompare & 0x100) | val; break;
+      case 0x19: this.vicIrqFlags &= ~val & 0x0f; break;     // 1 schreiben = quittieren
+      case 0x1a: this.vicIrqMask = val & 0x0f; break;
     }
-    this.rasterCycleAccum += cycles;
-    while(this.rasterCycleAccum >= this.cyclesPerLine){
-      this.rasterCycleAccum -= this.cyclesPerLine;
-      this.rasterLine++;
-      if(this.rasterLine >= this.totalRasterLines) this.rasterLine = 0;
-      if(this.rasterLine === this.vicRasterCompare){
-        this.vicIrqFlags |= 0x01;
+  }
+  irqLine(){ return this.cia1.irq || ((this.vicIrqFlags & this.vicIrqMask) !== 0); }
+
+  tickHw(c){
+    this.cia1.tick(c);
+    this.cia2.tick(c);
+    const nl=this.cia2.irq;                       // CIA2 -> NMI ist flankengetriggert
+    if(nl && !this.nmiLine) this.nmiPending=true;
+    this.nmiLine=nl;
+    this.lineCycles += c;
+    while(this.lineCycles >= this.cyclesPerLine){
+      this.lineCycles -= this.cyclesPerLine;
+      if(++this.rasterLine >= this.totalLines) this.rasterLine=0;
+      if(this.rasterLine === this.rasterCompare) this.vicIrqFlags |= 0x01;
+    }
+    if(this.playMode){
+      if(this.initDone){
+        this.frameCnt -= c;
+        if(this.frameCnt <= 0){
+          this.frameCnt += this.framePeriod();
+          this.playPending = true;   // läuft play noch, wird der Aufruf einfach nachgeholt
+        }
+      } else {
+        this.initCycles += c;
+        if(this.initCycles > this.clockHz*3 && !this.initWarned){
+          this.initWarned=true;
+          this.port.postMessage({type:'warn', text:'Init-Routine kehrt nicht zurück – Tune evtl. inkompatibel.'});
+        }
       }
     }
   }
-  callSubroutine(addr, a=0,x=0,y=0){
-    this.cpu.a=a; this.cpu.x=x; this.cpu.y=y;
+  framePeriod(){
+    if(this.speedCIA){
+      const p=this.cia1.taLatch+1;
+      return p < 500 ? this.vbiCycles : p;
+    }
+    return this.vbiCycles;
+  }
+  bankFor(addr){
+    if(this.img.isRSID) return 0x37;
+    if(addr < 0xa000) return 0x37;
+    if(addr < 0xd000) return 0x36;
+    if(addr >= 0xe000) return 0x35;
+    return 0x34;
+  }
+  callFromIdle(addr){
+    const ret=(IDLE-1)&0xffff;
+    this.cpu.push((ret>>8)&0xff); this.cpu.push(ret&0xff);
     this.cpu.pc=addr;
-    const ret = this.stopAddr - 1;
-    this.cpu.push((ret>>8)&0xff);
-    this.cpu.push(ret&0xff);
-    let guard=0;
-    while(this.cpu.pc !== this.stopAddr && guard < 5_000_000){
-      const c = this.cpu.step();
-      this.tickCia(c);
-      guard++;
-    }
   }
+
+  // Tune (neu) in den Speicher legen und Subtune initialisieren
+  start(subtune){
+    const img=this.img;
+    this.subtune=subtune;
+    this.mem.fill(0);
+    for(let i=0;i<img.data.length;i++) this.mem[(img.loadAddress+i)&0xffff]=img.data[i];
+    this.mem[0]=0x2f;
+    // KERNAL-Softvektoren
+    this.mem[0x0314]=0x31; this.mem[0x0315]=0xea;
+    this.mem[0x0316]=0x66; this.mem[0x0317]=0xfe;
+    this.mem[0x0318]=0x47; this.mem[0x0319]=0xfe;
+
+    this.clockHz = img.clockHz;
+    const ntsc = img.clock==='NTSC';
+    this.totalLines = ntsc ? 263 : 312;
+    this.cyclesPerLine = ntsc ? 65 : 63;
+    this.vbiCycles = this.totalLines*this.cyclesPerLine;
+    this.rasterLine=0; this.lineCycles=0; this.rasterCompare=0;
+    this.vicIrqFlags=0; this.vicIrqMask=0; this.vicRegs.fill(0);
+
+    // CIAs wie nach KERNAL-Reset: CIA1 Timer A läuft (~60 Hz) mit IRQ
+    this.cia1.reset(); this.cia2.reset();
+    this.cia1.taLatch = ntsc ? 0x4295 : 0x4025;
+    this.cia1.ta = this.cia1.taLatch;
+    this.cia1.cra = 0x01; this.cia1.icrMask = 0x01;
+    this.nmiPending=false; this.nmiLine=false;
+
+    this.sid = new SID(this.model);
+    this.sid.sampleRateHint = sampleRate;
+    this.sid.filterOn = this.filterOn;
+
+    // PSID mit play-Adresse: Treiber ruft play im Takt auf.
+    // RSID oder PSID mit play=0: Tune installiert eigenen Interrupt.
+    this.playMode = !img.isRSID && img.playAddress!==0;
+    this.speedCIA = this.playMode && !!((img.speed >>> Math.min(subtune,31)) & 1);
+    this.idleCli = !this.playMode;
+    this.initDone=false; this.initCycles=0; this.initWarned=false; this.jamWarned=false;
+    this.playPending=false; this.frameCnt=0; this.cycleDebt=0;
+
+    const cpu=this.cpu;
+    cpu.reset();
+    this.mem[1] = this.bankFor(img.initAddress);
+    this.callFromIdle(img.initAddress);
+    cpu.a = subtune & 0xff;
+    cpu.i = !img.isRSID;      // RSID startet wie per SYS aus BASIC (IRQs an)
+    this.ready=true;
+  }
+
+  runOne(){
+    const cpu=this.cpu;
+    let c;
+    if(this.nmiPending){
+      this.nmiPending=false;
+      c=cpu.nmi();
+    } else if(!cpu.i && this.irqLine()){
+      c=cpu.irq();
+    } else if(cpu.pc===IDLE && !cpu.jam){
+      if(!this.initDone){
+        this.initDone=true;
+        this.frameCnt=this.framePeriod();
+      }
+      if(this.playPending){
+        this.playPending=false;
+        this.mem[1]=this.bankFor(this.img.playAddress);
+        this.callFromIdle(this.img.playAddress);
+        cpu.i=true;            // play läuft wie in einer IRQ-Routine
+        return 0;
+      }
+      if(this.idleCli) cpu.i=false;
+      c = Math.min(Math.max(2, Math.ceil(this.cycleDebt)), 64);
+    } else {
+      c=cpu.step();
+      if(cpu.jam && !this.jamWarned){
+        this.jamWarned=true;
+        this.port.postMessage({type:'warn', text:'CPU ist auf einen JAM-Opcode gelaufen ($'+cpu.pc.toString(16).toUpperCase()+').'});
+      }
+    }
+    this.tickHw(c);
+    return c;
+  }
+
   handleMessage(msg){
     if(msg.type==='load'){
-      this.mem.fill(0);
-      const data = new Uint8Array(msg.data);
-      for(let i=0;i<data.length;i++){ this.mem[(msg.loadAddress+i)&0xffff]=data[i]; }
-      this.clockHz = msg.clockHz;
-      this.refreshRate = msg.refreshRate;
-      this.initAddr = msg.initAddress;
-      this.playAddr = msg.playAddress;
-      this.useIrqMode = !!msg.isRSID;
-      this.framePeriodCycles = this.clockHz / this.refreshRate;
-      this.totalRasterLines = (this.refreshRate >= 55) ? 263 : 312; // NTSC : PAL
-      this.cyclesPerLine = this.clockHz / this.refreshRate / this.totalRasterLines;
-      this.sid = new SID(this.clockHz);
-      this.sid.sampleRateHint = sampleRate;
-      this.sid.filterOn = msg.filterOn;
-      this.cpu.reset();
-      this.cyclesSincePlay = 0;
-      this.ciaTimerARunning=false; this.ciaIcrMask=0; this.ciaIcrFlags=0;
-      this.cia2TimerARunning=false; this.cia2IcrMask=0; this.cia2IcrFlags=0; this.nmiPending=false;
-      this.vicIrqMask=0; this.vicIrqFlags=0; this.rasterLine=0; this.rasterCycleAccum=0;
-      if(this.useIrqMode){
-        // Minimaler "Fake-KERNAL"-Stub: viele RSID-Tunes route ihren IRQ-Handler
-        // nicht direkt über $FFFE, sondern über den KERNAL-Softvektor $0314/$0315,
-        // wie es die echte Hardware via $FFFE->$FF48->JMP($0314) tut. Ohne echtes
-        // KERNAL-ROM bilden wir nur die paar dafür nötigen Bytes nach:
-        //  $FF48: PHA TXA PHA TYA PHA JMP ($0314)   (Register retten, dispatch)
-        //  $EA31: PLA TAY PLA TAX PLA RTI           (KERNAL-Standard-Fortsetzung)
-        this.mem[0xff48]=0x48; this.mem[0xff49]=0x8a; this.mem[0xff4a]=0x48;
-        this.mem[0xff4b]=0x98; this.mem[0xff4c]=0x48; this.mem[0xff4d]=0x6c;
-        this.mem[0xff4e]=0x14; this.mem[0xff4f]=0x03;
-        this.mem[0xea31]=0x68; this.mem[0xea32]=0xa8; this.mem[0xea33]=0x68;
-        this.mem[0xea34]=0xaa; this.mem[0xea35]=0x68; this.mem[0xea36]=0x40;
-        this.mem[0xfffe]=0x48; this.mem[0xffff]=0xff; // Hardware-IRQ-Vektor -> Stub
-        this.mem[0x0314]=0x31; this.mem[0x0315]=0xea; // Standard-KERNAL-Default (IRQ)
-        // Analoger Stub für NMI (z.B. CIA2-Timer-getriebene Player):
-        //  $FE43: PHA TXA PHA TYA PHA JMP ($0318)
-        this.mem[0xfe43]=0x48; this.mem[0xfe44]=0x8a; this.mem[0xfe45]=0x48;
-        this.mem[0xfe46]=0x98; this.mem[0xfe47]=0x48; this.mem[0xfe48]=0x6c;
-        this.mem[0xfe49]=0x18; this.mem[0xfe4a]=0x03;
-        this.mem[0xfffa]=0x43; this.mem[0xfffb]=0xfe; // NMI-Vektor -> Stub
-        this.mem[0x0318]=0x50; this.mem[0x0319]=0xfe; // Default-NMI-Ziel: RTI-Stub (falls Tune $0318 nicht selbst setzt)
-        this.mem[0xfe50]=0x40; // RTI
-        // Idle-Loop fern von typischen Tune-Adressbereichen (RSID-Daten liegen
-        // konventionell unterhalb $E000); hier wartet die CPU zwischen IRQs.
-        this.mem[0xff00]=0x4c; this.mem[0xff01]=0x00; this.mem[0xff02]=0xff;
-      }
-      this.callSubroutine(this.initAddr, msg.subtune);
-      if(this.useIrqMode){
-        this.cpu.i = false; // Emulator aktiviert IRQs nach Init, wie im RSID-Modell üblich
-        this.cpu.pc = 0xff00;
-      }
+      this.img = {
+        data: new Uint8Array(msg.data), loadAddress: msg.loadAddress,
+        initAddress: msg.initAddress, playAddress: msg.playAddress,
+        clockHz: msg.clockHz, clock: msg.clock, isRSID: !!msg.isRSID, speed: msg.speed>>>0
+      };
+      this.filterOn = msg.filterOn;
+      this.model = msg.model;
+      this.start(msg.subtune);
       this.playing = true;
-      this.ready = true;
-      this.port.postMessage({type:'loaded', mode: this.useIrqMode?'irq':'direct'});
+      this.port.postMessage({type:'loaded', mode: this.playMode ? (this.speedCIA?'cia':'vbi') : 'irq'});
     } else if(msg.type==='subtune'){
-      if(!this.ready) return;
-      this.ciaTimerARunning=false; this.ciaIcrMask=0; this.ciaIcrFlags=0;
-      this.cia2TimerARunning=false; this.cia2IcrMask=0; this.cia2IcrFlags=0; this.nmiPending=false;
-      this.vicIrqMask=0; this.vicIrqFlags=0;
-      this.callSubroutine(this.initAddr, msg.subtune);
-      if(this.useIrqMode){ this.cpu.i = false; this.cpu.pc = 0xff00; }
-      this.cyclesSincePlay=0;
+      if(!this.img) return;
+      this.start(msg.subtune);
+      this.port.postMessage({type:'loaded', mode: this.playMode ? (this.speedCIA?'cia':'vbi') : 'irq'});
     } else if(msg.type==='play'){
       this.playing = true;
+    } else if(msg.type==='pause'){
+      this.playing = false;
     } else if(msg.type==='stop'){
       this.playing = false;
+      if(this.img) this.start(this.subtune);
     } else if(msg.type==='filter'){
+      this.filterOn = msg.on;
       if(this.sid) this.sid.filterOn = msg.on;
+    } else if(msg.type==='model'){
+      this.model = msg.model;
+      if(this.sid) this.sid.setModel(msg.model);
     } else if(msg.type==='volume'){
       this.gain = msg.value;
     }
   }
+
   process(inputs, outputs){
     const out = outputs[0][0];
     if(!this.ready || !this.playing || !this.sid){
       out.fill(0);
       return true;
     }
-    const cyclesPerSample = this.clockHz / sampleRate;
-    const framePeriod = this.clockHz / this.refreshRate;
-    const gain = (this.gain!==undefined)?this.gain:0.8;
-    if(this.useIrqMode){
-      for(let i=0;i<out.length;i++){
-        let debt = cyclesPerSample;
-        let guard = 0;
-        while(debt > 0 && guard < 2000){
-          guard++;
-          if(this.nmiPending){
-            this.nmiPending = false;
-            const c = this.cpu.nmi();
-            debt -= c;
-            this.tickCia(c);
-            continue;
-          }
-          if(this.irqLineAsserted() && !this.cpu.i){
-            const c = this.cpu.irq();
-            debt -= c;
-            this.tickCia(c);
-            continue;
-          }
-          const c = this.cpu.step();
-          debt -= c;
-          this.tickCia(c);
-        }
-        out[i] = this.sid.process(cyclesPerSample) * gain;
-      }
-    } else {
-      for(let i=0;i<out.length;i++){
-        this.cyclesSincePlay += cyclesPerSample;
-        if(this.cyclesSincePlay >= framePeriod){
-          this.cyclesSincePlay -= framePeriod;
-          this.callSubroutine(this.playAddr);
-        }
-        out[i] = this.sid.process(cyclesPerSample) * gain;
-      }
+    const cps = this.clockHz / sampleRate;
+    for(let i=0;i<out.length;i++){
+      this.cycleDebt += cps;
+      while(this.cycleDebt > 0) this.cycleDebt -= this.runOne();
+      out[i] = this.sid.process(cps) * this.gain;
     }
     return true;
   }
@@ -928,20 +977,23 @@ registerProcessor('sid-player', SidPlayerProcessor);
 
 // ---------- Main-Thread: PSID-Parser, UI, AudioWorkletNode ----------
 let audioCtx=null, workletNode=null, analyser=null;
-let currentHeader=null, currentData=null;
-let animId=null;
+let audioReady=null;
+let currentHeader=null;
 
 function parsePSID(buf){
+  if(buf.byteLength < 0x76) throw new Error('Datei zu kurz für einen PSID/RSID-Header');
   const dv = new DataView(buf);
   const magic = String.fromCharCode(dv.getUint8(0),dv.getUint8(1),dv.getUint8(2),dv.getUint8(3));
   if(magic!=='PSID' && magic!=='RSID') throw new Error('Kein gültiges PSID/RSID-File');
   const version = dv.getUint16(4);
   const dataOffset = dv.getUint16(6);
   let loadAddress = dv.getUint16(8);
-  const initAddress = dv.getUint16(10);
+  const initAddressRaw = dv.getUint16(10);
   const playAddress = dv.getUint16(12);
-  const songs = dv.getUint16(14);
-  const startSong = dv.getUint16(16);
+  const songs = Math.max(1, dv.getUint16(14));
+  let startSong = dv.getUint16(16);
+  if(startSong<1 || startSong>songs) startSong=1;
+  const speed = dv.getUint32(0x12);
   const readStr = (off,len)=>{
     let s='';
     for(let i=0;i<len;i++){
@@ -954,19 +1006,30 @@ function parsePSID(buf){
   const name = readStr(0x16,32);
   const author = readStr(0x36,32);
   const released = readStr(0x56,32);
-  let flags=0, clock='PAL';
-  if(version>=2){
+  let flags=0, clock='PAL', model=null, secondSid=0;
+  if(version>=2 && buf.byteLength>=0x7c){
     flags = dv.getUint16(0x76);
     const clockBits = (flags>>2)&0x03;
     clock = (clockBits===2) ? 'NTSC' : 'PAL';
+    const modelBits = (flags>>4)&0x03;
+    if(modelBits===1) model=6581; else if(modelBits===2) model=8580;
+    if(version>=3) secondSid = dv.getUint8(0x7a);
   }
+  const isRSID = magic==='RSID';
+  if(!isRSID && (flags & 1)) throw new Error('Compute!-Sidplayer-Format (MUS) wird nicht unterstützt');
+  if(dataOffset >= buf.byteLength) throw new Error('Datenoffset liegt hinter dem Dateiende');
   let data = new Uint8Array(buf, dataOffset);
   if(loadAddress===0){
+    if(data.length<2) throw new Error('Keine Ladeadresse in den Daten');
     loadAddress = data[0] | (data[1]<<8);
     data = data.slice(2);
   }
-  return { version, loadAddress, initAddress, playAddress, songs, startSong, name, author, released, clock, data, isRSID: magic==='RSID' };
+  const initAddress = initAddressRaw || loadAddress;   // init=0 heißt: init = Ladeadresse
+  return { version, loadAddress, initAddress, playAddress, songs, startSong, speed, name, author, released,
+           clock, model, flags, secondSid, data, isRSID, needsBasic: isRSID && !!(flags & 2) };
 }
+
+function setStatus(t){ document.getElementById('status').textContent = t; }
 
 function setupUI(){
   const drop = document.getElementById('drop');
@@ -980,13 +1043,23 @@ function setupUI(){
   });
   fileInput.addEventListener('change', e=>{
     if(e.target.files.length) loadFile(e.target.files[0]);
+    fileInput.value='';
   });
   document.getElementById('playBtn').addEventListener('click', ()=>{
+    if(!workletNode) return;
     if(audioCtx.state==='suspended') audioCtx.resume();
     workletNode.port.postMessage({type:'play'});
+    setStatus('Spielt.');
+  });
+  document.getElementById('pauseBtn').addEventListener('click', ()=>{
+    if(!workletNode) return;
+    workletNode.port.postMessage({type:'pause'});
+    setStatus('Pausiert.');
   });
   document.getElementById('stopBtn').addEventListener('click', ()=>{
+    if(!workletNode) return;
     workletNode.port.postMessage({type:'stop'});
+    setStatus('Gestoppt (zurück auf Anfang).');
   });
   document.getElementById('volume').addEventListener('input', e=>{
     if(workletNode) workletNode.port.postMessage({type:'volume', value:e.target.value/100});
@@ -994,25 +1067,39 @@ function setupUI(){
   document.getElementById('filterOn').addEventListener('change', e=>{
     if(workletNode) workletNode.port.postMessage({type:'filter', on:e.target.checked});
   });
+  document.getElementById('sidModel').addEventListener('change', e=>{
+    if(workletNode) workletNode.port.postMessage({type:'model', model:+e.target.value});
+  });
 }
 
-async function ensureAudio(){
-  if(audioCtx) return;
-  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
-  const blob = new Blob([workletCode], {type:'application/javascript'});
-  const url = URL.createObjectURL(blob);
-  await audioCtx.audioWorklet.addModule(url);
-  workletNode = new AudioWorkletNode(audioCtx, 'sid-player', {outputChannelCount:[1]});
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 1024;
-  workletNode.connect(analyser);
-  analyser.connect(audioCtx.destination);
-  workletNode.port.onmessage = (e)=>{
-    if(e.data.type==='loaded'){
-      document.getElementById('status').textContent = 'Bereit.';
-    }
-  };
-  drawScope();
+function ensureAudio(){
+  if(!audioReady){
+    audioReady = (async ()=>{
+      audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+      const blob = new Blob([workletCode], {type:'application/javascript'});
+      const url = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      workletNode = new AudioWorkletNode(audioCtx, 'sid-player', {outputChannelCount:[1]});
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      workletNode.connect(analyser);
+      analyser.connect(audioCtx.destination);
+      workletNode.port.onmessage = (e)=>{
+        const d=e.data;
+        if(d.type==='loaded'){
+          const modeTxt = d.mode==='irq' ? 'eigener Interrupt (IRQ/NMI)'
+                        : d.mode==='cia' ? 'play per CIA-Timer' : 'play per Rasterzeile';
+          const extra = audioCtx.state==='suspended' ? ' – zum Abspielen „Play“ drücken.' : '';
+          setStatus('Bereit: '+modeTxt+'.'+extra);
+        } else if(d.type==='warn'){
+          setStatus('Hinweis: '+d.text);
+        }
+      };
+      drawScope();
+    })();
+  }
+  return audioReady;
 }
 
 function drawScope(){
@@ -1020,7 +1107,7 @@ function drawScope(){
   const ctx = canvas.getContext('2d');
   const buf = new Uint8Array(analyser.fftSize);
   function frame(){
-    animId = requestAnimationFrame(frame);
+    requestAnimationFrame(frame);
     analyser.getByteTimeDomainData(buf);
     ctx.fillStyle = '#0d0d1a';
     ctx.fillRect(0,0,canvas.width,canvas.height);
@@ -1041,16 +1128,26 @@ async function loadFile(file){
   const buf = await file.arrayBuffer();
   let header;
   try{ header = parsePSID(buf); }
-  catch(err){ document.getElementById('status').textContent = 'Fehler: '+err.message; return; }
+  catch(err){ setStatus('Fehler: '+err.message); return; }
   currentHeader = header;
-  await ensureAudio();
+  try{ await ensureAudio(); }
+  catch(err){ setStatus('Audio konnte nicht gestartet werden: '+err.message); return; }
+  if(audioCtx.state==='suspended') audioCtx.resume().catch(()=>{});
+
+  const modelSel = document.getElementById('sidModel');
+  if(header.model) modelSel.value = String(header.model);
+
+  const notes=[];
+  if(header.secondSid) notes.push('2. SID ($D'+(header.secondSid).toString(16).toUpperCase()+'0) wird nicht emuliert');
+  if(header.needsBasic) notes.push('Tune braucht das BASIC-ROM – läuft evtl. nicht');
 
   document.getElementById('meta').innerHTML =
     '<span class="label">Titel:</span> '+escapeHtml(header.name)+'<br>'+
     '<span class="label">Autor:</span> '+escapeHtml(header.author)+'<br>'+
     '<span class="label">Copyright:</span> '+escapeHtml(header.released)+'<br>'+
     '<span class="label">Format:</span> '+(header.isRSID?'RSID':'PSID')+' v'+header.version+' &middot; '+header.clock+' &middot; '+header.songs+' Subtune(s)'+
-    (header.isRSID?' &middot; IRQ-Modus':'');
+    (header.model?' &middot; '+header.model:'')+
+    (notes.length?'<br><span class="label">Hinweis:</span> '+escapeHtml(notes.join('; ')):'');
 
   const subtunesDiv = document.getElementById('subtunes');
   subtunesDiv.innerHTML='';
@@ -1061,13 +1158,14 @@ async function loadFile(file){
     b.addEventListener('click', ()=>{
       document.querySelectorAll('#subtunes button').forEach(x=>x.classList.remove('active'));
       b.classList.add('active');
+      if(audioCtx.state==='suspended') audioCtx.resume();
       workletNode.port.postMessage({type:'subtune', subtune:s-1});
+      workletNode.port.postMessage({type:'play'});
     });
     subtunesDiv.appendChild(b);
   }
 
   const clockHz = header.clock==='NTSC' ? 1022727 : 985248;
-  const refreshRate = header.clock==='NTSC' ? 60 : 50;
 
   workletNode.port.postMessage({
     type:'load',
@@ -1076,15 +1174,18 @@ async function loadFile(file){
     initAddress: header.initAddress,
     playAddress: header.playAddress,
     subtune: header.startSong-1,
-    clockHz, refreshRate,
+    speed: header.speed,
+    clockHz, clock: header.clock,
     isRSID: header.isRSID,
+    model: +modelSel.value,
     filterOn: document.getElementById('filterOn').checked
   });
   workletNode.port.postMessage({type:'volume', value: document.getElementById('volume').value/100});
 
   document.getElementById('playBtn').disabled=false;
+  document.getElementById('pauseBtn').disabled=false;
   document.getElementById('stopBtn').disabled=false;
-  document.getElementById('status').textContent = 'Lädt...';
+  setStatus('Lädt...');
 }
 
 function escapeHtml(s){
