@@ -105,6 +105,7 @@ footer a{color:#8fc1ff}
     <label>Kurbelversatz (Phasenwinkel) <b id="vAl"></b><input type="range" id="al" min="0" max="180" step="5" value="90"></label>
     <label>Totvolumen (Wolle, Düsen, Schlauch) <b id="vTot"></b><input type="range" id="tot" min="0.2" max="3" step="0.1" value="1"></label>
     <label>Regenerator-Wirkungsgrad ε <b id="vEps"></b><input type="range" id="eps" min="0" max="1" step="0.01" value="0.2"></label>
+    <label class="chk" style="display:block;margin-top:6px"><input type="checkbox" id="patrone"> Regeneratorpatrone im Schlauch zeigen (Länge wächst mit ε)</label>
     <label>Drehzahl (für Leistung) <b id="vN"></b><input type="range" id="rpm" min="50" max="3000" step="50" value="400"></label>
     <label>Animationstempo <b id="vTempo"></b><input type="range" id="tempo" min="0.03" max="1.5" step="0.01" value="0.25"></label>
     <div id="phase"></div>
@@ -144,7 +145,7 @@ footer a{color:#8fc1ff}
 <ul>
 <li><b>Heiße Spritze</b> (vorne, über dem Brenner): Ihr Kolben begrenzt den Expansionsraum. Die <b>Stahlwolle</b> in der Spitze ist der Heizer – die Flamme erhitzt das Glas, die feine Wolle gibt die Wärme mit großer Oberfläche ans Gas weiter.</li>
 <li><b>Kalte Spritze</b> (hinten): Kompressionsraum. Die <b>Kupferwolle</b> in der Spitze ist der Kühler; Kupfer leitet gut und gibt die Wärme über das Glas an die Raumluft ab.</li>
-<li><b>Silikonschlauch:</b> verbindet die beiden Spitzen. Einen echten Regenerator gibt es hier nicht – der Schlauch speichert kaum Wärme. Deshalb steht ε in dieser Voreinstellung nur auf 20 %: Ein großer Teil der Wärme, die das Gas auf dem Weg nach heiß aufnehmen müsste, kommt direkt aus der Flamme und geht auf dem Rückweg an der kalten Seite verloren. Schiebe ε auf 100 % und sieh, wie sich der Wirkungsgrad verbessern würde.</li>
+<li><b>Silikonschlauch:</b> verbindet die beiden Spitzen. Einen echten Regenerator gibt es hier nicht – der Schlauch speichert kaum Wärme. Deshalb steht ε in dieser Voreinstellung nur auf 20 %: Ein großer Teil der Wärme, die das Gas auf dem Weg nach heiß aufnehmen müsste, kommt direkt aus der Flamme und geht auf dem Rückweg an der kalten Seite verloren. Schiebe ε auf 100 % und sieh, wie sich der Wirkungsgrad verbessern würde. Mit „Regeneratorpatrone im Schlauch zeigen“ siehst du, wo ein echter Regenerator säße: ein Rohrstück voll feinem Drahtgewebe, innen mit einem Temperaturgefälle von kalt nach heiß. Je besser der Regenerator (größeres ε), desto länger ist die Patrone gezeichnet – in echten Maschinen heißt das: mehr Gewebe, mehr Speicherfläche.</li>
 <li><b>Kurbeln:</b> die heiße Kurbel läuft der kalten um 90° voraus. Stell den Kurbelversatz auf 0° oder 180° – dann bewegen sich beide Kolben gleichläufig bzw. genau gegenläufig. Bei 180° wird keine Arbeit mehr umgesetzt, bei 0° sogar negative: Die Maschine müsste angetrieben werden.</li>
 </ul>
 <p>Die berechnete Leistung ist die Obergrenze ohne Reibung, Leckage am Kolben und mit perfektem Wärmeübergang. Ein echtes Spritzenmodell kommt mit einer kleinen Flamme auf einige hundert Umdrehungen pro Minute und gerade genug Leistung, um die eigene Reibung zu überwinden.</p>
@@ -363,6 +364,7 @@ function setzePreset() {
   const P = preset();
   for (const k of ['Th', 'Tk', 'pm', 'al', 'tot', 'eps', 'rpm']) $(k).value = P[k];
   $('gas').value = P.gas;
+  $('patrone').checked = $('preset').value === 'technik';
 }
 const par = () => {
   const tot = +$('tot').value;
@@ -587,8 +589,25 @@ function baueMaschine() {
 
   // Silikonschlauch (Reihenfolge: kalte Düse -> heiße Düse)
   const xs = G3.xDuese;
-  const kurve = new THREE.CatmullRomCurve3([V3(xs - 0.4, y, G3.zC), V3(xs + 1.4, y, G3.zC), V3(xs + 2.7, y, 0), V3(xs + 1.4, y, G3.zH), V3(xs - 0.4, y, G3.zH)]);
-  root.add(new THREE.Mesh(new THREE.TubeGeometry(kurve, 80, 0.26, 14), new THREE.MeshStandardMaterial({ color: 0xe8f2f0, transparent: true, opacity: 0.35, roughness: 0.3, depthWrite: false })));
+  const kurve = new THREE.CatmullRomCurve3([V3(xs - 0.4, y, G3.zC), V3(xs + 1.2, y, G3.zC), V3(xs + 2.5, y, G3.zC + 0.7),
+    V3(xs + 2.9, y, -0.9), V3(xs + 2.9, y, 0.9), V3(xs + 2.5, y, G3.zH - 0.7), V3(xs + 1.2, y, G3.zH), V3(xs - 0.4, y, G3.zH)]);
+  root.add(new THREE.Mesh(new THREE.TubeGeometry(kurve, 100, 0.26, 14), new THREE.MeshStandardMaterial({ color: 0xe8f2f0, transparent: true, opacity: 0.35, roughness: 0.3, depthWrite: false })));
+
+  // Regeneratorpatrone (optional): Rohrstück mit Drahtgewebe, Scheiben zeigen den Temperaturverlauf kalt → heiß
+  const patrone = new THREE.Group(); root.add(patrone);
+  const NPS = 12, patScheiben = [];
+  for (let i = 0; i < NPS; i++) {
+    const m = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 1 / NPS * 0.94, 24),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, metalness: 0.2, transparent: true, opacity: 0.4, depthWrite: false }));
+    m.position.y = (i + 0.5) / NPS - 0.5; patrone.add(m); patScheiben.push(m);
+  }
+  const gewebe = new THREE.Mesh(new THREE.CylinderGeometry(0.53, 0.53, 1, 16, 10, true),
+    new THREE.MeshBasicMaterial({ color: 0x2a2a2a, wireframe: true, transparent: true, opacity: 0.55 }));
+  patrone.add(gewebe);
+  const huelle = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.6, 1, 32, 1, true),
+    new THREE.MeshStandardMaterial({ color: 0xd8e4ea, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+  patrone.add(huelle);
+  for (const yy of [-0.5, 0.5]) { const r = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.06, 8, 28), metall(0x9aa0a8)); r.rotation.x = Math.PI / 2; r.position.y = yy; patrone.add(r); }
 
   // Spiritusbrenner unter der Stahlwolle
   const xb = G3.xWm;
@@ -621,10 +640,11 @@ function baueMaschine() {
   lab('kalte Spritze – Kompressionsraum', '#7fb4ff', V3(10.6, y + 2.0, G3.zC));
   lab('Kupferwolle (Kühler)', '#e8a070', V3(G3.xWm + 0.5, y + 3.9, G3.zC));
   lab('Stahlwolle (Heizer)', '#ff9a72', V3(G3.xWm + 3.2, y - 1.1, G3.zH + 0.6));
-  lab('Schlauch', '#c6a8ff', V3(xs + 3.6, y + 0.9, 0));
+  lab('Schlauch', '#c6a8ff', V3(xs + 1.6, y + 1.1, G3.zC - 0.4));
+  lab('Regeneratorpatrone', '#c6a8ff', V3(xs + 4.4, y - 0.9, 0)); labels[labels.length - 1].nur = () => $('patrone').checked;
   lab('Spiritusbrenner', '#ffd25a', V3(xb + 2.4, 1.3, G3.zH + 0.8));
 
-  MA = { root, kH, kC, pH, pC, sH, sC, schwung, flammen, teil, labels, pfH, pfK, pfR, kurve, kurvenLaenge: kurve.getLength(),
+  MA = { root, kH, kC, pH, pC, sH, sC, schwung, flammen, teil, labels, pfH, pfK, pfR, kurve, kurvenLaenge: kurve.getLength(), patrone, patScheiben,
          posH: V3(G3.xWm, y - 1.1, G3.zH), posK: V3(G3.xWm, y + 1.1, G3.zC), posR: V3(xs + 2.7, y + 0.35, 0) };
 }
 
@@ -655,6 +675,19 @@ function update3D(s, zeit) {
     const k = 0.85 + 0.2 * Math.sin(zeit * 11 + i * 1.7) + 0.08 * Math.sin(zeit * 29 + i);
     const h = f.userData.h * k; f.scale.set(1, h, 1); f.position.y = 2.75 + h / 2;
   });
+  // Regeneratorpatrone: Länge wächst mit ε, sitzt mittig im geraden Schlauchstück
+  const mitPatrone = $('patrone').checked;
+  let u0 = 0, u1 = 1;
+  MA.patrone.visible = mitPatrone;
+  if (mitPatrone) {
+    const Lp = Math.min(2.0, 0.6 + 1.5 * P.eps), du = Lp / 2 / MA.kurvenLaenge;
+    u0 = 0.5 - du; u1 = 0.5 + du;
+    const a = MA.kurve.getPointAt(u0), b = MA.kurve.getPointAt(u1), d = b.clone().sub(a);
+    MA.patrone.position.copy(a).add(b).multiplyScalar(0.5);
+    MA.patrone.quaternion.setFromUnitVectors(V3(0, 1, 0), d.clone().normalize());
+    MA.patrone.scale.set(1, d.length(), 1);
+    MA.patScheiben.forEach((m, i) => m.material.color.setRGB(...tFarbe(E.Tk + (E.Th - E.Tk) * (i + 0.5) / MA.patScheiben.length)));
+  }
   // Wärmepfeile (Wert > 0: Wärme ins Gas)
   const q = E.qmax || 1;
   const setzePfeil = (pf, anker, seite, wert) => {
@@ -666,7 +699,7 @@ function update3D(s, zeit) {
   };
   setzePfeil(MA.pfH, MA.posH, 'unten', s.dQheiss);
   setzePfeil(MA.pfK, MA.posK, 'oben', s.dQkalt);
-  setzePfeil(MA.pfR, MA.posR, 'oben', s.dQr);
+  setzePfeil(MA.pfR, mitPatrone ? MA.patrone.position.clone().setY(y + 0.65) : MA.posR, 'oben', s.dQr);
   // Teilchen: Massenkoordinate läuft vom kalten Kolben über Kupferwolle, Schlauch, Stahlwolle zum heißen Kolben
   const mg = s.m, Mt = mg.reduce((a, b) => a + b, 0), kum = [0];
   for (const x of mg) kum.push(kum[kum.length - 1] + x / Mt);
@@ -678,16 +711,22 @@ function update3D(s, zeit) {
     let x, z, rad, T;
     if (i === 0) { x = fC + 0.06 + f * (G3.xWolle - fC - 0.1); z = G3.zC; rad = G3.Rin * 0.8; T = s.Tc; }
     else if (i === 4) { x = G3.xWolle - 0.04 - f * (G3.xWolle - fH - 0.1); z = G3.zH; rad = G3.Rin * 0.8; T = s.Te; }
-    else if (i === 1 || i === 3) {
-      x = i === 1 ? G3.xWolle + f * lauf : G3.xDuese - f * lauf;
+    let uSchlauch = -1;   // ≥ 0: Teilchen sitzt im Schlauch an dieser Stelle
+    if (i === 1 || i === 3) {
+      // Kühler bzw. Heizer: Wolle + Düse, mit Patrone auch das Schlauchstück bis zur Patrone
+      const Lt = (i === 1 ? u0 : 1 - u1) * MA.kurvenLaenge, sw = f * (lauf + Lt);
+      if (i === 1) { if (sw < lauf) x = G3.xWolle + sw; else uSchlauch = (sw - lauf) / MA.kurvenLaenge; }
+      else { if (sw < Lt) uSchlauch = u1 + sw / MA.kurvenLaenge; else x = G3.xDuese - (sw - Lt); }
       z = i === 1 ? G3.zC : G3.zH;
       rad = x < G3.xSpitze ? G3.Rin * 0.85 : Math.max(0.1, 0.8 - (x - G3.xSpitze) * 1.2);
       T = i === 1 ? E.Tk : E.Th;
     }
-    if (i === 2) {
-      MA.kurve.getPointAt(Math.min(1, Math.max(0, f)), v);
-      v.x += Math.cos(j.a) * j.r * 0.12; v.y += j.b * 0.12; v.z += Math.sin(j.a) * j.r * 0.12;
-      T = E.Tk + (E.Th - E.Tk) * f;
+    if (i === 2) uSchlauch = u0 + f * (u1 - u0);
+    if (uSchlauch >= 0) {
+      MA.kurve.getPointAt(Math.min(1, Math.max(0, uSchlauch)), v);
+      const rr = (i === 2 && mitPatrone) ? 0.4 : 0.12;
+      v.x += Math.cos(j.a) * j.r * rr; v.y += j.b * rr; v.z += Math.sin(j.a) * j.r * rr;
+      if (i === 2) T = E.Tk + (E.Th - E.Tk) * f;
     } else {
       v.set(x, y + Math.cos(j.a) * j.r * rad, z + Math.sin(j.a) * j.r * rad);
     }
@@ -698,7 +737,7 @@ function update3D(s, zeit) {
   const box = $('ansicht'), w = box.clientWidth, h = box.clientHeight;
   for (const l of MA.labels) {
     const p = l.pos.clone().project(camera);
-    l.el.style.display = p.z < 1 ? 'block' : 'none';
+    l.el.style.display = p.z < 1 && (!l.nur || l.nur()) ? 'block' : 'none';
     l.el.style.left = ((p.x + 1) / 2 * w) + 'px'; l.el.style.top = ((1 - p.y) / 2 * h) + 'px';
   }
 }
@@ -794,7 +833,8 @@ function pfeil(c, x1, y1, x2, y2, farbe, breite) {
 }
 function zeichneGas(i) {
   const { c, w, h } = flaeche($('cvGas')), s = E.S[i];
-  const namen = preset().namen;
+  const namen = preset().namen.slice();
+  if ($('patrone').checked && $('preset').value === 'spritze') namen[2] = 'Regenerator-\npatrone';
   const Ts = [s.Tc, E.Tk, E.Tr, E.Th, s.Te], Vs = [s.Vc, E.Vk, E.Vr, E.Vh, s.Ve];
   const Mt = s.m.reduce((a, b) => a + b, 0);
   const gap = Math.min(70, w * 0.06), bw = (w - gap * 6) / 5, top = 62, bh = h - top - 34;
@@ -858,6 +898,7 @@ function schleife(t) {
 }
 
 $('preset').addEventListener('input', () => { setzePreset(); neuRechnen(); letztePhase = ''; });
+$('patrone').addEventListener('input', () => {});
 ['Th', 'Tk', 'pm', 'al', 'tot', 'eps', 'rpm', 'modell', 'gas'].forEach(id => $(id).addEventListener('input', () => { neuRechnen(); letztePhase = ''; }));
 $('tempo').addEventListener('input', () => { $('vTempo').textContent = zahl(+$('tempo').value, 2) + ' U/s'; });
 $('bLauf').onclick = () => { laeuft = !laeuft; $('bLauf').textContent = laeuft ? '⏸ Pause' : '▶ Weiter'; $('bLauf').classList.toggle('an', laeuft); };
