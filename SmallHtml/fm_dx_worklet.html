@@ -41,7 +41,7 @@ select{background:#1e1e1e;color:#e0e0e0;border:0.5px solid #333;border-radius:4p
 .mini-v{color:#e8a030;font-size:8px}
 input[type=range]{width:100%;height:3px;accent-color:#e8a030;cursor:pointer;display:block}
 #scope{display:block;width:100%;height:70px;background:#141414;border-radius:4px}
-#kb{position:relative;height:90px;display:flex;gap:1px;margin-top:8px;user-select:none}
+#kb{position:relative;height:90px;display:flex;gap:1px;margin-top:8px;user-select:none;touch-action:none}
 .wkey{background:#d8d8d8;border:0.5px solid #999;border-radius:0 0 4px 4px;position:relative;cursor:pointer}
 .wkey.dn{background:#e8a030}
 .bkey{position:absolute;top:0;height:56%;background:#222;border:0.5px solid #555;border-radius:0 0 3px 3px;z-index:10;cursor:pointer}
@@ -63,7 +63,8 @@ input[type=range]{width:100%;height:3px;accent-color:#e8a030;cursor:pointer;disp
     <span class="lbl">ALGORITHM</span><select id="alg"></select>
     <button class="btn" id="start">&#9654; AUDIO AN</button>
     <button class="btn" id="panic">PANIC</button>
-    <button class="btn" id="dump">&#8599; PATCH</button>
+    <button class="btn" id="dump">&#8599; PATCH SPEICHERN</button>
+    <button class="btn" id="load">&#8601; PATCH LADEN</button><input type="file" id="loadfile" accept=".json,application/json" hidden>
     <button class="btn" id="octdn">OCT -</button><span class="lbl" id="oct">0</span><button class="btn" id="octup">OCT +</button>
   </div>
   <div class="top">
@@ -73,7 +74,8 @@ input[type=range]{width:100%;height:3px;accent-color:#e8a030;cursor:pointer;disp
   </div>
   <div id="ops"></div>
   <div id="kb"></div>
-  <div class="hint">Tasten: y&hellip;m untere Oktave, q&hellip;i obere, Pfeil links/rechts = Oktave. Anschlagstaerke = vertikale Klickposition auf der Taste. MIDI-Keyboard wird automatisch erkannt.</div>
+  <div class="hint">Tasten: y&hellip;m untere Oktave, q&hellip;i obere, Pfeil links/rechts = Oktave. Anschlagstaerke = vertikale Klickposition auf der Taste. MIDI-Keyboard wird automatisch erkannt (Noten, Haltepedal, Pitch Bend &plusmn;2 HT).</div>
+  <div class="hint"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#3ab0e8">itzwieseltal.wordpress.com</a></div>
 </div>
 <script>
 const WORKLET_SRC = `/* ---- 6-Operator FM-Kernel, laeuft im AudioWorkletGlobalScope ---- */
@@ -99,12 +101,12 @@ class Voice {
   constructor() {
     this.ph = new Float64Array(NOP);
     this.inc = new Float64Array(NOP);
-    this.amp = new Float32Array(NOP);
-    this.tgt = new Float32Array(NOP);
-    this.coef = new Float32Array(NOP);
+    this.amp = new Float64Array(NOP);
+    this.tgt = new Float64Array(NOP);
+    this.coef = new Float64Array(NOP);
     this.stage = new Int8Array(NOP);
     this.out = new Float32Array(NOP);
-    this.lvl = new Float32Array(NOP);
+    this.lvl = new Float64Array(NOP);
     this.fb1 = 0; this.fb2 = 0;
     this.on = false; this.held = false; this.note = -1; this.age = 0;
     this.base = 440; this.pegT = 0;
@@ -116,6 +118,7 @@ class FMProcessor extends AudioWorkletProcessor {
     super();
     this.patch = null;
     this.counter = 0;
+    this.bend = 0;                                     /* Pitch Bend in Halbtoenen */
     const n = (opts && opts.processorOptions && opts.processorOptions.polyphony) || 16;
     this.voices = []; for (let i = 0; i < n; i++) this.voices.push(new Voice());
     this.port.onmessage = e => this.onMsg(e.data);
@@ -126,6 +129,7 @@ class FMProcessor extends AudioWorkletProcessor {
     else if (m.type === 'noteOn') this.noteOn(m.note, m.vel);
     else if (m.type === 'noteOff') this.noteOff(m.note);
     else if (m.type === 'allOff') this.voices.forEach(v => { v.on = false; v.held = false; });
+    else if (m.type === 'bend') this.bend = m.semis;
   }
 
   /* --- Huellkurven-Stufe vorbereiten: Zielwert + multiplikativer Koeffizient --- */
@@ -143,7 +147,12 @@ class FMProcessor extends AudioWorkletProcessor {
     v.tgt[o] = t;
     /* linear in dB == multiplikativ in der Amplitude */
     v.coef[o] = Math.pow(t / start, 1 / (time * sampleRate));
-    if (Math.abs(v.coef[o] - 1) < 1e-12) v.coef[o] = 1;
+    if (Math.abs(v.coef[o] - 1) < 1e-12) {
+      /* Ziel schon erreicht (z.B. L1 == L2): sofort zur naechsten Stufe,
+         sonst bleibt die Huellkurve in dieser Stufe stehen */
+      v.coef[o] = 1; v.amp[o] = t;
+      if (s < 3) { v.stage[o]++; this.setStage(v, o); }
+    }
   }
 
   noteOn(note, vel) {
@@ -184,7 +193,7 @@ class FMProcessor extends AudioWorkletProcessor {
   updateInc(v) {
     const p = this.patch;
     const pe = p.pitchDepth * Math.exp(-v.pegT / Math.max(p.pitchTime, 0.001));
-    const f0 = v.base * Math.pow(2, pe / 12);
+    const f0 = v.base * Math.pow(2, (pe + this.bend) / 12);
     for (let o = 0; o < NOP; o++) {
       const op = p.ops[o];
       const f = op.fixed ? op.fixedHz : f0 * op.ratio * Math.pow(2, op.detune / 1200);
@@ -330,8 +339,10 @@ const PRESETS={
 
 /* ================= Zustand ================= */
 let patch=JSON.parse(JSON.stringify(PRESETS['E-Piano  (Tine)']));
-let ctx=null,node=null,analyser=null,ready=false;
-const held=new Map();
+let ctx=null,node=null,analyser=null,audioP=null;
+const held=new Map();          /* Noten, die gerade gedrueckt sind (Maus, Tastatur, MIDI) */
+const sustained=new Set();     /* losgelassen, aber vom Haltepedal gehalten */
+let sustainOn=false;
 let octave=0;
 
 const ratioOf=o=>(o.coarse===0?0.5:o.coarse)*(1+o.fine/100);
@@ -348,19 +359,58 @@ function resolved(){
 }
 function push(){if(node)node.port.postMessage({type:'patch',patch:resolved()});}
 
-async function initAudio(){
-  if(ctx){if(ctx.state==='suspended')await ctx.resume();return;}
-  ctx=new(window.AudioContext||window.webkitAudioContext)();
-  const url=URL.createObjectURL(new Blob([WORKLET_SRC],{type:'application/javascript'}));
-  await ctx.audioWorklet.addModule(url);URL.revokeObjectURL(url);
-  node=new AudioWorkletNode(ctx,'fm-dx',{numberOfInputs:0,numberOfOutputs:1,
-    outputChannelCount:[2],processorOptions:{polyphony:16}});
-  analyser=ctx.createAnalyser();analyser.fftSize=2048;
-  node.connect(analyser);analyser.connect(ctx.destination);
-  ready=true;push();scope();
+/* Genau EIN Init-Vorgang, auch wenn mehrere Noten gleichzeitig ankommen
+   (vorher: zweiter Aufruf lief bei ctx!=null durch, node war noch null -> Absturz) */
+function initAudio(){
+  if(!audioP){
+    audioP=(async()=>{
+      ctx=new(window.AudioContext||window.webkitAudioContext)();
+      ctx.onstatechange=showAudio;
+      const url=URL.createObjectURL(new Blob([WORKLET_SRC],{type:'application/javascript'}));
+      try{await ctx.audioWorklet.addModule(url);}finally{URL.revokeObjectURL(url);}
+      node=new AudioWorkletNode(ctx,'fm-dx',{numberOfInputs:0,numberOfOutputs:1,
+        outputChannelCount:[2],processorOptions:{polyphony:16}});
+      analyser=ctx.createAnalyser();analyser.fftSize=2048;
+      node.connect(analyser);analyser.connect(ctx.destination);
+      push();sendBend();scope();showAudio();
+    })().catch(err=>{
+      console.error(err);audioP=null;
+      if(ctx){ctx.close().catch(()=>{});ctx=null;}node=null;
+      document.getElementById('start').textContent='AUDIO FEHLER';
+      throw err;
+    });
+  }
+  /* resume() nicht abwarten: ohne Benutzergeste bleibt das Promise u.U. ewig offen */
+  return audioP.then(()=>{if(ctx.state==='suspended')ctx.resume().catch(()=>{});});
 }
-async function noteOn(n,v){await initAudio();if(held.has(n))return;held.set(n,1);node.port.postMessage({type:'noteOn',note:n,vel:v});setLed(true);}
-function noteOff(n){if(!held.has(n))return;held.delete(n);if(node)node.port.postMessage({type:'noteOff',note:n});setLed(held.size>0);}
+function showAudio(){
+  const b=document.getElementById('start');
+  b.textContent=ctx&&ctx.state==='running'?'\u25CF AUDIO L\u00C4UFT':'\u25B6 AUDIO AN';
+}
+function noteOn(n,v){
+  if(n<0||n>127||held.has(n))return;
+  if(sustained.has(n)){sustained.delete(n);if(node)node.port.postMessage({type:'noteOff',note:n});}
+  held.set(n,1);setLed(true);
+  /* held VOR dem Warten setzen, sonst geht ein schnelles noteOff verloren -> haengende Note */
+  initAudio().then(()=>{if(held.has(n))node.port.postMessage({type:'noteOn',note:n,vel:v});}).catch(()=>{});
+}
+function noteOff(n){
+  if(!held.has(n))return;held.delete(n);
+  if(sustainOn)sustained.add(n);
+  else if(node)node.port.postMessage({type:'noteOff',note:n});
+  setLed(held.size>0);
+}
+function setSustain(on){
+  sustainOn=on;
+  if(!on){sustained.forEach(n=>{if(node)node.port.postMessage({type:'noteOff',note:n});});sustained.clear();}
+}
+let bendSemis=0;
+const sendBend=()=>{if(node)node.port.postMessage({type:'bend',semis:bendSemis});};
+function allNotesOff(){
+  held.clear();sustained.clear();sustainOn=false;keyNotes.clear();
+  document.querySelectorAll('#kb .dn').forEach(k=>{k.classList.remove('dn');k._note=undefined;});
+  setLed(false);if(node)node.port.postMessage({type:'allOff'});
+}
 const setLed=on=>document.getElementById('led').classList.toggle('on',on);
 
 /* ================= UI-Aufbau ================= */
@@ -472,48 +522,79 @@ function buildKeys(){
   for(let n=lo;n<=hi;n++)if(WHITE.includes(n%12))whites.push(n);
   const wPct=100/whites.length,bPct=wPct*0.6;
   const vel=e=>{const r=e.currentTarget.getBoundingClientRect();return Math.max(0.25,Math.min(1,(e.clientY-r.top)/r.height*0.85+0.3));};
+  /* Die beim Druecken gespielte Note wird an der Taste gemerkt: so loesen
+     Oktavwechsel waehrend des Haltens oder blosses Ueberfahren mit der Maus
+     keine falschen noteOffs mehr aus (vorher: haengende Noten bzw.
+     abgeschnittene MIDI-Noten). Pointer-Events = auch Touch. */
+  const wire=(k,n)=>{
+    k.addEventListener('pointerdown',e=>{e.preventDefault();if(k._note!==undefined)return;
+      k._note=n+octave*12;noteOn(k._note,vel(e));k.classList.add('dn');});
+    const up=()=>{if(k._note===undefined)return;noteOff(k._note);k._note=undefined;k.classList.remove('dn');};
+    ['pointerup','pointerleave','pointercancel'].forEach(t=>k.addEventListener(t,up));
+  };
   whites.forEach((n,i)=>{
     const k=el('div','wkey');k.style.width='calc('+wPct+'% - 1px)';
     if(n%12===0)k.appendChild(el('span','klbl','C'+(n/12-1)));
-    k.addEventListener('mousedown',e=>{e.preventDefault();noteOn(n+octave*12,vel(e));k.classList.add('dn');});
-    k.addEventListener('mouseup',()=>{noteOff(n+octave*12);k.classList.remove('dn');});
-    k.addEventListener('mouseleave',()=>{noteOff(n+octave*12);k.classList.remove('dn');});
-    kb.appendChild(k);
+    wire(k,n);kb.appendChild(k);
   });
   let wi=0;
   for(let n=lo;n<=hi;n++){
     if(WHITE.includes(n%12)){wi++;continue;}
     const k=el('div','bkey');
     k.style.left='calc('+(wi*wPct)+'% - '+(bPct/2)+'%)';k.style.width=bPct+'%';
-    k.addEventListener('mousedown',e=>{e.preventDefault();noteOn(n+octave*12,vel(e));k.classList.add('dn');});
-    k.addEventListener('mouseup',()=>{noteOff(n+octave*12);k.classList.remove('dn');});
-    k.addEventListener('mouseleave',()=>{noteOff(n+octave*12);k.classList.remove('dn');});
-    kb.appendChild(k);
+    wire(k,n);kb.appendChild(k);
   }
 }
 /* QWERTZ */
 const KEYMAP={'y':48,'s':49,'x':50,'d':51,'c':52,'v':53,'g':54,'b':55,'h':56,'n':57,'j':58,'m':59,
  'q':60,'2':61,'w':62,'3':63,'e':64,'r':65,'5':66,'t':67,'6':68,'z':69,'7':70,'u':71,'i':72};
+const keyNotes=new Map();   /* Taste -> beim Druecken gespielte Note */
 addEventListener('keydown',e=>{
-  if(['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName))return;
-  if(e.key==='ArrowLeft'){octave=Math.max(-2,octave-1);showOct();return;}
-  if(e.key==='ArrowRight'){octave=Math.min(2,octave+1);showOct();return;}
-  const n=KEYMAP[e.key.toLowerCase()];if(n===undefined||e.repeat)return;noteOn(n+octave*12,0.85);
+  const t=e.target,tag=t.tagName;
+  if(tag==='SELECT'||tag==='TEXTAREA'||(tag==='INPUT'&&t.type!=='range'))return;
+  if(e.ctrlKey||e.metaKey||e.altKey)return;
+  const isRange=tag==='INPUT';               /* nach Schieberegler-Bedienung weiterspielen koennen */
+  if(!isRange&&e.key==='ArrowLeft'){octave=Math.max(-2,octave-1);showOct();return;}
+  if(!isRange&&e.key==='ArrowRight'){octave=Math.min(2,octave+1);showOct();return;}
+  const k=e.key.toLowerCase(),n=KEYMAP[k];if(n===undefined)return;
+  e.preventDefault();if(e.repeat||keyNotes.has(k))return;
+  const note=n+octave*12;keyNotes.set(k,note);noteOn(note,0.85);
 });
-addEventListener('keyup',e=>{const n=KEYMAP[e.key.toLowerCase()];if(n!==undefined)noteOff(n+octave*12);});
+addEventListener('keyup',e=>{
+  const k=e.key.toLowerCase();if(!keyNotes.has(k))return;
+  noteOff(keyNotes.get(k));keyNotes.delete(k);
+});
+/* Fenster verliert den Fokus -> keyup kommt nie an */
+addEventListener('blur',()=>{keyNotes.forEach(n=>noteOff(n));keyNotes.clear();});
 const showOct=()=>document.getElementById('oct').textContent=(octave>0?'+':'')+octave;
 
 /* Web MIDI */
 function initMidi(){
   if(!navigator.requestMIDIAccess){document.getElementById('midi').textContent='MIDI: n/a';return;}
+  const lbl=document.getElementById('midi');
+  const onMsg=m=>{
+    const d=m.data;if(!d||d.length<2)return;
+    const st=d[0],cmd=st&0xf0,d1=d[1],d2=d.length>2?d[2]:0;
+    if(cmd===0x90&&d2>0)noteOn(d1,d2/127);
+    else if(cmd===0x80||(cmd===0x90&&d2===0))noteOff(d1);
+    else if(cmd===0xB0){
+      if(d1===64)setSustain(d2>=64);                     /* Haltepedal */
+      else if(d1===120||d1===123){                       /* All Sound/Notes Off */
+        [...held.keys()].forEach(noteOff);setSustain(false);
+        if(d1===120&&node)node.port.postMessage({type:'allOff'});
+      }
+    }
+    else if(cmd===0xE0){bendSemis=(((d2<<7)|d1)-8192)/8192*2;sendBend();}  /* +-2 Halbtoene */
+    if(cmd===0x90&&d2>0&&(!ctx||ctx.state!=='running'))lbl.textContent='MIDI: \u25B6 AUDIO AN klicken';
+  };
   navigator.requestMIDIAccess().then(a=>{
-    const bind=()=>{let c=0;a.inputs.forEach(i=>{c++;i.onmidimessage=m=>{
-      const[st,d1,d2]=m.data,cmd=st&0xf0;
-      if(cmd===0x90&&d2>0)noteOn(d1,d2/127);
-      else if(cmd===0x80||(cmd===0x90&&d2===0))noteOff(d1);
-    };});document.getElementById('midi').textContent='MIDI: '+c+' in';};
+    const bind=()=>{
+      const names=[];
+      a.inputs.forEach(i=>{i.onmidimessage=onMsg;names.push(i.name||'?');});
+      lbl.textContent='MIDI: '+(names.length?names.join(', '):'kein Eingang');lbl.title=names.join('\n');
+    };
     bind();a.onstatechange=bind;
-  }).catch(()=>{document.getElementById('midi').textContent='MIDI: blocked';});
+  }).catch(()=>{lbl.textContent='MIDI: blockiert';});
 }
 
 function scope(){
@@ -550,13 +631,28 @@ Object.keys(PRESETS).forEach(k=>{const o=document.createElement('option');o.valu
 preSel.value='E-Piano  (Tine)';
 preSel.addEventListener('change',()=>{patch=JSON.parse(JSON.stringify(PRESETS[preSel.value]));refreshAll();});
 
-document.getElementById('panic').addEventListener('click',()=>{held.clear();setLed(false);if(node)node.port.postMessage({type:'allOff'});});
-document.getElementById('start').addEventListener('click',()=>initAudio());
+document.getElementById('panic').addEventListener('click',()=>{allNotesOff();bendSemis=0;sendBend();});
+document.getElementById('start').addEventListener('click',()=>{initAudio().catch(()=>{});if(ctx)ctx.resume().catch(()=>{});});
 document.getElementById('octdn').addEventListener('click',()=>{octave=Math.max(-2,octave-1);showOct();});
 document.getElementById('octup').addEventListener('click',()=>{octave=Math.min(2,octave+1);showOct();});
 document.getElementById('dump').addEventListener('click',()=>{
   const b=new Blob([JSON.stringify(patch,null,1)],{type:'application/json'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='fm-patch.json';a.click();URL.revokeObjectURL(a.href);
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='fm-patch.json';
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);   /* sofortiges revoke bricht den Download in Firefox ab */
+});
+const fileIn=document.getElementById('loadfile');
+document.getElementById('load').addEventListener('click',()=>fileIn.click());
+fileIn.addEventListener('change',()=>{
+  const f=fileIn.files[0];fileIn.value='';if(!f)return;
+  f.text().then(t=>{
+    const j=JSON.parse(t);
+    if(!j||!Array.isArray(j.ops)||j.ops.length!==6)throw new Error('kein FM-DX-Patch');
+    const np=mkpatch(0,0,60,j.ops);
+    ['algo','fb','master','transpose','pitchDepth','pitchTime'].forEach(k=>{if(typeof j[k]==='number')np[k]=j[k];});
+    np.algo=Math.max(0,Math.min(ALGOS.length-1,np.algo|0));
+    patch=np;refreshAll();
+  }).catch(err=>alert('Patch konnte nicht geladen werden: '+err.message));
 });
 
 buildKeys();showOct();refreshAll();initMidi();

@@ -2,6 +2,7 @@
 <html lang="de">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Casio VL-Tone VL-1 Emulator</title>
 <style>
   :root{
@@ -92,7 +93,7 @@
   .controls{ flex:1; display:flex; flex-direction:column; gap:10px;}
   .slider-groups{ display:flex; gap:18px; flex-wrap:wrap;}
   .sgroup{ display:flex; flex-direction:column; gap:3px; font-size:9px; color:#333; font-weight:600;}
-  .sgroup .labels{ display:flex; justify-content:space-between; letter-spacing:.5px;}
+  .sgroup .labels{ display:flex; justify-content:space-between; gap:6px; letter-spacing:.5px;}
   .track-wrap{ background:var(--slot); border-radius:8px; padding:4px 6px;}
   input[type=range]{
     -webkit-appearance:none; appearance:none;
@@ -118,7 +119,7 @@
   .mode-labels span{ width:24px; text-align:center;}
   .mode-track{
     width:96px; height:18px; background:var(--slot); border-radius:4px; position:relative; cursor:pointer;
-    box-shadow:inset 0 2px 4px rgba(0,0,0,.5);
+    box-shadow:inset 0 2px 4px rgba(0,0,0,.5); touch-action:none;
   }
   .mode-detents{ position:absolute; inset:0; display:flex; }
   .mode-detents i{ flex:1; border-right:1px solid rgba(255,255,255,.08); }
@@ -245,7 +246,8 @@
     <div class="whitekeys" id="whitekeys"></div>
   </div>
 
-  <div class="footer">Klicke/tippe die Tasten. Der Schieber rechts wählt den Modus: REC (aufnehmen) · PLAY (spielen) · CAL (Rechner) · OFF. AUTO PLAY startet den Rhythmus, MR/MUSIC spielt die Melodie.</div>
+  <div class="footer">Klicke/tippe die Tasten. Der Schieber rechts wählt den Modus: REC (aufnehmen) · PLAY (spielen) · CAL (Rechner) · OFF. AUTO PLAY startet den Rhythmus, MR/MUSIC spielt die Melodie. ONE KEY (M+): jede Taste spielt die nächste Melodienote.<br>
+    <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></div>
 </div>
 
 <script>
@@ -266,10 +268,17 @@
     for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
     return bytes.buffer;
   }
+  const USE_SAMPLES = true; // false = rein synthetische Po/Pi/Sha-Klänge
   function decodeSamples(){
-    try{ actx.decodeAudioData(b64ToArrayBuffer(SAMPLES.po), b=>{bufPo=b;}); }catch(e){}
-    try{ actx.decodeAudioData(b64ToArrayBuffer(SAMPLES.pi), b=>{bufPi=b;}); }catch(e){}
-    try{ actx.decodeAudioData(b64ToArrayBuffer(SAMPLES.sha), b=>{bufSha=b;}); }catch(e){}
+    const dec=(b64,set)=>{
+      try{
+        const p=actx.decodeAudioData(b64ToArrayBuffer(b64), set, ()=>{});
+        if(p && p.catch) p.catch(()=>{});   // Promise-Variante: Fehler nicht unbehandelt lassen
+      }catch(e){}
+    };
+    dec(SAMPLES.po,  b=>{bufPo=b;});
+    dec(SAMPLES.pi,  b=>{bufPi=b;});
+    dec(SAMPLES.sha, b=>{bufSha=b;});
   }
   let actx=null, masterGain=null, melodyGain=null, rhythmGain=null;
   function ensureAudio(){
@@ -280,7 +289,12 @@
       rhythmGain=actx.createGain();
       melodyGain.connect(masterGain);
       rhythmGain.connect(masterGain);
-      masterGain.connect(actx.destination);
+      // Limiter, damit Akkorde + Rhythmus nicht übersteuern
+      const limiter=actx.createDynamicsCompressor();
+      limiter.threshold.value=-6; limiter.knee.value=6; limiter.ratio.value=12;
+      limiter.attack.value=0.003; limiter.release.value=0.15;
+      masterGain.connect(limiter);
+      limiter.connect(actx.destination);
       updateVolume();
       updateBalance();
       decodeSamples();
@@ -290,7 +304,8 @@
 
   function updateVolume(){
     if(!masterGain) return;
-    const v = document.getElementById('volume').value/100;
+    // im OFF-Zustand stumm bleiben, auch wenn der Lautstärkeregler bewegt wird
+    const v = state.power ? document.getElementById('volume').value/100 : 0;
     masterGain.gain.setTargetAtTime(v, actx.currentTime, 0.01);
   }
   function updateBalance(){
@@ -332,6 +347,7 @@
     calStored:null,
     calOp:null,
     calFresh:true,
+    calError:false,
     tempo:130,   // measured Rock-1 tempo (~130 BPM, 16th-note grid = 0.115 s)
     rhythmIndex:0,
     rhythmPlaying:false,
@@ -364,14 +380,16 @@
   }
 
   // ---------- Tone synthesis ----------
-  function playTone(freq, dur, toTarget){
+  function playTone(freq, dur, toTarget, tone){
     ensureAudio();
+    if(!state.power) return;
+    tone = tone || state.tone;
     const t0=actx.currentTime;
     const out = toTarget || melodyGain;
     const osc=actx.createOscillator();
     const gain=actx.createGain();
     let attack=0.005, decay=0.15, sustain=0.6, release=0.15;
-    switch(state.tone){
+    switch(tone){
       case 'piano':
         osc.type='triangle'; attack=0.003; decay=0.25; sustain=0.15; release=0.2; break;
       case 'fantasy':
@@ -399,7 +417,7 @@
     osc.connect(gain); gain.connect(out);
     osc.start(t0);
     osc.stop(t0+durSec+release+0.05);
-    if(state.tone==='flute'){
+    if(tone==='flute'){
       // subtle vibrato
       const lfo=actx.createOscillator(); const lfoGain=actx.createGain();
       lfo.frequency.value=5; lfoGain.gain.value=3;
@@ -422,9 +440,16 @@
   // ---------- Percussion (authentic VL-1 "Po" / "Pi" / "Sha") ----------
   // The VL-1 rhythms use only three tiny sounds. Po and Pi are short square-wave
   // blips (tonal, not sampled drums); Sha is a short filtered noise burst.
-  function po(target){            // ~30 ms, 880 Hz square (measured f0 ~875 Hz)
+  function playSample(buf, target, t0, vel){
+    const src=actx.createBufferSource(); src.buffer=buf;
+    const g=actx.createGain(); g.gain.value=0.5*vel;
+    src.connect(g); g.connect(target);
+    src.start(t0);
+  }
+  function po(target, t0){        // ~30 ms, 880 Hz square (measured f0 ~875 Hz)
     ensureAudio();
-    const t0=actx.currentTime;
+    t0 = (t0===undefined)?actx.currentTime:t0;
+    if(USE_SAMPLES && bufPo){ playSample(bufPo, target, t0, 1); return; }
     const osc=actx.createOscillator(); const gain=actx.createGain();
     osc.type='square'; osc.frequency.value=880;
     gain.gain.setValueAtTime(0.0,t0);
@@ -434,9 +459,10 @@
     osc.connect(gain); gain.connect(target);
     osc.start(t0); osc.stop(t0+0.04);
   }
-  function pi(target){            // ~20 ms, 1760 Hz square (octave above Po, measured)
+  function pi(target, t0){        // ~20 ms, 1760 Hz square (octave above Po, measured)
     ensureAudio();
-    const t0=actx.currentTime;
+    t0 = (t0===undefined)?actx.currentTime:t0;
+    if(USE_SAMPLES && bufPi){ playSample(bufPi, target, t0, 0.6); return; }
     const osc=actx.createOscillator(); const gain=actx.createGain();
     osc.type='square'; osc.frequency.value=1760;
     gain.gain.setValueAtTime(0.0,t0);
@@ -446,11 +472,13 @@
     osc.connect(gain); gain.connect(target);
     osc.start(t0); osc.stop(t0+0.028);
   }
-  function sha(target, vel, dur){  // noise burst; vel/dur let one generator do both
-    ensureAudio();                 // quiet short "hi-hat" and louder fuller "snare" accent
+  function sha(target, vel, dur, t0){  // noise burst; vel/dur let one generator do both
+    ensureAudio();                     // quiet short "hi-hat" and louder fuller "snare" accent
     vel = (vel===undefined)?1:vel;
     dur = (dur===undefined)?0.16:dur;
-    const t0=actx.currentTime;
+    t0 = (t0===undefined)?actx.currentTime:t0;
+    // volle Sha-Schläge aus dem Original-Sample, kurze Hi-Hats bleiben synthetisch
+    if(USE_SAMPLES && bufSha && dur>=0.1){ playSample(bufSha, target, t0, 0.55*vel); return; }
     const bufferSize=Math.floor(actx.sampleRate*dur);
     const buffer=actx.createBuffer(1,bufferSize,actx.sampleRate);
     const data=buffer.getChannelData(0);
@@ -459,7 +487,7 @@
     const hp=actx.createBiquadFilter(); hp.type='highpass'; hp.frequency.value=5500;
     const gain=actx.createGain(); gain.gain.value=0.28*vel;
     src.connect(hp); hp.connect(gain); gain.connect(target);
-    src.start();
+    src.start(t0);
   }
 
   // Patterns per rhythm. Tracks: p="Po" (low blip), t="Pi" (high tick), n="Sha" (noise).
@@ -477,17 +505,29 @@
     {p:'100000100000',     t:'101010101010',     n:'001000001000'    }  // BEGUINE (12 steps)
   ];
 
-  function stepRhythm(){
+  function stepRhythm(t){
     const pat=patterns[state.rhythmIndex];
     const len=pat.p.length;
     const i=state.rhythmStep % len;
-    if(pat.p[i]==='1') po(rhythmGain);
-    if(pat.t[i]==='1') pi(rhythmGain);
+    if(pat.p[i]==='1') po(rhythmGain, t);
+    if(pat.t[i]==='1') pi(rhythmGain, t);
     const nc=pat.n[i];
-    if(nc==='h')      sha(rhythmGain, 0.6, 0.05);  // closed hi-hat: quiet + short
-    else if(nc==='2') sha(rhythmGain, 1.1, 0.16);  // snare accent: loud + full
-    else if(nc==='1') sha(rhythmGain, 1.0, 0.16);  // normal noise (other rhythms)
+    if(nc==='h')      sha(rhythmGain, 0.6, 0.05, t);  // closed hi-hat: quiet + short
+    else if(nc==='2') sha(rhythmGain, 1.1, 0.16, t);  // snare accent: loud + full
+    else if(nc==='1') sha(rhythmGain, 1.0, 0.16, t);  // normal noise (other rhythms)
     state.rhythmStep++;
+  }
+  // Look-ahead-Scheduler: Schläge werden auf die AudioContext-Uhr gelegt,
+  // der Timer füllt nur nach. Tempoänderungen greifen ab dem nächsten Schritt.
+  let nextStepTime=0;
+  function rhythmScheduler(){
+    if(!state.rhythmPlaying) return;
+    const ahead=actx.currentTime+0.12;
+    if(nextStepTime < actx.currentTime-0.2) nextStepTime=actx.currentTime+0.02; // Tab war im Hintergrund
+    while(nextStepTime < ahead){
+      stepRhythm(nextStepTime);
+      nextStepTime += 60/state.tempo/4;
+    }
   }
   function startRhythm(){
     if(!state.power) return;
@@ -495,8 +535,9 @@
     stopRhythm();
     state.rhythmPlaying=true;
     document.getElementById('btnAutoPlay').classList.add('active-state');
-    const stepMs = 60000/state.tempo/4;
-    state.rhythmTimer=setInterval(stepRhythm, stepMs);
+    nextStepTime=actx.currentTime+0.05;
+    rhythmScheduler();
+    state.rhythmTimer=setInterval(rhythmScheduler, 25);
   }
   function stopRhythm(){
     state.rhythmPlaying=false;
@@ -511,8 +552,16 @@
     return v==0?-1: (v==2?1:0);
   }
 
+  function freqToLabel(freq){
+    const names=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const n=Math.round(12*Math.log2(freq/440))+57; // 57 = A4
+    return {name:names[((n%12)+12)%12], oct:Math.floor(n/12)};
+  }
+
   function noteOn(name, oct){
     if(!state.power) return;
+    // ONE KEY PLAY: jede Taste spielt nur die nächste Melodienote, nicht die gedrückte
+    if(state.oneKeyPlay && !state.recording){ playOneKeyStep(); return; }
     oct += currentOctaveShift();
     const freq = noteFreq(name, oct);
     playTone(freq, 350, melodyGain);
@@ -523,38 +572,60 @@
       if(state.melody.length===0) state.melodyStartTime=now;
       state.melody.push({freq, tone:state.tone, t:now-state.melodyStartTime});
     }
-    if(state.oneKeyPlay){
-      playOneKeyStep();
-    }
   }
 
   function playOneKeyStep(){ if(!state.power) return;
-    const src = state.melody.length? state.melody.map(n=>({freq:n.freq})) :
+    const src = state.melody.length? state.melody.map(n=>({freq:n.freq, tone:n.tone})) :
       demoSong.map(n=>({freq:noteFreq(n[0],n[1])}));
     if(src.length===0) return;
     const step=src[state.oneKeyIndex % src.length];
-    playTone(step.freq, 300, melodyGain);
+    playTone(step.freq, 300, melodyGain, step.tone);
+    const l=freqToLabel(step.freq); showNote(l.name, l.oct);
     state.oneKeyIndex++;
   }
 
+  // laufende Wiedergabe-Timer merken, damit OFF/AC/erneutes MR sie abbrechen können
+  let playbackTimers=[];
+  function stopPlayback(){ playbackTimers.forEach(clearTimeout); playbackTimers=[]; }
+  function schedule(fn, ms){ playbackTimers.push(setTimeout(fn, ms)); }
+
   function playMelodyBuffer(){ if(!state.power) return;
+    stopPlayback();
     if(state.melody.length===0){ playDemoSong(); return; }
     const base=state.melody[0].t;
     state.melody.forEach(ev=>{
-      setTimeout(()=>{ playTone(ev.freq, 300, melodyGain); }, ev.t-base);
+      schedule(()=>{
+        playTone(ev.freq, 300, melodyGain, ev.tone);
+        const l=freqToLabel(ev.freq); if(state.mode!=='cal') showNote(l.name, l.oct);
+      }, ev.t-base);
     });
   }
   function playDemoSong(){
     let acc=0;
     demoSong.forEach(n=>{
-      setTimeout(()=>{ playTone(noteFreq(n[0],n[1]), n[2]*0.9, melodyGain); }, acc);
+      schedule(()=>{
+        playTone(noteFreq(n[0],n[1]), n[2]*0.9, melodyGain);
+        if(state.mode!=='cal') showNote(n[0], n[1]);
+      }, acc);
       acc+=n[2];
     });
   }
 
   // ---------- Calculator ----------
+  const CAL_DIGITS=8;
+  function digitCount(s){ return s.replace(/[^0-9]/g,'').length; }
+  function formatCalc(r){
+    if(!isFinite(r)) return null;
+    if(Math.abs(r)>=Math.pow(10,CAL_DIGITS)) return null;          // Überlauf
+    const intDigits=Math.max(1, String(Math.floor(Math.abs(r))).length);
+    let s=r.toFixed(Math.max(0, CAL_DIGITS-intDigits));
+    if(s.includes('.')) s=s.replace(/0+$/,'').replace(/\.$/,'');
+    if(s==='-0') s='0';
+    return s;
+  }
   function calcInput(label){
     playCalcBeep();
+    if(state.calError && label!=='=') return;   // nach "E" erst AC/C
     if(label==='.'){
       if(state.calFresh){ state.calDisplay='0.'; state.calFresh=false; }
       else if(!state.calDisplay.includes('.')) state.calDisplay+='.';
@@ -567,7 +638,8 @@
     }
     if(/^[0-9]$/.test(label)){
       if(state.calFresh || state.calDisplay==='0'){ state.calDisplay=label; state.calFresh=false; }
-      else state.calDisplay+=label;
+      else if(state.calDisplay==='-0'){ state.calDisplay='-'+label; }
+      else if(digitCount(state.calDisplay)<CAL_DIGITS) state.calDisplay+=label;
       showCal(); return;
     }
     if(['+','−','×','÷'].includes(label)){
@@ -587,15 +659,16 @@
       case '+': r=state.calStored+b; break;
       case '−': r=state.calStored-b; break;
       case '×': r=state.calStored*b; break;
-      case '÷': r=b!==0? state.calStored/b : 0; break;
+      case '÷': r=state.calStored/b; break;   // b=0 -> Infinity -> E
     }
-    r = Math.round(r*1e8)/1e8;
-    state.calDisplay=String(r);
+    const s=formatCalc(r);
     state.calOp=null; state.calStored=null; state.calFresh=true;
+    if(s===null){ state.calError=true; state.calDisplay='E'; }
+    else state.calDisplay=s;
     showCal();
   }
-  function calcClearEntry(){ state.calDisplay='0'; state.calFresh=true; showCal(); }
-  function calcAllClear(){ state.calDisplay='0'; state.calStored=null; state.calOp=null; state.calFresh=true; showCal(); }
+  function calcClearEntry(){ state.calDisplay='0'; state.calFresh=true; state.calError=false; showCal(); }
+  function calcAllClear(){ state.calDisplay='0'; state.calStored=null; state.calOp=null; state.calFresh=true; state.calError=false; showCal(); }
 
   // ---------- Build keyboard ----------
   const whitekeysEl=document.getElementById('whitekeys');
@@ -623,8 +696,7 @@
       if(state.mode==='cal'){
         calcInput(calcLabels[i]);
       } else {
-        if(calcLabels[i]===String(state.rhythmIndex+1)){ /* no-op, handled elsewhere */ }
-        noteOn(name, parseInt(el.dataset.oct));
+        noteOn(name, parseInt(el.dataset.oct,10));
       }
     }
     function deactivate(){ el.classList.remove('pressed'); }
@@ -675,7 +747,6 @@
   // ---------- Controls wiring ----------
   document.getElementById('volume').addEventListener('input', ()=>{ ensureAudio(); updateVolume(); });
   document.getElementById('balance').addEventListener('input', ()=>{ ensureAudio(); updateBalance(); });
-  document.getElementById('octave').addEventListener('input', ()=>{});
 
   document.getElementById('tonebtns').addEventListener('click', e=>{
     const b=e.target.closest('button'); if(!b) return;
@@ -697,11 +768,13 @@
     if(pos==='OFF'){
       state.power=false; state.mode='music'; state.recording=false;
       stopRhythm();
+      stopPlayback();
       showLCD(''); // blank display
       if(masterGain) masterGain.gain.setTargetAtTime(0, actx.currentTime, 0.02);
     } else {
       state.power=true;
       if(masterGain){ updateVolume(); }
+      if(pos!=='PLAY') stopPlayback();
       if(pos==='CAL'){ state.mode='cal'; state.recording=false; calcAllClear(); }
       else { // REC or PLAY -> music mode
         state.mode='music';
@@ -711,63 +784,92 @@
       }
     }
   }
-  function setMode(i){ state.modeIndex=Math.max(0,Math.min(3,i)); ensureAudio(); applyMode(); }
-  modeTrack.addEventListener('click', e=>{
+  function setMode(i){
+    i=Math.max(0,Math.min(3,i));
+    if(i===state.modeIndex) return;   // nur bei echtem Wechsel (sonst löscht Ziehen in REC ständig die Melodie)
+    state.modeIndex=i; ensureAudio(); applyMode();
+  }
+  function modeFromEvent(e){
     const r=modeTrack.getBoundingClientRect();
-    const frac=(e.clientX-r.left)/r.width;
+    const frac=Math.max(0,Math.min(0.999,(e.clientX-r.left)/r.width));
     setMode(Math.floor(frac*4));
-  });
-  // allow dragging
+  }
+  // Maus, Stift und Touch: Klicken oder Ziehen
   let dragging=false;
-  modeTrack.addEventListener('mousedown', ()=>dragging=true);
-  window.addEventListener('mouseup', ()=>dragging=false);
-  window.addEventListener('mousemove', e=>{
-    if(!dragging) return;
-    const r=modeTrack.getBoundingClientRect();
-    const frac=(e.clientX-r.left)/r.width;
-    setMode(Math.floor(Math.max(0,Math.min(0.999,frac))*4));
+  modeTrack.addEventListener('pointerdown', e=>{
+    dragging=true;
+    try{ modeTrack.setPointerCapture(e.pointerId); }catch(_){}
+    modeFromEvent(e);
   });
+  modeTrack.addEventListener('pointermove', e=>{ if(dragging) modeFromEvent(e); });
+  modeTrack.addEventListener('pointerup',     ()=>{ dragging=false; });
+  modeTrack.addEventListener('pointercancel', ()=>{ dragging=false; });
   applyMode(); // init knob position (audio not yet started; guarded)
 
 
+  // kurze Info im LCD, danach wieder den passenden Inhalt
+  let lcdInfoTimer=null;
+  function flashLCD(text){
+    showLCD(text);
+    clearTimeout(lcdInfoTimer);
+    lcdInfoTimer=setTimeout(()=>{
+      if(!state.power) return;
+      if(state.mode==='cal') showCal(); else showNote('C',4);
+    }, 900);
+  }
+
   document.getElementById('btnAC').addEventListener('click', ()=>{
+    if(!state.power) return;
     ensureAudio();
+    stopPlayback();
     if(state.mode==='cal') calcAllClear();
     else showNote('C',4);
   });
   document.getElementById('btnC').addEventListener('click', ()=>{
+    if(!state.power) return;
     ensureAudio();
     if(state.mode==='cal') calcClearEntry();
   });
   document.getElementById('btnTempoUp').addEventListener('click', ()=>{
-    state.tempo=Math.min(240,state.tempo+4);
-    if(state.rhythmPlaying) startRhythm();
+    if(!state.power) return;
+    state.tempo=Math.min(240,state.tempo+4);   // Scheduler übernimmt das neue Tempo ab dem nächsten Schritt
+    flashLCD('TEMPO '+state.tempo);
   });
   document.getElementById('btnTempoDown').addEventListener('click', ()=>{
+    if(!state.power) return;
     state.tempo=Math.max(40,state.tempo-4);
-    if(state.rhythmPlaying) startRhythm();
+    flashLCD('TEMPO '+state.tempo);
   });
   document.getElementById('btnRhythm').addEventListener('click', ()=>{
+    if(!state.power) return;
     state.rhythmIndex=(state.rhythmIndex+1)%patterns.length;
-    showLCD(rhythmNames[state.rhythmIndex]);
-    setTimeout(()=>{ if(state.mode==='cal') showCal(); }, 900);
+    state.rhythmStep=0;
+    flashLCD(rhythmNames[state.rhythmIndex]);
   });
   document.getElementById('btnMLC').addEventListener('click', ()=>{
+    if(!state.power) return;
     if(state.melody.length) state.melody.pop();
+    if(state.oneKeyIndex>state.melody.length) state.oneKeyIndex=0;
   });
   document.getElementById('btnMC').addEventListener('click', ()=>{
+    if(!state.power) return;
+    stopPlayback();
     state.melody=[]; state.oneKeyIndex=0;
   });
   document.getElementById('btnMR').addEventListener('click', ()=>{
+    if(!state.power) return;
     ensureAudio();
     playMelodyBuffer();
   });
   document.getElementById('btnAutoPlay').addEventListener('click', ()=>{
+    if(!state.power) return;
     ensureAudio();
     if(state.rhythmPlaying) stopRhythm(); else startRhythm();
   });
   document.getElementById('btnMPlus').addEventListener('click', ()=>{
+    if(!state.power) return;
     state.oneKeyPlay=true;
+    state.oneKeyIndex=0;
     document.getElementById('btnMPlus').classList.add('active-state');
     document.getElementById('btnMMinus').classList.remove('active-state');
   });

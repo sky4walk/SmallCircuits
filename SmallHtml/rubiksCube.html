@@ -337,6 +337,24 @@
   .input-msg { font-size: 12px; min-height: 18px; margin-top: 14px; text-align: center; letter-spacing: 0.03em; }
   .input-msg.err { color: #e87070; }
   .input-msg.ok  { color: #60d080; }
+  .site-footer { width: 100%; max-width: 1180px; padding: 6px 32px 24px; font-size: 11px; letter-spacing: 0.08em; }
+  .site-footer a { color: #4a7a4a; text-decoration: none; }
+  .site-footer a:hover { color: #60d080; text-decoration: underline; }
+  canvas { touch-action: none; }
+  @media (max-width: 900px) {
+    .main { flex-wrap: wrap; padding: 16px 16px 0; }
+    #canvas-wrapper { flex-basis: 100%; }
+    .controls, .solver-panel { width: 50%; padding-left: 0; margin-left: 0; border-left: none; margin-top: 16px; }
+    .controls { padding-right: 12px; }
+    .solver-panel { padding-left: 12px; }
+    header, .tab-bar, .status-bar, .site-footer { padding-left: 16px; padding-right: 16px; }
+  }
+  @media (max-width: 560px) {
+    .controls, .solver-panel { width: 100%; padding: 0; }
+    .net { grid-template-columns: repeat(4, 76px); gap: 4px; }
+    .net-face { grid-template-columns: repeat(3, 23px); grid-template-rows: repeat(3, 23px); }
+    .net-sticker { width: 23px; height: 23px; }
+  }
   .input-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; justify-content: center; }
 </style>
 </head>
@@ -464,9 +482,13 @@
     <div class="input-msg" id="inputMsg"></div>
   </div>
 </div>
+<div class="status-bar">
   <div class="last-move" id="lastMove">Letzter Zug: <strong>—</strong></div>
   <div class="solved-badge" id="solvedBadge">✓ Gelöst</div>
 </div>
+<footer class="site-footer">
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -583,8 +605,33 @@ function applyMove(s, face, cw) {
   else if (face==='D') rotateDown(s,cw);
 }
 
-// Also applies to global state
-function rotateFace(face,cw){ applyMove(state,face,cw); }
+// Der Solver arbeitet intern in einer "Roh"-Konvention, in der L/U/D
+// gegenüber der Standardnotation (und der 3D-Animation) invertiert sind.
+// Nach außen (Knöpfe, Animation, Lösungsanzeige) gilt immer Standardnotation.
+function stdToRaw(face,cw){ return (face==='L'||face==='U'||face==='D') ? !cw : cw; }
+const rawToStd = stdToRaw; // Abbildung ist selbstinvers
+
+// Wendet einen Zug in Standardnotation auf den globalen Zustand an
+function rotateFace(face,cw){ applyMove(state,face,stdToRaw(face,cw)); }
+
+// Fasst aufeinanderfolgende Drehungen derselben Fläche zusammen (X X X → X', X X' → –)
+function simplifyMoves(list){
+  const out=[];
+  for(const [f,cw] of list){
+    const q=cw?1:3;
+    if(out.length&&out[out.length-1].f===f){
+      const top=out[out.length-1]; top.q=(top.q+q)%4;
+      if(top.q===0) out.pop();
+    } else out.push({f,q});
+  }
+  const res=[];
+  for(const {f,q} of out){
+    if(q===1) res.push([f,true]);
+    else if(q===2) res.push([f,true],[f,true]);
+    else res.push([f,false]);
+  }
+  return res;
+}
 
 function isSolved(s) {
   const faces=[['front',2,1,1],['back',0,1,1],['left',1,0,1],['right',1,2,1],['up',2,1,2],['down',0,1,0]];
@@ -975,6 +1022,8 @@ const PHASE_DEFS = [
 
 let solutionMoveList = [];
 let solverRunning = false;
+let solveToken = 0;        // erhöht sich bei Reset → laufende Berechnung wird verworfen
+let solutionPlaying = false;
 
 function moveLabel(face, cw) { return face + (cw ? '' : "'"); }
 
@@ -1013,7 +1062,14 @@ async function startSolve() {
     document.getElementById('solverStatus').className = 'solver-status done';
     return;
   }
+  const v = validateState(state);
+  if (!v.ok) {
+    document.getElementById('solverStatus').textContent = 'Würfel ungültig: ' + v.msg;
+    document.getElementById('solverStatus').className = 'solver-status error';
+    return;
+  }
   solverRunning = true;
+  const token = ++solveToken;
   animQueue = [];
   solutionMoveList = [];
   document.getElementById('solveBtn').disabled = true;
@@ -1042,6 +1098,7 @@ async function startSolve() {
     const result = await new Promise(resolve => {
       setTimeout(() => resolve(ph.solve(workingState)), 10);
     });
+    if (token !== solveToken) { solverRunning = false; return; }
 
     if (result === null || result === undefined) {
       document.getElementById('solverStatus').textContent = `Phase ${pi+1} fehlgeschlagen – Würfel neu mischen?`;
@@ -1053,9 +1110,10 @@ async function startSolve() {
     totalMoves.push(...result);
   }
 
+  if (token !== solveToken) { solverRunning = false; return; } // zwischendurch zurückgesetzt
   if (!failed) {
-    solutionMoveList = totalMoves;
-    document.getElementById('solverStatus').textContent = `Lösung: ${totalMoves.length} Züge`;
+    solutionMoveList = simplifyMoves(totalMoves.map(([f,cw]) => [f, rawToStd(f,cw)]));
+    document.getElementById('solverStatus').textContent = `Lösung: ${solutionMoveList.length} Züge`;
     document.getElementById('solverStatus').className = 'solver-status done';
     setPhase(PHASE_DEFS.length);
     renderSolutionMoves(0);
@@ -1067,17 +1125,26 @@ async function startSolve() {
 }
 
 function executesSolutionMoves(startIdx) {
-  let idx = startIdx;
-  function queueNext() {
-    if (idx >= solutionMoveList.length) return;
+  if (startIdx >= solutionMoveList.length) return;
+  solutionPlaying = true;
+  const last = solutionMoveList.length - 1;
+  for (let idx = startIdx; idx <= last; idx++) {
     const [f, cw] = solutionMoveList[idx];
-    const captured = idx;
-    animQueue.push({ face: f, cw, onDone: () => renderSolutionMoves(captured + 1) });
-    idx++;
-    if (idx < solutionMoveList.length) queueNext();
-    if (!animating) processQueue();
+    animQueue.push({ face: f, cw, solution: true, onDone: () => {
+      renderSolutionMoves(idx + 1);
+      if (idx === last) solutionPlaying = false;
+    }});
   }
-  queueNext();
+  if (!animating) processQueue();
+}
+
+// Bricht eine laufende Lösungs-Wiedergabe ab (z. B. bei manuellem Zug)
+function cancelSolutionPlayback() {
+  if (!solutionPlaying) return;
+  animQueue = animQueue.filter(it => !it.solution);
+  solutionPlaying = false;
+  document.getElementById('solverStatus').textContent = 'Wiedergabe abgebrochen';
+  document.getElementById('solverStatus').className = 'solver-status';
 }
 
 
@@ -1144,7 +1211,11 @@ function createCubie(x,y,z){
 }
 
 function buildMeshes(){
-  scene.children.filter(c=>c.isMesh).forEach(c=>scene.remove(c));
+  scene.children.filter(c=>c.isMesh).forEach(c=>{
+    scene.remove(c);
+    if(c.geometry)c.geometry.dispose();
+    if(c.material)c.material.dispose();
+  });
   meshes=[];
   for(let x=0;x<3;x++){meshes[x]=[];for(let y=0;y<3;y++){meshes[x][y]=[];for(let z=0;z<3;z++)meshes[x][y][z]=createCubie(x,y,z);}}
   updateColors();
@@ -1163,6 +1234,8 @@ let animating=false;
 let animQueue=[];
 
 function doMove(face,cw){
+  if(solverRunning)return;           // Zustand wird gerade berechnet
+  cancelSolutionPlayback();
   animQueue.push({face,cw});
   if(!animating)processQueue();
 }
@@ -1257,9 +1330,12 @@ canvas.addEventListener('touchmove',e=>{
   rotX=Math.max(-Math.PI/2+0.05,Math.min(Math.PI/2-0.05,rotX));
   lastTouch={x:e.touches[0].clientX,y:e.touches[0].clientY};applyOrbit();
 },{passive:true});
+canvas.addEventListener('touchend',()=>{lastTouch=null;},{passive:true});
 
 // ── Scramble / Reset ──────────────────────────────────────────
 function scramble(){
+  if(solverRunning)return;
+  cancelSolutionPlayback();
   solutionMoveList=[];
   renderSolutionMoves(0);
   document.getElementById('solverStatus').textContent='Bereit';
@@ -1271,6 +1347,7 @@ function scramble(){
 }
 
 function resetCube(){
+  solveToken++;solutionPlaying=false;
   animQueue=[];animating=false;solverRunning=false;
   solutionMoveList=[];
   if(animGroup){animGroup.children.slice().forEach(m=>{animGroup.remove(m);scene.add(m);});scene.remove(animGroup);animGroup=null;}
@@ -1455,6 +1532,56 @@ const VALID_CORNERS = (() => {
   return set;
 })();
 
+const COLOR_DE = { white:'Weiß', yellow:'Gelb', red:'Rot', orange:'Orange', green:'Grün', blue:'Blau' };
+const de = c => COLOR_DE[c] || c;
+
+// Positionen mit Facelets im Uhrzeigersinn (von außen gesehen), U/D-Facelet zuerst
+const PAR_CORNERS = [
+  [[2,2,2],['up','right','front']], [[0,2,2],['up','front','left']],
+  [[0,2,0],['up','left','back']],   [[2,2,0],['up','back','right']],
+  [[2,0,2],['down','front','right']],[[0,0,2],['down','left','front']],
+  [[0,0,0],['down','back','left']], [[2,0,0],['down','right','back']],
+];
+const PAR_EDGES = [
+  [[2,2,1],['up','right']], [[1,2,2],['up','front']], [[0,2,1],['up','left']], [[1,2,0],['up','back']],
+  [[2,0,1],['down','right']],[[1,0,2],['down','front']],[[0,0,1],['down','left']],[[1,0,0],['down','back']],
+  [[2,1,2],['front','right']],[[0,1,2],['front','left']],[[0,1,0],['back','left']],[[2,1,0],['back','right']],
+];
+// Farbe der Mittelsteine je Fläche (aus dem Zustand gelesen)
+function centerColors(s){
+  return { up:s[1][2][1].up, down:s[1][0][1].down, front:s[1][1][2].front,
+           back:s[1][1][0].back, left:s[0][1][1].left, right:s[2][1][1].right };
+}
+function permParity(p){
+  let par=0; const seen=new Array(p.length).fill(false);
+  for(let i=0;i<p.length;i++){ if(seen[i])continue; let j=i,len=0; while(!seen[j]){seen[j]=true;j=p[j];len++;} par+=len-1; }
+  return par%2;
+}
+// Prüft Eckverdrehung, Kantenkippung und Permutationsparität
+function checkParity(s){
+  const ctr=centerColors(s);
+  const ud=new Set([ctr.up,ctr.down]), fb=new Set([ctr.front,ctr.back]);
+  const key=a=>a.slice().sort().join(',');
+  const cIdx={}; PAR_CORNERS.forEach(([,f],i)=>cIdx[key(f.map(k=>ctr[k]))]=i);
+  const eIdx={}; PAR_EDGES.forEach(([,f],i)=>eIdx[key(f.map(k=>ctr[k]))]=i);
+  let twist=0; const cp=[];
+  for(const [[x,y,z],f] of PAR_CORNERS){
+    const cols=f.map(k=>s[x][y][z][k]);
+    twist+=cols.findIndex(c=>ud.has(c)); cp.push(cIdx[key(cols)]);
+  }
+  let flip=0; const ep=[];
+  for(const [[x,y,z],f] of PAR_EDGES){
+    const cols=f.map(k=>s[x][y][z][k]);
+    const ref = (ud.has(cols[0])||ud.has(cols[1])) ? ud : fb;
+    if(!ref.has(cols[0])) flip++;
+    ep.push(eIdx[key(cols)]);
+  }
+  if(twist%3!==0) return 'Eine Ecke ist verdreht (Ecken-Orientierung stimmt nicht).';
+  if(flip%2!==0)  return 'Eine Kante ist gekippt (Kanten-Orientierung stimmt nicht).';
+  if(permParity(cp)!==permParity(ep)) return 'Zwei Steine sind vertauscht (Permutationsparität stimmt nicht).';
+  return null;
+}
+
 function validateState(s) {
   // 1) Farbzählung
   const count = {};
@@ -1467,7 +1594,7 @@ function validateState(s) {
   }
   for (const col of PALETTE_COLORS) {
     if ((count[col]||0) !== 9)
-      return { ok:false, msg:`Farbe „${col}" kommt ${count[col]||0}× vor (erwartet 9).` };
+      return { ok:false, msg:`Farbe „${de(col)}" kommt ${count[col]||0}× vor (erwartet 9).` };
   }
   // 2) Kanten gültig + vollständig
   const edgePos = ['UF','UB','UL','UR','DF','DB','DL','DR','FR','FL','BR','BL'];
@@ -1475,8 +1602,8 @@ function validateState(s) {
   for (const p of edgePos) {
     const e = getEdge(s, p);
     const key = [e[0],e[1]].sort().join(',');
-    if (!VALID_EDGES.has(key)) return { ok:false, msg:`Ungültige Kante an ${p}: ${e[0]}/${e[1]}.` };
-    if (seenE.has(key)) return { ok:false, msg:`Kante ${e[0]}/${e[1]} kommt doppelt vor.` };
+    if (!VALID_EDGES.has(key)) return { ok:false, msg:`Ungültige Kante an ${p}: ${de(e[0])}/${de(e[1])}.` };
+    if (seenE.has(key)) return { ok:false, msg:`Kante ${de(e[0])}/${de(e[1])} kommt doppelt vor.` };
     seenE.add(key);
   }
   // 3) Ecken gültig + vollständig
@@ -1485,10 +1612,13 @@ function validateState(s) {
   for (const p of cornPos) {
     const c = getCorner(s, p);
     const key = [c[0],c[1],c[2]].sort().join(',');
-    if (!VALID_CORNERS.has(key)) return { ok:false, msg:`Ungültige Ecke an ${p}: ${c.join('/')}.` };
-    if (seenC.has(key)) return { ok:false, msg:`Ecke ${c.join('/')} kommt doppelt vor.` };
+    if (!VALID_CORNERS.has(key)) return { ok:false, msg:`Ungültige Ecke an ${p}: ${c.map(de).join('/')}.` };
+    if (seenC.has(key)) return { ok:false, msg:`Ecke ${c.map(de).join('/')} kommt doppelt vor.` };
     seenC.add(key);
   }
+  // 4) Lösbarkeit (Parität) – verhindert langes Suchen bei unlösbaren Würfeln
+  const par = checkParity(s);
+  if (par) return { ok:false, parity:true, msg:par };
   return { ok:true, msg:'' };
 }
 
@@ -1496,7 +1626,10 @@ function validateState(s) {
 function applyNetAndSolve() {
   const candidate = netToState();
   const v = validateState(candidate);
-  if (!v.ok) { setInputMsg('Ungültig: ' + v.msg, 'err'); return; }
+  if (!v.ok) {
+    setInputMsg((v.parity ? 'Würfel nicht lösbar: ' : 'Ungültig: ') + v.msg, 'err');
+    return;
+  }
   // Vollständige Prüfung: Solver auf Kopie versuchen (fängt Paritätsfälle ab)
   const test = deepCopyState(candidate);
   let solvable = true;
@@ -1509,7 +1642,11 @@ function applyNetAndSolve() {
     setInputMsg('Steine gültig, aber Würfel nicht lösbar (Paritätsfehler – prüfe gedrehte/getauschte Steine).', 'err');
     return;
   }
-  // Anwenden
+  // Anwenden – laufende Animationen/Berechnungen verwerfen
+  solveToken++; solverRunning = false; solutionPlaying = false;
+  animQueue = [];
+  if (animGroup) { animGroup.children.slice().forEach(m=>{animGroup.remove(m);scene.add(m);}); scene.remove(animGroup); animGroup = null; }
+  animating = false;
   state = candidate;
   moves = 0;
   document.getElementById('moveCount').textContent = '0';

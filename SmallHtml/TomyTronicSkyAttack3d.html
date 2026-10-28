@@ -114,7 +114,8 @@ input[type=range]::-moz-range-thumb{width:13px;height:20px;border:0;background:v
 
   <p class="hint">
     <kbd>←</kbd> <kbd>→</kbd> Position wechseln &middot; <kbd>Leertaste</kbd> oder FIRE &middot; <kbd>P</kbd> Pause &middot; <kbd>R</kbd> Lampentest<br>
-    Nach dem Lampentest bleibt die Anzeige dunkel, bis du FIRE drückst — das startet das Spiel, wie am Gerät.<br>Kein Ton? Einmal auf TON tippen — das gibt eine Hörprobe und schaltet die Audioausgabe des Browsers frei.
+    Nach dem Lampentest bleibt die Anzeige dunkel, bis du FIRE drückst — das startet das Spiel, wie am Gerät.<br>Kein Ton? Einmal auf TON tippen — das gibt eine Hörprobe und schaltet die Audioausgabe des Browsers frei.<br>
+    Mehr Projekte: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#a7a196">itzwieseltal.wordpress.com</a>
   </p>
 </div>
 
@@ -258,8 +259,15 @@ function audioReady() {
   addEventListener(ev, audioReady, { capture: true, passive: true }));
 
 function tone(f0, onS, offS, count, vol, f1) {
-  if (!S.sound || !audioReady()) return;
-  try {
+  if (!S.sound) return;
+  if (!audioReady()) {
+    /* Kontext laeuft gerade erst an: Ton einmal nachreichen statt verschlucken */
+    if (ac && ac.state === "suspended")
+      ac.resume().then(() => { if (S.sound && ac.state === "running") play(); }).catch(() => {});
+    return;
+  }
+  play();
+  function play() { try {
     const o = ac.createOscillator(), g = ac.createGain();
     const t0 = ac.currentTime + .015;            /* Vorlauf, nie in der Vergangenheit */
     o.type = "square"; o.frequency.setValueAtTime(f0, t0);
@@ -272,19 +280,26 @@ function tone(f0, onS, offS, count, vol, f1) {
       t += onS + offS;
     }
     o.connect(g); g.connect(master); o.start(t0); o.stop(t + .03);
-  } catch (e) {}
+  } catch (e) {} }
 }
+let overTimers = [];
+function stopOverSound() { overTimers.forEach(clearTimeout); overTimers = []; }
 const sfx = {
   shoot: () => tone(1335, .011, .018, 7, .050),
   hit:   () => tone( 646, .012, .024, 2, .060),
   hurt:  () => tone( 646, .030, .020, 5, .065, 380),   /* nicht gemessen */
-  over:  () => { for (let i = 0; i < 7; i++)
-                   setTimeout(() => tone(2950, .16, .0, 1, .045), i * 490); }
+  over:  () => { stopOverSound(); for (let i = 0; i < 7; i++)
+                   overTimers.push(setTimeout(() => tone(2950, .16, .0, 1, .045), i * 490)); }
 };
 
 /* ============================ LOGIK ============================ */
+/* Ein Slot (Spalte + Stufe) kann am Geraet nur eine Lampe zeigen */
+const slotBusy = (col, step, self) =>
+  S.enemies.some(o => o !== self && o.col === col && o.step === step);
 function spawn() {
-  S.enemies.push({ col: (Math.random() * COLS) | 0, step: 0, t: 0, dying: 0, front: 0, fired: false });
+  const free = [0, 1, 2].filter(c => !slotBusy(c, 0));
+  if (!free.length) return;
+  S.enemies.push({ col: free[(Math.random() * free.length) | 0], step: 0, t: 0, dying: 0, front: 0, fired: false });
 }
 function tick() {
   S.frame++;
@@ -327,9 +342,12 @@ function tick() {
     if (e.dying) { if (--e.dying <= 0) S.enemies.splice(i, 1); continue; }
     if (e.step < STEPS - 1) {
       if (++e.t < adv) continue;
+      if (slotBusy(e.col, e.step + 1, e)) continue;   /* vorne noch besetzt: warten */
       e.t = 0; e.step++;
-      if (S.laneChange && Math.random() < 0.25)
-        e.col = Math.max(0, Math.min(COLS - 1, e.col + (Math.random() < .5 ? -1 : 1)));
+      if (S.laneChange && Math.random() < 0.25) {
+        const nc = Math.max(0, Math.min(COLS - 1, e.col + (Math.random() < .5 ? -1 : 1)));
+        if (!slotBusy(nc, e.step, e)) e.col = nc;
+      }
     } else {
       /* Vorderste Stufe: ein einziger Schuss, dann abdrehen */
       e.front = (e.front || 0) + 1;
@@ -352,12 +370,14 @@ function fire() {
   if (!S.paused && !S.shot) { S.shot = { col: S.col, i: 0 }; sfx.shoot(); }
 }
 function start() {
+  stopOverSound();
   S.enemies = []; S.bullets = []; S.shot = null;
   S.col = 1; S.score = 0; S.lives = 3; S.wave = 1; S.kills = 0;
   S.idle = false; S.over = false; S.paused = false; S.hurt = 0;
 }
 function move(d) { if (!S.idle && !S.over && !S.paused && !S.test) S.col = Math.max(0, Math.min(COLS - 1, S.col + d)); }
 function reset(testLen) {
+  stopOverSound();
   S.enemies = []; S.bullets = []; S.shot = null;
   S.col = 1; S.score = 0; S.lives = 3; S.wave = 1; S.kills = 0;
   S.over = false; S.paused = false; S.hurt = 0; S.idle = false;
@@ -560,7 +580,7 @@ function digit(g, n, x, y, w) {
   }
 }
 function drawScore(g, val) {
-  const w = VW * 0.036, gap = w * 1.5, x0 = VW / 2 - gap * 2 + gap * 0.25, y = VH * SCORE_Y;
+  const w = VW * 0.036, gap = w * 1.5, x0 = VW / 2 - (3 * gap + w) / 2, y = VH * SCORE_Y;
   const s = String(Math.min(9999, val)).padStart(4, "0");
   for (let i = 0; i < 4; i++) digit(g, +s[i], x0 + i * gap, y, w);
 }
@@ -639,7 +659,7 @@ function drawLamps(eye) {
     g.font = "700 26px Arial,Helvetica,sans-serif";
     g.fillText(S.over ? "GAME OVER" : "PAUSE", VW / 2, VH * .60);
     g.font = "700 11px Arial,Helvetica,sans-serif";
-    g.fillText(S.over ? "R = NEU STARTEN" : "P = WEITER", VW / 2, VH * .60 + 20);
+    g.fillText(S.over ? "FIRE = NEU STARTEN" : "P = WEITER", VW / 2, VH * .60 + 20);
   }
 }
 
@@ -697,6 +717,8 @@ function blit(dx, dy, tint) {
     tintCx.clearRect(0, 0, VW, VH); tintCx.drawImage(eyeCv, 0, 0);
     tintCx.globalCompositeOperation = "multiply";
     tintCx.fillStyle = tint; tintCx.fillRect(0, 0, VW, VH);
+    tintCx.globalCompositeOperation = "destination-in";   /* Ecken ausserhalb der Linse transparent halten */
+    tintCx.drawImage(eyeCv, 0, 0);
     cx.globalCompositeOperation = "lighter"; cx.filter = "blur(" + LENS_BLUR + "px)";
     cx.drawImage(tintCv, dx, dy);
     cx.filter = "none"; cx.globalCompositeOperation = "source-over";
@@ -742,9 +764,12 @@ sndBtn.addEventListener("click", () => {
   sndBtn.setAttribute("aria-pressed", String(S.sound));
   if (!S.sound) { sndBtn.textContent = "AUS"; return; }
   /* Freischalten und sofort hoerbar bestaetigen */
-  const ok = audioReady();
-  sndBtn.textContent = ok ? "AN" : "BLOCKIERT";
-  if (ok) sfx.shoot();
+  sndBtn.textContent = "AN";
+  if (audioReady()) { sfx.shoot(); return; }
+  if (!ac) { sndBtn.textContent = "BLOCKIERT"; return; }
+  ac.resume().then(() => {
+    if (ac.state === "running") sfx.shoot(); else sndBtn.textContent = "BLOCKIERT";
+  }).catch(() => { sndBtn.textContent = "BLOCKIERT"; });
 });
 document.getElementById("testBtn").addEventListener("click", () => { S.test = 40; });
 const bFire = document.getElementById("btnFire"),
@@ -753,15 +778,22 @@ const bFire = document.getElementById("btnFire"),
 bFire.addEventListener("pointerdown", e => { e.preventDefault(); fire(); });
 bLeft.addEventListener("pointerdown", e => { e.preventDefault(); move(-1); });
 bRight.addEventListener("pointerdown", e => { e.preventDefault(); move(1); });
+/* click mit detail 0 = Ausloesung per Tastatur auf dem fokussierten Knopf */
+bFire.addEventListener("click", e => { if (e.detail === 0) fire(); });
+bLeft.addEventListener("click", e => { if (e.detail === 0) move(-1); });
+bRight.addEventListener("click", e => { if (e.detail === 0) move(1); });
 addEventListener("keydown", e => {
   const k = e.key.toLowerCase();
+  if (e.target.closest && e.target.closest("input")) return;   /* Regler bedienen, nicht spielen */
   if (["arrowleft","arrowright","arrowup","arrowdown"," "].includes(k)) e.preventDefault();
-  if (k === "arrowleft" || k === "a") move(-1);
-  if (k === "arrowright" || k === "d") move(1);
   if (k === "arrowleft" || k === "a") bLeft.classList.add("on");
   if (k === "arrowright" || k === "d") bRight.classList.add("on");
-  if (k === " " || k === "control") { fire(); bFire.classList.add("on"); }
-  if (k === "p" && !S.over) S.paused = !S.paused;
+  if (k === " " || k === "control") bFire.classList.add("on");
+  if (e.repeat) return;              /* gehaltene Taste: kein Durchrutschen, kein Pause-Flackern */
+  if (k === "arrowleft" || k === "a") move(-1);
+  if (k === "arrowright" || k === "d") move(1);
+  if (k === " " || k === "control") fire();
+  if (k === "p" && !S.over && !S.idle && !S.test) S.paused = !S.paused;
   if (k === "r") reset();
 });
 addEventListener("keyup", () => {
