@@ -74,6 +74,10 @@
   details td{border-top:1px solid var(--edge);padding:4px 14px 4px 0;vertical-align:top}
   details td:first-child{color:var(--ink-bright);white-space:nowrap}
 
+  footer{width:100%;max-width:860px;margin:22px 0 0;padding-top:10px;border-top:1px solid var(--edge);font-size:.82em}
+  footer a{color:var(--ink-bright)}
+  footer a:hover,footer a:focus-visible{color:var(--green)}
+
   @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 </style>
 </head>
@@ -111,6 +115,8 @@
   <summary>Über diese Portierung</summary>
   <div class="body" id="notes"></div>
 </details>
+
+<footer>Mehr Retro-Rechner und Hintergründe: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a></footer>
 
 <script type="text/plain" id="src-AKALABETH"> 0  TEXT : HOME
  1  IF  PEEK (55) = 253 THEN  END
@@ -450,6 +456,7 @@
  4530  GOTO 4999
  4600  IF  RND (1) < .5 THEN 4509
  4610  IF MM = 7 THEN PW(0) =  INT (PW(0) / 2): PRINT "A GREMLIN STOLE SOME FOOD": GOTO 4525
+ 4615  IF PW(0) < 1 AND PW(1) < 1 AND PW(2) < 1 AND PW(3) < 1 AND PW(4) < 1 AND PW(5) < 1 THEN 4509
  4620 ZZ =  INT ( RND (1) * 6): IF PW(ZZ) < 1 THEN 4620
  4630  PRINT "A THIEF STOLE A ";W$(ZZ):PW(ZZ) = PW(ZZ) - 1: GOTO 4525
  4999  NEXT : RETURN
@@ -634,7 +641,10 @@ class AppleIO {
   crlf() {
     this.CH = 0;
     this.CV++;
-    if (this.CV > this.WNDBTM - 1) { this.scroll(); this.CV = this.WNDBTM - 1; }
+    // Wie LF im Monitor-ROM: CV wird nur um eins zurueckgenommen, nicht an
+    // den Fensterrand gesetzt -- wichtig, wenn per VTAB unterhalb des
+    // Fensters geschrieben wurde (Ladenanzeige)
+    if (this.CV >= this.WNDBTM) { this.CV--; this.scroll(); }
     this.dirty = true;
   }
   scroll() {
@@ -707,8 +717,11 @@ class AppleIO {
     this.dirty = true;
   }
   printComma() {
-    const target = (Math.floor(this.CH / 16) + 1) * 16;
-    if (target >= this.WNDWDTH) this.crlf(); else this.CH = target;
+    // Applesoft: ab Spalte 24 neue Zeile, sonst mit Leerzeichen bis zur
+    // naechsten 16er-Marke (die bei schmalem Fenster auch umbrechen)
+    if (this.CH >= 24) { this.crlf(); return; }
+    const n = (Math.floor(this.CH / 16) + 1) * 16 - this.CH;
+    for (let k = 0; k < n; k++) this.putc(32);
     this.dirty = true;
   }
   tabTo(col) { if (col > this.CH) this.CH = col; this.dirty = true; }
@@ -735,7 +748,7 @@ class AppleIO {
   htab(n) { this.CH = Math.max(0, n - 1); this.dirty = true; }
   setInverse(v) { this.inverse = v; }
   text() {
-    this.gfx = false;
+    this.gfx = false; this.page = 1;           // SETTXT liest auch $C054
     this.mode = 'text';
     this.WNDLFT = 0; this.WNDWDTH = COLS; this.WNDTOP = 0; this.WNDBTM = ROWS;
     this.CH = 0; this.CV = ROWS - 1;
@@ -1445,6 +1458,11 @@ class Interpreter {
     this.li = this.lineIndex.get(n); this.si = 0;
   }
   nextLine() { this.li++; this.si = 0; }
+  // Unterste FOR-Ebene, die zum laufenden Unterprogramm gehoert
+  forBase() {
+    const g = this.gosubStack[this.gosubStack.length - 1];
+    return g ? Math.min(g.fs, this.forStack.length) : 0;
+  }
 
   async run() {
     this.li = 0; this.si = 0; this.halted = false;
@@ -1522,17 +1540,20 @@ class Interpreter {
       }
       case 'GOTO': this.gotoLine(st.n); return true;
       case 'GOSUB':
-        this.gosubStack.push({ li: this.li, si: this.si + 1 });
+        this.gosubStack.push({ li: this.li, si: this.si + 1, fs: this.forStack.length });
         this.gotoLine(st.n); return true;
       case 'RETURN': {
         const f = this.gosubStack.pop();
         if (!f) throw new BasicError('RETURN WITHOUT GOSUB');
+        // Applesoft raeumt beim RETURN alle FOR-Rahmen ab, die seit dem GOSUB
+        // auf dem Stapel liegen (auch die von verlassenen Schleifen)
+        this.forStack.length = Math.min(this.forStack.length, f.fs);
         this.li = f.li; this.si = f.si; return true;
       }
       case 'ON': {
         const i = Math.trunc(this.num(this.ev(st.e)));
         if (i >= 1 && i <= st.list.length) {
-          if (st.kind === 'GOSUB') this.gosubStack.push({ li: this.li, si: this.si + 1 });
+          if (st.kind === 'GOSUB') this.gosubStack.push({ li: this.li, si: this.si + 1, fs: this.forStack.length });
           this.gotoLine(st.list[i - 1]); return true;
         }
         return;
@@ -1542,8 +1563,10 @@ class Interpreter {
         const to = this.num(this.ev(st.to));
         const step = st.step ? this.num(this.ev(st.step)) : 1;
         this.setVar(st.v, from);
-        // gleichnamige Rahmen verwerfen (Applesoft)
-        for (let k = this.forStack.length - 1; k >= 0; k--) {
+        // gleichnamige Rahmen verwerfen (Applesoft) -- die Suche endet aber am
+        // juengsten GOSUB-Eintrag, genau wie FNDFOR im ROM
+        const base = this.forBase();
+        for (let k = this.forStack.length - 1; k >= base; k--) {
           if (this.forStack[k].v === st.v) { this.forStack.length = k; break; }
         }
         this.forStack.push({ v: st.v, to, step, li: this.li, si: this.si + 1 });
@@ -1553,10 +1576,12 @@ class Interpreter {
         const names = st.vars.length ? st.vars : [null];
         for (const nm of names) {
           let f;
-          if (nm === null) f = this.forStack[this.forStack.length - 1];
+          const base = this.forBase();
+          if (nm === null) f = this.forStack.length > base ? this.forStack[this.forStack.length - 1] : null;
           else {
-            while (this.forStack.length && this.forStack[this.forStack.length - 1].v !== nm) this.forStack.pop();
-            f = this.forStack[this.forStack.length - 1];
+            let k = this.forStack.length - 1;
+            while (k >= base && this.forStack[k].v !== nm) k--;
+            if (k >= base) { this.forStack.length = k + 1; f = this.forStack[k]; } else f = null;
           }
           if (!f) throw new BasicError('NEXT WITHOUT FOR');
           const nv = this.num(this.getVar(f.v)) + f.step;
@@ -1588,11 +1613,13 @@ class Interpreter {
         if (st.prompt !== null) io.print(st.prompt);
         else io.print('?');
         const line = await io.inputLine();
-        const parts = st.lvs.length > 1 ? line.split(',') : [line];
+        // Ungequotete Eingaben enden wie im Original an Komma oder Doppelpunkt
+        const parts = line.split(/[,:]/);
         st.lvs.forEach((lv, i) => {
           const raw = (parts[i] || '').trim();
           this.assign(lv, lvIsStr(lv) ? raw : (parseFloat(raw) || 0));
         });
+        if (parts.length > st.lvs.length) io.print('?EXTRA IGNORED\n');
         return;
       }
       case 'CLEAR': this.clearVars(); return;
@@ -2002,8 +2029,13 @@ if (typeof module !== 'undefined') module.exports = { Interpreter, fmtNum, token
     '<h2>Bekannte Abweichung</h2>' +
     '<p>Der Zufallsgenerator ist kein bitgenauer Nachbau von Applesofts <code>RND</code> &mdash; ' +
     'daf&uuml;r w&auml;re das Apple-ROM n&ouml;tig. Dieselbe Gl&uuml;ckszahl erzeugt hier ' +
-    'reproduzierbar dieselbe Welt, aber nicht dieselbe wie auf echter Hardware. Alles andere ' +
-    'l&auml;uft &uuml;ber den Originalcode.</p>' +
+    'reproduzierbar dieselbe Welt, aber nicht dieselbe wie auf echter Hardware. Auch rechnet ' +
+    'der Interpreter mit JavaScript-Gleitkomma statt mit Applesofts 5-Byte-Format; in seltenen ' +
+    'Grenzf&auml;llen (etwa beim Abrunden des Nahrungsvorrats) kann das ein Zehntel ausmachen.</p>' +
+    '<p>Eine einzige Zeile ist hinzugef&uuml;gt: <code>4615</code>. Im Original sucht ein Dieb ' +
+    'in Zeile 4620 so lange nach einem Gegenstand, bis er einen findet &mdash; besitzt man gar ' +
+    'nichts mehr (auch weniger als eine Nahrungsration), h&auml;ngt das Spiel f&uuml;r immer. ' +
+    'Zeile 4615 l&auml;sst den Dieb in diesem Fall stattdessen angreifen.</p>' +
 
     '<h2>Farben</h2>' +
     '<p>Die gr&uuml;nen und violetten Linien sind kein Effekt, sondern Absicht: auf dem Apple&nbsp;II ' +
