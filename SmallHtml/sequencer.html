@@ -227,6 +227,13 @@ canvas#grid-canvas { display: block; cursor: crosshair; }
 #midibar label { display: flex; align-items: center; gap: 4px; color: var(--text2); font-size: 11px; cursor: pointer; white-space: nowrap; }
 #midibar input[type=checkbox] { accent-color: var(--accent2); }
 #midi-input { max-width: 220px; }
+#midi-output { max-width: 200px; }
+#ext-status { font-size: 11px; color: var(--text3); }
+#ext-status.ok { color: #22c55e; }
+#fmdx-open { text-decoration: none; }
+.track-out { display: flex; gap: 4px; align-items: center; }
+.track-out select { font-size: 10px; padding: 1px 3px; max-width: 110px; }
+.track-out select.ext { border-color: var(--accent); color: var(--accent); }
 #midi-led { width: 9px; height: 9px; border-radius: 50%; background: #2a2a40; border: 1px solid var(--border); flex-shrink: 0; transition: background 0.15s; }
 #midi-led.on { background: var(--green); box-shadow: 0 0 6px var(--green); transition: none; }
 #midi-last { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text2); min-width: 170px; white-space: nowrap; }
@@ -313,6 +320,15 @@ canvas#grid-canvas { display: block; cursor: crosshair; }
     <button class="btn" id="undo-take-btn" onclick="undoTake()" disabled title="Alles aus der letzten Aufnahme wieder entfernen">↶ Take verwerfen</button>
   </div>
   <div class="tb-group">
+    <span class="mb-title" title="Spuren mit Ausgabe &bdquo;&rarr; FM&middot;DX&ldquo; oder &bdquo;&rarr; MIDI-Out&ldquo; (Auswahl in der Spurliste)">🔊 Ausgang</span>
+    <select id="midi-output" onchange="midiSelectOutput()" disabled title="MIDI-Ausgang f&uuml;r Spuren mit &bdquo;&rarr; MIDI-Out&ldquo; (Hardware-Synth, DAW &uuml;ber virtuelles Kabel)">
+      <option value="">— erst 🔌 Verbinden —</option>
+    </select>
+    <label title="Programmwechsel aus der Spur mitsenden (w&auml;hlt in FM&middot;DX das Preset bzw. die Bankstimme)"><input type="checkbox" id="ext-pc"> Programmwechsel senden</label>
+    <a href="fm_dx_worklet.html" target="fmdx" class="btn" id="fmdx-open" title="FM&middot;DX in einem eigenen Tab &ouml;ffnen &ndash; dort einmal &bdquo;&#9654; AUDIO AN&ldquo; klicken">FM&middot;DX &ouml;ffnen</a>
+    <span id="ext-status" title="Verbindung zu FM&middot;DX im Browser"></span>
+  </div>
+  <div class="tb-group">
     <label title="Noten auf MIDI-Kanal 10 (Pads des MPK mini) landen in einer Schlagzeugspur – sie wird bei Bedarf angelegt"><input type="checkbox" id="midi-pads" checked> Pads (Kanal 10) → Drums</label>
     <label title="MPK-mini-Drehregler K1–K8 (CC 70–77) → Filter, Resonanz, Hall, Chorus, Lautstärke, Panorama, Expression, Modulation"><input type="checkbox" id="midi-knobs" checked> MPK-Regler zuordnen</label>
   </div>
@@ -365,12 +381,26 @@ canvas#grid-canvas { display: block; cursor: crosshair; }
   <div>Tonart: <span id="st-key">—</span></div>
   <div>Noten: <span id="st-notes">0</span></div>
   <div>Spur: <span id="st-track">—</span></div>
+  <div>Auswahl: <span id="st-sel">0</span></div>
+  <div style="cursor:help" title="Maus im Notenraster:
+• leere Stelle drücken und nach rechts ziehen = Note mit dieser Länge (Klick = zuletzt benutzte Länge)
+• Note anfassen und ziehen = verschieben (ausgewählte Noten wandern mit)
+• rechte Kante ziehen = Länge ändern
+• Shift + Ziehen = Auswahlrahmen, Shift + Klick = Note an-/abwählen
+• Alt + Note ziehen = Kopie, Alt + Ziehen auf leerer Fläche = viele Noten malen
+• Doppelklick = löschen, Strg + Ziehen = radieren, Rechtsklick = Menü
+
+Tastatur:
+• Entf = Auswahl löschen, Strg+A = alles, Esc = Auswahl aufheben
+• ←/→ = Rasterschritt, ↑/↓ = Halbton, Shift+↑/↓ = Oktave
+• Strg+D = Auswahl duplizieren
+• Strg+Z = rückgängig, Strg+Y = wiederholen">⌨ <span>Bedienung</span></div>
   <div id="st-msg"></div>
   <div><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:var(--accent2); text-decoration:none">itzwieseltal.wordpress.com</a></div>
 </div>
 
 <div id="ctx-menu">
-  <div class="ctx-item" onclick="ctxAction('delete')">🗑 Note löschen</div>
+  <div class="ctx-item" onclick="ctxAction('delete')">🗑 Note(n) löschen</div>
   <div class="ctx-item" onclick="ctxAction('vel-up')">⬆ Anschlag +10</div>
   <div class="ctx-item" onclick="ctxAction('vel-down')">⬇ Anschlag −10</div>
   <div class="ctx-sep"></div>
@@ -39348,6 +39378,7 @@ function makeTrack(o = {}) {
   return Object.assign({
     name: 'Spur', color: TRACK_COLORS[0], channel: null, instrument: 0, bank: 0, kit: 0,
     notes: [], events: [], volume: 100, muted: false, solo: false, _cache: null, _rt: null,
+    out: 'int', outCh: 0,          // Ausgabe: 'int' = eingebaute Klänge, 'fmdx' = FM·DX-Tab, 'midi' = MIDI-Ausgang; Kanal 0..15
   }, o);
 }
 
@@ -39361,10 +39392,8 @@ let cellH = 16;
 let isPlaying = false;
 let playheadTick = 0;
 
-let isDragging = false;
-let dragMode = null;             // 'add' | 'erase'
-let lastCell = null;
 let ctxNote = null;
+const selection = new Set();     // ausgewählte Noten der aktiven Spur
 let instModalTrackIdx = null;
 
 // abgeleitete Größen
@@ -39931,6 +39960,7 @@ function applyStateToStrip(tr, t, which) {
 }
 
 function updateFader(tr, t) {
+  if (isExt(tr)) extVol(tr, 0);
   if (!tr._rt) return;
   const soloActive = tracks.some(x => x.solo);
   const audible = !tr.muted && (!soloActive || tr.solo);
@@ -40156,7 +40186,8 @@ function noteOn(pitch, velocity, trackIdx, duration_s) {
   const ctx = getAudioCtx();
   if (!isPlaying) syncStripToPlayhead(tr);
   const t = ctx.currentTime + 0.005;
-  playVoice(tr, pitch, velocity, t, duration_s);
+  if (isExt(tr)) { extNoteOn(tr, pitch, velocity, t); extNoteOff(tr, pitch, t + Math.max(duration_s, 0.05)); }
+  else playVoice(tr, pitch, velocity, t, duration_s);
   lightKey(pitch, t, t + Math.max(duration_s, 0.15), tr.color);
 }
 
@@ -40325,6 +40356,117 @@ function noteReleaseTick(tr, n) {
 // ========== PLAYBACK ==========
 // Ein Zeiger läuft in Ticks der Audiozeit um LOOKAHEAD voraus. Jede Note und jedes Ereignis
 // wird genau einmal eingeplant. Am Liedende springt er an den Anfang (Schleife).
+// ========== EXTERNE AUSGABE: FM·DX (anderer Browser-Tab) oder MIDI-Ausgang ==========
+// FM·DX wird über einen BroadcastChannel angesprochen (gleiche Herkunft, kein Treiber nötig).
+// Jede Nachricht trägt ihren Soll-Zeitpunkt als absolute Zeit (ms seit 1970), FM·DX plant sie
+// im Audiothread sample-genau ein – auch wenn sein Tab im Hintergrund liegt.
+// Pedale werden für eingeplante Noten nicht gesendet: ihre Länge enthält das Pedal schon.
+const EXT_BC_NAME = 'smallcircuits-midi';
+let extBC = null, midiOutPort = null, midiOutId = '', fmdxSeen = 0, fmdxAudio = false;
+const isExt = tr => !!tr && (tr.out === 'fmdx' || tr.out === 'midi');
+const extCh = tr => (tr.outCh | 0) & 15;
+function extChannel() {
+  if (!extBC && 'BroadcastChannel' in window) {
+    extBC = new BroadcastChannel(EXT_BC_NAME);
+    extBC.onmessage = e => {
+      const m = e.data;
+      if (m && m.hello === 'fmdx') { fmdxSeen = Date.now(); fmdxAudio = !!m.audio; showExtStatus(); }
+    };
+    setInterval(showExtStatus, 2000);
+  }
+  return extBC;
+}
+function showExtStatus() {
+  const el = document.getElementById('ext-status');
+  if (!tracks.some(t => t.out === 'fmdx')) { el.textContent = ''; return; }
+  const alive = Date.now() - fmdxSeen < 5000;
+  if (extBC && Date.now() - fmdxSeen > 2500) extBC.postMessage({ ping: 1 });
+  el.className = alive && fmdxAudio ? 'ok' : '';
+  el.textContent = !alive ? 'FM·DX nicht gefunden – „FM·DX öffnen“' : fmdxAudio ? '● FM·DX bereit' : 'FM·DX: dort „▶ AUDIO AN“ klicken';
+}
+function extSend(tr, bytes, t) {
+  const now = audioCtx ? audioCtx.currentTime : 0;
+  const dt = t ? Math.max(0, (t - now) * 1000) : 0;
+  if (tr.out === 'fmdx') {
+    const bc = extChannel();
+    if (bc) bc.postMessage({ d: bytes, at: performance.timeOrigin + performance.now() + dt });
+  } else if (tr.out === 'midi' && midiOutPort) {
+    try { midiOutPort.send(bytes, performance.now() + dt); } catch (e) { console.error(e); }
+  }
+}
+function extNoteOn(tr, p, v, t) { extSend(tr, [0x90 | extCh(tr), p & 127, clamp(v | 0, 1, 127)], t); }
+function extNoteOff(tr, p, t) { extSend(tr, [0x80 | extCh(tr), p & 127, 64], t); }
+function extCC(tr, cc, v, t) { extSend(tr, [0xB0 | extCh(tr), cc & 127, clamp(v | 0, 0, 127)], t); }
+function extBend(tr, v, t) { extSend(tr, [0xE0 | extCh(tr), v & 127, (v >> 7) & 127], t); }
+// Lautstärke = Kanal-Volume (CC 7) × Spur-Fader, stumm/solo → 0
+function extVol(tr, t) {
+  const st = tr._rt ? tr._rt.state : defaultState(tr);
+  const soloActive = tracks.some(x => x.solo), audible = !tr.muted && (!soloActive || tr.solo);
+  extCC(tr, 7, audible ? Math.round(st.vol * tr.volume / 100) : 0, t);
+}
+// Kanalzustand an der Einstiegsstelle nachsenden
+function extChaseOut(tr, t) {
+  const st = tr._rt ? tr._rt.state : defaultState(tr);
+  extVol(tr, t); extCC(tr, 11, st.expr, t); extCC(tr, 1, st.mod, t); extBend(tr, st.bend, t);
+}
+// Alles verstummen lassen: geplante Nachrichten verwerfen, Noten aus
+function extSilence(tr) {
+  if (tr.out === 'fmdx') { const bc = extChannel(); if (bc) bc.postMessage({ flush: 1, ch: extCh(tr) }); }
+  else if (tr.out === 'midi' && midiOutPort) {
+    try { if (midiOutPort.clear) midiOutPort.clear(); } catch (e) {}
+    extCC(tr, 64, 0, 0); extCC(tr, 123, 0, 0);
+  }
+}
+function extSilenceAll() { for (const tr of tracks) if (isExt(tr)) extSilence(tr); }
+function extEvent(tr, e, t) {
+  if (e.t === 'cc') {
+    if (e.a === 64 || e.a === 66 || e.a === 67) return;              // schon in den Notenlängen enthalten
+    if (e.a === 7) extVol(tr, t); else extCC(tr, e.a, e.b, t);
+  } else if (e.t === 'pb') extBend(tr, e.a, t);
+  else if (e.t === 'cp') extSend(tr, [0xD0 | extCh(tr), e.a & 127], t);
+  else if (e.t === 'prog' && document.getElementById('ext-pc').checked) extSend(tr, [0xC0 | extCh(tr), e.a & 127], t);
+}
+// Spur-Ausgabe umschalten
+function setTrackOut(i, v) {
+  const tr = tracks[i]; if (!tr) return;
+  if (isExt(tr)) extSilence(tr);
+  if (audioCtx) releaseTrackVoices(tr, audioCtx.currentTime, true);
+  tr.out = v;
+  if (v === 'fmdx') {
+    const bc = extChannel();
+    if (bc) { bc.postMessage({ ping: 1 }); setTimeout(showExtStatus, 300); }
+    else statusMsg('Dieser Browser kennt keinen BroadcastChannel – bitte „→ MIDI-Out“ mit virtuellem Kabel nutzen');
+  }
+  if (v === 'midi' && !midiOutPort) statusMsg('MIDI-Ausgang: erst 🔌 Verbinden, dann rechts unter „🔊 Ausgang“ ein Gerät wählen');
+  if (isExt(tr) && isPlaying) extChaseOut(tr, 0);
+  renderTrackList(); showExtStatus();
+}
+function setTrackOutCh(i, ch) {
+  const tr = tracks[i]; if (!tr) return;
+  if (isExt(tr)) extSilence(tr);
+  tr.outCh = clamp(ch | 0, 0, 15);
+  if (isExt(tr) && isPlaying) extChaseOut(tr, 0);
+  renderTrackList();
+}
+function midiRefreshOutputs() {
+  if (!midiAccess) return;
+  const sel = document.getElementById('midi-output');
+  const outs = [...midiAccess.outputs.values()].filter(o => o.state !== 'disconnected');
+  sel.innerHTML = '';
+  sel.add(new Option(outs.length ? '— kein MIDI-Ausgang —' : '— kein Ausgang gefunden —', ''));
+  for (const o of outs) sel.add(new Option(o.name + (o.manufacturer ? ` (${o.manufacturer})` : ''), o.id));
+  if (![...sel.options].some(o => o.value === midiOutId)) midiOutId = '';
+  sel.value = midiOutId; sel.disabled = false;
+  midiOutPort = midiOutId ? midiAccess.outputs.get(midiOutId) || null : null;
+}
+function midiSelectOutput() {
+  for (const tr of tracks) if (tr.out === 'midi') extSilence(tr);
+  midiOutId = document.getElementById('midi-output').value;
+  midiOutPort = midiOutId && midiAccess ? midiAccess.outputs.get(midiOutId) || null : null;
+  if (midiOutPort) statusMsg('MIDI-Ausgang: ' + midiOutPort.name);
+  if (isPlaying) for (const tr of tracks) if (tr.out === 'midi') extChaseOut(tr, 0);
+}
+
 const LOOKAHEAD = 0.15;
 const LOOKAHEAD_HIDDEN = 1.5;   // Hintergrund-Tabs drosseln setTimeout auf ~1 s
 const SCHED_INTERVAL = 25;
@@ -40373,11 +40515,13 @@ function beginPass(from, t) {
     applyStateToStrip(tr, t);
     rt.ni = lowerBound(tr.notes, from);
     rt.ei = lowerBound(tr.events, from);
+    if (isExt(tr) && isPlaying) extChaseOut(tr, t);
   }
 }
 
 function pauseSeq() {
   liveStopAll();
+  extSilenceAll();
   isPlaying = false;
   clearTimeout(schedTimer);
   cancelAnimationFrame(animFrameId);
@@ -40473,7 +40617,10 @@ function scheduleWindow(a, b, ctx) {
         const dur = secAt(relTick) - secAt(n.tick);
         let vel = n.velocity;
         if (pedalAt(trackCache(tr).soft, n.tick)) vel = Math.max(1, Math.round(vel * 0.75));
-        playVoice(tr, n.pitch, vel, Math.max(t, now), dur);
+        if (isExt(tr)) {
+          const ts = Math.max(t, now);
+          extNoteOn(tr, n.pitch, vel, ts); extNoteOff(tr, n.pitch, ts + Math.max(dur, 0.02));
+        } else playVoice(tr, n.pitch, vel, Math.max(t, now), dur);
         lightKey(n.pitch, Math.max(t, now), timeOf(n.tick + n.len), tr.color);
       }
     }
@@ -40482,6 +40629,11 @@ function scheduleWindow(a, b, ctx) {
 
 function handleEvent(tr, rt, e, t) {
   const st = rt.state;
+  if (isExt(tr)) {                                   // Zustand mitführen (für CC 7 × Fader), dann weiterreichen
+    if (e.t === 'cc') applyCC(st, e.a, e.b); else if (e.t === 'pb') st.bend = e.a;
+    extEvent(tr, e, t);
+    return;
+  }
   if (e.t === 'cc') {
     if (e.a === 120 || e.a === 123) { releaseTrackVoices(tr, t, e.a === 120); return; }
     if (!applyCC(st, e.a, e.b)) return;
@@ -40552,7 +40704,10 @@ function renderTrackList() {
   tracks.forEach((tr, i) => {
     const div = document.createElement('div');
     div.className = 'track-row' + (i === activeTrackIdx ? ' active' : '');
-    div.onclick = (e) => { if (!e.target.closest('.mini-btn,.vol-slider,.track-name,.track-del,.track-inst')) selectTrack(i); };
+    div.onclick = (e) => { if (!e.target.closest('.mini-btn,.vol-slider,.track-name,.track-del,.track-inst,.track-out')) selectTrack(i); };
+    const outOpts = [['int', 'Intern'], ['fmdx', '→ FM·DX'], ['midi', '→ MIDI-Out']]
+      .map(([v, l]) => `<option value="${v}"${tr.out === v ? ' selected' : ''}>${l}</option>`).join('');
+    const chOpts = Array.from({ length: 16 }, (_, c) => `<option value="${c}"${(tr.outCh | 0) === c ? ' selected' : ''}>K${c + 1}</option>`).join('');
     div.innerHTML = `
       <div class="track-name-row">
         <div class="track-color" style="background:${tr.color}"></div>
@@ -40560,7 +40715,11 @@ function renderTrackList() {
                onchange="tracks[${i}].name=this.value; updateStatus()"
                onclick="event.stopPropagation()" />
       </div>
-      <div class="track-inst" onclick="openInstModal(${i})" title="Instrument wählen">🎵 ${escHtml(trackInstName(tr))}</div>
+      <div class="track-inst" onclick="openInstModal(${i})" title="Instrument wählen">${isExt(tr) ? '🔊 ' + (tr.out === 'fmdx' ? 'FM·DX' : 'MIDI-Out') + ' K' + (extCh(tr) + 1) : '🎵 ' + escHtml(trackInstName(tr))}</div>
+      <div class="track-out" onclick="event.stopPropagation()" title="Wohin die Spur spielt">
+        <select class="${isExt(tr) ? 'ext' : ''}" onchange="setTrackOut(${i}, this.value)">${outOpts}</select>
+        ${isExt(tr) ? `<select onchange="setTrackOutCh(${i}, +this.value)" title="MIDI-Kanal der Ausgabe">${chOpts}</select>` : ''}
+      </div>
       <div class="track-meta">${escHtml(trackInfo(tr))}</div>
       <div class="track-controls">
         <button class="mini-btn ${tr.muted ? 'm-active' : ''}" onclick="event.stopPropagation(); toggleMute(${i})">M</button>
@@ -40582,6 +40741,7 @@ function setTrackVolume(i, v, el) {
 }
 
 function selectTrack(idx) {
+  if (clamp(idx, 0, tracks.length - 1) !== activeTrackIdx) selection.clear();
   activeTrackIdx = clamp(idx, 0, tracks.length - 1);
   renderTrackList();
   renderGrid();
@@ -40858,6 +41018,11 @@ function drawNote(ctx, note, track, isActive) {
     // Anschlagstärke als helle Linie oben, Länge proportional
     ctx.fillStyle = 'rgba(255,255,255,0.45)';
     ctx.fillRect(x + 1, y + 1, Math.max(1, (w - 1) * note.velocity / 127), 2);
+    if (selection.has(note)) {
+      ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5;
+      ctx.strokeRect(x + 1, y + 1.5, Math.max(w - 1, 1), h - 2);
+      ctx.lineWidth = 1;
+    }
   }
   ctx.globalAlpha = 1;
 }
@@ -40898,39 +41063,329 @@ function removeNote(note) {
   if (i !== -1) tr.notes.splice(i, 1);
 }
 
+// Maus im Raster:
+//   leer + Klick/Ziehen nach rechts  → neue Note, Länge = gezogene Strecke (Klick allein = zuletzt benutzte Länge)
+//   Note anfassen + ziehen           → verschieben (Zeit und Tonhöhe); ist sie ausgewählt, wandert die ganze Auswahl mit
+//   rechte Kante der Note ziehen     → Länge ändern (bei Auswahl für alle ausgewählten)
+//   Shift + Ziehen auf leerer Fläche → Auswahlrahmen;  Shift + Klick auf Note → Auswahl umschalten
+//   Alt + Note ziehen                → Kopie verschieben
+//   Alt + Ziehen auf leerer Fläche   → viele kurze Noten malen
+//   Doppelklick auf Note             → löschen;  Strg/Cmd + Ziehen → radieren
+// Tastatur: Entf/Rück löschen · Strg+A alles · Esc Auswahl aufheben · Strg+D duplizieren
+//           ←/→ um einen Rasterschritt · ↑/↓ Halbton (mit Shift Oktave) · Strg+Z rückgängig · Strg+Y / Strg+Shift+Z wiederholen
+const EDGE_PX = 6;
+let drag = null;
+let lastLen = null;
+
+// ---------- Rückgängig / Wiederholen ----------
+const undoStack = [], redoStack = [];
+const UNDO_MAX = 200;
+
+function snapTrack(tr) {
+  return { tr, notes: tr.notes.map(n => ({ ...n })), events: tr.events.slice() };
+}
+function pushUndoSnap(s) {
+  if (!s) return;
+  undoStack.push(s);
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  redoStack.length = 0;
+}
+function pushUndo() { const tr = tracks[activeTrackIdx]; if (tr) pushUndoSnap(snapTrack(tr)); }
+
+function restoreSnap(s) {
+  const tr = s.tr;
+  tr.notes = s.notes.map(n => ({ ...n }));
+  tr.events = s.events.slice();
+  tr._cache = null;
+  if (isPlaying) { const rt = runtime(tr); rt.ni = lowerBound(tr.notes, schedTick); rt.ei = lowerBound(tr.events, schedTick); }
+  selection.clear();
+  const idx = tracks.indexOf(tr);
+  if (idx !== activeTrackIdx) selectTrack(idx);
+  else { renderTrackList(); renderGrid(); buildLaneSelect(); drawLane(); }
+}
+function undoRedo(from, to, label) {
+  while (from.length) {
+    const s = from.pop();
+    if (!tracks.includes(s.tr)) continue;          // Spur gibt es nicht mehr
+    to.push(snapTrack(s.tr));
+    restoreSnap(s);
+    statusMsg(`${label} (${from.length} weitere)`);
+    return;
+  }
+  statusMsg(`Nichts mehr zum ${label === 'Rückgängig' ? 'Rückgängigmachen' : 'Wiederholen'}`);
+}
+function undo() { undoRedo(undoStack, redoStack, 'Rückgängig'); }
+function redo() { undoRedo(redoStack, undoStack, 'Wiederholt'); }
+
+function resyncPlayback(tr) {
+  if (isPlaying && tr) runtime(tr).ni = lowerBound(tr.notes, schedTick);
+}
+function updateSelCount() {
+  const el = document.getElementById('st-sel');
+  if (el) el.textContent = selection.size;
+}
+function activeSelection() {
+  const tr = tracks[activeTrackIdx];
+  if (!tr) return [];
+  return tr.notes.filter(n => selection.has(n));
+}
+
+// ---------- Trefferprüfung ----------
+function gridXY(e) {
+  const rect = gridCanvas.getBoundingClientRect();
+  return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+}
+function hitNote(e) {
+  const tr = tracks[activeTrackIdx];
+  if (!tr) return null;
+  const { x, y } = gridXY(e);
+  const pitch = MIDI_MAX - Math.floor(y / cellH);
+  const notes = tr.notes;
+  for (let i = upperBound(notes, (x + 2) / pxPerTick) - 1; i >= 0; i--) {
+    const n = notes[i];
+    if ((x - 2) / pxPerTick - n.tick > song.ppq * 64) break;
+    if (n.pitch !== pitch) continue;
+    const x0 = n.tick * pxPerTick, x1 = (n.tick + Math.max(n.len, 1)) * pxPerTick;
+    if (x >= x0 && x <= x1 + 2) {
+      const edge = Math.min(EDGE_PX, (x1 - x0) / 3);
+      return { note: n, part: x >= x1 - edge ? 'end' : 'body' };
+    }
+  }
+  return null;
+}
+
+function drawMarquee() {
+  if (!drag || drag.mode !== 'marquee') return;
+  const ctx = gridCanvas.getContext('2d');
+  const x = Math.min(drag.x0, drag.x1), y = Math.min(drag.y0, drag.y1);
+  const w = Math.abs(drag.x1 - drag.x0), h = Math.abs(drag.y1 - drag.y0);
+  ctx.fillStyle = 'rgba(120,160,255,0.12)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(160,190,255,0.9)';
+  ctx.setLineDash([4, 3]);
+  ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.setLineDash([]);
+}
+function redraw() { renderGrid(); drawMarquee(); drawLane(); updateSelCount(); }
+
+// ---------- Maus ----------
 gridCanvas.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
-  isDragging = true;
+  const tr = tracks[activeTrackIdx];
+  if (!tr) return;
   const { rawTick, tick, pitch } = getCellFromEvent(e);
-  const existing = findNoteAt(rawTick, pitch);
-  if (existing || e.ctrlKey || e.metaKey) {
-    dragMode = 'erase';
-    if (existing) removeNote(existing);
-  } else {
-    dragMode = 'add';
+  const hit = hitNote(e);
+  const snap = snapTrack(tr);
+
+  if (e.ctrlKey || e.metaKey) {
+    drag = { mode: 'erase', snap, changed: false };
+    if (hit) { removeNote(hit.note); selection.delete(hit.note); drag.changed = true; }
+  } else if (hit && e.shiftKey && hit.part === 'body') {
+    // Auswahl umschalten; danach kann man trotzdem ziehen
+    if (selection.has(hit.note)) { selection.delete(hit.note); drag = null; redraw(); return; }
+    selection.add(hit.note);
+    startMove(e, tr, hit, rawTick, pitch, snap, false);
+  } else if (hit) {
+    if (!selection.has(hit.note)) { selection.clear(); selection.add(hit.note); }
+    if (hit.part === 'end') startResize(tr, hit, snap);
+    else startMove(e, tr, hit, rawTick, pitch, snap, e.altKey);
+    noteOn(hit.note.pitch, hit.note.velocity, activeTrackIdx, 0.25);
+  } else if (e.shiftKey) {
+    const { x, y } = gridXY(e);
+    drag = { mode: 'marquee', x0: x, y0: y, x1: x, y1: y, base: new Set(selection) };
+  } else if (e.altKey) {
+    selection.clear();
+    drag = { mode: 'paint', last: { tick, pitch }, snap, changed: true };
     addNote(tick, pitch);
     noteOn(pitch, 100, activeTrackIdx, 0.3);
+  } else {
+    selection.clear();
+    const len = clamp(Math.round(lastLen || ticksPerStep), 1, Math.max(1, songEnd - tick));
+    const n = { tick, len, pitch, velocity: 100, offVel: 64 };
+    insertSorted(tr.notes, n);
+    drag = { mode: 'create', note: n, moved: false, snap, changed: true };
+    noteOn(pitch, 100, activeTrackIdx, 0.3);
   }
-  lastCell = { tick, pitch };
-  renderGrid(); drawLane();
+  redraw();
 });
+
+function startMove(e, tr, hit, rawTick, pitch, snap, copy) {
+  let group = activeSelection();
+  if (copy) {
+    const copies = group.map(n => ({ ...n }));
+    for (const c of copies) insertSorted(tr.notes, c);
+    selection.clear();
+    copies.forEach(c => selection.add(c));
+    group = copies;
+  }
+  drag = {
+    mode: 'move', snap, copy, changed: copy,
+    lead: copy ? group[copyIndexOf(hit.note, group)] : hit.note,
+    startRaw: rawTick, startPitch: pitch,
+    group: group.map(n => ({ n, tick: n.tick, pitch: n.pitch })),
+  };
+}
+// beim Kopieren die Kopie finden, die zur angefassten Note gehört
+function copyIndexOf(orig, copies) {
+  const i = copies.findIndex(c => c.tick === orig.tick && c.pitch === orig.pitch && c.len === orig.len);
+  return i < 0 ? 0 : i;
+}
+function startResize(tr, hit, snap) {
+  const group = activeSelection();
+  drag = { mode: 'resize', snap, changed: false, lead: hit.note, leadLen: hit.note.len,
+           group: group.map(n => ({ n, len: n.len })) };
+}
 
 gridCanvas.addEventListener('mousemove', (e) => {
-  if (!isDragging) return;
-  const { rawTick, tick, pitch } = getCellFromEvent(e);
-  if (lastCell && (tick !== lastCell.tick || pitch !== lastCell.pitch)) {
-    if (dragMode === 'add') {
-      if (!findNoteAt(tick, pitch)) { addNote(tick, pitch); noteOn(pitch, 80, activeTrackIdx, 0.2); }
-    } else {
-      const n = findNoteAt(rawTick, pitch);
-      if (n) removeNote(n);
-    }
-    lastCell = { tick, pitch };
-    renderGrid(); drawLane();
+  if (!drag) {
+    const hit = hitNote(e);
+    gridCanvas.style.cursor = !hit ? 'crosshair' : hit.part === 'end' ? 'ew-resize' : 'grab';
+    return;
   }
+  const tr = tracks[activeTrackIdx];
+  const { rawTick, tick, pitch } = getCellFromEvent(e);
+  const step = ticksPerStep;
+  const minLen = Math.max(1, Math.round(step));
+  let changed = false;
+
+  if (drag.mode === 'create') {
+    const n = drag.note;
+    if (!drag.moved && rawTick < n.tick + step) return;
+    drag.moved = true;
+    const end = Math.round(Math.round(rawTick / step) * step);          // an Rasterlinie einrasten
+    const len = clamp(end - n.tick, minLen, Math.max(1, songEnd - n.tick));
+    if (len !== n.len) { n.len = len; changed = true; }
+    gridCanvas.style.cursor = 'ew-resize';
+  } else if (drag.mode === 'resize') {
+    const lead = drag.lead;
+    const end = Math.round(Math.round(rawTick / step) * step);
+    const dLen = clamp(end - lead.tick, minLen, Math.max(1, songEnd - lead.tick)) - drag.leadLen;
+    for (const g of drag.group) {
+      const len = clamp(g.len + dLen, Math.min(minLen, g.len), Math.max(1, songEnd - g.n.tick));
+      if (len !== g.n.len) { g.n.len = len; changed = true; }
+    }
+    gridCanvas.style.cursor = 'ew-resize';
+  } else if (drag.mode === 'move') {
+    let dT = Math.round((rawTick - drag.startRaw) / step) * step;
+    let dP = pitch - drag.startPitch;
+    // Gruppe als Ganzes im erlaubten Bereich halten
+    let minT = Infinity, maxEnd = -Infinity, minP = 999, maxP = -1;
+    for (const g of drag.group) {
+      minT = Math.min(minT, g.tick); maxEnd = Math.max(maxEnd, g.tick + g.n.len);
+      minP = Math.min(minP, g.pitch); maxP = Math.max(maxP, g.pitch);
+    }
+    dT = clamp(dT, -minT, Math.max(-minT, songEnd - maxEnd));
+    dP = clamp(dP, MIDI_MIN - minP, MIDI_MAX - maxP);
+    for (const g of drag.group) {
+      const t = Math.round(g.tick + dT), p = g.pitch + dP;
+      if (t !== g.n.tick || p !== g.n.pitch) { g.n.tick = t; g.n.pitch = p; changed = true; }
+    }
+    if (changed) {
+      if (drag.lead && drag.lastPitch !== drag.lead.pitch) {
+        noteOn(drag.lead.pitch, drag.lead.velocity, activeTrackIdx, 0.15);
+        drag.lastPitch = drag.lead.pitch;
+      }
+      sortByTick(tr.notes);
+    }
+    gridCanvas.style.cursor = 'grabbing';
+  } else if (drag.mode === 'paint') {
+    if (tick !== drag.last.tick || pitch !== drag.last.pitch) {
+      if (!findNoteAt(tick, pitch)) { addNote(tick, pitch); noteOn(pitch, 80, activeTrackIdx, 0.2); }
+      drag.last = { tick, pitch };
+      changed = true;
+    }
+  } else if (drag.mode === 'erase') {
+    const hit = hitNote(e);
+    if (hit) { removeNote(hit.note); selection.delete(hit.note); changed = true; }
+  } else if (drag.mode === 'marquee') {
+    const { x, y } = gridXY(e);
+    drag.x1 = clamp(x, 0, gridCanvas.width); drag.y1 = clamp(y, 0, gridCanvas.height);
+    const t0 = Math.min(drag.x0, drag.x1) / pxPerTick, t1 = Math.max(drag.x0, drag.x1) / pxPerTick;
+    const pHi = MIDI_MAX - Math.floor(Math.min(drag.y0, drag.y1) / cellH);
+    const pLo = MIDI_MAX - Math.floor(Math.max(drag.y0, drag.y1) / cellH);
+    selection.clear();
+    drag.base.forEach(n => selection.add(n));
+    for (const n of tr.notes)
+      if (n.pitch >= pLo && n.pitch <= pHi && n.tick < t1 && n.tick + Math.max(n.len, 1) > t0) selection.add(n);
+    changed = true;
+  }
+  if (changed) { if (drag.mode !== 'marquee') drag.changed = true; redraw(); }
 });
 
-document.addEventListener('mouseup', () => { isDragging = false; lastCell = null; });
+document.addEventListener('mouseup', () => {
+  if (!drag) return;
+  const d = drag;
+  drag = null;
+  if ((d.mode === 'create' && d.moved) || d.mode === 'resize') lastLen = d.lead ? d.lead.len : d.note.len;
+  if (d.mode === 'move' && d.copy && d.group.every(g => g.n.tick === g.tick && g.n.pitch === g.pitch)) {
+    // Alt-Klick ohne Bewegung: Kopien wieder weg, Originale bleiben ausgewählt
+    for (const g of d.group) removeNote(g.n);
+    selection.clear();
+    d.changed = false;
+  }
+  if (d.changed && d.snap) { pushUndoSnap(d.snap); resyncPlayback(tracks[activeTrackIdx]); renderTrackList(); }
+  gridCanvas.style.cursor = 'crosshair';
+  redraw();
+});
+
+gridCanvas.addEventListener('dblclick', (e) => {
+  const hit = hitNote(e);
+  if (!hit) return;
+  pushUndo();
+  removeNote(hit.note);
+  selection.delete(hit.note);
+  redraw(); renderTrackList();
+});
+
+// ---------- Tastatur ----------
+document.addEventListener('keydown', (e) => {
+  const tag = e.target.tagName;
+  if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+  const tr = tracks[activeTrackIdx];
+  if (!tr) return;
+  const mod = e.ctrlKey || e.metaKey;
+  const k = e.key.toLowerCase();
+
+  if (mod && k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
+  if (mod && (k === 'y' || (k === 'z' && e.shiftKey))) { e.preventDefault(); redo(); return; }
+  if (mod && k === 'a') { e.preventDefault(); selection.clear(); tr.notes.forEach(n => selection.add(n)); redraw(); return; }
+  if (e.code === 'Escape') { if (selection.size) { selection.clear(); redraw(); } return; }
+
+  const sel = activeSelection();
+  if (!sel.length) return;
+
+  if (e.code === 'Delete' || e.code === 'Backspace') {
+    e.preventDefault();
+    pushUndo();
+    tr.notes = tr.notes.filter(n => !selection.has(n));
+    selection.clear();
+    resyncPlayback(tr); redraw(); renderTrackList();
+  } else if (mod && k === 'd') {
+    e.preventDefault();
+    pushUndo();
+    const t0 = Math.min(...sel.map(n => n.tick)), t1 = Math.max(...sel.map(n => n.tick + n.len));
+    const span = Math.ceil((t1 - t0) / ticksPerStep) * ticksPerStep;
+    if (t1 + span > songEnd) { statusMsg('Kein Platz mehr hinter der Auswahl – Takte erhöhen'); undoStack.pop(); return; }
+    selection.clear();
+    for (const n of sel) { const c = { ...n, tick: Math.round(n.tick + span) }; insertSorted(tr.notes, c); selection.add(c); }
+    resyncPlayback(tr); redraw(); renderTrackList();
+  } else if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.code)) {
+    e.preventDefault();
+    let dT = 0, dP = 0;
+    if (e.code === 'ArrowLeft') dT = -ticksPerStep;
+    if (e.code === 'ArrowRight') dT = ticksPerStep;
+    if (e.code === 'ArrowUp') dP = e.shiftKey ? 12 : 1;
+    if (e.code === 'ArrowDown') dP = e.shiftKey ? -12 : -1;
+    const minT = Math.min(...sel.map(n => n.tick)), maxEnd = Math.max(...sel.map(n => n.tick + n.len));
+    const minP = Math.min(...sel.map(n => n.pitch)), maxP = Math.max(...sel.map(n => n.pitch));
+    if (minT + dT < 0 || maxEnd + dT > songEnd || minP + dP < MIDI_MIN || maxP + dP > MIDI_MAX) return;
+    pushUndo();
+    for (const n of sel) { n.tick = Math.round(n.tick + dT); n.pitch += dP; }
+    sortByTick(tr.notes);
+    if (dP && sel.length === 1) noteOn(sel[0].pitch, sel[0].velocity, activeTrackIdx, 0.2);
+    resyncPlayback(tr); redraw();
+  }
+});
 
 gridCanvas.addEventListener('contextmenu', (e) => {
   e.preventDefault();
@@ -40946,13 +41401,24 @@ document.addEventListener('click', () => { document.getElementById('ctx-menu').s
 
 function ctxAction(action) {
   const tr = tracks[activeTrackIdx];
-  if (action === 'delete' && ctxNote) removeNote(ctxNote);
-  else if (action === 'vel-up' && ctxNote) ctxNote.velocity = Math.min(127, ctxNote.velocity + 10);
-  else if (action === 'vel-down' && ctxNote) ctxNote.velocity = Math.max(1, ctxNote.velocity - 10);
-  else if (action === 'clear-track') {
-    if (confirm(`Alle Noten und Controller in "${tr.name}" löschen?`)) { tr.notes = []; tr.events = []; tr._cache = null; renderTrackList(); }
+  // Rechtsklick auf eine ausgewählte Note wirkt auf die ganze Auswahl
+  const targets = ctxNote ? (selection.has(ctxNote) ? activeSelection() : [ctxNote]) : [];
+  if (action === 'delete' && targets.length) {
+    pushUndo();
+    tr.notes = tr.notes.filter(n => !targets.includes(n));
+    targets.forEach(n => selection.delete(n));
+    resyncPlayback(tr); renderTrackList();
+  } else if ((action === 'vel-up' || action === 'vel-down') && targets.length) {
+    pushUndo();
+    const d = action === 'vel-up' ? 10 : -10;
+    for (const n of targets) n.velocity = clamp(n.velocity + d, 1, 127);
+  } else if (action === 'clear-track') {
+    if (confirm(`Alle Noten und Controller in "${tr.name}" löschen?`)) {
+      pushUndo();
+      tr.notes = []; tr.events = []; tr._cache = null; selection.clear(); resyncPlayback(tr); renderTrackList();
+    }
   }
-  renderGrid(); drawLane();
+  renderGrid(); drawLane(); updateSelCount();
 }
 
 // ========== CONTROLLER-SPUR ==========
@@ -41106,6 +41572,7 @@ function laneEdit(p, erase) {
   const canvas = document.getElementById('lane-canvas');
   canvas.addEventListener('mousedown', e => {
     e.preventDefault();
+    pushUndo();
     laneDrag = { erase: e.button === 2, last: null };
     laneEdit(lanePos(e), laneDrag.erase);
   });
@@ -41740,6 +42207,7 @@ function midiRefreshInputs() {
   sel.value = midiInputId;
   sel.disabled = false;
   for (const inp of midiAccess.inputs.values()) inp.onmidimessage = midiMessage;
+  midiRefreshOutputs();
 }
 
 function midiSelectInput() {
@@ -41850,8 +42318,13 @@ function liveNoteOn(ch, pitch, vel, t) {
   const now = ctx.currentTime + 0.003;
   const drum = isDrumTrack(tr);
   const voices = voiceCollector = [];
-  try { playVoice(tr, pitch, vel, now, drum ? 0.1 : LIVE_HOLD); }
-  finally { voiceCollector = null; }
+  const ext = isExt(tr);
+  if (ext) extNoteOn(tr, pitch, vel, 0);              // live: sofort senden
+  else {
+    try { playVoice(tr, pitch, vel, now, drum ? 0.1 : LIVE_HOLD); }
+    finally { voiceCollector = null; }
+  }
+  voiceCollector = null;
 
   let hit = null;
   if (pitch >= MIDI_MIN && pitch <= MIDI_MAX) {
@@ -41859,7 +42332,7 @@ function liveNoteOn(ch, pitch, vel, t) {
     keyHits.push(hit);
     if (!keyLightFrame) keyLightFrame = requestAnimationFrame(updateKeyLights);
   }
-  liveHeld.set(key, { tr, ch, pitch, vel, voices, hit, drum, pos: recPosAt(t) });
+  liveHeld.set(key, { tr, ch, pitch, vel, voices, hit, drum, ext, pos: recPosAt(t) });
   midiActivity(`${ch === SCREEN_CH ? 'Maus' : 'K' + (ch + 1)} ${noteLabel(pitch).padEnd(4)} v${String(vel).padStart(3)} → ${tr.name}`);
 }
 
@@ -41871,6 +42344,7 @@ function liveNoteOff(ch, pitch, offVel, t) {
   const now = audioCtx ? audioCtx.currentTime : 0;
   if (h.hit && h.hit.end > now) h.hit.end = now;
   if (h.pos) recCommitNote(h, recPosAt(t), offVel);
+  if (h.ext) { extNoteOff(h.tr, h.pitch, 0); midiActivity(); return; }   // Pedal regelt das Zielgerät selbst
   if (h.drum) return;                                   // Schlagzeug klingt von selbst aus
   const st = h.tr._rt && h.tr._rt.state;
   if (st && st.sus >= 64) liveSustained.push(h);
@@ -41908,9 +42382,11 @@ function recCommitNote(h, endPos, offVel) {
 
 // ---------- Controller ----------
 function liveCC(ch, cc, val, t) {
+  const rawCC = cc;                                     // externe Ziele bekommen den Original-Controller (FM·DX: K1–K8 = Makros)
   if (document.getElementById('midi-knobs').checked && MPK_KNOB_MAP[cc] !== undefined) cc = MPK_KNOB_MAP[cc];
   const tr = midiTargetTrack(ch);
   if (!tr) return;
+  if (isExt(tr)) extCC(tr, rawCC, val, 0);
   const rt = runtime(tr), st = rt.state;
   const now = rt.ctx.currentTime;
   midiActivity(`K${ch + 1} CC${String(cc).padEnd(3)} ${String(val).padStart(3)}  ${(CC_NAMES[cc] || (LANE_BASE.find(l => l.cc === cc) || {}).name || '').replace(/^CC \d+ /, '')}`);
@@ -41936,7 +42412,8 @@ function livePitchBend(ch, val, t) {
   if (!tr) return;
   const rt = runtime(tr);
   rt.state.bend = val;
-  rt.strip.bend.offset.setValueAtTime(bendCents(rt.state), rt.ctx.currentTime);
+  if (isExt(tr)) extBend(tr, val, 0);
+  else rt.strip.bend.offset.setValueAtTime(bendCents(rt.state), rt.ctx.currentTime);
   midiActivity(`K${ch + 1} Bend ${String(val - 8192).padStart(6)}`);
   const pos = recPosAt(t);
   if (pos) recInsert(tr, 'events', { tick: Math.round(pos.tick), t: 'pb', a: val }, pos.pass);
@@ -41945,6 +42422,7 @@ function livePitchBend(ch, val, t) {
 function liveChannelPressure(ch, val, t) {
   const tr = midiTargetTrack(ch);
   if (!tr) return;
+  if (isExt(tr)) extSend(tr, [0xD0 | extCh(tr), val & 127], 0);
   midiActivity(`K${ch + 1} Druck ${val}`);
   const pos = recPosAt(t);
   if (pos) recInsert(tr, 'events', { tick: Math.round(pos.tick), t: 'cp', a: val }, pos.pass);
@@ -41954,6 +42432,11 @@ function liveChannelPressure(ch, val, t) {
 function liveProgram(ch, prog) {
   const tr = midiTargetTrack(ch);
   if (!tr) return;
+  if (isExt(tr)) {                                       // Pads im PROG-CHANGE-Modus: Klang im Zielgerät wählen
+    extSend(tr, [0xC0 | extCh(tr), prog & 127], 0);
+    midiActivity(`K${ch + 1} Prog ${prog + 1} → ${tr.out === 'fmdx' ? 'FM·DX' : 'MIDI-Out'}`);
+    return;
+  }
   if (isDrumTrack(tr)) tr.kit = prog; else { tr.instrument = prog; tr.bank = 0; }
   if (tr._rt) { tr._rt.state.prog = prog; tr._rt.state.progBank = 0; tr._rt.state.bankM = 0; }
   renderTrackList();
@@ -41966,7 +42449,8 @@ function liveStopAll() {
   const t = audioCtx ? audioCtx.currentTime : 0;
   for (const h of liveHeld.values()) {
     if (h.pos) recCommitNote(h, recPosAt(t), 64);
-    if (!h.drum) releaseLiveVoices(h);
+    if (h.ext) extNoteOff(h.tr, h.pitch, 0);
+    else if (!h.drum) releaseLiveVoices(h);
   }
   liveHeld.clear();
   for (const h of liveSustained) releaseLiveVoices(h);
