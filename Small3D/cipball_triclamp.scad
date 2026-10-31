@@ -1,6 +1,5 @@
 // =====================================================================
 //  CIP-Sprühkugel (Reinigungskugel) – parametrisch
-//  Nachkonstruktion von cipball1.stl, erweitert um Tri-Clamp-Anschluss
 //  Anschluss unten auf z=0 (Dichtfläche nach unten), Kugel oben.
 //  https://itzwieseltal.wordpress.com  ·  https://zwieselbrau.wordpress.com
 // =====================================================================
@@ -9,12 +8,12 @@
 anschluss    = "triclamp";   // [triclamp, gewinde, keiner]
 
 /* [Kugel] */
-kugel_d      = 42;     // Außendurchmesser Kugel (x/y)
+kugel_d      = 25;     // Außendurchmesser Kugel (x/y)
 kugel_h      = 42;     // Höhe der Kugel in z (> kugel_d = in die Länge gezogen)
-wand         = 1;      // Wandstärke Kugel
+wand         = 2;      // Wandstärke Kugel
 
 /* [Zulaufrohr] */
-rohr_di      = 20;     // Innendurchmesser Zulaufrohr (bei Gewinde = Kern-Ø)
+rohr_di      = 13;     // Innendurchmesser Zulaufrohr (bei Gewinde = Kern-Ø)
 rohr_wand    = 2.5;    // Wandstärke Zulaufrohr
 rohr_laenge  = 10;     // gerades Rohrstück zwischen Anschluss und Kugel
 
