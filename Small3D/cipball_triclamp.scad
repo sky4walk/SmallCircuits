@@ -13,8 +13,8 @@ kugel_h      = 42;     // Höhe der Kugel in z (> kugel_d = in die Länge gezoge
 wand         = 2;      // Wandstärke Kugel
 
 /* [Zulaufrohr] */
-rohr_di      = 13;     // Innendurchmesser Zulaufrohr (bei Gewinde = Kern-Ø)
-rohr_wand    = 2.5;    // Wandstärke Zulaufrohr
+rohr_di      = 10;     // Innendurchmesser Zulaufrohr (bei Gewinde = Kern-Ø)
+rohr_wand    = 4;    // Wandstärke Zulaufrohr
 rohr_laenge  = 10;     // gerades Rohrstück zwischen Anschluss und Kugel
 
 /* [Tri-Clamp 1,5" (DIN 32676 / ISO 2852, Flansch 50,5)] */

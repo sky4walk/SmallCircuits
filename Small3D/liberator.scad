@@ -1,6 +1,5 @@
 // =============================================================================
-//  Sammeldatei – alle Nachkonstruktionen (1 … 15) in einer OpenSCAD-Datei
-//  Andre – https://itzwieseltal.wordpress.com · https://zwieselbrau.wordpress.com
+//  https://itzwieseltal.wordpress.com · https://zwieselbrau.wordpress.com
 //
 //  Einheit: alle Teile sind in Zoll konstruiert. EXPORT_MM schaltet ALLE
 //  Teile gemeinsam auf mm (Faktor 25.4).
