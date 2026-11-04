@@ -29,4 +29,4 @@
 include <Technic.scad>;
 
 
-translate([10,0,0]) technic_axle( length = 3 );
+technic_axle( length = 3 );   // ohne translate – passt so zur STL und zur Kalibrierung
