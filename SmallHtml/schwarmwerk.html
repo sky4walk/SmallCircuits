@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Schwarmwerk – Vogelschwarm-Simulator</title>
+<style>
+:root{
+  --bg:#0a0f1e; --panel:#111a2d; --panel2:#17223a; --line:#26334f;
+  --text:#e7ecf6; --muted:#93a1bd; --accent:#f5a524; --accent2:#5cc8ff; --danger:#ff5d5d;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);
+  font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+.app{display:grid;grid-template-columns:minmax(0,1fr) 350px;height:100vh}
+.stage{position:relative;min-width:0;overflow:hidden}
+canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
+.hud{position:absolute;left:12px;top:10px;background:rgba(10,15,30,.72);border:1px solid var(--line);
+  border-radius:8px;padding:8px 10px;font-size:12px;color:var(--muted);pointer-events:none;min-width:190px}
+.hud b{color:var(--text);font-weight:600}
+.hud .bar{height:5px;background:#223050;border-radius:3px;margin-top:3px;overflow:hidden}
+.hud .bar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));width:0}
+.hint{position:absolute;right:12px;bottom:10px;font-size:12px;color:var(--muted);
+  background:rgba(10,15,30,.72);border:1px solid var(--line);border-radius:8px;padding:6px 9px;pointer-events:none}
+aside{overflow-y:auto;background:var(--panel);border-left:1px solid var(--line);padding:14px 14px 24px}
+h1{font-size:19px;margin:0 0 2px;letter-spacing:.3px}
+h1 span{color:var(--accent)}
+.sub{color:var(--muted);font-size:12.5px;margin-bottom:12px}
+.row{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
+button,select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;padding:6px 9px;cursor:pointer}
+button:hover,select:hover{border-color:#3b4d75}
+button.on{background:var(--accent);color:#1a1200;border-color:var(--accent);font-weight:600}
+select{width:100%}
+details{border:1px solid var(--line);border-radius:8px;margin:10px 0;background:rgba(255,255,255,.015)}
+summary{cursor:pointer;padding:8px 10px;font-weight:600;color:var(--accent2);user-select:none}
+.sec{padding:2px 10px 10px}
+.ctl{margin:9px 0}
+.ctl .lab{display:flex;justify-content:space-between;gap:8px;font-size:13px}
+.ctl .lab output{color:var(--accent);font-variant-numeric:tabular-nums}
+.ctl .help{font-size:11.5px;color:var(--muted);margin-top:1px}
+.ctl.dim{opacity:.4}
+input[type=range]{width:100%;accent-color:var(--accent);margin:4px 0 0}
+.chk{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+.chk input{accent-color:var(--accent);width:16px;height:16px}
+.lbl{font-size:12px;color:var(--muted);margin:10px 0 4px}
+.info p{margin:6px 0;color:#c9d2e6;font-size:13px}
+.info code{background:#0c1426;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.rule{display:grid;grid-template-columns:22px 1fr;gap:6px;margin:6px 0;font-size:13px}
+.rule span{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:50%;
+  background:var(--panel2);border:1px solid var(--line);color:var(--accent);font-size:11px;font-weight:700}
+footer{margin-top:14px;padding-top:10px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+footer a,.info a{color:var(--accent2)}
+@media (max-width:860px){
+  .app{grid-template-columns:1fr;grid-template-rows:62vh auto;height:auto}
+  aside{border-left:0;border-top:1px solid var(--line)}
+  .hint{display:none}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="stage" id="stage">
+    <canvas id="cv"></canvas>
+    <div class="hud" id="hud">
+      <div>Vögel: <b id="hN">0</b> &nbsp; Falken: <b id="hP">0</b> &nbsp; <b id="hF">0</b> fps</div>
+      <div>Ø Nachbarn: <b id="hNb">0</b></div>
+      <div>Ordnung (gleiche Richtung): <b id="hO">0</b></div>
+      <div class="bar"><i id="hOb"></i></div>
+    </div>
+    <div class="hint" id="hint">Klick: Vogel beobachten · Leertaste: Pause</div>
+  </div>
+
+  <aside>
+    <h1>Schwarm<span>werk</span></h1>
+    <div class="sub">Vogelschwarm-Simulator nach Craig Reynolds (1987) – drei lokale Regeln, ein Schwarm, den niemand programmiert hat.</div>
+
+    <div class="row">
+      <button id="bPause">⏸ Pause</button>
+      <button id="bStep">Schritt</button>
+      <button id="bScatter">Neu verteilen</button>
+      <button id="bReset">Zurücksetzen</button>
+    </div>
+
+    <div class="lbl">Vorlage</div>
+    <select id="preset"></select>
+
+    <div class="lbl">Klick-Werkzeug</div>
+    <div class="row" id="tools">
+      <button data-tool="select" class="on">👁 Beobachten</button>
+      <button data-tool="falcon">🦅 Falke</button>
+      <button data-tool="obstacle">⬤ Hindernis</button>
+      <button data-tool="erase">✕ Entfernen</button>
+    </div>
+    <div class="row">
+      <button id="bClrP">Falken weg</button>
+      <button id="bClrO">Hindernisse weg</button>
+    </div>
+
+    <div id="controls"></div>
+
+    <details class="info">
+      <summary>Wie funktioniert das?</summary>
+      <div class="sec">
+        <p>Jeder Vogel sieht nur seine Nachbarn und befolgt drei Regeln:</p>
+        <div class="rule"><span>1</span><div><b>Abstand halten</b> – ist ein Nachbar näher als der Wohlfühlabstand, lenkt der Vogel von ihm weg.</div></div>
+        <div class="rule"><span>2</span><div><b>Ausrichten</b> – er lenkt in die durchschnittliche Flugrichtung seiner Nachbarn.</div></div>
+        <div class="rule"><span>3</span><div><b>Zusammenhalt</b> – er lenkt zur Mitte seiner Nachbarn.</div></div>
+        <p>Jede Regel liefert eine Lenkkraft: <code>gewünscht − aktuell</code>, begrenzt auf die Wendigkeit. Die drei Kräfte werden mit ihren Gewichten addiert.</p>
+        <p><b>Metrisch</b> heißt: Nachbar ist jeder innerhalb der Sichtweite. <b>Topologisch</b> heißt: Nachbarn sind die <i>k</i> nächsten, egal wie weit weg – so machen es echte Stare (Ballerini u. a. 2008: etwa 6–7 Nachbarn). Topologische Schwärme reißen bei Lücken seltener auseinander.</p>
+        <p>Die <b>Ordnung</b> oben links ist die Länge des Mittelwerts aller Flugrichtungen: 0 = wildes Durcheinander, 1 = alle fliegen parallel. Das ist die Kenngröße, mit der Physiker den „Phasenübergang“ von Chaos zu Schwarm messen.</p>
+        <p><b>Experimente:</b> Setze <i>Ausrichten</i> auf 0 → Mückenwolke. Nur <i>Zusammenhalt</i> → Klumpen. Erhöhe den Zufall langsam und beobachte, wann die Ordnung plötzlich zusammenbricht. Setze ein paar Falken und Hindernisse.</p>
+      </div>
+    </details>
+
+    <footer>
+      Gehört zum Artikel „Mehr ist anders – Emergenz“ auf
+      <a href="https://itzwieseltal.wordpress.com/" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>.<br>
+      Weitere Seiten: <a href="https://sky4walk.github.io/SmallCircuits/SmallHtml/game_of_life.html" target="_blank" rel="noopener">Game of Life</a> ·
+      <a href="https://zwieselbrau.wordpress.com/" target="_blank" rel="noopener">zwieselbrau</a>
+    </footer>
+  </aside>
+</div>
+
+<script>
+"use strict";
+/* ================= Parameter ================= */
+const DEFAULTS = {
+  sepW:1.5, aliW:1.0, cohW:1.0,
+  mode:'metric', perR:60, kNear:7, sepR:24, fov:270,
+  n:400, maxSpeed:3.5, maxForce:0.08, noise:0, tempo:1,
+  edges:'wrap', predR:110, predW:3, obsW:3, obsSize:40,
+  color:'heading', size:4, trails:false, showSel:true
+};
+const P = Object.assign({}, DEFAULTS);
+
+const PRESETS = [
+  ['reynolds','Reynolds 1987 (Standard)',{}],
+  ['stare','Starenschwarm (topologisch, k = 7)',{n:900,sepW:1.8,aliW:1.4,cohW:0.9,mode:'topo',kNear:7,sepR:14,fov:300,maxSpeed:4.2,maxForce:0.12,noise:0.1,size:3}],
+  ['fische','Fischschwarm (dicht, ruhig)',{n:500,sepW:2.0,aliW:1.6,cohW:1.4,perR:45,sepR:14,fov:300,maxSpeed:2.4,maxForce:0.06}],
+  ['muecken','Mückenwolke (ohne Ausrichten)',{sepW:1.2,aliW:0,cohW:1.6,perR:70,sepR:14,fov:360,maxSpeed:3,maxForce:0.25,noise:0.6}],
+  ['nurAli','Nur Ausrichten',{sepW:0,aliW:1.5,cohW:0}],
+  ['nurCoh','Nur Zusammenhalt (Klumpen)',{sepW:0,aliW:0,cohW:1.5}],
+  ['nurSep','Nur Abstand halten',{sepW:2,aliW:0,cohW:0}],
+  ['keine','Keine Regeln (Einzelgänger)',{sepW:0,aliW:0,cohW:0,noise:0.3}],
+  ['nervoes','Nervös (viel Zufall)',{noise:1.5}],
+  ['blind','Tunnelblick (60° Sicht)',{fov:60}]
+];
+
+const SPEC = [
+  {sec:'Die drei Regeln', open:true},
+  {k:'sepW',l:'① Abstand halten',min:0,max:4,st:0.05,h:'Separation – von zu nahen Nachbarn weglenken'},
+  {k:'aliW',l:'② Ausrichten',min:0,max:4,st:0.05,h:'Alignment – Richtung der Nachbarn übernehmen'},
+  {k:'cohW',l:'③ Zusammenhalt',min:0,max:4,st:0.05,h:'Cohesion – zur Mitte der Nachbarn lenken'},
+  {sec:'Wahrnehmung', open:true},
+  {k:'mode',l:'Wer ist Nachbar?',type:'select',opts:[['metric','metrisch – alle in Sichtweite'],['topo','topologisch – die k nächsten (wie Stare)']]},
+  {k:'perR',l:'Sichtweite',min:10,max:200,st:1,u:' px',h:'nur bei metrisch'},
+  {k:'kNear',l:'k nächste Nachbarn',min:1,max:20,st:1,h:'nur bei topologisch'},
+  {k:'sepR',l:'Wohlfühlabstand',min:4,max:80,st:1,u:' px',h:'Radius für Regel ①'},
+  {k:'fov',l:'Blickwinkel',min:30,max:360,st:5,u:'°',h:'nach hinten sieht ein Vogel nichts'},
+  {sec:'Bewegung'},
+  {k:'n',l:'Anzahl Vögel',min:2,max:2000,st:1},
+  {k:'maxSpeed',l:'Höchstgeschwindigkeit',min:0.5,max:8,st:0.1},
+  {k:'maxForce',l:'Wendigkeit',min:0.005,max:0.4,st:0.005,h:'maximale Lenkkraft pro Schritt'},
+  {k:'noise',l:'Zufall / Unruhe',min:0,max:2,st:0.05},
+  {k:'tempo',l:'Simulationstempo',min:1,max:5,st:1,u:'×'},
+  {sec:'Welt'},
+  {k:'edges',l:'Ränder',type:'select',opts:[['wrap','durchlässig (rechts raus, links rein)'],['avoid','Wände – Vögel drehen um']]},
+  {k:'predR',l:'Fluchtdistanz vor Falken',min:20,max:300,st:5,u:' px'},
+  {k:'predW',l:'Fluchtstärke',min:0,max:8,st:0.1},
+  {k:'obsW',l:'Hindernissen ausweichen',min:0,max:8,st:0.1},
+  {k:'obsSize',l:'Größe neuer Hindernisse',min:10,max:120,st:1,u:' px'},
+  {sec:'Anzeige'},
+  {k:'color',l:'Färbung',type:'select',opts:[['heading','nach Flugrichtung'],['neigh','nach Nachbarzahl'],['mono','einfarbig']]},
+  {k:'size',l:'Vogelgröße',min:2,max:10,st:0.5},
+  {k:'trails',l:'Spuren zeichnen',type:'check'},
+  {k:'showSel',l:'Wahrnehmung des markierten Vogels zeigen',type:'check'}
+];
+
+/* ================= UI aufbauen ================= */
+const ctlBox = document.getElementById('controls');
+const inputs = {};
+let curSec = null;
+for (const s of SPEC) {
+  if (s.sec) {
+    const d = document.createElement('details'); if (s.open) d.open = true;
+    d.innerHTML = '<summary>' + s.sec + '</summary>';
+    curSec = document.createElement('div'); curSec.className = 'sec';
+    d.appendChild(curSec); ctlBox.appendChild(d); continue;
+  }
+  const w = document.createElement('div'); w.className = 'ctl'; w.id = 'c_' + s.k;
+  if (s.type === 'check') {
+    w.innerHTML = '<label class="chk"><input type="checkbox"> ' + s.l + '</label>';
+    const inp = w.querySelector('input');
+    inp.addEventListener('change', () => { P[s.k] = inp.checked; onParam(s.k); });
+    inputs[s.k] = {s, inp};
+  } else if (s.type === 'select') {
+    w.innerHTML = '<div class="lab"><span>' + s.l + '</span></div><select></select>';
+    const sel = w.querySelector('select');
+    for (const [v, t] of s.opts) { const o = document.createElement('option'); o.value = v; o.textContent = t; sel.appendChild(o); }
+    sel.addEventListener('change', () => { P[s.k] = sel.value; onParam(s.k); });
+    inputs[s.k] = {s, inp: sel};
+  } else {
+    w.innerHTML = '<div class="lab"><span>' + s.l + '</span><output></output></div>' +
+      '<input type="range" min="' + s.min + '" max="' + s.max + '" step="' + s.st + '">' +
+      (s.h ? '<div class="help">' + s.h + '</div>' : '');
+    const inp = w.querySelector('input'), out = w.querySelector('output');
+    inp.addEventListener('input', () => { P[s.k] = +inp.value; out.textContent = fmt(s, P[s.k]); onParam(s.k); });
+    inputs[s.k] = {s, inp, out};
+  }
+  curSec.appendChild(w);
+}
+function fmt(s, v) {
+  const dec = s.st >= 1 ? 0 : (s.st >= 0.1 ? 1 : (s.st >= 0.01 ? 2 : 3));
+  return v.toFixed(dec) + (s.u || '');
+}
+function syncUI() {
+  for (const k in inputs) {
+    const {s, inp, out} = inputs[k];
+    if (s.type === 'check') inp.checked = !!P[k];
+    else { inp.value = P[k]; if (out) out.textContent = fmt(s, P[k]); }
+  }
+  document.getElementById('c_perR').classList.toggle('dim', P.mode !== 'metric');
+  document.getElementById('c_kNear').classList.toggle('dim', P.mode !== 'topo');
+}
+function onParam(k) {
+  if (k === 'n') setCount(P.n);
+  if (k === 'mode') syncUI();
+  if (k === 'perR' || k === 'sepR' || k === 'mode') buildGridDims();
+}
+
+const presetSel = document.getElementById('preset');
+for (const [id, name] of PRESETS) { const o = document.createElement('option'); o.value = id; o.textContent = name; presetSel.appendChild(o); }
+presetSel.addEventListener('change', () => applyPreset(presetSel.value));
+function applyPreset(id) {
+  const pr = PRESETS.find(p => p[0] === id); if (!pr) return;
+  const keep = {color:P.color, trails:P.trails, showSel:P.showSel, tempo:P.tempo};
+  Object.assign(P, DEFAULTS, keep, pr[2]);
+  setCount(P.n); buildGridDims(); syncUI();
+}
+
+/* ================= Canvas ================= */
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+let W = 800, H = 600, dpr = 1;
+function resize() {
+  const r = cv.getBoundingClientRect();
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const nW = Math.max(200, r.width), nH = Math.max(200, r.height);
+  // Positionen proportional mitnehmen
+  if (N) for (let i = 0; i < N; i++) { px[i] = px[i] / W * nW; py[i] = py[i] / H * nH; }
+  W = nW; H = nH;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  buildGridDims();
+  clearBg(1);
+}
+new ResizeObserver(resize).observe(document.getElementById('stage'));
+
+/* ================= Vögel ================= */
+const MAXN = 2000;
+const px = new Float32Array(MAXN), py = new Float32Array(MAXN);
+const vx = new Float32Array(MAXN), vy = new Float32Array(MAXN);
+const fx = new Float32Array(MAXN), fy = new Float32Array(MAXN);
+const nbc = new Uint16Array(MAXN);
+let N = 0;
+function spawn(i) {
+  px[i] = Math.random() * W; py[i] = Math.random() * H;
+  const a = Math.random() * Math.PI * 2, s = P.maxSpeed * (0.5 + Math.random() * 0.5);
+  vx[i] = Math.cos(a) * s; vy[i] = Math.sin(a) * s;
+}
+function setCount(n) {
+  n = Math.max(1, Math.min(MAXN, n | 0));
+  for (let i = N; i < n; i++) spawn(i);
+  N = n; if (sel >= N) sel = 0;
+}
+function scatter() { for (let i = 0; i < N; i++) spawn(i); clearBg(1); }
+
+const preds = [];      // {x,y,vx,vy}
+const obstacles = [];  // {x,y,r}
+let sel = 0;
+let selNeigh = [];
+
+/* ================= Raster für Nachbarsuche ================= */
+let cols = 1, rows = 1, csx = 1, csy = 1, head = new Int32Array(1);
+const nxt = new Int32Array(MAXN);
+function buildGridDims() {
+  const r = Math.max(P.mode === 'metric' ? P.perR : 40, P.sepR, 12);
+  cols = Math.max(1, Math.floor(W / r)); rows = Math.max(1, Math.floor(H / r));
+  csx = W / cols; csy = H / rows;
+  if (head.length !== cols * rows) head = new Int32Array(cols * rows);
+}
+function fillGrid() {
+  head.fill(-1);
+  for (let i = 0; i < N; i++) {
+    let cx = Math.floor(px[i] / csx), cy = Math.floor(py[i] / csy);
+    if (cx < 0) cx = 0; else if (cx >= cols) cx = cols - 1;
+    if (cy < 0) cy = 0; else if (cy >= rows) cy = rows - 1;
+    const c = cy * cols + cx; nxt[i] = head[c]; head[c] = i;
+  }
+}
+const cellList = [];
+function cellsAround(cx, cy, R, wrap) {
+  cellList.length = 0;
+  for (let oy = -R; oy <= R; oy++) for (let ox = -R; ox <= R; ox++) {
+    let x = cx + ox, y = cy + oy;
+    if (wrap) { x = ((x % cols) + cols) % cols; y = ((y % rows) + rows) % rows; }
+    else if (x < 0 || y < 0 || x >= cols || y >= rows) continue;
+    const c = y * cols + x;
+    if (cellList.indexOf(c) < 0) cellList.push(c);
+  }
+}
+
+/* ================= Lenkkraft ================= */
+let sX = 0, sY = 0;
+function steer(dx, dy, vxi, vyi, maxS, maxF) {
+  const m = Math.hypot(dx, dy);
+  if (m < 1e-9) { sX = sY = 0; return; }
+  let ex = dx / m * maxS - vxi, ey = dy / m * maxS - vyi;
+  const em = Math.hypot(ex, ey);
+  if (em > maxF) { ex = ex / em * maxF; ey = ey / em * maxF; }
+  sX = ex; sY = ey;
+}
+
+/* ================= Simulationsschritt ================= */
+const bestD = new Float32Array(32), bestJ = new Int32Array(32);
+let statNeigh = 0;
+function step() {
+  const wrap = P.edges === 'wrap';
+  const hw = W / 2, hh = H / 2;
+  const topo = P.mode === 'topo';
+  const perR2 = P.perR * P.perR, sepR2 = P.sepR * P.sepR;
+  const useFov = P.fov < 359;
+  const cosHalf = Math.cos(P.fov / 2 * Math.PI / 180);
+  const K = Math.min(P.kNear, 32);
+  const maxS = P.maxSpeed, maxF = P.maxForce;
+  const R = topo ? 2 : 1;
+  fillGrid();
+  let sumNb = 0;
+
+  for (let i = 0; i < N; i++) {
+    const xi = px[i], yi = py[i];
+    const sp = Math.hypot(vx[i], vy[i]) || 1;
+    const ux = vx[i] / sp, uy = vy[i] / sp;
+    let cx = Math.floor(xi / csx), cy = Math.floor(yi / csy);
+    if (cx >= cols) cx = cols - 1; if (cy >= rows) cy = rows - 1;
+    cellsAround(cx, cy, R, wrap);
+
+    let sx = 0, sy = 0, ax = 0, ay = 0, hx = 0, hy = 0, nc = 0, m = 0;
+    const rec = (i === sel && P.showSel);
+    if (rec) selNeigh.length = 0;
+
+    for (let ci = 0; ci < cellList.length; ci++) {
+      for (let j = head[cellList[ci]]; j >= 0; j = nxt[j]) {
+        if (j === i) continue;
+        let dx = px[j] - xi, dy = py[j] - yi;
+        if (wrap) {
+          if (dx > hw) dx -= W; else if (dx < -hw) dx += W;
+          if (dy > hh) dy -= H; else if (dy < -hh) dy += H;
+        }
+        const d2 = dx * dx + dy * dy;
+        if (!topo && d2 > perR2 && d2 > sepR2) continue;
+        if (d2 < 1e-6) { sx += Math.random() - 0.5; sy += Math.random() - 0.5; continue; }
+        if (useFov) {
+          const d = Math.sqrt(d2);
+          if (dx * ux + dy * uy < cosHalf * d) continue;
+        }
+        if (d2 < sepR2) { sx -= dx / d2; sy -= dy / d2; }
+        if (!topo) {
+          if (d2 <= perR2) { ax += vx[j]; ay += vy[j]; hx += dx; hy += dy; nc++; if (rec) selNeigh.push(j); }
+        } else {
+          // die K nächsten sortiert halten
+          if (m < K || d2 < bestD[m - 1]) {
+            let p = m < K ? m++ : K - 1;
+            while (p > 0 && bestD[p - 1] > d2) { bestD[p] = bestD[p - 1]; bestJ[p] = bestJ[p - 1]; p--; }
+            bestD[p] = d2; bestJ[p] = j;
+          }
+        }
+      }
+    }
+    if (topo) {
+      for (let q = 0; q < m; q++) {
+        const j = bestJ[q];
+        let dx = px[j] - xi, dy = py[j] - yi;
+        if (wrap) {
+          if (dx > hw) dx -= W; else if (dx < -hw) dx += W;
+          if (dy > hh) dy -= H; else if (dy < -hh) dy += H;
+        }
+        ax += vx[j]; ay += vy[j]; hx += dx; hy += dy; nc++;
+        if (rec) selNeigh.push(j);
+      }
+    }
+    nbc[i] = nc; sumNb += nc;
+
+    let Fx = 0, Fy = 0;
+    if (P.sepW > 0 && (sx || sy)) { steer(sx, sy, vx[i], vy[i], maxS, maxF); Fx += sX * P.sepW; Fy += sY * P.sepW; }
+    if (nc > 0) {
+      if (P.aliW > 0) { steer(ax, ay, vx[i], vy[i], maxS, maxF); Fx += sX * P.aliW; Fy += sY * P.aliW; }
+      if (P.cohW > 0) { steer(hx, hy, vx[i], vy[i], maxS, maxF); Fx += sX * P.cohW; Fy += sY * P.cohW; }
+    }
+    // Falken
+    for (const pr of preds) {
+      let dx = pr.x - xi, dy = pr.y - yi;
+      if (wrap) {
+        if (dx > hw) dx -= W; else if (dx < -hw) dx += W;
+        if (dy > hh) dy -= H; else if (dy < -hh) dy += H;
+      }
+      const d = Math.hypot(dx, dy);
+      if (d < P.predR) {
+        steer(-dx, -dy, vx[i], vy[i], maxS, maxF);
+        const w = P.predW * (1.5 - d / P.predR);
+        Fx += sX * w; Fy += sY * w;
+      }
+    }
+    // Hindernisse
+    for (const o of obstacles) {
+      let dx = o.x - xi, dy = o.y - yi;
+      if (wrap) {
+        if (dx > hw) dx -= W; else if (dx < -hw) dx += W;
+        if (dy > hh) dy -= H; else if (dy < -hh) dy += H;
+      }
+      const d = Math.hypot(dx, dy), gap = d - o.r, M = 35;
+      if (gap < M) {
+        steer(-dx, -dy, vx[i], vy[i], maxS, maxF);
+        const w = P.obsW * Math.min(2.5, (M - gap) / M * 2);
+        Fx += sX * w; Fy += sY * w;
+      }
+    }
+    // Wände
+    if (!wrap) {
+      const M = 60;
+      let ex = 0, ey = 0;
+      if (xi < M) ex = 1; else if (xi > W - M) ex = -1;
+      if (yi < M) ey = 1; else if (yi > H - M) ey = -1;
+      if (ex || ey) { steer(ex, ey, vx[i], vy[i], maxS, maxF); Fx += sX * 2.5; Fy += sY * 2.5; }
+    }
+    // Zufall
+    if (P.noise > 0) {
+      const a = Math.random() * Math.PI * 2, r = P.noise * maxF * Math.random();
+      Fx += Math.cos(a) * r; Fy += Math.sin(a) * r;
+    }
+    fx[i] = Fx; fy[i] = Fy;
+  }
+  statNeigh = N ? sumNb / N : 0;
+
+  // anwenden
+  const minS = maxS * 0.35;
+  for (let i = 0; i < N; i++) {
+    let nvx = vx[i] + fx[i], nvy = vy[i] + fy[i];
+    let s = Math.hypot(nvx, nvy);
+    if (s > maxS) { nvx = nvx / s * maxS; nvy = nvy / s * maxS; }
+    else if (s < minS) {
+      if (s < 1e-6) { const a = Math.random() * 6.283; nvx = Math.cos(a); nvy = Math.sin(a); s = 1; }
+      nvx = nvx / s * minS; nvy = nvy / s * minS;
+    }
+    vx[i] = nvx; vy[i] = nvy;
+    let x = px[i] + nvx, y = py[i] + nvy;
+    if (wrap) {
+      if (x < 0) x += W; else if (x >= W) x -= W;
+      if (y < 0) y += H; else if (y >= H) y -= H;
+    } else {
+      if (x < 0) { x = 0; vx[i] = Math.abs(vx[i]); } else if (x >= W) { x = W - 0.01; vx[i] = -Math.abs(vx[i]); }
+      if (y < 0) { y = 0; vy[i] = Math.abs(vy[i]); } else if (y >= H) { y = H - 0.01; vy[i] = -Math.abs(vy[i]); }
+    }
+    // nicht in Hindernissen stecken bleiben
+    for (const o of obstacles) {
+      const dx = x - o.x, dy = y - o.y, d = Math.hypot(dx, dy);
+      if (d < o.r && d > 0) { x = o.x + dx / d * o.r; y = o.y + dy / d * o.r; }
+    }
+    px[i] = x; py[i] = y;
+  }
+  stepPreds(wrap);
+}
+
+function stepPreds(wrap) {
+  const hw = W / 2, hh = H / 2;
+  const maxS = P.maxSpeed * 1.15, maxF = P.maxForce * 1.3;
+  for (const pr of preds) {
+    let best = -1, bd = 1e18, bdx = 0, bdy = 0;
+    for (let i = 0; i < N; i++) {
+      let dx = px[i] - pr.x, dy = py[i] - pr.y;
+      if (wrap) {
+        if (dx > hw) dx -= W; else if (dx < -hw) dx += W;
+        if (dy > hh) dy -= H; else if (dy < -hh) dy += H;
+      }
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bd) { bd = d2; best = i; bdx = dx; bdy = dy; }
+    }
+    if (best >= 0) { steer(bdx, bdy, pr.vx, pr.vy, maxS, maxF); pr.vx += sX; pr.vy += sY; }
+    for (const o of obstacles) {
+      const dx = o.x - pr.x, dy = o.y - pr.y, gap = Math.hypot(dx, dy) - o.r;
+      if (gap < 30) { steer(-dx, -dy, pr.vx, pr.vy, maxS, maxF * 3); pr.vx += sX; pr.vy += sY; }
+    }
+    const s = Math.hypot(pr.vx, pr.vy);
+    if (s > maxS) { pr.vx = pr.vx / s * maxS; pr.vy = pr.vy / s * maxS; }
+    pr.x += pr.vx; pr.y += pr.vy;
+    if (wrap) {
+      if (pr.x < 0) pr.x += W; else if (pr.x >= W) pr.x -= W;
+      if (pr.y < 0) pr.y += H; else if (pr.y >= H) pr.y -= H;
+    } else {
+      if (pr.x < 0 || pr.x >= W) { pr.vx = -pr.vx; pr.x = Math.max(0, Math.min(W - 0.01, pr.x)); }
+      if (pr.y < 0 || pr.y >= H) { pr.vy = -pr.vy; pr.y = Math.max(0, Math.min(H - 0.01, pr.y)); }
+    }
+  }
+}
+
+/* ================= Zeichnen ================= */
+function clearBg(alpha) {
+  if (alpha >= 1) {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#0b1226'); g.addColorStop(1, '#141c33');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  } else {
+    ctx.fillStyle = 'rgba(12,18,38,' + alpha + ')'; ctx.fillRect(0, 0, W, H);
+  }
+}
+function tri(x, y, ux, uy, s) {
+  const lx = -uy, ly = ux;
+  ctx.moveTo(x + ux * s * 1.8, y + uy * s * 1.8);
+  ctx.lineTo(x - ux * s + lx * s * 0.85, y - uy * s + ly * s * 0.85);
+  ctx.lineTo(x - ux * s * 0.5, y - uy * s * 0.5);
+  ctx.lineTo(x - ux * s - lx * s * 0.85, y - uy * s - ly * s * 0.85);
+  ctx.closePath();
+}
+function draw() {
+  clearBg(P.trails ? 0.12 : 1);
+  // Hindernisse
+  for (const o of obstacles) {
+    ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#2a3554'; ctx.fill();
+    ctx.strokeStyle = '#43537c'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
+  // Wahrnehmung des markierten Vogels
+  if (P.showSel && sel < N) drawSel();
+  // Vögel
+  const s = P.size;
+  if (P.color === 'mono') {
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const sp = Math.hypot(vx[i], vy[i]) || 1;
+      tri(px[i], py[i], vx[i] / sp, vy[i] / sp, s);
+    }
+    ctx.fillStyle = '#e8edf7'; ctx.fill();
+  } else {
+    for (let i = 0; i < N; i++) {
+      const sp = Math.hypot(vx[i], vy[i]) || 1, ux = vx[i] / sp, uy = vy[i] / sp;
+      let hue;
+      if (P.color === 'heading') hue = (Math.atan2(uy, ux) * 180 / Math.PI + 360) % 360;
+      else hue = 220 - Math.min(nbc[i], 20) / 20 * 200;
+      ctx.fillStyle = 'hsl(' + hue.toFixed(0) + ',80%,62%)';
+      ctx.beginPath(); tri(px[i], py[i], ux, uy, s); ctx.fill();
+    }
+  }
+  // Falken
+  for (const pr of preds) {
+    const sp = Math.hypot(pr.vx, pr.vy) || 1;
+    ctx.beginPath(); tri(pr.x, pr.y, pr.vx / sp, pr.vy / sp, 9);
+    ctx.fillStyle = '#ff5d5d'; ctx.fill();
+    ctx.strokeStyle = '#ffd0d0'; ctx.lineWidth = 1; ctx.stroke();
+  }
+}
+function drawSel() {
+  const x = px[sel], y = py[sel];
+  const ang = Math.atan2(vy[sel], vx[sel]);
+  const half = P.fov / 2 * Math.PI / 180;
+  const wrap = P.edges === 'wrap';
+  // Sichtbereich
+  let R = P.perR;
+  if (P.mode === 'topo') {
+    R = 0;
+    for (const j of selNeigh) R = Math.max(R, wdist(x, y, px[j], py[j], wrap));
+    R = Math.max(R, 10);
+  }
+  ctx.beginPath();
+  if (P.fov < 359) { ctx.moveTo(x, y); ctx.arc(x, y, R, ang - half, ang + half); ctx.closePath(); }
+  else ctx.arc(x, y, R, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(92,200,255,0.08)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(92,200,255,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+  // Wohlfühlabstand
+  ctx.beginPath(); ctx.arc(x, y, P.sepR, 0, Math.PI * 2);
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = 'rgba(245,165,36,0.75)'; ctx.stroke(); ctx.setLineDash([]);
+  // Linien zu Nachbarn
+  ctx.beginPath();
+  for (const j of selNeigh) {
+    let dx = px[j] - x, dy = py[j] - y;
+    if (wrap) {
+      if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+      if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+    }
+    ctx.moveTo(x, y); ctx.lineTo(x + dx, y + dy);
+  }
+  ctx.strokeStyle = 'rgba(92,200,255,0.55)'; ctx.stroke();
+  // Vogel selbst
+  ctx.beginPath(); ctx.arc(x, y, P.size + 5, 0, Math.PI * 2);
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2; ctx.stroke(); ctx.lineWidth = 1;
+}
+function wdist(x1, y1, x2, y2, wrap) {
+  let dx = x2 - x1, dy = y2 - y1;
+  if (wrap) {
+    if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+    if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+  }
+  return Math.hypot(dx, dy);
+}
+
+/* ================= Statistik ================= */
+const hN = document.getElementById('hN'), hP = document.getElementById('hP'), hF = document.getElementById('hF');
+const hNb = document.getElementById('hNb'), hO = document.getElementById('hO'), hOb = document.getElementById('hOb');
+let frames = 0, lastT = performance.now(), fps = 0;
+function stats() {
+  let sx = 0, sy = 0;
+  for (let i = 0; i < N; i++) { const s = Math.hypot(vx[i], vy[i]) || 1; sx += vx[i] / s; sy += vy[i] / s; }
+  const order = N ? Math.hypot(sx, sy) / N : 0;
+  hN.textContent = N; hP.textContent = preds.length; hF.textContent = fps;
+  hNb.textContent = statNeigh.toFixed(1);
+  hO.textContent = order.toFixed(2); hOb.style.width = (order * 100).toFixed(1) + '%';
+}
+
+/* ================= Hauptschleife ================= */
+let paused = false, frameNo = 0;
+function loop(t) {
+  if (!paused) for (let k = 0; k < P.tempo; k++) step();
+  draw();
+  frames++; frameNo++;
+  if (t - lastT > 500) { fps = Math.round(frames * 1000 / (t - lastT)); frames = 0; lastT = t; }
+  if (frameNo % 8 === 0) stats();
+  requestAnimationFrame(loop);
+}
+
+/* ================= Bedienung ================= */
+let tool = 'select';
+const hint = document.getElementById('hint');
+const HINTS = {
+  select:'Klick: Vogel beobachten · Leertaste: Pause',
+  falcon:'Klick: Falke aussetzen – er jagt den nächsten Vogel',
+  obstacle:'Klick: Hindernis setzen (Größe unter „Welt“)',
+  erase:'Klick: Falke oder Hindernis in der Nähe entfernen'
+};
+document.querySelectorAll('#tools button').forEach(b => b.addEventListener('click', () => {
+  tool = b.dataset.tool;
+  document.querySelectorAll('#tools button').forEach(x => x.classList.toggle('on', x === b));
+  hint.textContent = HINTS[tool];
+}));
+cv.addEventListener('pointerdown', e => {
+  const r = cv.getBoundingClientRect();
+  const x = e.clientX - r.left, y = e.clientY - r.top;
+  if (tool === 'select') {
+    let best = 0, bd = 1e18;
+    for (let i = 0; i < N; i++) { const d = (px[i] - x) ** 2 + (py[i] - y) ** 2; if (d < bd) { bd = d; best = i; } }
+    sel = best; if (!P.showSel) { P.showSel = true; syncUI(); }
+  } else if (tool === 'falcon') {
+    const a = Math.random() * 6.283;
+    preds.push({x, y, vx: Math.cos(a) * P.maxSpeed, vy: Math.sin(a) * P.maxSpeed});
+  } else if (tool === 'obstacle') {
+    obstacles.push({x, y, r: P.obsSize});
+  } else if (tool === 'erase') {
+    let kind = null, idx = -1, bd = 45 * 45;
+    preds.forEach((p, i) => { const d = (p.x - x) ** 2 + (p.y - y) ** 2; if (d < bd) { bd = d; kind = 'p'; idx = i; } });
+    obstacles.forEach((o, i) => { const d = Math.max(0, Math.hypot(o.x - x, o.y - y) - o.r) ** 2; if (d < bd) { bd = d; kind = 'o'; idx = i; } });
+    if (kind === 'p') preds.splice(idx, 1); else if (kind === 'o') obstacles.splice(idx, 1);
+  }
+  if (paused) draw();
+  stats();
+});
+
+const bPause = document.getElementById('bPause');
+function togglePause() { paused = !paused; bPause.textContent = paused ? '▶ Weiter' : '⏸ Pause'; bPause.classList.toggle('on', paused); }
+bPause.addEventListener('click', togglePause);
+document.getElementById('bStep').addEventListener('click', () => { if (!paused) togglePause(); step(); stats(); });
+document.getElementById('bScatter').addEventListener('click', scatter);
+document.getElementById('bReset').addEventListener('click', () => {
+  Object.assign(P, DEFAULTS); preds.length = 0; obstacles.length = 0;
+  presetSel.value = 'reynolds'; N = 0; setCount(P.n); buildGridDims(); syncUI(); clearBg(1);
+});
+document.getElementById('bClrP').addEventListener('click', () => { preds.length = 0; stats(); });
+document.getElementById('bClrO').addEventListener('click', () => { obstacles.length = 0; stats(); });
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !/INPUT|SELECT|BUTTON/.test(document.activeElement.tagName)) { e.preventDefault(); togglePause(); }
+});
+
+/* ================= Start ================= */
+resize();
+setCount(P.n);
+syncUI();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
