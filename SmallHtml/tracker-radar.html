@@ -1,0 +1,704 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tracker-Radar</title>
+<meta name="theme-color" content="#0b1410">
+<meta name="description" content="Bluetooth-LE-Scanner im Browser: findet BLE-Geräte, AirTags und andere Tracker (Chrome, experimentelle Web-Bluetooth-Scanning-API).">
+<style>
+:root{
+  --bg:#0b1410; --panel:#111d18; --panel2:#16261f; --line:#24392f;
+  --text:#d8eee2; --muted:#86a597; --accent:#3ee08f; --warn:#ffb020; --alarm:#ff4d5e;
+  --apple:#7fb4ff; --tracker:#ff8a3d; --beacon:#c08cff; --other:#6f9a86;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{padding:0 16px 120px;max-width:820px;margin:0 auto}
+a{color:var(--accent)}
+h1{font-size:1.5rem;margin:18px 0 2px;letter-spacing:.02em}
+h1 span{color:var(--accent)}
+.sub{color:var(--muted);margin:0 0 14px;font-size:.92rem}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:12px 0}
+.card h2{font-size:1.02rem;margin:0 0 8px}
+details.card summary{cursor:pointer;font-weight:600;list-style:none}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:"▸ ";color:var(--accent)}
+details.card[open] summary::before{content:"▾ "}
+.req{border-color:#5a4a1a;background:#1c1a0f}
+.req strong{color:var(--warn)}
+.req ol{padding-left:20px;margin:8px 0}
+.req li{margin:4px 0}
+code{background:#0006;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:.88em;word-break:break-all}
+.checks{list-style:none;padding:0;margin:8px 0 0}
+.checks li{padding:3px 0;font-size:.92rem}
+.ok{color:var(--accent)} .bad{color:var(--alarm)} .unk{color:var(--warn)}
+.btns{display:flex;flex-wrap:wrap;gap:8px}
+button,select{font:inherit;color:var(--text);background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 13px;cursor:pointer}
+button:active{transform:translateY(1px)}
+button.primary{background:var(--accent);color:#06210f;border-color:var(--accent);font-weight:700}
+button.danger{background:#3a1419;border-color:#6b2430;color:#ffc9cf}
+button.small{padding:6px 10px;font-size:.88rem}
+button:disabled{opacity:.45;cursor:default}
+.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+.row label{display:flex;align-items:center;gap:6px;font-size:.9rem;color:var(--muted)}
+input[type=range]{accent-color:var(--accent);width:120px}
+input[type=checkbox]{accent-color:var(--accent);width:18px;height:18px}
+.status{margin-top:10px;font-size:.9rem;color:var(--muted)}
+.status b{color:var(--text)}
+.dotlive{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);margin-right:6px;vertical-align:middle}
+.dotlive.on{background:var(--accent);box-shadow:0 0 8px var(--accent);animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.radarwrap{position:relative;width:100%;max-width:440px;margin:0 auto}
+#radar{width:100%;aspect-ratio:1/1;display:block;border-radius:50%;background:radial-gradient(circle,#0f2219 0%,#08110d 75%);border:1px solid var(--line);touch-action:manipulation}
+.legend{display:flex;flex-wrap:wrap;gap:10px;justify-content:center;font-size:.8rem;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:4px;vertical-align:-1px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.stat{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px;text-align:center}
+.stat b{display:block;font-size:1.3rem}
+.stat span{font-size:.75rem;color:var(--muted)}
+.stat.alarm b{color:var(--alarm)}
+#list{display:flex;flex-direction:column;gap:6px}
+.dev{display:grid;grid-template-columns:14px 1fr auto;gap:4px 10px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;cursor:pointer}
+.dev.stale{opacity:.45}
+.dev.warn{border-color:var(--alarm);box-shadow:0 0 0 1px var(--alarm) inset}
+.dev .c{width:12px;height:12px;border-radius:50%}
+.dev .t{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev .m{grid-column:2/4;font-size:.8rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dev .r{font-variant-numeric:tabular-nums;text-align:right;font-size:.9rem}
+.bar{height:5px;border-radius:3px;background:#0005;grid-column:2/4;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.badge{display:inline-block;font-size:.7rem;font-weight:700;padding:1px 6px;border-radius:6px;margin-left:6px;vertical-align:1px}
+.badge.w{background:var(--alarm);color:#fff}
+.badge.t{background:var(--tracker);color:#221000}
+.empty{color:var(--muted);text-align:center;padding:16px;font-size:.92rem}
+#sheet{position:fixed;left:0;right:0;bottom:0;max-height:82vh;overflow:auto;background:var(--panel);border-top:2px solid var(--accent);border-radius:16px 16px 0 0;padding:14px 16px 24px;transform:translateY(105%);transition:transform .25s;z-index:20;max-width:820px;margin:0 auto}
+#sheet.open{transform:none}
+#sheet h3{margin:0 0 4px;font-size:1.15rem;word-break:break-word}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:.88rem;margin:10px 0}
+.kv dt{color:var(--muted)} .kv dd{margin:0;word-break:break-all}
+.hex{font-family:ui-monospace,Consolas,monospace;font-size:.8rem;background:#0006;border:1px solid var(--line);border-radius:8px;padding:8px;word-break:break-all;white-space:pre-wrap}
+#spark{width:100%;height:80px;display:block;background:#0004;border-radius:8px;border:1px solid var(--line)}
+#search{display:none;text-align:center;background:#07100c;border:1px solid var(--line);border-radius:12px;padding:12px;margin:10px 0}
+#search.on{display:block}
+#sRssi{font-size:3rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1.1}
+#sTrend{font-size:1.1rem;color:var(--muted);min-height:1.5em}
+.meter{height:22px;border-radius:11px;background:#0008;border:1px solid var(--line);overflow:hidden;margin:8px 0}
+.meter i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2a6,#ee3,#f53);transition:width .2s}
+#toast{position:fixed;left:50%;top:14px;transform:translate(-50%,-160%);background:#3a1419;border:1px solid var(--alarm);color:#fff;padding:10px 16px;border-radius:10px;z-index:30;transition:transform .3s;max-width:92vw;font-weight:600;text-align:center}
+#toast.show{transform:translate(-50%,0)}
+#toast.info{background:var(--panel2);border-color:var(--accent)}
+footer{margin-top:24px;color:var(--muted);font-size:.85rem;text-align:center}
+@media (max-width:480px){.stats{grid-template-columns:repeat(2,1fr)} button{padding:9px 11px}}
+</style>
+</head>
+<body>
+
+<h1>Tracker-<span>Radar</span></h1>
+<p class="sub">Findet Bluetooth-LE-Geräte in der Nähe – auch AirTags, Samsung SmartTags, Tile und Google-Find-Hub-Tracker.</p>
+
+<p class="sub" id="reqHint">Funktioniert nur mit Chrome und freigeschalteter Bluetooth-Scan-Schnittstelle – Details unten unter „Voraussetzungen“.</p>
+
+<div class="card">
+  <div class="btns">
+    <button class="primary" id="btnStart" type="button">▶ Scan starten</button>
+    <button id="btnStop" type="button" disabled>■ Stopp</button>
+    <button id="btnDemo" type="button">Demo</button>
+    <button id="btnClear" type="button">Liste leeren</button>
+  </div>
+  <div class="row">
+    <label>Anzeige
+      <select id="selFilter">
+        <option value="all">alle Geräte</option>
+        <option value="tracker">nur Tracker</option>
+        <option value="apple">nur Apple</option>
+        <option value="active">nur aktive (30 s)</option>
+      </select></label>
+    <label>Sortierung
+      <select id="selSort">
+        <option value="rssi">Signalstärke</option>
+        <option value="dur">Dauer in der Nähe</option>
+        <option value="last">zuletzt gesehen</option>
+        <option value="name">Name</option>
+      </select></label>
+  </div>
+  <div class="row">
+    <label>Warnen nach
+      <select id="selThresh">
+        <option value="2">2 min</option>
+        <option value="5">5 min</option>
+        <option value="10" selected>10 min</option>
+        <option value="15">15 min</option>
+        <option value="30">30 min</option>
+      </select></label>
+    <label>min. RSSI <input type="range" id="rngRssi" min="-100" max="-40" value="-100"><b id="rssiVal">-100</b></label>
+    <label><input type="checkbox" id="chkSound" checked> Ton</label>
+    <label><input type="checkbox" id="chkVib" checked> Vibration</label>
+  </div>
+  <div class="status" id="status"><span class="dotlive" id="live"></span><b>bereit</b> – noch kein Scan gestartet.</div>
+</div>
+
+<div class="card">
+  <div class="radarwrap"><canvas id="radar"></canvas></div>
+  <div class="legend">
+    <span><i style="background:var(--alarm)"></i>Find My getrennt</span>
+    <span><i style="background:var(--tracker)"></i>anderer Tracker</span>
+    <span><i style="background:var(--apple)"></i>Apple</span>
+    <span><i style="background:var(--beacon)"></i>Beacon</span>
+    <span><i style="background:var(--other)"></i>sonstige</span>
+  </div>
+  <p class="sub" style="text-align:center;margin:6px 0 0">Abstand ≈ aus der Signalstärke geschätzt. Die <b>Richtung ist zufällig</b> – Bluetooth liefert keine Richtung. Tippe auf einen Punkt für Details.</p>
+</div>
+
+<div class="card">
+  <div class="stats">
+    <div class="stat"><b id="stAll">0</b><span>Geräte</span></div>
+    <div class="stat"><b id="stAct">0</b><span>aktiv (30 s)</span></div>
+    <div class="stat"><b id="stTrk">0</b><span>Tracker</span></div>
+    <div class="stat alarm"><b id="stWarn">0</b><span>Warnungen</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Geräte</h2>
+  <div id="list"><div class="empty">Noch keine Geräte – Scan starten oder Demo ausprobieren.</div></div>
+  <div class="row">
+    <button class="small" id="btnCsvDev" type="button">Geräteliste als CSV</button>
+    <button class="small" id="btnCsvLog" type="button">Protokoll als CSV</button>
+  </div>
+</div>
+
+<details class="card req" id="reqBox">
+  <summary>Voraussetzungen: nur Chrome + experimentelle Bluetooth-Scan-Schnittstelle</summary>
+  <p><strong>Diese Seite funktioniert nur mit Google Chrome</strong> (am besten auf einem <strong>Android-Handy</strong>) und nur, wenn dort die experimentelle <strong>Web-Bluetooth-Scanning-Schnittstelle</strong> (<code>navigator.bluetooth.requestLEScan</code>) freigeschaltet ist. Ohne diese Schnittstelle kann eine Webseite die Bluetooth-Umgebung nicht abhören.</p>
+  <ol>
+    <li>Chrome auf dem Handy öffnen und in die Adresszeile eingeben:<br>
+      <code id="flagTxt">chrome://flags/#enable-experimental-web-platform-features</code>
+      <button class="small" id="copyFlag" type="button">kopieren</button></li>
+    <li>„<b>Experimental Web Platform features</b>“ auf <b>Enabled</b> stellen und Chrome mit „Relaunch“ neu starten.</li>
+    <li>Am Handy <b>Bluetooth</b> und <b>Standort</b> einschalten (Android koppelt BLE-Scans an die Standortfreigabe).</li>
+    <li>Diese Seite über <b>https://</b> öffnen (z. B. GitHub Pages), auf „Scan starten“ tippen und die Berechtigungsabfrage bestätigen.</li>
+  </ol>
+  <p>Nicht unterstützt: Firefox, Safari und <b>alle Browser auf dem iPhone</b>. Andere Chromium-Browser (Edge, Brave, Samsung Internet) nur eventuell. Am PC klappt es mit Chrome je nach Betriebssystem nur teilweise.</p>
+  <p>Ohne Unterstützung kannst du mit „Demo“ ausprobieren, wie die Seite aussieht.</p>
+  <ul class="checks" id="checks"></ul>
+</details>
+
+<details class="card">
+  <summary>Was die Seite kann – und was nicht</summary>
+  <ul>
+    <li><b>Find My „getrennt vom Besitzer“</b>: Ein AirTag (oder AirPods, Find-My-Zubehör), das <i>nicht</i> bei seinem Besitzer ist, sendet ein langes Find-My-Paket. Begleitet dich so ein Gerät länger als die eingestellte Zeit, warnt die Seite. Das ist das typische Muster, wenn dir jemand einen Tracker untergeschoben hat.</li>
+    <li><b>Find My „beim Besitzer“</b>: Gehört zu Apple-Geräten, deren Besitzer in der Nähe ist (z. B. im Bus). Das ist harmlos und löst keine Warnung aus.</li>
+    <li>Die Gerätetyp-Angabe (AirTag/AirPods/Zubehör) und der Batteriestand kommen aus dem Statusbyte. Das ist eine <b>Heuristik</b> und nicht garantiert.</li>
+    <li>Auch Samsung SmartTag (FD5A), Tile (FEED/FEEC) und Google-Find-Hub-Tracker (FEAA, Typ 0x40/0x41) werden erkannt.</li>
+    <li><b>Wechselnde Adressen:</b> Apple-Geräte beim Besitzer wechseln ihre Bluetooth-Adresse etwa alle 15 Minuten und tauchen dann als neues Gerät auf. Getrennte AirTags behalten sie meist bis zu einem Tag.</li>
+    <li><b>Nicht möglich:</b> den Besitzer herausfinden, eine Richtung bestimmen, im Hintergrund scannen. Die Seite muss offen und der Bildschirm an sein (sie versucht, den Bildschirm wach zu halten).</li>
+    <li>Der Abstand wird grob aus der Signalstärke geschätzt. Körper, Taschen und Wände verfälschen ihn stark. Zum Aufspüren eignet sich der <b>Suchmodus</b> besser: Er piept schneller, je näher du kommst.</li>
+    <li>Für dauerhaften Schutz im Hintergrund gibt es die Android-eigene Tracker-Warnung oder die App AirGuard.</li>
+    <li>Es werden keine Daten gespeichert oder übertragen. Alles bleibt im Speicher der Seite und ist beim Neuladen weg.</li>
+  </ul>
+</details>
+
+<footer>
+  Tracker-Radar · ein Werkstück aus dem Zwieseltal ·
+  <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a> ·
+  <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a>
+</footer>
+
+<div id="sheet" aria-hidden="true">
+  <div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+    <div><h3 id="dTitle">–</h3><div class="sub" id="dSub" style="margin:0"></div></div>
+    <button class="small" id="btnClose" type="button">✕</button>
+  </div>
+  <div class="btns" style="margin-top:10px">
+    <button class="primary" id="btnSearch" type="button">🔍 Suchmodus</button>
+  </div>
+  <div id="search">
+    <div id="sRssi">–</div>
+    <div class="meter"><i id="sMeter"></i></div>
+    <div id="sTrend"></div>
+    <div class="sub" style="margin:0">Mit dem Handy langsam umhergehen: Je lauter und schneller der Ton, desto näher bist du dem Gerät.</div>
+  </div>
+  <canvas id="spark"></canvas>
+  <dl class="kv" id="dKv"></dl>
+  <div id="dRaw"></div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const $ = s => document.querySelector(s);
+const devices = new Map();
+const log = [];
+const LOG_MAX = 50000;
+let scan = null, scanning = false, demoTimer = null, demoState = null;
+let audioCtx = null, wakeLock = null, selectedId = null, searchActive = false, searchTimer = null;
+let dirty = true, hitDots = [];
+
+/* ---------- Hilfsfunktionen ---------- */
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const hex2 = n => n.toString(16).padStart(2, '0').toUpperCase();
+const hex4 = n => '0x' + n.toString(16).padStart(4, '0').toUpperCase();
+function dvBytes(dv){ return dv ? new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength) : new Uint8Array(0); }
+function bytesHex(b){ return Array.from(b, hex2).join(' '); }
+function short16(u){ const m = /^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i.exec(u); return m ? m[1].toLowerCase() : String(u).toLowerCase(); }
+function fmtDur(ms){ const s = Math.max(0, Math.floor(ms/1000)); const h = Math.floor(s/3600), m = Math.floor(s%3600/60), x = s%60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(x).padStart(2,'0')} h` : `${m}:${String(x).padStart(2,'0')} min`; }
+function fmtTime(t){ return new Date(t).toLocaleTimeString('de-DE'); }
+function hashAngle(s){ let h = 2166136261; for (const c of s) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619); } return ((h >>> 0) % 3600) / 3600 * Math.PI * 2; }
+
+const COMPANIES = {
+  0x004C:'Apple', 0x0006:'Microsoft', 0x0075:'Samsung', 0x00E0:'Google', 0x0087:'Garmin',
+  0x0059:'Nordic Semiconductor', 0x012D:'Sony', 0x0171:'Amazon', 0x038F:'Xiaomi', 0x0157:'Huami (Amazfit)',
+  0x009E:'Bose', 0x02E5:'Espressif', 0x0224:'Fitbit', 0x006B:'Polar', 0x000F:'Broadcom', 0x0002:'Intel'
+};
+const APPLE_TYPES = {
+  0x02:'iBeacon', 0x05:'AirDrop', 0x07:'AirPods/Beats', 0x09:'AirPlay-Ziel', 0x0A:'AirPlay-Quelle',
+  0x0B:'Magic Switch (Watch)', 0x0C:'Handoff', 0x0D:'Hotspot', 0x0E:'Hotspot-Quelle', 0x0F:'Nearby Action',
+  0x10:'Nearby Info (iPhone/iPad/Mac/Watch)', 0x12:'Find My'
+};
+const FM_TYPES = ['Apple-Gerät', 'AirTag', 'Find-My-Zubehör', 'AirPods'];
+const FM_BAT = ['voll', 'mittel', 'niedrig', 'kritisch'];
+const CAT_COLOR = { 'fm-sep':'#ff4d5e', 'tracker':'#ff8a3d', 'fm-near':'#7fb4ff', 'apple':'#7fb4ff', 'beacon':'#c08cff', 'other':'#6f9a86' };
+
+/* ---------- Klassifikation ---------- */
+function appleTLV(b){
+  const out = []; let i = 0;
+  while (i + 1 < b.length) { const t = b[i], l = b[i+1]; out.push({ t, l, at:i, data:b.subarray(i+2, i+2+l) }); i += 2 + l; }
+  return out;
+}
+function classify(mfr, svc, uuids){
+  const res = { cat:'other', label:'BLE-Gerät', detail:'', tracker:false, maker:'' };
+  const svcShort = new Map();
+  if (svc) for (const [u, dv] of svc) svcShort.set(short16(u), dvBytes(dv));
+  const uShort = (uuids || []).map(short16);
+
+  // Trackerdienste anderer Hersteller
+  if (svcShort.has('fd5a') || svcShort.has('fd59'))
+    return { ...res, cat:'tracker', label:'Samsung SmartTag', detail:'Samsung-Tracker (Offline Finding)', tracker:true, maker:'Samsung' };
+  if (svcShort.has('feed') || svcShort.has('feec') || uShort.includes('feed') || uShort.includes('feec'))
+    return { ...res, cat:'tracker', label:'Tile-Tracker', detail:'Tile (Dienst FEED/FEEC)', tracker:true, maker:'Tile' };
+  if (svcShort.has('feaa')) {
+    const b = svcShort.get('feaa'), f = b[0];
+    if (f === 0x40 || f === 0x41)
+      return { ...res, cat:'tracker', label:'Google-Find-Hub-Tracker', detail:'Find-My-Device-Netzwerk (FEAA ' + hex2(f) + ')', tracker:true, maker:'Google-Netzwerk' };
+    const ed = { 0x00:'UID', 0x10:'URL', 0x20:'TLM', 0x30:'EID' }[f] || hex2(f ?? 0);
+    return { ...res, cat:'beacon', label:'Eddystone-Beacon', detail:'Frame ' + ed };
+  }
+
+  if (mfr) for (const [cid, dv] of mfr) {
+    const b = dvBytes(dv);
+    res.maker = COMPANIES[cid] || hex4(cid);
+    if (cid === 0x004C) {
+      const tl = appleTLV(b);
+      const fm = tl.find(x => x.t === 0x12);
+      if (fm) {
+        if (fm.l >= 0x19) {
+          const st = fm.data[0] ?? 0;
+          const typ = FM_TYPES[(st >> 4) & 3], bat = FM_BAT[(st >> 6) & 3];
+          return { ...res, cat:'fm-sep', label:'Find My – getrennt vom Besitzer', detail:`vermutlich ${typ} · Batterie ${bat} (Heuristik)`, tracker:true, maker:'Apple' };
+        }
+        return { ...res, cat:'fm-near', label:'Find My – beim Besitzer', detail:'Besitzer ist in der Nähe – unkritisch', findmy:true, maker:'Apple' };
+      }
+      const ib = tl.find(x => x.t === 0x02 && x.l === 0x15);
+      if (ib) {
+        const d = ib.data, uu = bytesHex(d.subarray(0,16)).replace(/ /g,'');
+        const maj = (d[16]<<8)|d[17], min = (d[18]<<8)|d[19];
+        return { ...res, cat:'beacon', label:'iBeacon', detail:`${uu.slice(0,8)}-…  major ${maj}, minor ${min}`, maker:'Apple-Format' };
+      }
+      const names = tl.map(x => APPLE_TYPES[x.t] || ('Typ ' + hex2(x.t)));
+      return { ...res, cat:'apple', label:'Apple: ' + (names[0] || 'Gerät'), detail: names.join(', ') };
+    }
+    if (cid === 0x0006) return { ...res, cat:'other', label:'Microsoft-Gerät', detail:'Swift Pair / Windows' };
+  }
+  if (svcShort.has('fe2c')) return { ...res, cat:'other', label:'Google Fast Pair', detail:'z. B. Kopfhörer im Kopplungsmodus' };
+  if (svcShort.has('fd6f')) return { ...res, cat:'other', label:'Exposure Notification', detail:'Corona-Warn-Beacon (FD6F)' };
+  if (res.maker) res.label = res.maker + '-Gerät';
+  return res;
+}
+
+/* ---------- Eingang der Advertisements ---------- */
+function ingest(a){
+  const now = Date.now();
+  let d = devices.get(a.id);
+  if (!d) {
+    d = { id:a.id, name:'', first:now, last:now, count:0, hist:[], rmin:999, rmax:-999, rs:null, rssi:null, alerted:false, angle:hashAngle(a.id) };
+    devices.set(a.id, d);
+    if (a.backdate) d.first = now - a.backdate;
+  }
+  d.last = now; d.count++;
+  if (a.name) d.name = a.name;
+  if (typeof a.rssi === 'number' && a.rssi < 0) {
+    d.rssi = a.rssi;
+    d.rs = d.rs == null ? a.rssi : d.rs * 0.7 + a.rssi * 0.3;
+    d.rmin = Math.min(d.rmin, a.rssi); d.rmax = Math.max(d.rmax, a.rssi);
+    d.hist.push([now, a.rssi]);
+    while (d.hist.length && (now - d.hist[0][0] > 180000 || d.hist.length > 600)) d.hist.shift();
+  }
+  if (typeof a.txPower === 'number') d.tx = a.txPower;
+  d.mfrRaw = []; if (a.mfr) for (const [cid, dv] of a.mfr) d.mfrRaw.push([cid, bytesHex(dvBytes(dv))]);
+  d.svcRaw = []; if (a.svc) for (const [u, dv] of a.svc) d.svcRaw.push([short16(u), bytesHex(dvBytes(dv))]);
+  d.uuids = (a.uuids || []).map(short16);
+  Object.assign(d, { findmy:false }, classify(a.mfr, a.svc, a.uuids));
+  if (log.length >= LOG_MAX) log.shift();
+  log.push([now, d.id, d.name, d.rssi, d.cat]);
+  checkAlert(d, now);
+  dirty = true;
+}
+function onAdv(ev){
+  ingest({ id:ev.device.id, name:ev.device.name || ev.name, rssi:ev.rssi, txPower:ev.txPower,
+           mfr:ev.manufacturerData, svc:ev.serviceData, uuids:ev.uuids });
+}
+
+/* ---------- Warnungen ---------- */
+function thresholdMs(){ return Number($('#selThresh').value) * 60000; }
+function isWarn(d, now = Date.now()){ return d.tracker && (d.last - d.first) >= thresholdMs() && d.count >= 3 && now - d.last < 120000; }
+function checkAlert(d, now){
+  if (d.alerted || !isWarn(d, now)) return;
+  d.alerted = true;
+  toast(`⚠ ${d.label} begleitet dich seit ${fmtDur(d.last - d.first)}`, false, 6000);
+  if ($('#chkVib').checked && navigator.vibrate) navigator.vibrate([250,120,250,120,400]);
+  if ($('#chkSound').checked) { beep(880,.15); setTimeout(()=>beep(660,.15),220); setTimeout(()=>beep(880,.25),440); }
+}
+
+/* ---------- Ton, Toast, Wake-Lock ---------- */
+function initAudio(){ try { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); if (audioCtx.state === 'suspended') audioCtx.resume(); } catch(e){} }
+function beep(freq, dur, vol = 0.18){
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain(), t = audioCtx.currentTime;
+  o.type = 'square'; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+let toastTimer = null;
+function toast(msg, info = false, ms = 4000){
+  const t = $('#toast'); t.textContent = msg; t.className = 'show' + (info ? ' info' : '');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = info ? 'info' : '', ms);
+}
+async function keepAwake(on){
+  try {
+    if (on && 'wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); }
+    if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch(e){}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && (scanning || demoTimer)) { keepAwake(true); toast('Willkommen zurück – im Hintergrund wurde nicht gescannt.', true); }
+});
+
+/* ---------- Kompatibilität ---------- */
+async function checkCompat(){
+  const ua = navigator.userAgent, ul = $('#checks');
+  const chrome = /Chrome\/\d+/.test(ua), android = /Android/.test(ua), ios = /iPhone|iPad|iPod/.test(ua);
+  const bt = !!navigator.bluetooth, le = bt && typeof navigator.bluetooth.requestLEScan === 'function';
+  const rows = [
+    [chrome && !ios, 'Chrome/Chromium-Browser', ios ? 'iPhone/iPad: nicht möglich' : (chrome ? '' : 'bitte Google Chrome verwenden')],
+    [android ? true : null, 'Android-Gerät', android ? '' : 'am PC nur eingeschränkt'],
+    [window.isSecureContext, 'sichere Verbindung (https)', window.isSecureContext ? '' : 'Seite über https:// öffnen'],
+    [bt, 'Web Bluetooth vorhanden', bt ? '' : 'Browser unterstützt kein Web Bluetooth'],
+    [le, 'Scan-Schnittstelle requestLEScan', le ? '' : 'Flag „Experimental Web Platform features“ aktivieren']
+  ];
+  if (bt && navigator.bluetooth.getAvailability) {
+    try { const av = await navigator.bluetooth.getAvailability(); rows.push([av, 'Bluetooth-Adapter verfügbar', av ? '' : 'Bluetooth einschalten']); } catch(e){}
+  }
+  ul.innerHTML = rows.map(([ok, txt, hint]) =>
+    `<li class="${ok === true ? 'ok' : ok === false ? 'bad' : 'unk'}">${ok === true ? '✓' : ok === false ? '✗' : '•'} ${esc(txt)}${hint ? ' – <span style="color:var(--muted)">' + esc(hint) + '</span>' : ''}</li>`).join('');
+  if (le && window.isSecureContext) $('#reqHint').textContent = 'Bluetooth-Scan wird von diesem Browser unterstützt.';
+  return le && window.isSecureContext;
+}
+
+/* ---------- Scan starten/stoppen ---------- */
+async function startScan(){
+  initAudio();
+  stopDemo();
+  if (!navigator.bluetooth || typeof navigator.bluetooth.requestLEScan !== 'function') {
+    $('#reqBox').open = true; $('#reqBox').scrollIntoView({ behavior:'smooth' });
+    toast('Scan-Schnittstelle fehlt: Chrome + Flag „Experimental Web Platform features“ nötig.', false, 6000);
+    return;
+  }
+  try {
+    scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements:true, keepRepeatedDevices:true });
+    scanning = true; keepAwake(true); setUI();
+    toast('Scan läuft – Bildschirm anlassen.', true);
+  } catch (e) {
+    const msg = {
+      NotAllowedError:'Berechtigung verweigert. In den Chrome-Website-Einstellungen Bluetooth/Standort erlauben.',
+      SecurityError:'Nur über https:// erlaubt.',
+      NotSupportedError:'Scannen wird auf diesem Gerät nicht unterstützt.',
+      InvalidStateError:'Bluetooth ist ausgeschaltet oder belegt.',
+      NotFoundError:'Kein Bluetooth-Adapter gefunden.'
+    }[e.name] || ('Fehler: ' + e.message);
+    toast(msg, false, 7000);
+  }
+}
+function stopScan(){
+  try { if (scan && scan.active) scan.stop(); } catch(e){}
+  scan = null; scanning = false; stopDemo(); keepAwake(false); setUI();
+}
+function setUI(){
+  const on = scanning || !!demoTimer;
+  $('#btnStart').disabled = scanning;
+  $('#btnStop').disabled = !on;
+  $('#btnDemo').textContent = demoTimer ? 'Demo beenden' : 'Demo';
+  $('#live').classList.toggle('on', on);
+  dirty = true;
+}
+
+/* ---------- Demo-Modus ---------- */
+function mkMfr(cid, bytes){ return new Map([[cid, new DataView(new Uint8Array(bytes).buffer)]]); }
+function mkSvc(u16, bytes){ return new Map([[`0000${u16}-0000-1000-8000-00805f9b34fb`, new DataView(new Uint8Array(bytes).buffer)]]); }
+const rnd = n => Array.from({ length:n }, () => Math.floor(Math.random() * 256));
+function startDemo(){
+  if (scanning) stopScan();
+  initAudio();
+  const T = thresholdMs();
+  demoState = [
+    { id:'demo-airtag',  r:-62, mfr:mkMfr(0x004C, [0x12,0x19,0x10, ...rnd(24)]), backdate:Math.max(0, T - 25000), stay:true },
+    { id:'demo-fmnear',  r:-75, mfr:mkMfr(0x004C, [0x12,0x02,0x24,0x01]), stay:true },
+    { id:'demo-iphone',  r:-55, mfr:mkMfr(0x004C, [0x10,0x05,0x01,0x18,0x44,0x1C,0x2A]), stay:true },
+    { id:'demo-airpods', r:-68, mfr:mkMfr(0x004C, [0x07,0x19,0x01,0x0E,0x20, ...rnd(22)]), name:'AirPods', stay:true },
+    { id:'demo-smarttag',r:-83, svc:mkSvc('fd5a', rnd(16)), stay:false },
+    { id:'demo-tile',    r:-88, svc:mkSvc('feed', rnd(10)), uuids:['0000feed-0000-1000-8000-00805f9b34fb'], name:'Tile', stay:false },
+    { id:'demo-fmdn',    r:-79, svc:mkSvc('feaa', [0x41, ...rnd(20)]), stay:true },
+    { id:'demo-miband',  r:-70, mfr:mkMfr(0x0157, rnd(12)), name:'Mi Smart Band', stay:true },
+    { id:'demo-garmin',  r:-90, mfr:mkMfr(0x0087, rnd(8)), name:'Forerunner 265', stay:false },
+    { id:'demo-ms',      r:-80, mfr:mkMfr(0x0006, [0x03,0x00,0x80, ...rnd(5)]), stay:false },
+    { id:'demo-ibeacon', r:-86, mfr:mkMfr(0x004C, [0x02,0x15, ...rnd(16), 0x00,0x01,0x00,0x07,0xC5]), stay:true }
+  ];
+  let first = true;
+  demoTimer = setInterval(() => {
+    for (const s of demoState) {
+      if (!s.stay && Math.random() < 0.6) continue;
+      s.r = clamp(s.r + (Math.random() - 0.5) * 6, -98, -42);
+      ingest({ id:s.id, name:s.name, rssi:Math.round(s.r + (Math.random() - 0.5) * 4), mfr:s.mfr, svc:s.svc, uuids:s.uuids, backdate: first ? s.backdate : 0 });
+    }
+    first = false;
+  }, 400);
+  keepAwake(true); setUI();
+  toast('Demo läuft – das „AirTag“ löst nach ca. 25 s eine Warnung aus.', true, 5000);
+}
+function stopDemo(){ if (demoTimer) { clearInterval(demoTimer); demoTimer = null; } }
+
+/* ---------- Entfernung ---------- */
+function distance(d){
+  if (d.rs == null) return null;
+  const ref = (typeof d.tx === 'number' && d.tx > -30 && d.tx < 20) ? d.tx - 41 : -59;
+  return Math.pow(10, (ref - d.rs) / (10 * 2.5));
+}
+const fmtDist = m => m == null ? '–' : (m < 1 ? '< 1 m' : m < 10 ? '≈ ' + m.toFixed(1) + ' m' : '≈ ' + Math.round(m) + ' m');
+
+/* ---------- Liste ---------- */
+function visibleList(){
+  const now = Date.now(), f = $('#selFilter').value, minR = Number($('#rngRssi').value);
+  let arr = [...devices.values()].filter(d => {
+    if (d.rs != null && d.rs < minR) return false;
+    if (f === 'tracker') return d.tracker || d.findmy;
+    if (f === 'apple') return d.maker === 'Apple' || d.cat === 'fm-sep' || d.cat === 'fm-near';
+    if (f === 'active') return now - d.last < 30000;
+    return true;
+  });
+  const s = $('#selSort').value;
+  arr.sort((a, b) => {
+    const wa = isWarn(a, now), wb = isWarn(b, now);
+    if (wa !== wb) return wa ? -1 : 1;
+    if (s === 'dur') return (b.last - b.first) - (a.last - a.first);
+    if (s === 'last') return b.last - a.last;
+    if (s === 'name') return (a.name || a.label).localeCompare(b.name || b.label, 'de');
+    return (b.rs ?? -999) - (a.rs ?? -999);
+  });
+  return arr;
+}
+function renderList(){
+  const now = Date.now(), arr = visibleList();
+  let trk = 0, warn = 0, act = 0;
+  for (const d of devices.values()) {
+    if (d.tracker) trk++;
+    if (isWarn(d, now)) warn++;
+    if (now - d.last < 30000) act++;
+  }
+  $('#stAll').textContent = devices.size; $('#stAct').textContent = act;
+  $('#stTrk').textContent = trk; $('#stWarn').textContent = warn;
+  const st = $('#status');
+  const mode = scanning ? 'Scan läuft' : demoTimer ? 'Demo läuft' : 'gestoppt';
+  st.innerHTML = `<span class="dotlive${scanning || demoTimer ? ' on' : ''}"></span><b>${mode}</b> – ${devices.size} Geräte, ${log.length} Pakete empfangen.`;
+  if (!arr.length) { $('#list').innerHTML = `<div class="empty">${devices.size ? 'Keine Geräte für diesen Filter.' : 'Noch keine Geräte – Scan starten oder Demo ausprobieren.'}</div>`; return; }
+  $('#list').innerHTML = arr.slice(0, 200).map(d => {
+    const w = isWarn(d, now), stale = now - d.last > 30000;
+    const pct = d.rs == null ? 0 : clamp((d.rs + 100) / 60 * 100, 0, 100);
+    const title = d.name ? `${esc(d.name)} <span style="color:var(--muted);font-weight:400">· ${esc(d.label)}</span>` : esc(d.label);
+    return `<div class="dev${w ? ' warn' : ''}${stale ? ' stale' : ''}" data-id="${esc(d.id)}">
+      <span class="c" style="background:${CAT_COLOR[d.cat] || CAT_COLOR.other}"></span>
+      <span class="t">${title}${w ? '<span class="badge w">WARNUNG</span>' : d.tracker ? '<span class="badge t">Tracker</span>' : ''}</span>
+      <span class="r">${d.rs == null ? '–' : Math.round(d.rs) + ' dBm'}<br><span style="color:var(--muted);font-size:.78rem">${fmtDist(distance(d))}</span></span>
+      <div class="bar"><i style="width:${pct}%;background:${w ? 'var(--alarm)' : 'var(--accent)'}"></i></div>
+      <span class="m">${esc(d.detail || d.maker || '')} · seit ${fmtDur(d.last - d.first)} · zuletzt vor ${Math.round((now - d.last) / 1000)} s · ${d.count}×</span>
+    </div>`;
+  }).join('');
+}
+$('#list').addEventListener('click', e => { const el = e.target.closest('.dev'); if (el) openDetail(el.dataset.id); });
+
+/* ---------- Radar ---------- */
+const cv = $('#radar'), ctx = cv.getContext('2d');
+let sweep = 0;
+function sizeRadar(){ const dpr = window.devicePixelRatio || 1, w = cv.clientWidth; cv.width = w * dpr; cv.height = w * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+window.addEventListener('resize', sizeRadar);
+const RMAX = 25;
+const radiusFor = (m, R) => R * Math.log1p(Math.min(m, RMAX)) / Math.log1p(RMAX);
+function drawRadar(){
+  const W = cv.clientWidth, R = W / 2 - 6, cx = W / 2, cy = W / 2, now = Date.now();
+  ctx.clearRect(0, 0, W, W);
+  ctx.strokeStyle = '#24392f'; ctx.fillStyle = '#5f7f70'; ctx.lineWidth = 1; ctx.font = '11px system-ui'; ctx.textAlign = 'left';
+  for (const m of [1, 3, 10, 25]) {
+    const r = radiusFor(m, R); ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillText(m + ' m', cx + 3, cy - r + 12);
+  }
+  ctx.beginPath(); ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy); ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R); ctx.stroke();
+  if (scanning || demoTimer) {
+    sweep = (sweep + 0.03) % (Math.PI * 2);
+    const g = ctx.createConicGradient ? ctx.createConicGradient(sweep - 0.6, cx, cy) : null;
+    if (g) { g.addColorStop(0, 'rgba(62,224,143,0)'); g.addColorStop(0.095, 'rgba(62,224,143,.22)'); g.addColorStop(0.1, 'rgba(62,224,143,0)');
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill(); }
+  }
+  hitDots = [];
+  const minR = Number($('#rngRssi').value), f = $('#selFilter').value;
+  for (const d of devices.values()) {
+    const age = now - d.last;
+    if (age > 60000 || d.rs == null || d.rs < minR) continue;
+    if (f === 'tracker' && !(d.tracker || d.findmy)) continue;
+    if (f === 'apple' && !(d.maker === 'Apple' || d.findmy || d.cat === 'fm-sep')) continue;
+    const r = radiusFor(distance(d), R), x = cx + Math.cos(d.angle) * r, y = cy + Math.sin(d.angle) * r;
+    const w = isWarn(d, now), alpha = clamp(1 - age / 60000, 0.15, 1);
+    ctx.globalAlpha = alpha;
+    if (w) { const p = 8 + 6 * (0.5 + 0.5 * Math.sin(now / 180)); ctx.strokeStyle = '#ff4d5e'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(x, y, p, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.fillStyle = CAT_COLOR[d.cat] || CAT_COLOR.other;
+    ctx.beginPath(); ctx.arc(x, y, d.tracker ? 6 : 4.5, 0, Math.PI * 2); ctx.fill();
+    if (d.id === selectedId) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.arc(x, y, 11, 0, Math.PI * 2); ctx.stroke(); }
+    ctx.globalAlpha = 1;
+    hitDots.push([x, y, d.id]);
+  }
+  ctx.fillStyle = '#3ee08f'; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, Math.PI * 2); ctx.fill();
+  if (!devices.size) { ctx.fillStyle = '#86a597'; ctx.textAlign = 'center'; ctx.font = '14px system-ui'; ctx.fillText(scanning ? 'Suche …' : 'Scan starten', cx, cy + 28); }
+  requestAnimationFrame(drawRadar);
+}
+cv.addEventListener('click', e => {
+  const b = cv.getBoundingClientRect(), x = e.clientX - b.left, y = e.clientY - b.top;
+  let best = null, bd = 28;
+  for (const [dx, dy, id] of hitDots) { const dd = Math.hypot(dx - x, dy - y); if (dd < bd) { bd = dd; best = id; } }
+  if (best) openDetail(best);
+});
+
+/* ---------- Detailansicht & Suchmodus ---------- */
+function openDetail(id){
+  selectedId = id; $('#sheet').classList.add('open'); $('#sheet').setAttribute('aria-hidden', 'false'); renderDetail();
+}
+function closeDetail(){ stopSearch(); selectedId = null; $('#sheet').classList.remove('open'); $('#sheet').setAttribute('aria-hidden', 'true'); }
+function renderDetail(){
+  const d = devices.get(selectedId); if (!d) return;
+  const now = Date.now();
+  $('#dTitle').textContent = d.name ? `${d.name} – ${d.label}` : d.label;
+  $('#dSub').textContent = d.detail || '';
+  const kv = [
+    ['Kennung', d.id], ['Hersteller', d.maker || '–'],
+    ['Signal', d.rs == null ? '–' : `${Math.round(d.rs)} dBm (min ${d.rmin}, max ${d.rmax})`],
+    ['Abstand', fmtDist(distance(d)) + ' (grob)'], ['Sendeleistung', d.tx != null ? d.tx + ' dBm' : '–'],
+    ['erstmals', fmtTime(d.first)], ['zuletzt', `${fmtTime(d.last)} (vor ${Math.round((now - d.last) / 1000)} s)`],
+    ['in der Nähe seit', fmtDur(d.last - d.first)], ['Pakete', d.count], ['Warnung', isWarn(d, now) ? 'JA' : 'nein']
+  ];
+  $('#dKv').innerHTML = kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  let raw = '';
+  for (const [cid, h] of d.mfrRaw || []) raw += `Herstellerdaten ${hex4(cid)} (${COMPANIES[cid] || 'unbekannt'}):\n${h}\n`;
+  for (const [u, h] of d.svcRaw || []) raw += `Dienstdaten ${u.toUpperCase()}:\n${h}\n`;
+  if (d.uuids && d.uuids.length) raw += `Dienste: ${d.uuids.join(', ').toUpperCase()}\n`;
+  $('#dRaw').innerHTML = raw ? `<div class="hex">${esc(raw.trim())}</div>` : '';
+  drawSpark(d);
+  if (searchActive) renderSearch(d);
+}
+function drawSpark(d){
+  const c = $('#spark'), dpr = window.devicePixelRatio || 1, W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr; c.height = H * dpr; const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const now = Date.now(), span = 120000;
+  g.strokeStyle = '#24392f'; g.fillStyle = '#5f7f70'; g.font = '10px system-ui';
+  for (const v of [-90, -70, -50]) { const y = H - (v + 100) / 70 * H; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.fillText(v, 3, y - 2); }
+  g.strokeStyle = CAT_COLOR[d.cat] || '#3ee08f'; g.lineWidth = 1.8; g.beginPath();
+  let first = true;
+  for (const [t, r] of d.hist) {
+    if (now - t > span) continue;
+    const x = W - (now - t) / span * W, y = H - clamp((r + 100) / 70, 0, 1) * H;
+    if (first) { g.moveTo(x, y); first = false; } else g.lineTo(x, y);
+  }
+  g.stroke(); g.fillText('letzte 2 min', W - 62, 12);
+}
+function renderSearch(d){
+  const now = Date.now(), lost = now - d.last > 5000;
+  $('#sRssi').textContent = lost ? 'kein Signal' : Math.round(d.rs) + ' dBm';
+  $('#sMeter').style.width = lost ? '0%' : clamp((d.rs + 100) / 60 * 100, 0, 100) + '%';
+  const recent = d.hist.filter(([t]) => now - t < 2500).map(x => x[1]);
+  const older = d.hist.filter(([t]) => now - t >= 2500 && now - t < 6000).map(x => x[1]);
+  const avg = a => a.reduce((s, v) => s + v, 0) / a.length;
+  let tr = '';
+  if (!lost && recent.length && older.length) {
+    const diff = avg(recent) - avg(older);
+    tr = diff > 2.5 ? '▲ wärmer – du kommst näher' : diff < -2.5 ? '▼ kälter – du entfernst dich' : '● gleichbleibend';
+  }
+  $('#sTrend').textContent = lost ? 'Gerät seit ' + Math.round((now - d.last) / 1000) + ' s nicht empfangen' : tr;
+}
+function searchLoop(){
+  if (!searchActive) return;
+  const d = devices.get(selectedId); let iv = 1500;
+  if (d && Date.now() - d.last < 5000 && d.rs != null) {
+    const t = clamp((d.rs + 100) / 60, 0, 1);
+    iv = 1200 - t * 1080;
+    if ($('#chkSound').checked) beep(350 + t * 1300, 0.06, 0.12 + t * 0.15);
+  }
+  searchTimer = setTimeout(searchLoop, iv);
+}
+function startSearch(){ initAudio(); searchActive = true; $('#search').classList.add('on'); $('#btnSearch').textContent = '■ Suche beenden'; searchLoop(); renderDetail(); }
+function stopSearch(){ searchActive = false; clearTimeout(searchTimer); $('#search').classList.remove('on'); $('#btnSearch').textContent = '🔍 Suchmodus'; }
+
+/* ---------- CSV-Export ---------- */
+function download(name, text){
+  const b = new Blob(['\uFEFF' + text], { type:'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+const csvCell = v => { const s = v == null ? '' : String(v); return /[;"\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+const stamp = () => new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+$('#btnCsvDev').onclick = () => {
+  const rows = [['kennung','name','kategorie','bezeichnung','detail','hersteller','erstmals','zuletzt','dauer_s','pakete','rssi_min','rssi_max','warnung']];
+  for (const d of devices.values()) rows.push([d.id, d.name, d.cat, d.label, d.detail, d.maker, new Date(d.first).toISOString(), new Date(d.last).toISOString(),
+    Math.round((d.last - d.first) / 1000), d.count, d.rmin === 999 ? '' : d.rmin, d.rmax === -999 ? '' : d.rmax, isWarn(d) ? 'ja' : 'nein']);
+  download(`tracker-radar-geraete-${stamp()}.csv`, rows.map(r => r.map(csvCell).join(';')).join('\n'));
+};
+$('#btnCsvLog').onclick = () => {
+  const rows = [['zeit','kennung','name','rssi','kategorie'], ...log.map(([t, id, n, r, c]) => [new Date(t).toISOString(), id, n, r, c])];
+  download(`tracker-radar-protokoll-${stamp()}.csv`, rows.map(r => r.map(csvCell).join(';')).join('\n'));
+};
+
+/* ---------- Bedienelemente ---------- */
+$('#btnStart').onclick = startScan;
+$('#btnStop').onclick = stopScan;
+$('#btnDemo').onclick = () => { if (demoTimer) { stopDemo(); keepAwake(false); setUI(); } else startDemo(); };
+$('#btnClear').onclick = () => { devices.clear(); log.length = 0; closeDetail(); dirty = true; renderList(); };
+$('#btnClose').onclick = closeDetail;
+$('#btnSearch').onclick = () => searchActive ? stopSearch() : startSearch();
+$('#rngRssi').oninput = e => { $('#rssiVal').textContent = e.target.value; dirty = true; };
+for (const id of ['#selFilter', '#selSort']) $(id).onchange = () => { dirty = true; renderList(); };
+$('#selThresh').onchange = () => { for (const d of devices.values()) d.alerted = false; dirty = true; };
+$('#copyFlag').onclick = async () => {
+  try { await navigator.clipboard.writeText($('#flagTxt').textContent); toast('Kopiert – in Chromes Adresszeile einfügen.', true); }
+  catch(e) { toast('Kopieren nicht möglich – bitte abtippen.', true); }
+};
+
+if (navigator.bluetooth) navigator.bluetooth.addEventListener('advertisementreceived', onAdv);
+setInterval(() => {
+  const now = Date.now();
+  for (const d of devices.values()) checkAlert(d, now);
+  renderList();
+  if (selectedId) renderDetail();
+}, 700);
+sizeRadar(); checkCompat(); renderList(); requestAnimationFrame(drawRadar);
+</script>
+</body>
+</html>
