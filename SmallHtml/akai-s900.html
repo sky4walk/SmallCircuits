@@ -184,6 +184,12 @@ footer{max-width:1240px;margin:0 auto;padding:4px 16px 28px;color:var(--dim);fon
       <span class="mut">Anschlag = Klickhöhe auf der Taste. Balken oben = Keygroups.</span>
     </div>
     <div class="mut" id="midiStat" style="margin-top:6px">—</div>
+    <div class="tools" style="margin-top:6px">
+      <label title="Spuren aus sequencer.html (gleicher Browser) hier abspielen – im Sequencer die Ausgabe der Spur auf „→ Browser“ stellen"><input type="checkbox" id="seqIn" checked> Sequencer im Browser empfangen</label>
+      <a href="sequencer.html" target="sequencer" class="btn" style="text-decoration:none">Sequencer öffnen</a>
+      <label title="Drehregler K1–K8 des MPK mini (CC 70–77) verstellen das aktuelle Programm"><input type="checkbox" id="mpkKnobs" checked> Regler K1–K8 (CC 70–77)</label>
+      <span class="mut" id="seqStat">—</span>
+    </div>
     <canvas id="kbd"></canvas>
   </section>
 
@@ -746,10 +752,16 @@ class SamplerProc extends AudioWorkletProcessor {
     this.bend = 0; this.mw = 0; this.at = 0; this.sus = false;
     this.master = 0.8; this.tune = 0; this.interp = false; this.cvol = 1;
     this.gPhase = 0; this.tick = 0; this.lastRep = '';
+    this.tq = [];
     this.port.onmessage = e => this.msg(e.data);
   }
   msg(m){
+    if (m.at !== undefined) {
+      if (m.at > currentTime) { const q = this.tq; let i = q.length; q.push(m); while (i > 0 && q[i - 1].at > m.at) { q[i] = q[i - 1]; i--; } q[i] = m; return; }
+      delete m.at;
+    }
     switch(m.t){
+      case 'flushq': this.tq.length = 0; break;
       case 'smp': this.smp[m.id] = m.d; break;
       case 'del': delete this.smp[m.id]; for (const v of this.v) if (v.active && v.id===m.id) v.active=false; break;
       case 'clear': this.smp = {}; for (const v of this.v) v.active=false; break;
@@ -795,6 +807,7 @@ class SamplerProc extends AudioWorkletProcessor {
     const p = L.pan; v.pl = Math.cos((p+1)*Math.PI/4); v.pr = Math.sin((p+1)*Math.PI/4);
   }
   process(inputs, outputs){
+    while (this.tq.length && this.tq[0].at <= currentTime + 64 / sampleRate) { const m = this.tq.shift(); delete m.at; this.msg(m); }
     const out = outputs[0], oL = out[0], oR = out[1] || out[0];
     const N = oL.length, fs = sampleRate, dt = N / fs;
     oL.fill(0); if (oR !== oL) oR.fill(0);
@@ -921,7 +934,8 @@ const Audio9 = {
     this.bw2.connect(this.monGain); this.monGain.connect(this.ctx.destination);
     this.ready = true;
   },
-  post(m, tr) { if (this.node) this.node.port.postMessage(m, tr || []); },
+  at: null,   // gesetzt, solange eine zeitgestempelte Sequencer-Nachricht verarbeitet wird
+  post(m, tr) { if (this.at !== null && m.at === undefined) m.at = this.at; if (this.node) this.node.port.postMessage(m, tr || []); },
   setBandwidth(hz) {
     if (!this.ctx) return;
     const f = Math.min(hz, this.ctx.sampleRate * 0.45);
@@ -2030,7 +2044,8 @@ const MidiIO = {
         const n = this.ports.length;
         if (!n) return 'Verbunden, aber keine MIDI-Eingänge gefunden. DAW-Ausgang auf einen virtuellen Port legen (Linux: „Midi Through“, Windows: loopMIDI, macOS: IAC-Treiber).';
         const age = this.lastAt ? (performance.now() - this.lastAt) / 1000 : -1;
-        return `Verbunden · ${n} ${n > 1 ? 'Eingänge' : 'Eingang'}` + (this.count ? ` · ${this.count} Nachrichten, letzte vor ${age < 1 ? '<1' : Math.round(age)} s` : ' · noch keine Daten empfangen');
+        const mpk = this.ports.some(p => /mpk/i.test(p.name)) ? ' · Akai MPK mini erkannt (Tasten, Pads, Joystick, Regler K1–K8)' : '';
+        return `Verbunden · ${n} ${n > 1 ? 'Eingänge' : 'Eingang'}` + (this.count ? ` · ${this.count} Nachrichten, letzte vor ${age < 1 ? '<1' : Math.round(age)} s` : ' · noch keine Daten empfangen') + mpk;
       }
     }
     return '';
@@ -2337,6 +2352,7 @@ const MIDI = {
           case 120: Audio9.post({ t: 'alloff' }); UI.held.clear(); UI.kbdDirty = true; break;
           case 121: Audio9.post({ t: 'reset' }); break;
           case 123: Audio9.post({ t: 'allrel' }); UI.held.clear(); UI.kbdDirty = true; break;
+          default: if (d[1] >= 70 && d[1] <= 77 && $('mpkKnobs').checked) KNOBS.set(d[1] - 70, d[2]);
         }
         this.lastText = `CTRL ${d[1]} = ${d[2]} CH ${ch + 1}`; break;
       case 0xD0: Audio9.post({ t: 'at', v: d[1] / 127 }); break;
@@ -2349,6 +2365,53 @@ const MIDI = {
   }
 };
 MidiIO.onMessage = d => MIDI.onMsg(d);
+
+/* ---------- Drehregler K1–K8 (Akai MPK mini, CC 70–77) → aktuelles Programm ---------- */
+const KNOBS = {
+  names: ['FILTER', 'ATTACK', 'DECAY', 'SUSTAIN', 'RELEASE', 'LFO RATE', 'LFO DEPTH', 'VOLUME'],
+  set(k, v) {
+    const x = Math.round(v * 99 / 127);
+    if (k === 7) { Audio9.post({ t: 'cfg', c: { cvol: Math.pow(v / 127, 2) } }); msg(`K8 VOLUME ${x}`); return; }
+    const p = curProg(); if (!p) return;
+    p.kgs.forEach(kg => {
+      if (k === 0) kg.z.forEach(z => z.cutoff = x);
+      else kg[['', 'a', 'd', 's', 'r', 'lfoRate', 'lfoDepth'][k]] = x;
+    });
+    msg(`K${k + 1} ${this.names[k]} ${x}`); UI.refresh();
+  }
+};
+
+/* ---------- Sequencer im Browser (sequencer.html, BroadcastChannel) ----------
+   Der Sequencer schickt rohe MIDI-Bytes mit Soll-Zeit (ms seit 1970). Die Zeit wird in
+   Audiozeit umgerechnet; der Worklet spielt die Nachricht erst dann ab – auch im Hintergrund-Tab. */
+const SEQ = {
+  bc: null, seen: 0, count: 0, LAT: 0.03,
+  init() {
+    if (!('BroadcastChannel' in window)) { $('seqStat').textContent = 'Dieser Browser kennt keinen BroadcastChannel.'; return; }
+    this.bc = new BroadcastChannel('smallcircuits-midi');
+    this.bc.onmessage = e => this.recv(e.data || {});
+    this.hello(); setInterval(() => { this.hello(); this.show(); }, 2000);
+  },
+  ready() { return !!(Audio9.ready && Audio9.ctx && Audio9.ctx.state === 'running' && ST.power); },
+  hello() { if (this.bc) this.bc.postMessage({ hello: 's900', audio: this.ready() }); },
+  show() {
+    const el = $('seqStat'); if (!el) return;
+    if (!$('seqIn').checked) { el.textContent = 'Sequencer-Empfang aus'; return; }
+    const age = this.seen ? (Date.now() - this.seen) / 1000 : -1;
+    el.textContent = !this.bc ? '' : age < 0 ? 'Bereit für sequencer.html – dort die Spur auf „→ Browser“ stellen'
+      : (age < 3 ? '● Sequencer spielt' : 'Sequencer zuletzt vor ' + Math.round(age) + ' s') + ' · ' + this.count + ' Nachrichten' + (this.ready() ? '' : ' · hier POWER/Audio einschalten');
+  },
+  recv(m) {
+    if (m.ping) { this.hello(); return; }
+    if (m.hello || !$('seqIn').checked) return;
+    if (m.flush) { if (Audio9.ready) { Audio9.post({ t: 'flushq' }); Audio9.post({ t: 'allrel' }); } UI.held.clear(); UI.kbdDirty = true; return; }
+    if (!m.d || !m.d.length) return;
+    const was = this.seen; this.seen = Date.now(); this.count++; if (!was) this.show();
+    const ctx = Audio9.ctx;
+    Audio9.at = ctx && typeof m.at === 'number' ? ctx.currentTime + Math.max(0, (m.at - (performance.timeOrigin + performance.now())) / 1000) + this.LAT : null;
+    try { MIDI.onMsg(Array.from(m.d)); } finally { Audio9.at = null; }
+  }
+};
 
 /* ---------- Audioeingänge ---------- */
 async function fillInputs() {
@@ -2712,6 +2775,7 @@ function wire() {
   };
   $('inSel').onchange = async () => { if (Audio9.inStream) { try { await Audio9.openInput($('inSel').value); } catch (err) { UI.toast(err.message); } } };
   midiUiInit(esc);
+  SEQ.init(); $('seqIn').onchange = () => { if (!$('seqIn').checked && Audio9.ready) { Audio9.post({ t: 'flushq' }); Audio9.post({ t: 'allrel' }); } SEQ.show(); };
   $('octDn').onclick = () => { ST.octave = Math.max(-2, ST.octave - 1); UI.kbdDirty = true; };
   $('octUp').onclick = () => { ST.octave = Math.min(3, ST.octave + 1); UI.kbdDirty = true; };
   const withS = fn => () => { const s = curSample(); if (!s) return UI.toast('Kein Sample gewählt.'); fn(s); UI.refresh(); };
