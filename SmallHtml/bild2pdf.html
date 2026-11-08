@@ -367,6 +367,25 @@ button.ghost{background:transparent}
 .stamp.sel .grip,.stamp.sel .x{display:block}
 .stamp .grip{right:-8px;bottom:-8px;cursor:nwse-resize}
 .stamp .x{right:-8px;top:-8px;cursor:pointer;background:var(--danger);color:#fff}
+/* Textstempel */
+.stamp .txt{white-space:pre;pointer-events:none;user-select:none;overflow:visible}
+textarea#stext{
+  width:100%;min-height:58px;resize:vertical;
+  background:var(--panel);color:var(--lume);
+  border:1px solid var(--line-2);border-radius:3px;
+  padding:7px 9px;font-family:var(--mono);font-size:13px;line-height:1.35;
+}
+textarea#stext:focus-visible{outline:2px solid var(--safelight);outline-offset:1px}
+input[type=color]#scolor{
+  width:100%;height:33px;padding:2px;background:var(--panel);
+  border:1px solid var(--line-2);border-radius:3px;cursor:pointer;
+}
+.txtprev{
+  background:#fff;border-radius:2px;min-height:44px;padding:6px 8px;margin:2px 0 10px;
+  cursor:grab;overflow:hidden;white-space:pre;max-height:110px;
+  outline:1px solid var(--line);
+}
+.txtprev.edit{outline:1.5px solid var(--safelight)}
 
 @media (prefers-reduced-motion:reduce){
   *{animation:none !important;transition:none !important}
@@ -619,6 +638,48 @@ button.ghost{background:transparent}
   </div>
 
   <div class="group">
+    <h2>Text</h2>
+    <label class="field">
+      <span>Inhalt <button class="ghost" id="sdate" type="button" title="Heutiges Datum einfügen"
+        style="float:right;padding:1px 7px;font-size:11px;font-family:var(--mono);text-transform:none;letter-spacing:0">Datum</button></span>
+      <textarea id="stext" spellcheck="false" placeholder="z. B. Nürnberg, den 01.11.2026">Ort, Datum</textarea>
+    </label>
+    <div class="row">
+      <label class="field">
+        <span>Schrift</span>
+        <select id="sfont">
+          <option value="Helvetica" selected>Helvetica</option>
+          <option value="Times">Times</option>
+          <option value="Courier">Courier</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Schnitt</span>
+        <select id="sstyle">
+          <option value="" selected>Normal</option>
+          <option value="b">Fett</option>
+          <option value="i">Kursiv</option>
+          <option value="bi">Fett kursiv</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label class="field">
+        <span>Größe in pt</span>
+        <input type="number" id="ssize" value="11" min="4" max="200" step="0.5">
+      </label>
+      <label class="field">
+        <span>Farbe</span>
+        <input type="color" id="scolor" value="#111111">
+      </label>
+    </div>
+    <div class="txtprev" id="stprev" draggable="true" title="Auf die Seite ziehen"></div>
+    <button id="stput" title="Text in die Mitte der Seite setzen">Text auf Seite setzen</button>
+    <p class="hint" id="sthint" style="margin-top:8px">Vorschau auf die Seite ziehen oder „Text auf Seite setzen“.
+      Ist ein Text auf der Seite markiert, ändern die Felder ihn direkt.</p>
+  </div>
+
+  <div class="group">
     <h2>Aufbereitung</h2>
     <label class="check">
       <input type="checkbox" id="swhite">
@@ -704,7 +765,7 @@ button.ghost{background:transparent}
       <div class="slayer" id="slayer"></div>
     </div>
   </div>
-  <div class="empty" id="sempty">PDF laden, Unterschrift links ablegen und auf die Seite ziehen.
+  <div class="empty" id="sempty">PDF laden, Unterschrift oder Text links vorbereiten und auf die Seite ziehen.
     Verschieben mit der Maus, Größe an der Ecke unten rechts, Entf löscht.</div>
 </section>
 </main>
@@ -4455,7 +4516,7 @@ const TAGLINES = {
     Läuft <b>vollständig lokal</b> — kein Upload, keine Bibliothek, keine Verbindung.`,
   "tab-pdf":  `PDF-Seiten einzeln als Bild sichern, fortlaufend nummeriert.<br>
     Läuft <b>vollständig lokal</b> — kein Upload, keine Verbindung. pdf.js ist eingebettet.`,
-  "tab-sign": `Unterschrift als Bild auf ein PDF setzen, Text bleibt Text.<br>
+  "tab-sign": `Unterschrift und Text auf ein PDF setzen, vorhandener Text bleibt Text.<br>
     Läuft <b>vollständig lokal</b> — kein Upload, keine Verbindung. pdf.js und pdf-lib sind eingebettet.`
 };
 const TABS = [["tb1","tab-bild"], ["tb2","tab-pdf"], ["tb3","tab-sign"]];
@@ -5138,14 +5199,120 @@ function srenderSigs(){
   $("#sighint").style.display = sigs.length ? "" : "none";
 }
 
+/* ---------- Textstempel ----------
+   Ein Text ist ein Stempel mit kind "txt". Größe in Punkt, Lage wie bei den
+   Bildern als Anteil der Seite. Im PDF landet er als echter Text in einer
+   der 14 Standardschriften (Helvetica, Times, Courier) — kein Einbetten nötig.
+   Im Browser stehen dafür Arial/Times New Roman/Courier New, die gleich laufen. */
+const TFAM = {
+  Helvetica: '"Helvetica Neue", Helvetica, Arial, sans-serif',
+  Times:     '"Times New Roman", Times, serif',
+  Courier:   '"Courier New", Courier, monospace'
+};
+const TPDF = {
+  Helvetica: ["Helvetica",  "HelveticaBold",  "HelveticaOblique",  "HelveticaBoldOblique"],
+  Times:     ["TimesRoman", "TimesRomanBold", "TimesRomanItalic", "TimesRomanBoldItalic"],
+  Courier:   ["Courier",    "CourierBold",    "CourierOblique",    "CourierBoldOblique"]
+};
+const TLH = 1.2;                         // Zeilenabstand als Vielfaches der Größe
+function tcss(t, px){
+  return (/i/.test(t.style) ? "italic " : "") + (/b/.test(t.style) ? "bold " : "") +
+         px + "px " + (TFAM[t.font] || TFAM.Helvetica);
+}
+function tpdfName(t){
+  const i = { "": 0, b: 1, i: 2, bi: 3 }[t.style] || 0;
+  return (TPDF[t.font] || TPDF.Helvetica)[i];
+}
+let tmctx = null;
+/* Breite, Höhe (pt) und Grundlinie (Anteil der Größe ab Zeilenoberkante) messen */
+function smeasure(st){
+  if (!tmctx) tmctx = document.createElement("canvas").getContext("2d");
+  tmctx.font = tcss(st, 100);
+  const lines = st.text.split("\n");
+  let w = 0;
+  for (const l of lines) w = Math.max(w, tmctx.measureText(l).width);
+  const m = tmctx.measureText("Hgä");
+  const a = m.fontBoundingBoxAscent  || 90;
+  const d = m.fontBoundingBoxDescent || 21;
+  st.base = ((TLH * 100 - (a + d)) / 2 + a) / 100;
+  st.wpt  = Math.max(w / 100 * st.size, st.size * 0.6);
+  st.hpt  = lines.length * TLH * st.size;
+}
+function tpanel(){
+  return { text: $("#stext").value.replace(/\r/g, "").replace(/\t/g, "    "),
+           font: $("#sfont").value, style: $("#sstyle").value,
+           size: Math.max(4, Math.min(200, +$("#ssize").value || 11)),
+           color: $("#scolor").value };
+}
+function scurTxt(){
+  const st = stamps.find(s => s.id === ssel);
+  return st && st.kind === "txt" ? st : null;
+}
+/* Felder links zeigen den markierten Text, sonst die Vorgabe für neue Texte */
+let ssynced = null;
+function ssyncPanel(){
+  const st = scurTxt();
+  // Nur beim Wechsel der Markierung in die Felder schreiben, sonst stört es beim Tippen
+  if (st && st.id !== ssynced){
+    $("#stext").value = st.text; $("#sfont").value = st.font; $("#sstyle").value = st.style;
+    $("#ssize").value = st.size; $("#scolor").value = st.color;
+  }
+  ssynced = st ? st.id : null;
+  $("#stprev").classList.toggle("edit", !!st);
+  $("#stput").textContent = st ? "Als neuen Text setzen" : "Text auf Seite setzen";
+  stprev();
+}
+function stprev(){
+  const t = tpanel(), p = $("#stprev");
+  p.textContent = t.text || " ";
+  p.style.font = tcss(t, Math.min(26, t.size * 96 / 72));
+  p.style.lineHeight = TLH;
+  p.style.color = t.color;
+}
+/* Änderung in den Feldern: markierten Text mitziehen */
+function spanelChanged(){
+  stprev();
+  const st = scurTxt();
+  if (!st) return;
+  const t = tpanel();
+  if (!t.text.trim()) return;           // leeren Text nicht übernehmen, Entf löscht
+  Object.assign(st, t);
+  smeasure(st); sclamp(st); srenderStamps();
+}
+function stplace(cx, cy){
+  if (!sdoc){ ssay("Erst ein PDF laden.", "err"); return; }
+  const t = tpanel();
+  if (!t.text.trim()){ ssay("Erst einen Text eingeben.", "err"); return; }
+  const sz = ssizes[spage];
+  const st = Object.assign({ id: snext++, kind: "txt", page: spage, fx: 0, fy: 0, fw: 0 }, t);
+  smeasure(st);
+  st.fw = st.wpt / sz.w;
+  st.fx = cx - st.fw / 2;
+  st.fy = cy - sfh(st) / 2;
+  sclamp(st);
+  stamps.push(st);
+  ssel = st.id;
+  srenderStamps();
+  ssay("Text gesetzt — verschieben, an der Ecke Schrift vergrößern, links ändern.", "ok");
+}
+
 /* ---------- Stempel auf der Seite ---------- */
 /* Höhe als Anteil der Seitenhöhe, aus Breite und Bildseitenverhältnis */
 function sfh(st){
-  const sg = sigById(st.sig), sz = ssizes[st.page];
+  const sz = ssizes[st.page];
+  if (st.kind === "txt") return sz ? st.hpt / sz.h : 0.05;
+  const sg = sigById(st.sig);
   if (!sg || !sz) return 0.05;
   return st.fw * (sz.w / sz.h) * (sg.h / sg.w);
 }
 function sclamp(st){
+  if (st.kind === "txt"){
+    const sz = ssizes[st.page];
+    st.fw = sz ? st.wpt / sz.w : st.fw;
+    st.fx = Math.max(0, Math.min(Math.max(0, 1 - st.fw), st.fx));
+    st.fy = Math.max(0, Math.min(Math.max(0, 1 - sfh(st)), st.fy));
+    return;
+  }
   st.fw = Math.max(0.02, Math.min(1, st.fw));
   const fh = sfh(st);
   st.fx = Math.max(0, Math.min(1 - st.fw, st.fx));
@@ -5170,19 +5337,33 @@ function splace(sg, cx, cy){
 function srenderStamps(){
   const layer = $("#slayer");
   layer.innerHTML = "";
+  const sz = ssizes[spage];
+  const k = sz ? (parseFloat($("#spage-el").style.width) || $("#spage-el").clientWidth) / sz.w : 1;
   for (const st of stamps){
     if (st.page !== spage) continue;
-    const sg = sigById(st.sig);
-    if (!sg) continue;
     const el = document.createElement("div");
     el.className = "stamp" + (st.id === ssel ? " sel" : "");
-    el.innerHTML = `<img alt=""><span class="grip" title="Größe ändern"></span><span class="x" title="Entfernen">×</span>`;
-    el.querySelector("img").src = sg.url;
+    if (st.kind === "txt"){
+      el.innerHTML = `<div class="txt"></div><span class="grip" title="Schriftgröße ändern"></span><span class="x" title="Entfernen">×</span>`;
+      const tx = el.querySelector(".txt");
+      tx.textContent = st.text;
+      tx.style.font = tcss(st, st.size * k);
+      tx.style.lineHeight = (TLH * st.size * k) + "px";
+      tx.style.color = st.color;
+      el.title = "Doppelklick: Text bearbeiten";
+      el.addEventListener("dblclick", () => { $("#stext").focus(); $("#stext").select(); });
+    }else{
+      const sg = sigById(st.sig);
+      if (!sg) continue;
+      el.innerHTML = `<img alt=""><span class="grip" title="Größe ändern"></span><span class="x" title="Entfernen">×</span>`;
+      el.querySelector("img").src = sg.url;
+    }
     spos(el, st);
     sdragify(el, st);
     layer.appendChild(el);
   }
   sstate();
+  ssyncPanel();
 }
 function spos(el, st){
   el.style.left   = (st.fx * 100) + "%";
@@ -5204,18 +5385,31 @@ function sdragify(el, st){
       ssel = st.id;
       page.querySelectorAll(".stamp.sel").forEach(s => s.classList.remove("sel"));
       el.classList.add("sel");
+      ssyncPanel();
     }
     const resize = e.target.classList.contains("grip");
     const r = page.getBoundingClientRect();
-    const s0 = { x: e.clientX, y: e.clientY, fx: st.fx, fy: st.fy, fw: st.fw };
+    const s0 = { x: e.clientX, y: e.clientY, fx: st.fx, fy: st.fy, fw: st.fw, size: st.size };
     el.setPointerCapture(e.pointerId);
+    const tx = el.querySelector(".txt");
     const move = ev => {
       const dx = (ev.clientX - s0.x) / r.width, dy = (ev.clientY - s0.y) / r.height;
-      if (resize) st.fw = s0.fw + dx;
+      if (resize && st.kind === "txt"){
+        // Ecke ziehen ändert die Schriftgröße (in halben Punkten)
+        const f = Math.max(0.05, (s0.fw + dx) / s0.fw);
+        st.size = Math.max(4, Math.min(200, Math.round(s0.size * f * 2) / 2));
+        smeasure(st);
+        const k = r.width / ssizes[st.page].w;
+        tx.style.font = tcss(st, st.size * k);
+        tx.style.lineHeight = (TLH * st.size * k) + "px";
+        $("#ssize").value = st.size;
+      }
+      else if (resize) st.fw = s0.fw + dx;
       else { st.fx = s0.fx + dx; st.fy = s0.fy + dy; }
       sclamp(st); spos(el, st);
     };
     const up = () => {
+      if (resize && st.kind === "txt") stprev();
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
@@ -5294,8 +5488,9 @@ async function sdraw(){
 }
 
 function sstate(){
-  const n = stamps.length;
-  $("#scount").textContent = n === 1 ? "1 Unterschrift" : n + " Unterschriften";
+  const nt = stamps.filter(s => s.kind === "txt").length, n = stamps.length - nt;
+  $("#scount").textContent = (n === 1 ? "1 Unterschrift" : n + " Unterschriften") +
+    (nt ? " · " + nt + " Text" + (nt === 1 ? "" : "e") : "");
   $("#smake").disabled = sbusy || !sdoc;
   $("#sjpg").disabled  = sbusy || !sdoc;
   $("#sprev").disabled = !sdoc || spage <= 0;
@@ -5341,7 +5536,7 @@ function sdropOrphans(doc, PDFLib){
 
 async function smakePDF(){
   if (sbusy || !sdoc) return;
-  if (!stamps.length && !confirm("Es ist noch keine Unterschrift gesetzt. Trotzdem sichern?")) return;
+  if (!stamps.length && !confirm("Es ist noch weder Unterschrift noch Text gesetzt. Trotzdem sichern?")) return;
   sbusy = true; sstate();
   $("#sbar").classList.add("on");
   const bar = $("#sbar").firstElementChild;
@@ -5372,8 +5567,34 @@ async function smakePDF(){
     }
 
     ssay("Unterschriften werden eingesetzt …"); bar.style.width = "60%";
-    const emb = new Map();
+    const emb = new Map(), fonts = new Map();
+    let bad = 0;
     for (const st of stamps){
+      if (st.kind === "txt"){
+        const fn = tpdfName(st);
+        if (!fonts.has(fn)) fonts.set(fn, await doc.embedFont(PDFLib.StandardFonts[fn]));
+        const font = fonts.get(fn);
+        const vp = (await sdoc.getPage(st.page + 1)).getViewport({ scale: 1 });
+        const c = parseInt(st.color.slice(1), 16);
+        const color = PDFLib.rgb((c >> 16 & 255) / 255, (c >> 8 & 255) / 255, (c & 255) / 255);
+        const L = st.fx * vp.width, T = st.fy * vp.height;
+        st.text.split("\n").forEach((line, i) => {
+          // Zeichen, die die Standardschrift (WinAnsi) nicht kennt, werden zu „?“
+          let s = "";
+          for (const ch of line){
+            try{ font.encodeText(ch); s += ch; }catch(e){ s += "?"; bad++; }
+          }
+          if (!s.trim()) return;
+          const y = T + (i * TLH + st.base) * st.size;
+          const p0 = vp.convertToPdfPoint(L, y), p1 = vp.convertToPdfPoint(L + 10, y);
+          const ang = Math.atan2(p1[1] - p0[1], p1[0] - p0[0]) * 180 / Math.PI;
+          doc.getPage(st.page).drawText(s, {
+            x: p0[0], y: p0[1], size: st.size, font, color,
+            rotate: PDFLib.degrees(Math.round(ang * 1000) / 1000)
+          });
+        });
+        continue;
+      }
       const sg = sigById(st.sig);
       if (!sg) continue;
       if (!emb.has(sg.id)) emb.set(sg.id, await doc.embedPng(sg.png));
@@ -5400,7 +5621,8 @@ async function smakePDF(){
     if (!/\.pdf$/i.test(name)) name += ".pdf";
     saveBlob(new Blob([out], { type: "application/pdf" }), name);
     bar.style.width = "100%";
-    ssay(`${name} gesichert — ${stamps.length} Unterschrift${stamps.length === 1 ? "" : "en"}, ${kb(out.length)}.` + note, "ok");
+    if (bad) note += ` ${bad} Zeichen ohne Entsprechung in der Standardschrift wurden zu „?“.`;
+    ssay(`${name} gesichert — ${$("#scount").textContent}, ${kb(out.length)}.` + note, "ok");
   }catch(err){
     console.error(err);
     ssay("Abgebrochen: " + (err && err.message ? err.message : err), "err");
@@ -5419,8 +5641,17 @@ async function smakeJPG(){
     const cv = await LIBS.render(await sdoc.getPage(spage + 1), dpi / 72, "#ffffff");
     const ctx = cv.getContext("2d");
     ctx.imageSmoothingQuality = "high";
+    const k = cv.width / ssizes[spage].w;
     for (const st of stamps){
       if (st.page !== spage) continue;
+      if (st.kind === "txt"){
+        ctx.font = tcss(st, st.size * k);
+        ctx.fillStyle = st.color;
+        ctx.textBaseline = "alphabetic";
+        st.text.split("\n").forEach((line, i) =>
+          ctx.fillText(line, st.fx * cv.width, st.fy * cv.height + (i * TLH + st.base) * st.size * k));
+        continue;
+      }
       const sg = sigById(st.sig);
       if (sg) ctx.drawImage(sg.cv, st.fx * cv.width, st.fy * cv.height, st.fw * cv.width, sfh(st) * cv.height);
     }
@@ -5450,6 +5681,21 @@ $("#sthr").oninput    = e => { $("#sthrval").textContent = e.target.value; };
 $("#sthr").onchange   = () => sreprocessAll();
 $("#sink").onchange   = () => sreprocessAll();
 $("#strim").onchange  = () => sreprocessAll();
+for (const id of ["#stext", "#ssize", "#scolor"]) $(id).addEventListener("input", spanelChanged);
+for (const id of ["#sfont", "#sstyle", "#ssize", "#scolor"]) $(id).addEventListener("change", spanelChanged);
+$("#stput").onclick   = () => stplace(0.5, 0.5);
+$("#sdate").onclick   = () => {
+  const d = new Date(), t = $("#stext");
+  const ds = String(d.getDate()).padStart(2, "0") + "." + String(d.getMonth() + 1).padStart(2, "0") + "." + d.getFullYear();
+  const a = t.selectionStart ?? t.value.length, b = t.selectionEnd ?? t.value.length;
+  t.value = t.value.slice(0, a) + ds + t.value.slice(b);
+  t.focus(); t.setSelectionRange(a + ds.length, a + ds.length);
+  spanelChanged();
+};
+$("#stprev").addEventListener("dragstart", e => {
+  e.dataTransfer.setData("text/x-txt", "1");
+  e.dataTransfer.effectAllowed = "copy";
+});
 $("#sclear").onclick  = () => {
   sgen++;
   if (sdoc) sdoc.destroy();
@@ -5507,6 +5753,7 @@ hotZone($("#spage-el"), async e => {
   const cx = (e.clientX - r.left) / r.width, cy = (e.clientY - r.top) / r.height;
   const id = e.dataTransfer.getData("text/x-sig");
   if (id){ const sg = sigById(+id); if (sg) splace(sg, cx, cy); return; }
+  if (e.dataTransfer.types.includes("text/x-txt")){ stplace(cx, cy); return; }
   const f = [...e.dataTransfer.files];
   const pdf = f.find(x => /pdf$/i.test(x.name) || x.type === "application/pdf");
   if (pdf){ stakePDF(pdf); return; }
@@ -5524,6 +5771,7 @@ window.addEventListener("resize", () => {
 
 sstate();
 srenderSigs();
+ssyncPanel();
 </script>
 
 <!-- =====================================================================
