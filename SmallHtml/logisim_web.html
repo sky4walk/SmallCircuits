@@ -48,7 +48,7 @@ body {
 <body>
 <div id="toolbar">
   <span style="color:#58a6ff;font-weight:bold;letter-spacing:.5px">⬡ Logisim Web</span>
-  <span style="color:#6e7681;font-size:11px" title="Build-Kennung">build&nbsp;v36&nbsp;·&nbsp;29.10</span>
+  <span style="color:#6e7681;font-size:11px" title="Build-Kennung">build&nbsp;v37&nbsp;·&nbsp;08.11</span>
   <span style="color:#30363d">│</span>
   <button class="tb" onclick="fileInput.click()">📂 .circ laden</button>
   <input id="fileInput" type="file" accept=".circ" style="display:none">
@@ -59,7 +59,7 @@ body {
   <button class="tb" id="btnTakt" onclick="stepClock()" title="Taktsignal umschalten">⏭ Takt</button>
   <button class="tb" id="btnRun" onclick="toggleRun()" title="Kontinuierlich takten">▶ Run</button>
   <select id="speedSel" class="tb" title="Taktschritte pro Sekunde im Run-Modus" onchange="if(runTimer){toggleRun();toggleRun();}">
-    <option value="1000">1/s</option><option value="300" selected>3/s</option><option value="100">10/s</option><option value="30">30/s</option><option value="10">100/s</option>
+    <option value="1000">1/s</option><option value="300" selected>3/s</option><option value="100">10/s</option><option value="30">30/s</option><option value="10">100/s</option><option value="1">1000/s</option><option value="0">Max</option>
   </select>
   <button class="tb" onclick="resetSim()">↺ Reset</button>
   <span style="color:#30363d">│</span>
@@ -6044,6 +6044,9 @@ function parseXY(s) {
   return { x: +m[1], y: +m[2] };
 }
 
+// v37: Busbreiten bis 32 Bit. (1 << 32) ist in JS 1, die Maske wäre 0.
+function wmask(w) { return w >= 32 ? 0xFFFFFFFF : (1 << w) - 1; }
+
 // ════════════════════════ PORT DEFINITIONS ════════════════════════
 // Gatter-Eingangsversatz — exakt Logisim 2.7 (AbstractGate.getInputOffset).
 // axisLength = size + bonusWidth (XOR/XNOR: Extra-Bogen 10) + 10 bei negiertem Ausgang.
@@ -6234,6 +6237,13 @@ function getPortsEast(type, attrs) {
         ports.push({ name:'din', io:'in', dx:-140, dy:20, w:dw });
       return ports;
     }
+    case 'TTY':
+      return [
+        { name:'in',  io:'in', dx: 0, dy:-10, w:7 },
+        { name:'clk', io:'in', dx: 0, dy:  0, w:1 },
+        { name:'we',  io:'in', dx:10, dy: 10, w:1 },
+        { name:'clr', io:'in', dx:20, dy: 10, w:1 },
+      ];
     case 'ROM': {
       const aw = parseInt(attrs.addrWidth || 8);
       const dw = parseInt(attrs.dataWidth || 8);
@@ -6421,7 +6431,8 @@ function buildNets(circ, proj) {
       let bestNet = -1, bestDist = TOL * TOL;
       // Flipflop-Ausgänge ebenfalls nur exakt: ein unbeschaltetes /Q band sonst
       // per Toleranz an ein Nachbarnetz (J-K-Blatt: /Q trieb die R-Leitung → Schwingen).
-      if (exactOnly.has(p.name) || (p.io === 'out' && comp.type.endsWith('Flip-Flop'))) {
+      // v37: auch unbeschaltete Ausgänge von Demultiplexern, Unterschaltungen und Splitter-Beine nur exakt (sonst überschreiben sie das Nachbarnetz mit 0)
+      if (exactOnly.has(p.name) || (p.io === 'out' && (comp.type.endsWith('Flip-Flop') || comp.type === 'Demultiplexer' || comp.lib === null)) || (comp.type === 'Splitter' && !p.isCombined)) {
         const nid = coordToNet.get(`${p.ax},${p.ay}`);
         bestNet = nid !== undefined ? nid : -1;
       } else if (coordToNet.has(`${p.ax},${p.ay}`)) {
@@ -6510,11 +6521,13 @@ function simulate(circ, nets, proj, regState, clkVal, path = '') {
     for (const cp of compPorts) {
       const { comp, ports, byName } = cp;
       const type = comp.type;
+      if (type === 'Tunnel' || type === 'Probe' || type === 'TTY') continue;   // v37: ohne eigene Ausgänge – vor allem anderen überspringen
       const inVal = (name) => {
         const p = byName.get(name);
         return (p && p.io === 'in' && p.netId >= 0) ? netVals[p.netId] : null;
       };
       const setOut = (name, val) => {
+        if (val !== null && val < 0) val = val >>> 0;     // v37: Werte immer vorzeichenlos (32 Bit)
         const p = byName.get(name);
         if (p && p.io === 'out' && p.netId >= 0 && netVals[p.netId] !== val) {
           netVals[p.netId] = val; changed = true;
@@ -6538,13 +6551,24 @@ function simulate(circ, nets, proj, regState, clkVal, path = '') {
       }
       if (type === 'Tunnel') continue;   // Tunnel sind seit v34 Teil des Netzes
 
-      const w = parseInt(comp.attrs.width || 1);
-      const mask = (1 << w) - 1;
-      const n = parseInt(comp.attrs.inputs || 2);
-      // Negierte Gattereingänge (negateN) vor der Verknüpfung invertieren
-      const negMask = (type.endsWith(' Gate') && type !== 'NOT Gate') ? gateNegated(comp.attrs, n) : 0;
-      const ins = Array.from({length:n}, (_,i) => { const v = inN(i); return (v !== null && ((negMask >> i) & 1)) ? (~v) & mask : v; });
-      const allDefined = ins.every(v => v !== null);
+      // v37: Attribute nur einmal auswerten (Cache am Port-Eintrag)
+      if (cp._w === undefined) {
+        cp._w = parseInt(comp.attrs.width || 1); cp._mask = wmask(cp._w); cp._n = parseInt(comp.attrs.inputs || 2);
+        cp._gate = type.endsWith(' Gate') && type !== 'NOT Gate';
+        // Negierte Gattereingänge (negateN) vor der Verknüpfung invertieren
+        cp._neg = cp._gate ? gateNegated(comp.attrs, cp._n) : 0;
+        cp._inP = Array.from({ length: cp._n }, (_, i) => byName.get(`in${i}`));
+      }
+      const w = cp._w, mask = cp._mask, n = cp._n, negMask = cp._neg;
+      let ins = null, allDefined = true;
+      if (cp._gate) {
+        ins = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const p = cp._inP[i]; let v = (p && p.io === 'in' && p.netId >= 0) ? netVals[p.netId] : null;
+          if (v === null) allDefined = false; else if ((negMask >> i) & 1) v = (~v) & mask;
+          ins[i] = v;
+        }
+      }
 
       if (type === 'NOT Gate') { const v=inVal('in'); if(v!==null) setOut('out',(~v)&mask); continue; }
       // Kurzschluss-Auswertung wie Logisim: eine dominierende 0 (AND/NAND) bzw.
@@ -6569,17 +6593,17 @@ function simulate(circ, nets, proj, regState, clkVal, path = '') {
 
       if (type === 'Adder') {
         const aw = parseInt(comp.attrs.width || 8);   // Logisim-Default: 8 Bit
-        const amask = (1 << aw) - 1;
+        const amask = wmask(aw);
         const a=inVal('a'), b=inVal('b'), ci=inVal('cin')??0;
         if (a!==null && b!==null) {
           const s = a + b + ci;
-          setOut('sum',  s & amask); setOut('cout', (s >> aw) & 1);
+          setOut('sum',  s & amask); setOut('cout', aw >= 32 ? (s > 0xFFFFFFFF ? 1 : 0) : (s >> aw) & 1);
         }
         continue;
       }
       if (type === 'Subtractor') {
         const aw = parseInt(comp.attrs.width || 8);   // Logisim-Default: 8 Bit
-        const amask = (1 << aw) - 1;
+        const amask = wmask(aw);
         const a=inVal('a'), b=inVal('b'), bi=inVal('bin')??0;
         if (a!==null && b!==null) {
           const s = a - b - bi;
@@ -6628,13 +6652,14 @@ function simulate(circ, nets, proj, regState, clkVal, path = '') {
           if (nets.extDriven(p.netId, uid)) {
             val = netVals[p.netId];
           } else if (comb !== null) {
-            val = 0; p.bits.forEach((b, k) => { val |= ((comb >> b) & 1) << k; });
+            val = 0; p.bits.forEach((b, k) => { val |= ((comb >> b) & 1) << k; }); val >>>= 0;
             if (netVals[p.netId] !== val) { netVals[p.netId] = val; changed = true; }
           } else if (netVals[p.netId] !== null) {
             val = netVals[p.netId];   // persistierter Wert (z.B. Latch-Rückkopplung)
           }
           if (val !== null) { p.bits.forEach((b, k) => { newComb |= ((val >> k) & 1) << b; }); known = true; }
         }
+        newComb >>>= 0;
         if (!combExt && known && combId >= 0 && netVals[combId] !== newComb) {
           netVals[combId] = newComb; changed = true;
         }
@@ -6692,11 +6717,18 @@ function simulate(circ, nets, proj, regState, clkVal, path = '') {
             sub._pinCache = { inPins: sp.filter(c=>c.attrs.output!=='true'), outPins: sp.filter(c=>c.attrs.output==='true') };
           }
           const { inPins, outPins } = sub._pinCache;
+          // v37: Unterschaltung nur neu rechnen, wenn sich Eingänge oder gespeicherte Zustände geändert haben
+          let key = stateGen + ':' + clkVal;
           inPins.forEach((pin, i) => {
             const outerPort = byName.get(pin.attrs.label||`in${i}`);
             if (outerPort && outerPort.io==='in' && outerPort.netId >= 0) pin.val = netVals[outerPort.netId];
+            key += ',' + pin.val;
           });
-          simulate(sub, sub._nets, proj, regState, clkVal, `${path}/${comp.uid}`);
+          if (!sub._instKey) sub._instKey = new Map();
+          if (sub._instKey.get(instId) !== key) {
+            sub._instKey.set(instId, key);
+            simulate(sub, sub._nets, proj, regState, clkVal, `${path}/${comp.uid}`);
+          }
           outPins.forEach((pin, i) => {
             const outerPort = byName.get(pin.attrs.label||`out${i}`);
             if (outerPort && outerPort.io !== 'out') return;
@@ -7133,16 +7165,39 @@ function drawComp(comp) {
       ctx.fillRect(-20,-8,20,16); ctx.strokeRect(-20,-8,20,16);
       ctx.fillStyle=C.val; ctx.font='8px monospace'; ctx.textAlign='center';
       ctx.fillText('PROBE', -10, 3); ctx.restore(); return;
-    case 'Tunnel':
+    case 'Tunnel': {
+      // v37: Richtung wie Logisim – die Spitze zeigt in "facing", der Körper liegt gegenüber
       ctx.restore();
       ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+      const f = comp.attrs.facing || 'west', lbl = comp.attrs.label || '';
+      const L = Math.max(25, 12 + lbl.length * 5);
       ctx.fillStyle='#1c2438'; ctx.strokeStyle='#a5d6ff'; ctx.lineWidth=1;
-      ctx.beginPath();
-      ctx.moveTo(0,0); ctx.lineTo(-10,-6); ctx.lineTo(-25,-6);
-      ctx.lineTo(-25,6); ctx.lineTo(-10,6); ctx.closePath();
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle=C.lbl; ctx.font='8px monospace'; ctx.textAlign='center';
-      ctx.fillText(comp.attrs.label||'', -17, 3); ctx.restore(); return;
+      ctx.font='8px monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.textBaseline='alphabetic';
+      if (f === 'north' || f === 'south') {
+        const s = f === 'north' ? 1 : -1, hw = Math.max(8, 4 + lbl.length * 2.6);   // north: Körper unterhalb
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(-hw, s*7); ctx.lineTo(-hw, s*20); ctx.lineTo(hw, s*20); ctx.lineTo(hw, s*7); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle=C.lbl; ctx.fillText(lbl, 0, s*13.5 + 3);
+      } else {
+        const s = f === 'west' ? 1 : -1;       // west: Körper rechts
+        ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(s*8,-6); ctx.lineTo(s*L,-6); ctx.lineTo(s*L,6); ctx.lineTo(s*8,6); ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle=C.lbl; ctx.fillText(lbl, s*(L+8)/2, 3);
+      }
+      ctx.restore(); return;
+    }
+    case 'TTY': {
+      ctx.restore();
+      const d = ttyDims(comp), t = ttyState.get(currentPath + '/' + comp.uid);
+      ctx.save(); ctx.translate(comp.loc.x, comp.loc.y);
+      ctx.fillStyle='#0a1a0f'; ctx.strokeStyle='#3fb950'; ctx.lineWidth=1.5;
+      ctx.fillRect(0, 10 - d.h, d.w, d.h); ctx.strokeRect(0, 10 - d.h, d.w, d.h);
+      ctx.fillStyle='#7ee787'; ctx.font='11px monospace'; ctx.textAlign='left';
+      if (t) { const ls = t.lines.slice(-d.rows); ls.forEach((l, i) => ctx.fillText(l.slice(0, d.cols), 5, 10 - d.h + 5 + 12 + i * 15)); }
+      ctx.fillStyle=C.text; ctx.font='8px monospace'; ctx.fillText(comp.attrs.label || 'TTY', 2, 10 - d.h - 3);
+      ctx.restore(); return;
+    }
     default:
       ctx.restore();
       if (comp.lib === null) drawSubcircuit(comp);
@@ -7156,9 +7211,32 @@ function drawComp(comp) {
 let panX = 40, panY = 40, viewZoom = 1.5;
 let dragging = false, lastX = 0, lastY = 0;
 let project = null, currentCirc = null, currentNets = null;
+const currentPath = '';
 let junctions = null;
 let regState = new Map();
 let memState = new Map();   // RAM: id → Map(addr → value)
+// v37: TTY wie in Logisim (Bibliothek Ein-/Ausgabe): Zeichen bei steigender Flanke, wenn WE=1.
+// 10/13 = neue Zeile, 8 = Rückschritt, 12 = Bildschirm löschen.
+let ttyState = new Map(), ttyChanged = false;
+let stateGen = 0;   // v37: zählt Zustandsänderungen (Register, Speicher, Eingaben) für den Unterschaltungs-Cache
+function ttyOf(id, comp) {
+  let t = ttyState.get(id);
+  if (!t) { t = { lines: [''], rows: parseInt(comp.attrs.rows || 8), cols: parseInt(comp.attrs.cols || 32), label: comp.attrs.label || 'TTY' }; ttyState.set(id, t); }
+  return t;
+}
+function ttyPut(t, c) {
+  const L = t.lines;
+  if (c === 10 || c === 13) { if (c === 10 || L[L.length - 1] !== '') L.push(''); }
+  else if (c === 8) L[L.length - 1] = L[L.length - 1].slice(0, -1);
+  else if (c === 12) t.lines = [''];
+  else if (c >= 32) { if (L[L.length - 1].length >= t.cols) L.push(''); L[L.length - 1] += String.fromCharCode(c); }
+  if (t.lines.length > 500) t.lines.splice(0, t.lines.length - 500);
+}
+function ttyDims(comp) {
+  const rows = parseInt(comp.attrs.rows || 8), cols = parseInt(comp.attrs.cols || 32);
+  const w = Math.ceil((10 + cols * 7) / 10) * 10, h = Math.ceil((10 + rows * 15) / 10) * 10;
+  return { rows, cols, w, h };
+}
 // RAM-Anfangsinhalt: optionales Attribut "contents" (Format wie ROM), wird beim
 // ersten Zugriff bzw. nach Reset geladen. Ohne Attribut: leerer RAM (wie bisher).
 function ramMem(id, comp) {
@@ -7340,8 +7418,30 @@ function populateCircSelect() {
   switchCircuit(start);
 }
 
+// v37: Takt ohne Neuzeichnen (für schnelle Läufe)
+function simStep() {
+  clkVal ^= 1; stateGen++;
+  simulate(currentCirc, currentNets, project, regState, clkVal, '');
+  let guard = 0;
+  while (latchWalk(currentCirc, currentNets, '') && guard++ < 8) simulate(currentCirc, currentNets, project, regState, clkVal, '');
+}
+let runFrames = 0, runCycles = 0, runT0 = 0;
+function runFast() {
+  if (!runTimer) return;
+  const per = parseInt(document.getElementById('speedSel').value);
+  const t0 = performance.now();
+  simOscillated = false;
+  if (per === 0) { while (performance.now() - t0 < 25) { simStep(); simStep(); runCycles++; } }
+  else { const n = Math.max(1, Math.round(16 / per)); for (let i = 0; i < n; i++) { simStep(); simStep(); runCycles++; } }
+  const warn = document.getElementById('warn');
+  const dt = (performance.now() - runT0) / 1000;
+  if (warn) warn.textContent = simOscillated ? '⚠ Schaltung schwingt (Iterationsgrenze erreicht)' : (dt > 0.5 ? Math.round(runCycles / dt) + ' Takte/s' : '');
+  render();
+  runTimer = requestAnimationFrame(runFast);
+}
 function runSim() {
   if (!currentNets || !currentCirc) return;
+  stateGen++;
   simOscillated = false;
   simulate(currentCirc, currentNets, project, regState, clkVal, '');
   let guard = 0;
@@ -7401,6 +7501,13 @@ function latchWalk(circ, nets, path) {
         if (j && !k) nq = 1; else if (!j && k) nq = 0; else if (j && k) nq = q ^ 1;
         if (nq !== q) { regState.set(id, nq); latched = true; }
       }
+    } else if (comp.type === 'TTY') {
+      const t = ttyOf(id, comp);
+      if (netVal('clr', 0) === 1) { if (t.lines.length > 1 || t.lines[0]) { t.lines = ['']; ttyChanged = true; } rising('clk'); }
+      else if (rising('clk') && netVal('we', 1) !== 0) {
+        const d = netVal('in');
+        if (d !== null) { ttyPut(t, d & 0x7f); ttyChanged = true; }
+      }
     } else if (comp.type === 'RAM') {
       if (rising('clk')) {
         if (netVal('we', 0) === 1) {
@@ -7426,15 +7533,19 @@ function latchWalk(circ, nets, path) {
           sub._pinCache = { inPins: sp.filter(c => c.attrs.output !== 'true'), outPins: sp.filter(c => c.attrs.output === 'true') };
         }
         const inPins = sub._pinCache.inPins;
+        let key = stateGen + ':' + clkVal;
         inPins.forEach((pin, i) => {
           const outerPort = cp.byName.get(pin.attrs.label || `in${i}`);
           if (outerPort && outerPort.io === 'in' && outerPort.netId >= 0) pin.val = nets.netVals[outerPort.netId];
+          key += ',' + pin.val;
         });
-        simulate(sub, sub._nets, project, regState, clkVal, id);
+        if (!sub._instKey) sub._instKey = new Map();
+        if (sub._instKey.get(id) !== key) { sub._instKey.set(id, key); simulate(sub, sub._nets, project, regState, clkVal, id); }
         if (latchWalk(sub, sub._nets, id)) latched = true;
       }
     }
   }
+  if (latched) stateGen++;
   return latched;
 }
 
@@ -7444,7 +7555,7 @@ function stepClock() {
 }
 
 function resetSim() {
-  regState.clear(); memState.clear(); clkPrev.clear(); clkVal = 0;
+  regState.clear(); memState.clear(); clkPrev.clear(); clkVal = 0; ttyState.clear(); ttyChanged = true;
   if (project) for (const [, cc] of project.circuits) {
     if (cc._nets) cc._nets.netVals.fill(null);
     if (cc._instVals) cc._instVals.clear();
@@ -7460,8 +7571,12 @@ function resetSim() {
 function toggleRun() {
   const btn = document.getElementById('btnRun');
   if (runTimer) {
-    clearInterval(runTimer); runTimer = null;
+    clearInterval(runTimer); cancelAnimationFrame(runTimer); runTimer = null;
     btn.textContent = '▶ Run'; btn.classList.remove('act');
+  } else if (parseInt(document.getElementById('speedSel').value) <= 1) {
+    runCycles = 0; runT0 = performance.now();
+    runTimer = requestAnimationFrame(runFast);
+    btn.textContent = '⏸ Stop'; btn.classList.add('act');
   } else {
     runTimer = setInterval(stepClock, parseInt(document.getElementById('speedSel').value) || 300);
     btn.textContent = '⏸ Stop'; btn.classList.add('act');
@@ -7580,7 +7695,7 @@ canvas.addEventListener('mousedown', async e => {
     if (w === 1) pin.val = pin.val===1 ? 0 : 1;
     else {
       const cur = pin.val ?? 0;
-      const mask = (1 << w) - 1;
+      const mask = wmask(w);
       const inp = await showPrompt(
         `${pin.attrs.label || 'Pin'} [${w} Bit] — Wert eingeben\n` +
         `(dezimal, 0x… hex oder 0b… binär, Bereich 0…${mask})`,
@@ -7592,7 +7707,7 @@ canvas.addEventListener('mousedown', async e => {
       else if (s.startsWith('0b')) v = parseInt(s.slice(2), 2);
       else                         v = parseInt(s, 10);
       if (isNaN(v)) return;
-      pin.val = v & mask;
+      pin.val = (v & mask) >>> 0;
     }
     runSim();
     return;
