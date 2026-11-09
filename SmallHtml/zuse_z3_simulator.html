@@ -1,7 +1,8 @@
 <!DOCTYPE html>
-<html>
+<html lang="de">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Zuse Z3 Simulator</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&display=swap');
@@ -252,6 +253,11 @@
     outline: none;
   }
 
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+
+  .footer { margin-top: 12px; text-align: center; font-size: 10px; color: var(--dim); }
+  .footer a { color: var(--pd); }
+
   .scanline {
     pointer-events: none;
     position: fixed;
@@ -358,13 +364,13 @@
       <div class="instr-item"><span class="hist">SUB n</span> ACC -= M[n]</div>
       <div class="instr-item"><span class="hist">MUL n</span> ACC *= M[n]</div>
       <div class="instr-item"><span class="hist">DIV n</span> ACC /= M[n]</div>
-      <div class="instr-item"><span class="hist">SQRT</span> ACC = √|ACC|</div>
-      <div class="instr-item"><span class="hist">JMP n</span> Sprung zu Zeile n</div>
+      <div class="instr-item"><span class="hist">SQRT</span> ACC = √ACC</div>
       <div class="instr-item"><span class="hist">HALT</span> Programm Ende</div>
     </div>
 
     <div class="instr-section-title ext" style="margin-top:10px">ERWEITERUNGEN *</div>
     <div class="instr-ref">
+      <div class="instr-item"><span class="ext">JMP n</span> Sprung zu Zeile n</div>
       <div class="instr-item"><span class="ext">LDI x</span> ACC = x direkt</div>
       <div class="instr-item"><span class="ext">NEG</span> ACC = −ACC</div>
       <div class="instr-item"><span class="ext">ABS</span> ACC = |ACC|</div>
@@ -373,41 +379,79 @@
     </div>
 
     <div style="margin-top:8px;font-size:9px;color:var(--extd);line-height:1.6;border-top:1px solid var(--border);padding-top:6px">
-      * Die echte Z3 hatte nur unbedingten Sprung (JMP) und keine bedingten Verzweigungen. Bedingte Logik kam erst im Plankalkül (Zuse, 1945) und späteren Maschinen.
+      * Die echte Z3 hatte überhaupt keinen Sprungbefehl. Schleifen entstanden, indem man Anfang und Ende des Lochstreifens zu einem Ring zusammenklebte. Rechnen lief über zwei Register R1/R2 (Pr z lädt, Ls1/Ls2/Lm/Li/Lw rechnen, Ps z speichert); das ACC-Modell hier ist eine Vereinfachung. Einen bedingten Sprung bekam erst die Z4 bei ihrer Aufstellung an der ETH Zürich 1950.
     </div>
 
     <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
       <div class="panel-title" style="border:none;padding:0;margin-bottom:6px">Z3 GLEITKOMMA (22 BIT)</div>
       <div style="font-size:10px;color:var(--dim);line-height:1.8">
         Vorzeichen: 1 bit<br>
-        Exponent: 7 bit (Basis 2, Offset 63)<br>
-        Mantisse: 14 bit (normalisiert)<br>
-        Bereich: ±4.2×10⁻³⁸ bis ±3.7×10³⁸
+        Exponent: 7 bit (Zweierkomplement, −64 … +63)<br>
+        Mantisse: 14 bit + implizite führende 1<br>
+        Bereich: ca. ±1,1×10⁻¹⁹ bis ±9,2×10¹⁸<br>
+        Der Simulator rundet jedes Ergebnis auf diese Genauigkeit.
       </div>
     </div>
   </div>
 
 </div>
 
+<div class="footer">
+  Mehr zu Konrad Zuse und alten Rechnern: <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a>
+</div>
+
 <script>
+// Z3-Zahlenformat: 1 Bit Vorzeichen, 7 Bit Exponent (Zweierkomplement),
+// 14 Bit Mantisse mit impliziter 1. Exponent −64 steht für 0, +63 für ∞,
+// normale Zahlen nutzen −63 … +62.
+const Z3_EMIN = -63, Z3_EMAX = 62;
+
+function z3round(v) {
+  if (v === 0 || isNaN(v)) return v;
+  if (!isFinite(v)) return v;
+  const sign = v < 0 ? -1 : 1;
+  let e = Math.floor(Math.log2(Math.abs(v)));
+  let m = Math.abs(v) / Math.pow(2, e);
+  m = Math.round(m * 16384) / 16384;
+  if (m >= 2) { m /= 2; e++; }
+  if (e > Z3_EMAX) return sign * Infinity;
+  if (e < Z3_EMIN) return 0;
+  return sign * m * Math.pow(2, e);
+}
+
 function toZ3Bits(val) {
-  if (val === 0) return new Array(22).fill(0);
-  const sign = val < 0 ? 1 : 0;
-  let abs = Math.abs(val);
-  let exp = Math.floor(Math.log2(abs));
-  let mant = abs / Math.pow(2, exp) - 1;
-  let expBits = exp + 63;
-  if (expBits < 0) expBits = 0;
-  if (expBits > 127) expBits = 127;
-  let mantInt = Math.round(mant * 16384);
-  if (mantInt >= 16384) mantInt = 16383;
+  const sign = (val < 0 || Object.is(val, -0)) ? 1 : 0;
+  let exp, mantInt = 0;
+  if (val === 0 || isNaN(val)) exp = -64;
+  else if (!isFinite(val)) exp = 63;
+  else {
+    const abs = Math.abs(val);
+    exp = Math.floor(Math.log2(abs));
+    mantInt = Math.round((abs / Math.pow(2, exp) - 1) * 16384);
+    if (mantInt >= 16384) { mantInt = 0; exp++; }
+    if (exp > Z3_EMAX) { exp = 63; mantInt = 0; }
+    if (exp < Z3_EMIN) { exp = -64; mantInt = 0; }
+  }
+  const expBits = exp & 0x7F;              // Zweierkomplement, 7 Bit
   const bits = [sign];
   for (let i = 6; i >= 0; i--) bits.push((expBits >> i) & 1);
   for (let i = 13; i >= 0; i--) bits.push((mantInt >> i) & 1);
   return bits;
 }
 
-const EXT_OPS = new Set(['LDI','NEG','ABS','JZ','JN']);
+const EXT_OPS = new Set(['JMP','LDI','NEG','ABS','JZ','JN']);
+// Argumenttyp je Befehl: addr = Speicheradresse 0–63, line = Programmzeile,
+// num = Zahl, null = kein Argument
+const OP_ARGS = {
+  LD:'addr', ST:'addr', ADD:'addr', SUB:'addr', MUL:'addr', DIV:'addr',
+  SQRT:null, HALT:null, NEG:null, ABS:null,
+  LDI:'num', JMP:'line', JZ:'line', JN:'line'
+};
+const MEM_OPS = new Set(['LD','ST','ADD','SUB','MUL','DIV']);
+
+function escHtml(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
 
 let ACC = 0, PC = 0, Z_reg = 0;
 let halted = false, running = false, runInterval = null, runSpeed = 400;
@@ -424,7 +468,30 @@ function parseProgram(src) {
     if (semi >= 0) { comment = line.slice(semi+1).trim(); line = line.slice(0,semi).trim(); }
     if (!line) continue;
     const parts = line.split(/\s+/);
-    instructions.push({ op: parts[0].toUpperCase(), arg: parts[1] || null, comment });
+    instructions.push({ op: parts[0].toUpperCase(), arg: parts[1] || null, comment, src: i + 1 });
+  }
+  // Prüfen, bevor das Programm läuft
+  for (const ins of instructions) {
+    const where = 'Zeile ' + ins.src + ' (' + ins.op + '): ';
+    if (!(ins.op in OP_ARGS)) throw new Error(where + 'unbekannter Befehl');
+    const t = OP_ARGS[ins.op];
+    if (t === null) {
+      if (ins.arg !== null) throw new Error(where + 'erwartet kein Argument');
+      continue;
+    }
+    if (ins.arg === null) throw new Error(where + 'Argument fehlt');
+    if (t === 'num') {
+      const x = Number(ins.arg.replace(',', '.'));
+      if (!isFinite(x)) throw new Error(where + 'ungültige Zahl');
+      ins.val = x;
+    } else {
+      if (!/^\d+$/.test(ins.arg)) throw new Error(where + 'ganze Zahl ≥ 0 erwartet');
+      const n = parseInt(ins.arg, 10);
+      if (t === 'addr' && n > 63) throw new Error(where + 'Adresse muss 0–63 sein');
+      if (t === 'line' && n > instructions.length)
+        throw new Error(where + 'Sprungziel hinter dem Programmende');
+      ins.val = n;
+    }
   }
   return instructions;
 }
@@ -446,8 +513,9 @@ function step() {
   if (PC >= program.length) { halted = true; updateStatus('Programmende.', 'warn'); updateUI(); return; }
 
   const instr = program[PC];
-  const n = parseInt(instr.arg);
-  const x = parseFloat(instr.arg);
+  const n = instr.val;
+  const x = instr.val;
+  let note = '';
 
   document.getElementById('reg-ir').textContent = instr.op + (instr.arg ? ' '+instr.arg : '');
   document.getElementById('reg-ir').style.color = EXT_OPS.has(instr.op) ? 'var(--ext)' : 'var(--p)';
@@ -457,15 +525,19 @@ function step() {
   try {
     switch(instr.op) {
       case 'LD':   ACC = memory[n]; break;
-      case 'LDI':  ACC = x; break;
+      case 'LDI':  ACC = z3round(x); break;
       case 'ST':   memory[n] = ACC; break;
       case 'ADD':  ACC = ACC + memory[n]; break;
       case 'SUB':  ACC = ACC - memory[n]; break;
       case 'MUL':  ACC = ACC * memory[n]; break;
       case 'DIV':
-        if (memory[n] === 0) throw new Error('Division durch 0');
-        ACC = ACC / memory[n]; break;
-      case 'SQRT': ACC = Math.sqrt(Math.abs(ACC)); break;
+        if (memory[n] === 0 && ACC === 0) throw new Error('0/0 — Ergebnis unbestimmt');
+        ACC = ACC / memory[n];
+        if (!isFinite(ACC)) note = '  [Division durch 0 → ∞, wie die Z3]';
+        break;
+      case 'SQRT':
+        if (ACC < 0) throw new Error('Wurzel aus negativer Zahl — Ergebnis unbestimmt');
+        ACC = Math.sqrt(ACC); break;
       case 'NEG':  ACC = -ACC; break;
       case 'ABS':  ACC = Math.abs(ACC); break;
       case 'JMP':  PC = n; jumped = true; break;
@@ -484,11 +556,19 @@ function step() {
     updateUI(); return;
   }
 
+  if (isNaN(ACC)) {
+    halted = true; stopRun();
+    updateStatus('FEHLER: Ergebnis unbestimmt (z. B. ∞ − ∞)', 'err');
+    updateUI(); return;
+  }
+  const before = ACC;
+  ACC = z3round(ACC);
+  if (!note && isFinite(before) && !isFinite(ACC)) note = '  [Überlauf → ∞]';
   Z_reg = ACC;
   if (!jumped) PC++;
   updateStatus('→ ' + instr.op + (instr.arg ? ' '+instr.arg : '') +
     (EXT_OPS.has(instr.op) ? ' [Erweiterung]' : '') +
-    (instr.comment ? '  ; '+instr.comment : '') + '   [PC='+PC+']', 'ok');
+    (instr.comment ? '  ; '+instr.comment : '') + '   [PC='+PC+']' + note, note ? 'warn' : 'ok');
   updateUI(); renderTape();
 }
 
@@ -499,8 +579,13 @@ function startRun() {
   running = true;
   document.getElementById('btn-run').textContent = 'STOP';
   runInterval = setInterval(() => {
-    if (halted || PC >= program.length) { stopRun(); return; }
+    if (halted) { stopRun(); return; }
     step();
+    if (!halted && PC >= program.length) {
+      halted = true; stopRun();
+      updateStatus('Programmende ohne HALT erreicht. ACC = ' + fmtVal(ACC), 'warn');
+      updateUI(); renderTape();
+    }
   }, runSpeed);
 }
 
@@ -530,6 +615,7 @@ function updateSpeed() {
 }
 
 function fmtVal(v) {
+  if (isNaN(v)) return 'unbestimmt';
   if (!isFinite(v)) return v > 0 ? '+∞' : '-∞';
   return (v >= 0 ? '+' : '') + v.toPrecision(6);
 }
@@ -552,18 +638,21 @@ function updateUI() {
 
 function renderMemory() {
   const grid = document.getElementById('mem-grid');
-  const activeAddr = (program[PC] && ['LD','ST','ADD','SUB','MUL','DIV','JMP','JZ','JN'].includes(program[PC].op))
-    ? parseInt(program[PC].arg) : -1;
+  // Sprungziele sind Programmzeilen, keine Speicheradressen
+  const activeAddr = (!halted && program[PC] && MEM_OPS.has(program[PC].op)) ? program[PC].val : -1;
   grid.innerHTML = '';
   for (let i = 0; i < 64; i++) {
     const cell = document.createElement('div');
     cell.className = 'mem-cell' + (memory[i]===0?' zero':'') + (i===activeAddr?' active':'');
     cell.innerHTML = '<span class="mem-cell-addr">'+String(i).padStart(2,'0')+'</span>' +
-                     '<span class="mem-cell-val">'+(memory[i]===0?'·':memory[i].toPrecision(3))+'</span>';
+                     '<span class="mem-cell-val">'+(memory[i]===0?'·':(isFinite(memory[i])?memory[i].toPrecision(3):fmtVal(memory[i])))+'</span>';
     cell.title = 'M['+i+'] = '+memory[i];
     cell.onclick = (idx => () => {
       const v = prompt('M['+idx+'] Wert:', memory[idx]);
-      if (v !== null && !isNaN(parseFloat(v))) { memory[idx] = parseFloat(v); renderMemory(); }
+      if (v === null) return;
+      const num = Number(v.trim().replace(',', '.'));
+      if (v.trim() !== '' && isFinite(num)) { memory[idx] = z3round(num); renderMemory(); }
+      else updateStatus('Ungültiger Wert: ' + v, 'err');
     })(i);
     grid.appendChild(cell);
   }
@@ -581,8 +670,8 @@ function renderTape() {
     if (i === PC && !halted) cls += ' current';
     else if (lineExecuted[i]) cls += ' executed';
     const arrow = (i === PC && !halted) ? '▶ ' : '  ';
-    const argStr = instr.arg !== null ? ' '+instr.arg : '';
-    const comment = instr.comment ? ' <span style="color:var(--dim)">; '+instr.comment+'</span>' : '';
+    const argStr = instr.arg !== null ? ' '+escHtml(instr.arg) : '';
+    const comment = instr.comment ? ' <span style="color:var(--dim)">; '+escHtml(instr.comment)+'</span>' : '';
     const extMark = isExt ? '<span style="color:var(--extd);font-size:9px"> *</span>' : '';
     const opClass = isExt ? 'ext-op' : '';
     return '<div class="'+cls+'">'+String(i).padStart(2,'0')+'  '+arrow+
@@ -604,8 +693,8 @@ function setMemFromUI() {
   const val = parseFloat(document.getElementById('mem-val').value);
   if (isNaN(addr)||addr<0||addr>63) { updateStatus('Ungültige Adresse (0–63)','err'); return; }
   if (isNaN(val)) { updateStatus('Ungültiger Wert','err'); return; }
-  memory[addr] = val;
-  updateStatus('M['+addr+'] = '+val+' gesetzt.','ok');
+  memory[addr] = z3round(val);
+  updateStatus('M['+addr+'] = '+fmtVal(memory[addr])+' gesetzt (auf Z3-Genauigkeit gerundet).','ok');
   renderMemory();
 }
 
@@ -619,7 +708,7 @@ const examples = {
     mem: { 1: 144 }
   },
   loop: {
-    code: `; Summe 1..5 — verwendet JN * (Erweiterung!)\n; M[1]=5, M[2]=1, M[20]=Zähler, M[21]=Summe\nLDI 0      ; * ACC = 0\nST 20      ; Zähler = 0\nST 21      ; Summe = 0\nLD 20      ; ACC = Zähler\nADD 2      ; ACC += 1\nST 20      ; Zähler speichern\nLD 21      ; ACC = Summe\nADD 20     ; Summe += Zähler\nST 21      ; Summe speichern\nLD 1       ; ACC = Grenze\nSUB 20     ; ACC = Grenze - Zähler\nJN 14      ; * Sprung wenn negativ → Ende\nJMP 3      ; Schleife zurück\nHALT`,
+    code: `; Summe 1..5 = 15 — verwendet JZ/JMP * (Erweiterung!)\n; M[1]=5, M[2]=1, M[20]=Zähler, M[21]=Summe\nLDI 0      ; * ACC = 0\nST 20      ; Zähler = 0\nST 21      ; Summe = 0\nLD 20      ; ACC = Zähler  (Zeile 3)\nADD 2      ; ACC += 1\nST 20      ; Zähler speichern\nLD 21      ; ACC = Summe\nADD 20     ; Summe += Zähler\nST 21      ; Summe speichern\nLD 1       ; ACC = Grenze\nSUB 20     ; ACC = Grenze - Zähler\nJZ 13      ; * fertig, wenn Zähler = Grenze\nJMP 3      ; * Schleife zurück\nHALT       ; Ergebnis in M[21]`,
     mem: { 1: 5, 2: 1 }
   },
   poly: {
@@ -632,6 +721,7 @@ function loadExample(name) {
   const ex = examples[name];
   if (!ex) return;
   document.getElementById('tape-input').value = ex.code;
+  memory.fill(0);   // Reste aus vorherigen Beispielen entfernen
   for (let k in ex.mem) memory[parseInt(k)] = ex.mem[k];
   reset();
   document.getElementById('mem-addr').value = Object.keys(ex.mem)[0];
