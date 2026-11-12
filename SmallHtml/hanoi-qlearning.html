@@ -118,6 +118,21 @@
 
   .status-line { margin-top: 12px; font-family: var(--mono); font-size: 0.78rem; color: var(--text-dim); }
   .status-line b { color: var(--cyan); }
+  .warn-txt { color: var(--warn); }
+
+  .progress { margin-top: 14px; }
+  .progress-bar { height: 8px; background: var(--bg); border: 1px solid var(--border-bright); border-radius: 4px; overflow: hidden; }
+  .progress-fill { height: 100%; width: 0; background: var(--border-bright); transition: width .12s linear; }
+  .progress.active .progress-fill {
+    background: repeating-linear-gradient(45deg, var(--large) 0 10px, var(--small) 10px 20px);
+    background-size: 28px 28px;
+    animation: stripes 0.6s linear infinite;
+  }
+  @keyframes stripes { to { background-position: 28px 0; } }
+  button.primary.running { background: var(--warn); border-color: var(--warn); }
+  .field input:disabled { opacity: 0.45; }
+  footer a { color: var(--text-dim); }
+  footer a:hover { color: var(--small); }
 
   /* ---------- trace panel ---------- */
   .transport { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -202,6 +217,10 @@
         <button id="traceBtn">Find best route</button>
         <button id="resetBtn">Reset agent</button>
       </div>
+      <div class="progress" id="progressWrap">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="status-line" id="progressText">Idle.</div>
+      </div>
       <div class="status-line" id="diskHint"></div>
       <div class="status-line" id="statusLine">Agent untrained — <b>0</b> episodes run. Reward matrix loaded (27 states, goal = state 26).</div>
     </div>
@@ -259,12 +278,14 @@
     <div class="panel-body notes-body">
       <p>This page is a direct port of <code>my2DMatrix.java</code>, <code>QLearning.java</code> and <code>ReinforcementLearning_Hanoi.java</code> to JavaScript. The 27-state reward matrix (<code>setRMatrix()</code>) and the episode/update logic are carried over value-for-value, including the original <code>(int)</code> truncation on the Q-update.</p>
       <p>The 27 ASCII-art states from <code>setMovesVisible()</code> were decoded into actual disk/peg positions (small, medium, large → peg A/B/C) so the towers above render real graphics instead of text art — the state numbering itself is unchanged.</p>
-      <p>Two original quirks were kept as-is rather than “fixed”, since the goal was a faithful conversion: the <code>traceRoute</code> loop condition uses <code>||</code> instead of <code>&&</code>, and <code>getBestNextState</code> falls back to state <code>0</code> when no action has a positive Q-value yet (which can show up as an odd jump early in training, before enough episodes have run). A hard iteration cap was added purely as a browser safety net against an infinite loop — happy to tidy either up if you'd rather have the “correct” version.</p>
+      <p>Two original quirks were kept as-is rather than “fixed”, since the goal was a faithful conversion: the <code>traceRoute</code> loop condition uses <code>||</code> instead of <code>&&</code>, and <code>getBestNextState</code> falls back to state <code>0</code> when no action has a positive Q-value yet (which can show up as an odd jump early in training, before enough episodes have run). A hard iteration cap was added purely as a browser safety net against an infinite loop.</p>
       <p>The disk count is generalized beyond the original 3-disk program: at 3 disks the page still uses the exact hand-built reward matrix and state numbering from <code>setRMatrix()</code>; for any other disk count the reward matrix and state numbering are generated from the same legal-move rules. Because the original Q-update overwrites instead of blending (no learning rate) and truncates to an integer, a reward of 100 decays below 1 — and gets crushed to 0 — after roughly <code>log(100)/log(1/λ)</code> hops from the goal. At λ = 0.5 that's about 6 hops, which happens to just cover the 7-move 3-disk solution but leaves more distant states permanently at Q = 0 once you add disks. Raise λ toward 0.9–0.95 for 4+ disks so values can reach further back through the state graph; even then, more disks means a much larger state space and a far less likely random walk to the goal each episode, so convergence gets slow and unreliable rather quickly. That's a property of this particular algorithm, not a bug in the port.</p>
     </div>
   </details>
 
-  <footer id="footerInfo">27 STATES · 3 DISKS · GOAL STATE 26 · OPTIMAL = 7 MOVES</footer>
+  <footer><div id="footerInfo">27 STATES · 3 DISKS · GOAL STATE 26 · OPTIMAL = 7 MOVES</div>
+    <div style="margin-top:6px"><a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener">itzwieseltal.wordpress.com</a> · <a href="https://zwieselbrau.wordpress.com" target="_blank" rel="noopener">zwieselbrau.wordpress.com</a></div>
+  </footer>
 </div>
 
 <script>
@@ -302,9 +323,22 @@
       this.Q.init(0);
       this.R.init(-1);
     }
-    setTransition(x, y, val) { this.R.set(x, y, val); }
+    setTransition(x, y, val) { this.R.set(x, y, val); this.adj = null; }
     setLambda(lambda) { this.lambda = lambda; }
+    // R never changes after setup, so its action lists are cached (same result, far faster than scanning a full row each step)
+    buildAdjacency() {
+      this.adj = new Array(this.states);
+      for (let s = 0; s < this.states; s++) {
+        const a = [];
+        for (let x = 0; x < this.R.sizeX; x++) if (this.R.get(x, s) >= 0) a.push(x);
+        this.adj[s] = a;
+      }
+    }
     getActions(m, state) {
+      if (m === this.R) {
+        if (!this.adj) this.buildAdjacency();
+        return this.adj[state];
+      }
       const actions = [];
       for (let x = 0; x < m.sizeX; x++) {
         if (m.get(x, state) >= 0) actions.push(x);
@@ -343,6 +377,7 @@
         this.Q.set(nextState, currState, Math.trunc(newVal));
         currState = nextState;
       }
+      return { steps: guard, reached: currState === endState };
     }
     traceRoute(startState, endState) {
       let currState = startState;
@@ -457,6 +492,12 @@
     return { states, goal, stateConfig, transitions };
   }
 
+  // λ > 1 would let values grow without bound around cycles in the state graph
+  function readLambda() {
+    const v = parseFloat(document.getElementById('lambdaInput').value);
+    return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+  }
+
   function clampDisks(n) {
     if (!Number.isFinite(n)) return 3;
     return Math.max(1, Math.min(7, Math.round(n)));
@@ -473,7 +514,7 @@
     END_STATE = puzzle.goal;
     STATE_CONFIG = puzzle.stateConfig;
     currentDisks = n;
-    const agent = new QLearning(puzzle.states, parseFloat(lambdaInput.value) || 0);
+    const agent = new QLearning(puzzle.states, readLambda());
     puzzle.transitions.forEach(([x, y, val]) => agent.setTransition(x, y, val));
     return agent;
   }
@@ -507,6 +548,9 @@
   const matrixHost = document.getElementById('matrixHost');
   const footerInfo = document.getElementById('footerInfo');
   const legendHost = document.getElementById('legend');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressFill = document.getElementById('progressFill');
+  const progressText = document.getElementById('progressText');
 
   let ql = buildAgent(clampDisks(parseInt(disksInput.value, 10)));
   let episodesRun = 0;
@@ -645,16 +689,80 @@
     if (matrixDetails.open) buildMatrices();
   }
 
-  trainBtn.addEventListener('click', () => {
-    if (clampDisks(parseInt(disksInput.value, 10)) !== currentDisks) rebuildAgent();
-    const n = Math.max(1, Math.min(200000, parseInt(episodesInput.value, 10) || 0));
-    ql.setLambda(parseFloat(lambdaInput.value) || 0);
-    for (let i = 0; i < n; i++) ql.episode(END_STATE);
-    episodesRun += n;
+  // Training runs in small time slices so the page stays responsive and progress is visible.
+  let training = null;
+
+  function fmtTime(ms) {
+    const s = Math.round(ms / 1000);
+    return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+  }
+
+  function setTrainingUI(on) {
+    trainBtn.textContent = on ? '■ Stop' : 'Train';
+    trainBtn.classList.toggle('running', on);
+    [traceBtn, resetBtn, disksInput, episodesInput, lambdaInput].forEach((el) => (el.disabled = on));
+    progressWrap.classList.toggle('active', on);
+    if (on) { stopPlayback(); setTransportEnabled(false); }
+    else if (route) setTransportEnabled(true);
+  }
+
+  function updateProgress(t) {
+    const pct = t.total ? (t.done / t.total) * 100 : 100;
+    progressFill.style.width = pct.toFixed(1) + '%';
+    const elapsed = performance.now() - t.t0;
+    const rate = t.done / Math.max(elapsed, 1) * 1000;
+    const eta = rate > 0 ? (t.total - t.done) / rate * 1000 : 0;
+    const avgSteps = t.done ? Math.round(t.stepsSum / t.done) : 0;
+    progressText.innerHTML =
+      `Training… <b>${t.done.toLocaleString('de-DE')}</b> / ${t.total.toLocaleString('de-DE')} episodes (${pct.toFixed(0)} %)` +
+      ` · ${Math.round(rate).toLocaleString('de-DE')} ep/s · elapsed ${fmtTime(elapsed)} · ETA ${fmtTime(eta)}` +
+      ` · Ø ${avgSteps} steps/episode${t.capped ? ` · <span class="warn-txt">${t.capped} hit the 5000-step cap</span>` : ''}`;
+    hudEpisodes.textContent = episodesRun;
+  }
+
+  function finishTraining(t) {
+    training = null;
+    setTrainingUI(false);
     refreshStatus();
+    const elapsed = performance.now() - t.t0;
+    statusLine.innerHTML += ` Last run: <b>${t.done.toLocaleString('de-DE')}</b> episode(s) in ${fmtTime(elapsed)}` +
+      `${t.cancel ? ' — <span class="warn-txt">stopped early</span>' : ''}` +
+      `${t.capped ? ` · <span class="warn-txt">${t.capped} episode(s) never reached the goal (5000-step cap)</span>` : ''}.`;
     matricesBuilt = false; // force rebuild with fresh Q values next time it's opened
     if (matrixDetails.open) buildMatrices();
-    traceBtn.disabled = false;
+  }
+
+  function trainChunk() {
+    const t = training;
+    if (!t) return;
+    const sliceEnd = performance.now() + 30;
+    while (t.done < t.total && !t.cancel && performance.now() < sliceEnd) {
+      const r = ql.episode(END_STATE);
+      t.stepsSum += r.steps;
+      if (!r.reached) t.capped++;
+      t.done++;
+      episodesRun++;
+    }
+    updateProgress(t);
+    if (t.done >= t.total || t.cancel) finishTraining(t);
+    else setTimeout(trainChunk, 0);
+  }
+
+  trainBtn.addEventListener('click', () => {
+    if (training) { training.cancel = true; return; }
+    if (clampDisks(parseInt(disksInput.value, 10)) !== currentDisks) rebuildAgent();
+    const n = Math.max(1, Math.min(200000, parseInt(episodesInput.value, 10) || 0));
+    ql.setLambda(readLambda());
+    hudLambda.textContent = ql.lambda.toFixed(2);
+    training = { total: n, done: 0, stepsSum: 0, capped: 0, cancel: false, t0: performance.now() };
+    setTrainingUI(true);
+    updateProgress(training);
+    setTimeout(trainChunk, 0); // let the browser paint the "running" state first
+  });
+
+  // changing the disk count immediately rebuilds the towers instead of waiting for the next Train click
+  disksInput.addEventListener('change', () => {
+    if (!training && clampDisks(parseInt(disksInput.value, 10)) !== currentDisks) rebuildAgent();
   });
 
   resetBtn.addEventListener('click', rebuildAgent);
@@ -666,6 +774,10 @@
 
   traceBtn.addEventListener('click', () => {
     stopPlayback();
+    if (episodesRun === 0) {
+      stepReadout.innerHTML = 'Agent is untrained — click <b>Train</b> first.';
+      return;
+    }
     route = ql.traceRoute(START_STATE, END_STATE);
     stepIdx = 0;
     const reachedGoal = route[route.length - 1] === END_STATE;
@@ -726,11 +838,18 @@
     if (playTimer) { stopPlayback(); return; }
     if (stepIdx >= route.length - 1) stepIdx = 0;
     playBtn.textContent = '⏸';
+    startTimer();
+  });
+  function startTimer() {
     playTimer = setInterval(() => {
       stepIdx++;
       renderStep();
       if (stepIdx >= route.length - 1) stopPlayback();
     }, parseInt(speedInput.value, 10));
+  }
+  // speed slider now also affects a playback that is already running
+  speedInput.addEventListener('input', () => {
+    if (playTimer) { clearInterval(playTimer); startTimer(); }
   });
 
   /* ---------- matrices ---------- */
