@@ -23,7 +23,10 @@
   label.tog{display:flex;align-items:center;gap:5px;padding:0 6px;user-select:none}
   #palette{overflow:auto;border-right:1px solid var(--line);padding:6px}
   #palette h2{font-size:12px;font-weight:600;color:var(--ink-2);margin:10px 4px 4px}
-  #palette h2:first-child{margin-top:2px}
+  #palette h2{cursor:pointer;user-select:none}
+  #palette h2::before{content:'▾ ';color:#9aa1a9}
+  #palette .grp.shut h2::before{content:'▸ '}
+  #palFind{font:inherit;width:100%;padding:3px 6px;margin:2px 0 4px;border:1px solid var(--line);border-radius:4px}
   .pal{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:3px 6px;margin:1px 0;background:transparent;border-color:transparent}
   .pal:hover{background:#fff;border-color:var(--line)}
   .pal.on{background:#fff;border-color:var(--ink)}
@@ -109,7 +112,7 @@
   <button id="bBom">Stückliste</button>
   <button id="bSpice" title="Netzliste für LTspice oder ngspice (.cir)">SPICE</button>
   <span class="sep"></span>
-  <button id="bSim" title="Schaltung simulieren (ICs außer dem NE555 werden nicht simuliert)">Simulation</button>
+  <button id="bSim" title="Schaltung simulieren (von den ICs werden NE555, CD4017 und die 74er-Logikbausteine simuliert)">Simulation</button>
   <select id="exSel" title="Fertige Beispielschaltung laden"><option value="">Beispiele …</option></select>
   <input type="file" id="fileLoad" accept=".json,.svg,.png">
   <input type="file" id="fileLib" accept=".json">
@@ -232,7 +235,320 @@ const BUILTIN = {
   ic:{name:'IC / Block',prefix:'U',group:'Sonstiges',value:'NE555',dynamic:true,icon:[['r',-20,-24,40,48],['l',-30,-14,-20,-14],['l',-30,0,-20,0],['l',-30,14,-20,14],['l',20,-14,30,-14],['l',20,0,30,0],['l',20,14,30,14]],units:{main:{}},
     defaultIc:{left:['1 GND','2 TRIG','3 OUT','4 RESET'],right:['8 VCC','7 DIS','6 THR','5 CV'],top:[],bottom:[]}},
 };
-const GROUPS = ['Quellen','Passiv','Halbleiter','Schalter','Relais','Messgeräte','Sonstiges'];
+
+/* ============================================================ Logikbausteine der 74er-Reihe
+   Symbole entstehen aus einer kompakten Tabelle. Gatterbausteine haben wie in KiCad eine
+   Einheit je Gatter und eine Versorgungseinheit, alle anderen einen Block mit VCC oben und
+   GND unten (Bausteine mit zwei gleichen Hälften: zwei Blöcke plus Versorgung).
+   LOGIC[typ] beschreibt Pins und Funktion für die Simulation (siehe buildLogic). */
+const LOGIC = {};
+/* Speicherinhalt als Hex-Text: Bytes durch Leerzeichen oder Komma getrennt, "1F0:" setzt die Adresse, ; oder # leitet Kommentare ein */
+function parseMem(txt, size, fill){
+  const m = new Uint8Array(size).fill(fill || 0); let a = 0;
+  for(const line of String(txt || '').split('\n')) for(let tok of line.replace(/[;#].*/, '').split(/[\s,]+/)){
+    if(!tok) continue; tok = tok.replace(/^0x/i, ''); const v = parseInt(tok, 16); if(!isFinite(v)) continue;
+    if(tok.endsWith(':')) a = v; else if(a < size) m[a++] = v & 255; }
+  return m;
+}
+const hexStr = (v, n) => (v | 0).toString(16).toUpperCase().padStart(n, '0');
+const memInfo = s => s.m ? `Adresse ${hexStr(s.a, 4)}: Daten ${hexStr(s.m[s.a | 0], 2)}` : '';
+const SEG7 = {a:[-8,-44,16,-44], b:[20,-40,20,-4], c:[20,4,20,40], d:[-8,44,16,44], e:[-12,4,-12,40], f:[-12,-40,-12,-4], g:[-8,0,16,0]};
+(function(){
+  const r1 = v => Math.round(v*10)/10, LETTERS = 'abcdefgh';
+  const schmitt = cx => ['d', `M${cx-9},4 H${cx+3} V-4 M${cx-3},4 V-4 H${cx+9}`, 0, [cx-9,-4,cx+9,4]];
+  const ocMark = cx => [['p',[cx,-6,cx+4,-2,cx,2,cx-4,-2]], ['l',cx-4,4,cx+4,4]];
+
+  /* Ein Gatter: kind and/nand/or/nor/xor/xnor/buf/not, ins = Pinnummern der Eingänge */
+  function gateUnit(kind, ins, out, o){
+    const n = ins.length, inv = ['nand','nor','not','xnor'].includes(kind);
+    const base = {nand:'and', nor:'or', xnor:'xor', not:'buf'}[kind] || kind, sh = [], pins = [];
+    let hh, tip, back = () => -20, ext = -20;
+    if(base === 'buf'){ hh = 20; tip = 20; sh.push(['p',[-20,-20,-20,20,20,0]]); }
+    else {
+      hh = n <= 2 ? 20 : n === 3 ? 30 : 40; tip = hh;
+      if(base === 'and') sh.push(['d', `M-20,${-hh} H0 A${hh},${hh} 0 0 1 0,${hh} H-20 Z`, 0, [-20,-hh,hh,hh]]);
+      else {
+        const xc = r1(-22 + 0.6*hh), q = r1(0.25*hh);
+        sh.push(['d', `M-22,${-hh} Q${q},${-hh} ${hh},0 Q${q},${hh} -22,${hh} Q${xc},0 -22,${-hh} Z`, 0, [-22,-hh,hh,hh]]);
+        const off = base === 'xor' ? 6 : 0;
+        if(off) sh.push(['d', `M-28,${-hh} Q${r1(xc-6)},0 -28,${hh}`, 0, [-28,-hh,-20,hh]]);
+        back = y => { if(Math.abs(y) >= hh) return -22 - off; const t = (y/hh + 1)/2; return r1(-22 - off + 2*t*(1-t)*(xc + 22)); };
+        ext = -22 - off;
+      }
+    }
+    const ys = ins.map((_, i) => (i - (n-1)/2)*20);
+    if(ys[0] < -hh) sh.push(['l', ext, ys[0], ext, -hh], ['l', ext, hh, ext, ys[n-1]]);
+    ins.forEach((id, i) => { const y = ys[i]; sh.push(['l', -40, y, back(y), y], ['t', -32, y-3, String(id), 8]); pins.push({id:String(id), x:-40, y}); });
+    const outX = tip + 20;
+    if(inv) sh.push(['c', tip+4, 0, 4]);
+    sh.push(['l', inv ? tip+8 : tip, 0, outX, 0], ['t', outX-8, -3, String(out), 8]); pins.push({id:String(out), x:outX, y:0});
+    if(o.oe){ if(o.oeLow) sh.push(['c',0,-14,4], ['l',0,-30,0,-18]); else sh.push(['l',0,-30,0,-10]); sh.push(['t',5,-22,String(o.oe),8,'start']); pins.push({id:String(o.oe), x:0, y:-30}); }
+    if(o.st) sh.push(schmitt(base === 'buf' ? -7 : 0));
+    if(o.oc) sh.push(...ocMark(base === 'buf' ? -9 : 0));
+    const ym = Math.max(hh, -ys[0]);
+    return {shapes:sh, pins, hh:ym, w:outX, refOff:o.oe ? [-26,-24] : [0, -ym-8], valOff:[0, ym+20]};
+  }
+  function pwrUnit(vcc, gnd, label){
+    return {label, shapes:[['r',-20,-20,40,40],['l',0,-40,0,-20],['l',0,20,0,40],['t',0,-5,'VCC',9],['t',0,13,'GND',9],['t',-5,-28,String(vcc),8,'end'],['t',-5,34,String(gnd),8,'end']],
+      pins:[{id:String(vcc),x:0,y:-40},{id:String(gnd),x:0,y:40}], refOff:[26,4], labelAnchor:'start'};
+  }
+  /* Pinangabe "Nummer [~][>]Name[:Anzeige]": ~ = low-aktiv (Kreis), > = Takteingang (Dreieck) */
+  function parsePin(s, multi){
+    const m = String(s).match(/^(\S+)\s+([~>]*)([^:]+)(?::(.+))?$/); let disp = m[4] || m[3];
+    if(multi && !m[4]) disp = disp.replace(/^\d(?=\D)/, '');
+    return {id:m[1], key:m[3], disp, neg:m[2].includes('~'), clk:m[2].includes('>')};
+  }
+  function boxUnit(L, R, multi, pw, label){
+    const Lp = L.map(s => s ? parsePin(s, multi) : null), Rp = R.map(s => s ? parsePin(s, multi) : null), sh = [], pins = [], sigs = [];
+    const rows = Math.max(Lp.length, Rp.length), wl = Math.max(0, ...Lp.filter(Boolean).map(p => p.disp.length + (p.clk ? 1.5 : 0))), wr = Math.max(0, ...Rp.filter(Boolean).map(p => p.disp.length));
+    const hw = Math.max(40, Math.ceil(((wl + wr)*6.2 + 22)/20)*10), hh = rows*10 + (pw ? 20 : 10);
+    sh.push(['r', -hw, -hh, 2*hw, 2*hh]);
+    const side = (arr, s) => arr.forEach((p, i) => { if(!p) return; const y = (i - (rows-1)/2)*20, e = s*hw, x = s*(hw+20);
+      if(p.neg) sh.push(['c', s*(hw+4), y, 4], ['l', x, y, s*(hw+8), y]); else sh.push(['l', x, y, e, y]);
+      if(p.clk) sh.push(['p', [e, y-5, e - s*7, y, e, y+5]]);
+      sh.push(['t', e - s*(p.clk ? 10 : 4), y+4, p.disp, 10, s < 0 ? 'start' : 'end'], ['t', s*(hw+12), y-3, p.id, 8]);
+      pins.push({id:p.id, x, y}); sigs.push({key:p.key, id:p.id, disp:p.disp, unit:label}); });
+    side(Lp, -1); side(Rp, 1);
+    if(pw) sh.push(['l',0,-hh-20,0,-hh], ['t',0,-hh+12,'VCC',9], ['t',-5,-hh-8,String(pw[0]),8,'end'], ['l',0,hh,0,hh+20], ['t',0,hh-5,'GND',9], ['t',-5,hh+14,String(pw[1]),8,'end']);
+    if(pw) pins.push({id:String(pw[0]), x:0, y:-hh-20}, {id:String(pw[1]), x:0, y:hh+20});
+    return {shapes:sh, pins, sigs, hh, w:hw+20, refOff:pw ? [6,-hh-8] : [0,-hh-8], valOff:pw ? [6,hh+16] : [0,hh+16], labelAnchor:pw ? 'start' : undefined};
+  }
+  const strip = u => { const o = Object.assign({}, u); delete o.hh; delete o.w; delete o.sigs; return o; };
+  const boxIcon = t => [['r',-18,-24,36,48],['l',-28,-14,-18,-14],['l',-28,0,-18,0],['l',-28,14,-18,14],['l',18,-14,28,-14],['l',18,0,28,0],['l',18,14,28,14],['t',0,4,t.replace(/^74/, '') || t,t.length > 5 ? 9 : 11]];
+
+  /* ---------- Gatterbausteine ---------- */
+  const G2 = [[1,2,3],[4,5,6],[9,10,8],[12,13,11]], G1 = [[1,2],[3,4],[5,6],[9,8],[11,10],[13,12]], G3 = [[1,2,13,12],[3,4,5,6],[9,10,11,8]], G4 = [[1,2,4,5,6],[9,10,12,13,8]];
+  const GATES = [
+    ['7400','4× NAND','nand',G2], ['7402','4× NOR','nor',[[2,3,1],[5,6,4],[8,9,10],[11,12,13]]], ['7403','4× NAND, offener Kollektor','nand',G2,{oc:1, v:'74LS03'}],
+    ['7404','6× Inverter (NOT)','not',G1], ['7405','6× Inverter, offener Kollektor','not',G1,{oc:1, v:'74LS05'}], ['7406','6× Inverter, offener Kollektor 30 V','not',G1,{oc:1, v:'7406'}],
+    ['7407','6× Treiber, offener Kollektor 30 V','buf',G1,{oc:1, v:'7407'}], ['7408','4× AND','and',G2], ['7410','3× NAND mit 3 Eingängen','nand',G3], ['7411','3× AND mit 3 Eingängen','and',G3],
+    ['7414','6× Schmitt-Trigger-Inverter','not',G1,{st:1}], ['7420','2× NAND mit 4 Eingängen','nand',G4], ['7421','2× AND mit 4 Eingängen','and',G4], ['7427','3× NOR mit 3 Eingängen','nor',G3],
+    ['7430','NAND mit 8 Eingängen','nand',[[1,2,3,4,5,6,11,12,8]]], ['7432','4× OR','or',G2], ['7486','4× XOR','xor',G2],
+    ['74125','4× Bustreiber, Tri-State (OE low)','buf',[[2,3,1],[5,6,4],[9,8,10],[12,11,13]],{oe:'low'}], ['74126','4× Bustreiber, Tri-State (OE high)','buf',[[2,3,1],[5,6,4],[9,8,10],[12,11,13]],{oe:'high'}],
+    ['74132','4× Schmitt-Trigger-NAND','nand',G2,{st:1}], ['74266','4× XNOR, offener Kollektor','xnor',[[1,2,3],[5,6,4],[8,9,10],[12,13,11]],{oc:1, v:'74LS266'}],
+  ];
+  for(const [num, desc, kind, list, opt = {}] of GATES){
+    const units = {}, block = {}, sigs = [], gl = []; let y = 0, maxW = 0;
+    list.forEach((g, k) => {
+      const ins = opt.oe ? g.slice(0, 1) : g.slice(0, -1), out = opt.oe ? g[1] : g[g.length-1], oe = opt.oe ? g[2] : null;
+      const u = gateUnit(kind, ins, out, {oc:opt.oc, st:opt.st, oe, oeLow:opt.oe === 'low'}), lab = LETTERS[k].toUpperCase();
+      u.label = lab; y += u.hh + (opt.oe ? 10 : 0); block[LETTERS[k]] = [0, y]; y += u.hh + 60; maxW = Math.max(maxW, u.w);
+      units[LETTERS[k]] = strip(u);
+      for(const id of ins) sigs.push({key:'p'+id, id:String(id), disp:String(id), unit:LETTERS[k]});
+      if(oe) sigs.push({key:'p'+oe, id:String(oe), disp:String(oe), unit:LETTERS[k]});
+      sigs.push({key:'p'+out, id:String(out), disp:String(out), unit:LETTERS[k], out:true, oc:!!opt.oc});
+      gl.push({ins:ins.map(i => 'p'+i), out:'p'+out, oe:oe ? 'p'+oe : null});
+    });
+    units.p = pwrUnit(14, 7, LETTERS[list.length].toUpperCase()); block.p = [Math.ceil((maxW + 50)/10)*10, block.a[1]];
+    const t = 'ttl' + num, icon = gateUnit(kind, kind === 'not' || kind === 'buf' ? [''] : ['',''], '', {}).shapes.filter(s => s[0] !== 't');
+    BUILTIN[t] = {name:num + ' ' + desc, prefix:'U', group:'Logik: Gatter', value:opt.v || ('74HC' + num.slice(2)), icon, block, units};
+    const op = {and:v => v.every(Boolean), nand:v => !v.every(Boolean), or:v => v.some(Boolean), nor:v => !v.some(Boolean), xor:v => v.filter(Boolean).length % 2 === 1, xnor:v => v.filter(Boolean).length % 2 === 0, buf:v => v[0], not:v => !v[0]}[kind];
+    LOGIC[t] = {sigs, vcc:'14', gnd:'7', st:!!opt.st, gate:true, f:I => { const o = {}; for(const g of gl){ let y = op(g.ins.map(k => I[k])); if(g.oe && (opt.oe === 'low' ? I[g.oe] : !I[g.oe])) y = null; o[g.out] = y; } return o; }};
+  }
+
+  /* ---------- Blockbausteine ---------- */
+  const nib = (I, ks) => ks.reduce((v, k, i) => v | (I[k] ? 1 << i : 0), 0);
+  const put = (o, ks, v) => { ks.forEach((k, i) => { o[k] = !!(v >> i & 1); }); return o; };
+  const Q4 = ['QA','QB','QC','QD'], D4 = ['A','B','C','D'], R8 = n => Array.from({length:8}, (_, i) => n + (i+1));
+  const SEG_TTL = [0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7C,0x07,0x7F,0x67,0x58,0x4C,0x62,0x69,0x78,0x00];
+  const SEG_4511 = [0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F,0,0,0,0,0,0];
+  const SEGK = ['a','b','c','d','e','f','g'];
+  const cntInfo = s => 'Zählerstand ' + (s.c | 0);
+  // Flipflop-Kern: setzt/löscht asynchron, sonst Takt
+  const ffQ = (o, h, q, both) => { o[h+'Q'] = both || !!q; o[h+'QN'] = both || !q; };
+  const octReg = mode => (I, s, E) => { const d = s.d || (s.d = [0,0,0,0,0,0,0,0]), o = {};
+    for(let i = 0; i < 8; i++){ if(mode === 'clr' && !I.CLR) d[i] = 0; else if(mode === 'latch' ? I.LE : E.rise('CLK')) d[i] = I['D'+(i+1)] ? 1 : 0; }
+    const z = mode !== 'clr' && I.OE; for(let i = 0; i < 8; i++) o['Q'+(i+1)] = z ? null : !!d[i]; return o; };
+  const sync16 = (mod, syncClr) => (I, s, E) => { let c = s.c | 0; const max = mod - 1;
+    if(!syncClr && !I.CLR) c = 0;
+    else if(E.rise('CLK')){ if(syncClr && !I.CLR) c = 0; else if(!I.LOAD) c = nib(I, D4); else if(I.ENP && I.ENT) c = c === max ? 0 : (c + 1) & 15; }
+    s.c = c; return put({RCO:!!(I.ENT && c === max)}, Q4, c); };
+  const ud1 = mod => (I, s, E) => { let c = s.c | 0; const max = mod - 1, down = I.DU;
+    if(!I.LOAD) c = nib(I, D4); else if(E.rise('CLK') && !I.CTEN) c = down ? (c === 0 ? max : c - 1) : (c >= max ? 0 : c + 1);
+    s.c = c; const mm = down ? c === 0 : c === max; return put({MM:mm, RCO:!(mm && !I.CTEN && !I.CLK)}, Q4, c); };
+  const ud2 = mod => (I, s, E) => { let c = s.c | 0; const max = mod - 1;
+    if(I.CLR) c = 0; else if(!I.LOAD) c = nib(I, D4); else if(E.rise('UP') && I.DOWN) c = c >= max ? 0 : c + 1; else if(E.rise('DOWN') && I.UP) c = c === 0 ? max : c - 1;
+    s.c = c; return put({CO:!(!I.UP && c === max), BO:!(!I.DOWN && c === 0)}, Q4, c); };
+  const segDec = (tab, active) => (I, s) => {
+    const v = nib(I, D4); let m = tab[v];
+    if(!I.BI) m = 0; else if(!I.LT) m = 0x7F; else if(I.RBI === false && v === 0) m = 0;
+    const o = {}; SEGK.forEach((k, i) => { const on = !!(m >> i & 1); o[k] = active ? on : !on; }); s.c = v; return o; };
+
+  /* Speicher: liest bei CE und OE low, schreibt solange CE und WE low sind; Inhalt aus dem Hexfeld des Bauteils */
+  const memFn = (size, abits) => (I, s, E, A) => {
+    const m = s.m || (s.m = parseMem(A.comp.rom, size, size > 4096 ? 0 : 0xFF)), a = nib(I, Array.from({length:abits}, (_, i) => 'A' + i)), o = {}; s.a = a;
+    if(!I.CE && !I.WE){ m[a] = nib(I, R8('IO').map((k, i) => 'IO' + i)); for(let i = 0; i < 8; i++) o['IO'+i] = null; return o; }
+    const rd = !I.CE && !I.OE; for(let i = 0; i < 8; i++) o['IO'+i] = rd ? !!(m[a] >> i & 1) : null; return o; };
+  const BOX = [
+    // Flipflops und Latches
+    {t:'7474', n:'2× D-Flipflop', g:'F', B:[{L:['2 1D','3 >1CLK','4 ~1PRE','1 ~1CLR'], R:['5 1Q','6 1QN:Q̄']}, {L:['12 2D','11 >2CLK','10 ~2PRE','13 ~2CLR'], R:['9 2Q','8 2QN:Q̄']}], vcc:14, gnd:7,
+      o:'1Q 1QN 2Q 2QN', f:(I, s, E) => { const o = {}; for(const h of ['1','2']){ const p = !I[h+'PRE'], c = !I[h+'CLR'];
+        if(p || c){ if(p !== c) s[h] = p ? 1 : 0; } else if(E.rise(h+'CLK')) s[h] = I[h+'D'] ? 1 : 0; ffQ(o, h, s[h], p && c); } return o; }},
+    {t:'74107', n:'2× JK-Flipflop (fallende Flanke)', g:'F', v:'74LS107', B:[{L:['1 1J','12 ~>1CLK','4 1K','13 ~1CLR'], R:['3 1Q','2 1QN:Q̄']}, {L:['8 2J','9 ~>2CLK','11 2K','10 ~2CLR'], R:['5 2Q','6 2QN:Q̄']}], vcc:14, gnd:7,
+      o:'1Q 1QN 2Q 2QN', f:(I, s, E) => { const o = {}; for(const h of ['1','2']){ let q = s[h] | 0;
+        if(!I[h+'CLR']) q = 0; else if(E.fall(h+'CLK')){ const j = I[h+'J'], k = I[h+'K']; q = j && k ? q ^ 1 : j ? 1 : k ? 0 : q; } s[h] = q; ffQ(o, h, q); } return o; }},
+    {t:'74112', n:'2× JK-Flipflop mit Preset', g:'F', B:[{L:['3 1J','1 ~>1CLK','2 1K','4 ~1PRE','15 ~1CLR'], R:['5 1Q','6 1QN:Q̄']}, {L:['11 2J','13 ~>2CLK','12 2K','10 ~2PRE','14 ~2CLR'], R:['9 2Q','7 2QN:Q̄']}], vcc:16, gnd:8,
+      o:'1Q 1QN 2Q 2QN', f:(I, s, E) => { const o = {}; for(const h of ['1','2']){ const p = !I[h+'PRE'], c = !I[h+'CLR']; let q = s[h] | 0;
+        if(p || c){ if(p !== c) q = p ? 1 : 0; } else if(E.fall(h+'CLK')){ const j = I[h+'J'], k = I[h+'K']; q = j && k ? q ^ 1 : j ? 1 : k ? 0 : q; } s[h] = q; ffQ(o, h, q, p && c); } return o; }},
+    {t:'7475', n:'4-Bit-Latch', g:'F', v:'74LS75', B:[{L:['2 1D','3 2D','6 3D','7 4D','13 E12:E1/2','4 E34:E3/4'], R:['16 1Q','1 1QN:1Q̄','15 2Q','14 2QN:2Q̄','10 3Q','11 3QN:3Q̄','9 4Q','8 4QN:4Q̄']}], vcc:5, gnd:12,
+      o:'1Q 1QN 2Q 2QN 3Q 3QN 4Q 4QN', f:(I, s) => { const o = {}; for(const h of ['1','2','3','4']){ if(I[+h < 3 ? 'E12' : 'E34']) s[h] = I[h+'D'] ? 1 : 0; ffQ(o, h, s[h] | 0); } return o; }},
+    {t:'74174', n:'6× D-Flipflop mit Löschen', g:'F', B:[{L:['3 1D','4 2D','6 3D','11 4D','13 5D','14 6D','9 >CLK','1 ~CLR'], R:['2 1Q','5 2Q','7 3Q','10 4Q','12 5Q','15 6Q']}], vcc:16, gnd:8,
+      o:'1Q 2Q 3Q 4Q 5Q 6Q', f:(I, s, E) => { const o = {}; for(const h of ['1','2','3','4','5','6']){ if(!I.CLR) s[h] = 0; else if(E.rise('CLK')) s[h] = I[h+'D'] ? 1 : 0; o[h+'Q'] = !!s[h]; } return o; }},
+    {t:'74175', n:'4× D-Flipflop mit Q und Q̄', g:'F', B:[{L:['4 1D','5 2D','12 3D','13 4D','9 >CLK','1 ~CLR'], R:['2 1Q','3 1QN:1Q̄','7 2Q','6 2QN:2Q̄','10 3Q','11 3QN:3Q̄','15 4Q','14 4QN:4Q̄']}], vcc:16, gnd:8,
+      o:'1Q 1QN 2Q 2QN 3Q 3QN 4Q 4QN', f:(I, s, E) => { const o = {}; for(const h of ['1','2','3','4']){ if(!I.CLR) s[h] = 0; else if(E.rise('CLK')) s[h] = I[h+'D'] ? 1 : 0; ffQ(o, h, s[h] | 0); } return o; }},
+    {t:'74273', n:'8× D-Flipflop mit Löschen', g:'F', B:[{L:['3 D1','4 D2','7 D3','8 D4','13 D5','14 D6','17 D7','18 D8','11 >CLK','1 ~CLR'], R:['2 Q1','5 Q2','6 Q3','9 Q4','12 Q5','15 Q6','16 Q7','19 Q8']}], vcc:20, gnd:10, o:R8('Q').join(' '), f:octReg('clr')},
+    {t:'74373', n:'8× Latch, Tri-State', g:'F', B:[{L:['3 D1','4 D2','7 D3','8 D4','13 D5','14 D6','17 D7','18 D8','11 LE','1 ~OE'], R:['2 Q1','5 Q2','6 Q3','9 Q4','12 Q5','15 Q6','16 Q7','19 Q8']}], vcc:20, gnd:10, o:R8('Q').join(' '), f:octReg('latch')},
+    {t:'74374', n:'8× D-Flipflop, Tri-State', g:'F', B:[{L:['3 D1','4 D2','7 D3','8 D4','13 D5','14 D6','17 D7','18 D8','11 >CLK','1 ~OE'], R:['2 Q1','5 Q2','6 Q3','9 Q4','12 Q5','15 Q6','16 Q7','19 Q8']}], vcc:20, gnd:10, o:R8('Q').join(' '), f:octReg('ff')},
+    {t:'74573', n:'8× Latch, Tri-State (Pins durchgehend)', g:'F', B:[{L:['2 D1','3 D2','4 D3','5 D4','6 D5','7 D6','8 D7','9 D8','11 LE','1 ~OE'], R:['19 Q1','18 Q2','17 Q3','16 Q4','15 Q5','14 Q6','13 Q7','12 Q8']}], vcc:20, gnd:10, o:R8('Q').join(' '), f:octReg('latch')},
+    {t:'74574', n:'8× D-Flipflop, Tri-State (Pins durchgehend)', g:'F', B:[{L:['2 D1','3 D2','4 D3','5 D4','6 D5','7 D6','8 D7','9 D8','11 >CLK','1 ~OE'], R:['19 Q1','18 Q2','17 Q3','16 Q4','15 Q5','14 Q6','13 Q7','12 Q8']}], vcc:20, gnd:10, o:R8('Q').join(' '), f:octReg('ff')},
+    {t:'74123', n:'2× Monoflop (nachtriggerbar)', g:'F', B:[{L:['1 ~1A:A','2 1B','3 ~1CLR'], R:['13 1Q','4 ~1QN:Q','14 1CX:Cext','15 1RC:Rext/Cext']}, {L:['9 ~2A:A','10 2B','11 ~2CLR'], R:['5 2Q','12 ~2QN:Q','6 2CX:Cext','7 2RC:Rext/Cext']}], vcc:16, gnd:8,
+      o:'1Q 1QN 1CX 1RC 2Q 2QN 2CX 2RC', oc:'1RC 2RC',
+      // Pulsdauer ≈ 0,45 · R · C: Cext liegt intern an GND, beim Auslösen wird Rext/Cext kurz entladen, der Puls endet bei 37 % von VCC
+      f:(I, s, E, A) => { const o = {}; for(const h of ['1','2']){ const m = s[h] || (s[h] = {q:0, dis:0});
+        if(!I[h+'CLR']){ m.q = 0; m.dis = 0; }
+        else if((E.fall(h+'A') && I[h+'B']) || (E.rise(h+'B') && !I[h+'A']) || (E.rise(h+'CLR') && !I[h+'A'] && I[h+'B'])){ m.q = 1; m.dis = 1; }
+        const v = A.v(h+'RC'); if(m.dis){ if(v < 0.01*A.vcc) m.dis = 0; } else if(m.q && v > 0.37*A.vcc) m.q = 0;
+        o[h+'Q'] = !!m.q; o[h+'QN'] = !m.q; o[h+'CX'] = false; o[h+'RC'] = !m.dis; } return o; },
+      info:s => ['1','2'].map(h => h + ': ' + (s[h] && s[h].q ? 'Puls läuft' : 'Ruhe')).join('   ')},
+    // Zähler
+    {t:'7490', n:'Dezimalzähler (÷2 und ÷5)', g:'Z', v:'74LS90', B:[{L:['14 ~>CKA','1 ~>CKB','2 R01:R0(1)','3 R02:R0(2)','6 R91:R9(1)','7 R92:R9(2)'], R:['12 QA','9 QB','8 QC','11 QD']}], vcc:5, gnd:10, o:'QA QB QC QD',
+      f:(I, s, E) => { let a = s.a | 0, b = s.b | 0;
+        if(I.R91 && I.R92){ a = 1; b = 4; } else if(I.R01 && I.R02){ a = 0; b = 0; } else { if(E.fall('CKA')) a ^= 1; if(E.fall('CKB')) b = (b + 1) % 5; }
+        s.a = a; s.b = b; return {QA:!!a, QB:!!(b & 1), QC:!!(b & 2), QD:!!(b & 4)}; }, info:s => `QA = ${s.a | 0}, Fünferteiler = ${s.b | 0} (mit QA→CKB: ${(s.a | 0) + 2*(s.b | 0)})`},
+    {t:'7493', n:'4-Bit-Binärzähler (÷2 und ÷8)', g:'Z', v:'74LS93', B:[{L:['14 ~>CKA','1 ~>CKB','2 R01:R0(1)','3 R02:R0(2)'], R:['12 QA','9 QB','8 QC','11 QD']}], vcc:5, gnd:10, o:'QA QB QC QD',
+      f:(I, s, E) => { let a = s.a | 0, b = s.b | 0;
+        if(I.R01 && I.R02){ a = 0; b = 0; } else { if(E.fall('CKA')) a ^= 1; if(E.fall('CKB')) b = (b + 1) & 7; }
+        s.a = a; s.b = b; return {QA:!!a, QB:!!(b & 1), QC:!!(b & 2), QD:!!(b & 4)}; }, info:s => `QA = ${s.a | 0}, Achterteiler = ${s.b | 0} (mit QA→CKB: ${(s.a | 0) + 2*(s.b | 0)})`},
+    ...[['74160','Dezimalzähler, synchron (Löschen asynchron)',10,false], ['74161','4-Bit-Binärzähler, synchron (Löschen asynchron)',16,false], ['74162','Dezimalzähler, synchron',10,true], ['74163','4-Bit-Binärzähler, synchron',16,true]].map(([t, n, m, sc]) =>
+      ({t, n, g:'Z', B:[{L:['3 A','4 B','5 C','6 D','7 ENP','10 ENT','9 ~LOAD','1 ~CLR','2 >CLK'], R:['14 QA','13 QB','12 QC','11 QD','15 RCO']}], vcc:16, gnd:8, o:'QA QB QC QD RCO', f:sync16(m, sc), info:cntInfo})),
+    ...[['74190','Dezimalzähler vor/rück',10], ['74191','4-Bit-Zähler vor/rück',16]].map(([t, n, m]) =>
+      ({t, n, g:'Z', B:[{L:['15 A','1 B','10 C','9 D','11 ~LOAD','4 ~CTEN','5 DU:D/U','14 >CLK'], R:['3 QA','2 QB','6 QC','7 QD','12 MM:MAX/MIN','13 ~RCO']}], vcc:16, gnd:8, o:'QA QB QC QD MM RCO', f:ud1(m), info:cntInfo})),
+    ...[['74192','Dezimalzähler vor/rück, zwei Takte',10], ['74193','4-Bit-Zähler vor/rück, zwei Takte',16]].map(([t, n, m]) =>
+      ({t, n, g:'Z', B:[{L:['15 A','1 B','10 C','9 D','11 ~LOAD','14 CLR','5 >UP','4 >DOWN'], R:['3 QA','2 QB','6 QC','7 QD','12 ~CO','13 ~BO']}], vcc:16, gnd:8, o:'QA QB QC QD CO BO', f:ud2(m), info:cntInfo})),
+    {t:'74393', n:'2× 4-Bit-Binärzähler', g:'Z', B:[{L:['1 ~>1CLK','2 1CLR'], R:['3 1QA','4 1QB','5 1QC','6 1QD']}, {L:['13 ~>2CLK','12 2CLR'], R:['11 2QA','10 2QB','9 2QC','8 2QD']}], vcc:14, gnd:7,
+      o:'1QA 1QB 1QC 1QD 2QA 2QB 2QC 2QD', f:(I, s, E) => { const o = {}; for(const h of ['1','2']){ let c = s[h] | 0; if(I[h+'CLR']) c = 0; else if(E.fall(h+'CLK')) c = (c + 1) & 15; s[h] = c; put(o, Q4.map(q => h + q), c); } return o; },
+      info:s => `Zählerstände ${s['1'] | 0} und ${s['2'] | 0}`},
+    {t:'744040', n:'12-Bit-Binärzähler', g:'Z', v:'74HC4040', B:[{L:['10 ~>CLK','11 RST'], R:['9 Q1','7 Q2','6 Q3','5 Q4','3 Q5','2 Q6','4 Q7','13 Q8','12 Q9','14 Q10','15 Q11','1 Q12']}], vcc:16, gnd:8,
+      o:'Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 Q10 Q11 Q12', f:(I, s, E) => { let c = s.c | 0; if(I.RST) c = 0; else if(E.fall('CLK')) c = (c + 1) & 4095; s.c = c; const o = {}; for(let i = 0; i < 12; i++) o['Q'+(i+1)] = !!(c >> i & 1); return o; }, info:cntInfo},
+    // Schieberegister
+    {t:'74164', n:'8-Bit-Schieberegister seriell → parallel', g:'S', B:[{L:['1 A','2 B','8 >CLK','9 ~CLR'], R:['3 QA','4 QB','5 QC','6 QD','10 QE','11 QF','12 QG','13 QH']}], vcc:14, gnd:7,
+      o:'QA QB QC QD QE QF QG QH', f:(I, s, E) => { let r = s.r | 0; if(!I.CLR) r = 0; else if(E.rise('CLK')) r = ((r << 1) | (I.A && I.B ? 1 : 0)) & 255; s.r = r; return put({}, ['QA','QB','QC','QD','QE','QF','QG','QH'], r); }},
+    {t:'74165', n:'8-Bit-Schieberegister parallel → seriell', g:'S', B:[{L:['11 A','12 B','13 C','14 D','3 E','4 F','5 G','6 H','10 SER','1 ~SHLD:SH/LD','2 >CLK','15 INH:CLK INH'], R:['9 QH','7 ~QHN:QH']}], vcc:16, gnd:8,
+      o:'QH QHN', f:(I, s) => { let r = s.r | 0; const ck = I.CLK || I.INH, rise = ck && s.ck === false; s.ck = ck;
+        if(!I.SHLD) r = nib(I, ['A','B','C','D','E','F','G','H']); else if(rise) r = ((r << 1) | (I.SER ? 1 : 0)) & 255; s.r = r; return {QH:!!(r & 128), QHN:!(r & 128)}; }},
+    {t:'74194', n:'4-Bit-Universal-Schieberegister', g:'S', B:[{L:['3 A','4 B','5 C','6 D','2 SR:SR SER','7 SL:SL SER','10 S0','11 S1','9 >CLK','1 ~CLR'], R:['15 QA','14 QB','13 QC','12 QD']}], vcc:16, gnd:8,
+      o:'QA QB QC QD', f:(I, s, E) => { let r = s.r | 0;
+        if(!I.CLR) r = 0; else if(E.rise('CLK')){ const m = (I.S1 ? 2 : 0) + (I.S0 ? 1 : 0); if(m === 1) r = ((r << 1) | (I.SR ? 1 : 0)) & 15; else if(m === 2) r = (r >> 1) | (I.SL ? 8 : 0); else if(m === 3) r = nib(I, D4); }
+        s.r = r; return put({}, Q4, r); }},
+    {t:'74595', n:'8-Bit-Schieberegister mit Ausgangsregister', g:'S', B:[{L:['14 SER','11 >SRCLK','10 ~SRCLR','12 >RCLK','13 ~OE'], R:['15 QA','1 QB','2 QC','3 QD','4 QE','5 QF','6 QG','7 QH','9 QH2:QH\'']}], vcc:16, gnd:8,
+      o:'QA QB QC QD QE QF QG QH QH2', f:(I, s, E) => { const old = s.r | 0; let r = old;
+        if(!I.SRCLR) r = 0; else if(E.rise('SRCLK')) r = ((r << 1) | (I.SER ? 1 : 0)) & 255;
+        if(E.rise('RCLK')) s.q = old; s.r = r; const o = put({}, ['QA','QB','QC','QD','QE','QF','QG','QH'], s.q | 0);
+        if(I.OE) for(const k in o) o[k] = null; o.QH2 = !!(r & 128); return o; }, info:s => `Schieberegister ${(s.r | 0).toString(2).padStart(8, '0')}, Ausgang ${(s.q | 0).toString(2).padStart(8, '0')} (QH … QA)`},
+    // Dekoder, Multiplexer
+    {t:'7442', n:'BCD → dezimal (1 aus 10)', g:'D', v:'74LS42', B:[{L:['15 A','14 B','13 C','12 D'], R:['1 ~Y0:0','2 ~Y1:1','3 ~Y2:2','4 ~Y3:3','5 ~Y4:4','6 ~Y5:5','7 ~Y6:6','9 ~Y7:7','10 ~Y8:8','11 ~Y9:9']}], vcc:16, gnd:8,
+      o:'Y0 Y1 Y2 Y3 Y4 Y5 Y6 Y7 Y8 Y9', f:I => { const v = nib(I, D4), o = {}; for(let k = 0; k < 10; k++) o['Y'+k] = v !== k; return o; }},
+    {t:'7447', n:'BCD → 7-Segment, offener Kollektor (gem. Anode)', g:'D', v:'74LS47', B:[{L:['7 A','1 B','2 C','6 D','3 ~LT','4 ~BI:BI/RBO','5 ~RBI'], R:['13 ~a','12 ~b','11 ~c','10 ~d','9 ~e','15 ~f','14 ~g']}], vcc:16, gnd:8,
+      o:'a b c d e f g', oc:true, f:segDec(SEG_TTL, false), info:s => 'Eingang ' + (s.c | 0)},
+    {t:'7448', n:'BCD → 7-Segment, 2-kΩ-Pull-ups (gem. Kathode)', g:'D', v:'74LS48', B:[{L:['7 A','1 B','2 C','6 D','3 ~LT','4 ~BI:BI/RBO','5 ~RBI'], R:['13 a','12 b','11 c','10 d','9 e','15 f','14 g']}], vcc:16, gnd:8,
+      o:'a b c d e f g', rh:2000, f:segDec(SEG_TTL, true), info:s => 'Eingang ' + (s.c | 0)},
+    {t:'744511', n:'BCD → 7-Segment mit Latch (gem. Kathode)', g:'D', v:'74HC4511', B:[{L:['7 A','1 B','2 C','6 D','5 LE','4 ~BL','3 ~LT'], R:['13 a','12 b','11 c','10 d','9 e','15 f','14 g']}], vcc:16, gnd:8,
+      o:'a b c d e f g', f:(I, s) => { if(!I.LE) s.v = nib(I, D4); let m = SEG_4511[s.v | 0]; if(!I.LT) m = 0x7F; else if(!I.BL) m = 0; const o = {}; SEGK.forEach((k, i) => { o[k] = !!(m >> i & 1); }); return o; },
+      info:s => 'gespeichert ' + (s.v | 0)},
+    {t:'74138', n:'Dekoder 3 → 8', g:'D', B:[{L:['1 A','2 B','3 C','6 G1','4 ~G2A','5 ~G2B'], R:['15 ~Y0','14 ~Y1','13 ~Y2','12 ~Y3','11 ~Y4','10 ~Y5','9 ~Y6','7 ~Y7']}], vcc:16, gnd:8,
+      o:'Y0 Y1 Y2 Y3 Y4 Y5 Y6 Y7', f:I => { const v = nib(I, ['A','B','C']), en = I.G1 && !I.G2A && !I.G2B, o = {}; for(let k = 0; k < 8; k++) o['Y'+k] = !(en && v === k); return o; }},
+    {t:'74139', n:'2× Dekoder 2 → 4', g:'D', B:[{L:['2 1A','3 1B','1 ~1G'], R:['4 ~1Y0','5 ~1Y1','6 ~1Y2','7 ~1Y3']}, {L:['14 2A','13 2B','15 ~2G'], R:['12 ~2Y0','11 ~2Y1','10 ~2Y2','9 ~2Y3']}], vcc:16, gnd:8,
+      o:'1Y0 1Y1 1Y2 1Y3 2Y0 2Y1 2Y2 2Y3', f:I => { const o = {}; for(const h of ['1','2']){ const v = nib(I, [h+'A', h+'B']); for(let k = 0; k < 4; k++) o[h+'Y'+k] = !(!I[h+'G'] && v === k); } return o; }},
+    {t:'74154', n:'Dekoder 4 → 16', g:'D', B:[{L:['23 A','22 B','21 C','20 D','18 ~G1','19 ~G2'], R:['1 ~Y0','2 ~Y1','3 ~Y2','4 ~Y3','5 ~Y4','6 ~Y5','7 ~Y6','8 ~Y7','9 ~Y8','10 ~Y9','11 ~Y10','13 ~Y11','14 ~Y12','15 ~Y13','16 ~Y14','17 ~Y15']}], vcc:24, gnd:12,
+      o:Array.from({length:16}, (_, k) => 'Y'+k).join(' '), f:I => { const v = nib(I, D4), en = !I.G1 && !I.G2, o = {}; for(let k = 0; k < 16; k++) o['Y'+k] = !(en && v === k); return o; }},
+    {t:'74148', n:'Prioritätsencoder 8 → 3', g:'D', B:[{L:['10 ~I0:0','11 ~I1:1','12 ~I2:2','13 ~I3:3','1 ~I4:4','2 ~I5:5','3 ~I6:6','4 ~I7:7','5 ~EI'], R:['9 ~A0','7 ~A1','6 ~A2','14 ~GS','15 ~EO']}], vcc:16, gnd:8,
+      o:'A0 A1 A2 GS EO', f:I => { if(I.EI) return {A0:true, A1:true, A2:true, GS:true, EO:true}; let k = -1; for(let i = 7; i >= 0; i--) if(!I['I'+i]){ k = i; break; }
+        if(k < 0) return {A0:true, A1:true, A2:true, GS:true, EO:false}; return {A0:!(k & 1), A1:!(k & 2), A2:!(k & 4), GS:false, EO:true}; }},
+    {t:'74151', n:'Multiplexer 8 → 1', g:'D', B:[{L:['4 D0','3 D1','2 D2','1 D3','15 D4','14 D5','13 D6','12 D7','11 A','10 B','9 C','7 ~G'], R:['5 Y','6 ~W']}], vcc:16, gnd:8,
+      o:'Y W', f:I => { const y = !I.G && !!I['D' + nib(I, ['A','B','C'])]; return {Y:y, W:!y}; }},
+    {t:'74153', n:'2× Multiplexer 4 → 1', g:'D', B:[{L:['6 1C0','5 1C1','4 1C2','3 1C3','1 ~1G','10 2C0','11 2C1','12 2C2','13 2C3','15 ~2G','14 A','2 B'], R:['7 1Y','9 2Y']}], vcc:16, gnd:8,
+      o:'1Y 2Y', f:I => { const v = nib(I, ['A','B']); return {'1Y':!I['1G'] && !!I['1C'+v], '2Y':!I['2G'] && !!I['2C'+v]}; }},
+    {t:'74157', n:'4× Multiplexer 2 → 1', g:'D', B:[{L:['2 1A','3 1B','5 2A','6 2B','11 3A','10 3B','14 4A','13 4B','1 S:A/B','15 ~G'], R:['4 1Y','7 2Y','9 3Y','12 4Y']}], vcc:16, gnd:8,
+      o:'1Y 2Y 3Y 4Y', f:I => { const o = {}; for(const h of ['1','2','3','4']) o[h+'Y'] = !I.G && !!(I.S ? I[h+'B'] : I[h+'A']); return o; }},
+    // Rechnen und Bus
+    {t:'74283', n:'4-Bit-Volladdierer', g:'R', B:[{L:['5 A1','3 A2','14 A3','12 A4','6 B1','2 B2','15 B3','11 B4','7 C0'], R:['4 S1','1 S2','13 S3','10 S4','9 C4']}], vcc:16, gnd:8,
+      o:'S1 S2 S3 S4 C4', f:I => { const s = nib(I, ['A1','A2','A3','A4']) + nib(I, ['B1','B2','B3','B4']) + (I.C0 ? 1 : 0); return put({C4:s > 15}, ['S1','S2','S3','S4'], s); }},
+    {t:'7485', n:'4-Bit-Vergleicher', g:'R', B:[{L:['10 A0','12 A1','13 A2','15 A3','9 B0','11 B1','14 B2','1 B3','4 IGT:A>B ein','3 IEQ:A=B ein','2 ILT:A<B ein'], R:['5 OGT:A>B','6 OEQ:A=B','7 OLT:A<B']}], vcc:16, gnd:8,
+      o:'OGT OEQ OLT', f:I => { const a = nib(I, ['A0','A1','A2','A3']), b = nib(I, ['B0','B1','B2','B3']);
+        if(a > b) return {OGT:true, OEQ:false, OLT:false}; if(a < b) return {OGT:false, OEQ:false, OLT:true};
+        return {OGT:!!I.IGT && !I.IEQ, OEQ:!!I.IEQ, OLT:!!I.ILT && !I.IEQ}; }},
+    {t:'74181', n:'4-Bit-ALU (16 Rechen- und 16 Logikfunktionen)', g:'R', v:'74LS181', B:[{L:['2 A0','23 A1','21 A2','19 A3','1 B0','22 B1','20 B2','18 B3','6 S0','5 S1','4 S2','3 S3','8 M','7 ~CN:Cn'], R:['9 F0','10 F1','11 F2','13 F3','14 AEB:A=B','15 ~P','16 ~CN4:Cn+4','17 ~G']}], vcc:24, gnd:12,
+      o:'F0 F1 F2 F3 AEB P CN4 G', oc:'AEB',
+      // Aktiv-High-Daten: X = A ∨ (B∧S0) ∨ (B̄∧S1), Y = (A∧B̄∧S2) ∨ (A∧B∧S3); rechnen F = X + Y + Übertrag, logisch F = ¬(X ⊕ Y)
+      f:(I, s) => { const a = nib(I, ['A0','A1','A2','A3']), b = nib(I, ['B0','B1','B2','B3']), nb = ~b & 15;
+        const X = a | (I.S0 ? b : 0) | (I.S1 ? nb : 0), Y = (I.S2 ? a & nb : 0) | (I.S3 ? a & b : 0), sum = X + Y + (I.CN ? 0 : 1);
+        const F = I.M ? ~(X ^ Y) & 15 : sum & 15; s.c = F; return put({AEB:F === 15, P:X !== 15, CN4:!(sum > 15), G:!(X + Y > 15)}, ['F0','F1','F2','F3'], F); }, info:s => 'F = ' + (s.c | 0)},
+    {t:'74244', n:'8× Bustreiber, Tri-State', g:'R', B:[{L:['2 1A1','4 1A2','6 1A3','8 1A4','11 2A1','13 2A2','15 2A3','17 2A4','1 ~1G','19 ~2G'], R:['18 1Y1','16 1Y2','14 1Y3','12 1Y4','9 2Y1','7 2Y2','5 2Y3','3 2Y4']}], vcc:20, gnd:10,
+      o:'1Y1 1Y2 1Y3 1Y4 2Y1 2Y2 2Y3 2Y4', f:I => { const o = {}; for(const h of ['1','2']) for(let i = 1; i <= 4; i++) o[h+'Y'+i] = I[h+'G'] ? null : !!I[h+'A'+i]; return o; }},
+    {t:'74245', n:'8× Bus-Transceiver (bidirektional)', g:'R', B:[{L:['2 A1','3 A2','4 A3','5 A4','6 A5','7 A6','8 A7','9 A8','1 DIR','19 ~OE'], R:['18 B1','17 B2','16 B3','15 B4','14 B5','13 B6','12 B7','11 B8']}], vcc:20, gnd:10,
+      o:R8('A').concat(R8('B')).join(' '), bi:true, f:I => { const o = {}; for(let i = 1; i <= 8; i++){ const ab = !I.OE && I.DIR, ba = !I.OE && !I.DIR; o['B'+i] = ab ? !!I['A'+i] : null; o['A'+i] = ba ? !!I['B'+i] : null; } return o; }},
+    // Bausteine für TTL-Rechner: Register, Bus, Speicher
+    {t:'74173', n:'4-Bit-Register, Tri-State', g:'F', v:'74LS173', B:[{L:['14 D1:1D','13 D2:2D','12 D3:3D','11 D4:4D','7 >CLK','9 ~G1','10 ~G2','15 CLR','1 ~M','2 ~N'], R:['3 Q1:1Q','4 Q2:2Q','5 Q3:3Q','6 Q4:4Q']}], vcc:16, gnd:8,
+      o:'Q1 Q2 Q3 Q4', f:(I, s, E) => { let r = s.c | 0; if(I.CLR) r = 0; else if(E.rise('CLK') && !I.G1 && !I.G2) r = nib(I, ['D1','D2','D3','D4']); s.c = r;
+        const o = put({}, ['Q1','Q2','Q3','Q4'], r); if(I.M || I.N) for(const k in o) o[k] = null; return o; }, info:s => 'gespeichert ' + (s.c | 0)},
+    {t:'74377', n:'8× D-Flipflop mit Freigabe', g:'F', B:[{L:['3 D1','4 D2','7 D3','8 D4','13 D5','14 D6','17 D7','18 D8','11 >CLK','1 ~G'], R:['2 Q1','5 Q2','6 Q3','9 Q4','12 Q5','15 Q6','16 Q7','19 Q8']}], vcc:20, gnd:10,
+      o:R8('Q').join(' '), f:(I, s, E) => { const d = s.d || (s.d = [0,0,0,0,0,0,0,0]), o = {}; if(E.rise('CLK') && !I.G) for(let i = 0; i < 8; i++) d[i] = I['D'+(i+1)] ? 1 : 0; for(let i = 0; i < 8; i++) o['Q'+(i+1)] = !!d[i]; return o; }},
+    {t:'7476', n:'2× JK-Flipflop mit Preset (fallende Flanke)', g:'F', v:'74LS76', B:[{L:['4 1J','1 ~>1CLK','16 1K','2 ~1PRE','3 ~1CLR'], R:['15 1Q','14 1QN:Q̄']}, {L:['9 2J','6 ~>2CLK','12 2K','7 ~2PRE','8 ~2CLR'], R:['11 2Q','10 2QN:Q̄']}], vcc:5, gnd:13,
+      o:'1Q 1QN 2Q 2QN', f:(I, s, E) => { const o = {}; for(const h of ['1','2']){ const p = !I[h+'PRE'], c = !I[h+'CLR']; let q = s[h] | 0;
+        if(p || c){ if(p !== c) q = p ? 1 : 0; } else if(E.fall(h+'CLK')){ const j = I[h+'J'], k = I[h+'K']; q = j && k ? q ^ 1 : j ? 1 : k ? 0 : q; } s[h] = q; ffQ(o, h, q, p && c); } return o; }},
+    {t:'74189', n:'RAM 16 × 4, invertierte Tri-State-Ausgänge', g:'M', v:'74LS189', B:[{L:['1 A0','15 A1','14 A2','13 A3','4 D1','6 D2','10 D3','12 D4','2 ~CS','3 ~WE'], R:['5 ~Q1','7 ~Q2','9 ~Q3','11 ~Q4']}], vcc:16, gnd:8,
+      o:'Q1 Q2 Q3 Q4', f:(I, s) => { const m = s.m || (s.m = new Uint8Array(16)), a = nib(I, ['A0','A1','A2','A3']); s.a = a;
+        if(!I.CS && !I.WE){ m[a] = nib(I, ['D1','D2','D3','D4']); return {Q1:null, Q2:null, Q3:null, Q4:null}; }
+        if(I.CS) return {Q1:null, Q2:null, Q3:null, Q4:null}; return put({}, ['Q1','Q2','Q3','Q4'], ~m[a] & 15); },
+      info:s => s.m ? `Adresse ${s.a | 0}: ${s.m[s.a | 0]}\nInhalt ${Array.from(s.m).map(v => v.toString(16).toUpperCase()).join(' ')}` : ''},
+    {t:'74670', n:'Registerdatei 4 × 4, Tri-State', g:'M', v:'74LS670', B:[{L:['15 D1','1 D2','2 D3','3 D4','14 WA','13 WB','12 ~GW','5 RA','4 RB','11 ~GR'], R:['10 Q1','9 Q2','7 Q3','6 Q4']}], vcc:16, gnd:8,
+      o:'Q1 Q2 Q3 Q4', f:(I, s) => { const m = s.m || (s.m = [0,0,0,0]);
+        if(!I.GW) m[nib(I, ['WA','WB'])] = nib(I, ['D1','D2','D3','D4']);
+        const o = put({}, ['Q1','Q2','Q3','Q4'], m[nib(I, ['RA','RB'])]); if(I.GR) for(const k in o) o[k] = null; return o; },
+      info:s => s.m ? 'Register 0 … 3: ' + s.m.join(', ') : ''},
+    {t:'74182', n:'Carry-Lookahead für 74181', g:'R', v:'74S182', B:[{L:['3 ~G0','4 ~P0','1 ~G1','2 ~P1','15 ~G2','14 ~P2','5 ~G3','6 ~P3','13 CN:Cn'], R:['12 CX:Cn+x','11 CY:Cn+y','9 CZ:Cn+z','10 ~G','7 ~P']}], vcc:16, gnd:8,
+      o:'CX CY CZ G P', f:I => { const g = [0,1,2,3].map(i => !I['G'+i]), p = [0,1,2,3].map(i => !I['P'+i]), c = !!I.CN;
+        const cx = g[0] || (p[0] && c), cy = g[1] || (p[1] && cx), cz = g[2] || (p[2] && cy), G = g[3] || (p[3] && (g[2] || (p[2] && (g[1] || (p[1] && g[0])))));
+        return {CX:cx, CY:cy, CZ:cz, G:!G, P:!(p[0] && p[1] && p[2] && p[3])}; }},
+    {t:'74688', n:'8-Bit-Vergleicher (Adressdekodierung)', g:'R', B:[{L:['2 P0','4 P1','6 P2','8 P3','11 P4','13 P5','15 P6','17 P7','1 ~G'], R:['3 Q0','5 Q1','7 Q2','9 Q3','12 Q4','14 Q5','16 Q6','18 Q7','19 ~EQ:P=Q']}], vcc:20, gnd:10,
+      o:'EQ', f:I => ({EQ:!(!I.G && [0,1,2,3,4,5,6,7].every(i => !I['P'+i] === !I['Q'+i]))})},
+    {t:'74541', n:'8× Bustreiber, Tri-State (Pins durchgehend)', g:'R', B:[{L:['2 A1','3 A2','4 A3','5 A4','6 A5','7 A6','8 A7','9 A8','1 ~G1','19 ~G2'], R:['18 Y1','17 Y2','16 Y3','15 Y4','14 Y5','13 Y6','12 Y7','11 Y8']}], vcc:20, gnd:10,
+      o:R8('Y').join(' '), f:I => { const o = {}; for(let i = 1; i <= 8; i++) o['Y'+i] = I.G1 || I.G2 ? null : !!I['A'+i]; return o; }},
+    {t:'74540', n:'8× invertierender Bustreiber, Tri-State', g:'R', B:[{L:['2 A1','3 A2','4 A3','5 A4','6 A5','7 A6','8 A7','9 A8','1 ~G1','19 ~G2'], R:['18 ~Y1','17 ~Y2','16 ~Y3','15 ~Y4','14 ~Y5','13 ~Y6','12 ~Y7','11 ~Y8']}], vcc:20, gnd:10,
+      o:R8('Y').join(' '), f:I => { const o = {}; for(let i = 1; i <= 8; i++) o['Y'+i] = I.G1 || I.G2 ? null : !I['A'+i]; return o; }},
+    // Speicher: Inhalt im Eigenschaftenfeld als Hex (Bauteil anklicken), RAM startet mit diesem Inhalt
+    {t:'28C16', n:'EEPROM 2K × 8', g:'M', v:'AT28C16', rom:2048, B:[{L:['8 A0','7 A1','6 A2','5 A3','4 A4','3 A5','2 A6','1 A7','23 A8','22 A9','19 A10','18 ~CE','20 ~OE','21 ~WE'], R:['9 IO0','10 IO1','11 IO2','13 IO3','14 IO4','15 IO5','16 IO6','17 IO7']}], vcc:24, gnd:12,
+      o:R8('IO').map((k, i) => 'IO' + i).join(' '), bi:true, f:memFn(2048, 11)},
+    {t:'62256', n:'SRAM 32K × 8', g:'M', v:'62256', rom:32768, B:[{L:['10 A0','9 A1','8 A2','7 A3','6 A4','5 A5','4 A6','3 A7','25 A8','24 A9','21 A10','23 A11','2 A12','26 A13','1 A14','20 ~CE','22 ~OE','27 ~WE'], R:['11 IO0','12 IO1','13 IO2','15 IO3','16 IO4','17 IO5','18 IO6','19 IO7']}], vcc:28, gnd:14,
+      o:R8('IO').map((k, i) => 'IO' + i).join(' '), bi:true, f:memFn(32768, 15)},
+  ];
+  const GN = {F:'Logik: Flipflops', Z:'Logik: Zähler', S:'Logik: Schieberegister', D:'Logik: Dekoder & Mux', R:'Logik: Rechnen & Bus', M:'Logik: Speicher'};
+  for(const c of BOX){
+    const multi = c.B.length > 1, units = {}, block = {}, sigs = []; let y = 0, maxW = 0;
+    c.B.forEach((b, k) => { const key = multi ? LETTERS[k] : 'main', u = boxUnit(b.L, b.R, multi, multi ? null : [c.vcc, c.gnd], key);
+      if(multi) u.label = LETTERS[k].toUpperCase(); y += u.hh; block[key] = [0, y]; y += u.hh + 60; maxW = Math.max(maxW, u.w);
+      for(const sg of u.sigs) sigs.push(Object.assign(sg, {unit:key})); units[key] = strip(u); });
+    if(multi){ units.p = pwrUnit(c.vcc, c.gnd, LETTERS[c.B.length].toUpperCase()); block.p = [Math.ceil((maxW + 50)/10)*10, block.a[1]]; }
+    const outs = new Set(c.o.split(' ')), ocs = c.oc === true ? outs : new Set((c.oc || '').split(' ').filter(Boolean));
+    for(const sg of sigs){ sg.out = outs.has(sg.key); sg.oc = ocs.has(sg.key); }
+    const t = 'ttl' + c.t, num = c.t.replace(/^744/, '4');
+    BUILTIN[t] = {name:(/^744\d{3}$/.test(c.t) ? '74HC' + c.t.slice(2) : c.t) + ' ' + c.n, prefix:'U', group:GN[c.g], value:c.v || ('74HC' + c.t.slice(2)), rom:c.rom, icon:boxIcon(/^744\d{3}$/.test(c.t) ? num : /^74/.test(c.t) ? c.t.slice(2) : c.t), units};
+    if(multi) BUILTIN[t].block = block;
+    LOGIC[t] = {sigs, vcc:String(c.vcc), gnd:String(c.gnd), f:c.f, rh:c.rh, bi:c.bi, info:c.info || (c.rom ? memInfo : undefined), rom:c.rom};
+  }
+
+  /* ---------- 7-Segment-Anzeigen ---------- */
+  for(const [t, nm, com] of [['seg7_cc','7-Segment-Anzeige (gem. Kathode)','K'], ['seg7_ca','7-Segment-Anzeige (gem. Anode)','A']]){
+    const sh = [['r',-40,-80,80,160]], pins = [];
+    for(const k in SEG7){ const s = SEG7[k]; sh.push(['l', s[0], s[1], s[2], s[3]]); }
+    sh.push(['c',28,46,2.5,1], ['l',0,80,0,100], ['t',0,72,'COM ' + com,9], ['t',6,94,'COM',8,'start']);
+    ['a','b','c','d','e','f','g','dp'].forEach((k, i) => { const y = -70 + i*20; sh.push(['l',-60,y,-40,y], ['t',-36,y+4,k,10,'start']); pins.push({id:k, x:-60, y}); });
+    pins.push({id:'COM', x:0, y:100});
+    BUILTIN[t] = {name:nm, prefix:'DS', group:'Halbleiter', value:'rot', icon:[['r',-18,-26,36,52],['l',-8,-18,8,-18],['l',10,-16,10,-2],['l',10,2,10,16],['l',-8,18,8,18],['l',-10,2,-10,16],['l',-10,-16,-10,-2],['l',-8,0,8,0]],
+      units:{main:{shapes:sh, pins, refOff:[46,-66], valOff:[46,-50], labelAnchor:'start'}}};
+  }
+})();
+const GROUPS = ['Quellen','Passiv','Halbleiter','Schalter','Relais','Messgeräte','Sonstiges','Logik: Gatter','Logik: Flipflops','Logik: Zähler','Logik: Schieberegister','Logik: Dekoder & Mux','Logik: Rechnen & Bus','Logik: Speicher'];
 let LIB = Object.assign({}, BUILTIN);
 
 /* IC-Block: Geometrie aus der Pinliste des Bauteils */
@@ -308,7 +624,7 @@ function unitBBox(comp, ukey){
     else if(s[0]==='c') pts = [[s[1]-s[3],s[2]-s[3]],[s[1]+s[3],s[2]+s[3]]];
     else if(s[0]==='p'){ for(let i=0;i<s[1].length;i+=2) pts.push([s[1][i],s[1][i+1]]); }
     else if(s[0]==='t') pts = [[s[1]-6,s[2]-10],[s[1]+6,s[2]+2]];
-    else if(s[0]==='d') pts = [[-10,-20],[10,20]];
+    else if(s[0]==='d') pts = s[3] ? [[s[3][0],s[3][1]],[s[3][2],s[3][3]]] : [[-10,-20],[10,20]];
     for(const q of pts){ const w = unitXf(u, q[0], q[1]); xs.push(w[0]); ys.push(w[1]); }
   }
   for(const p of def.pins){ const w = unitXf(u, p.x, p.y); xs.push(w[0]); ys.push(w[1]); }
@@ -682,13 +998,33 @@ function iconFor(type){
   const def = LIB[type], s = document.createElementNS(NS, 'svg'); s.setAttribute('viewBox', '-36 -32 72 64');
   const g = el('g', {}, s); drawShapes(g, def.icon || def.units[Object.keys(def.units)[0]].shapes, '#8b0000', 3); return s;
 }
+/* Bauteilliste: Gruppen auf- und zuklappbar (Logik anfangs zu), Suchfeld filtert nach Name, Typ und Wert */
+const palState = {filter:'', closed:new Set(GROUPS.filter(g => g.startsWith('Logik')))};
 function buildPalette(){
   const pal = document.getElementById('palette'); pal.innerHTML = '';
+  const fi = document.createElement('input'); fi.type = 'search'; fi.id = 'palFind'; fi.placeholder = 'Suchen (z. B. 7400)'; fi.value = palState.filter;
+  fi.oninput = () => { palState.filter = fi.value; filterPalette(); };
+  fi.onkeydown = e => { if(e.key === 'Escape'){ fi.value = ''; palState.filter = ''; filterPalette(); fi.blur(); } e.stopPropagation(); };
+  pal.appendChild(fi);
   const groups = GROUPS.slice(); for(const t in LIB) if(!groups.includes(LIB[t].group||'Eigene')) groups.push(LIB[t].group||'Eigene');
   for(const gname of groups){
     const types = Object.keys(LIB).filter(t => (LIB[t].group||'Eigene') === gname); if(!types.length) continue;
-    const h = document.createElement('h2'); h.textContent = gname; pal.appendChild(h);
-    for(const t of types){ const b = document.createElement('button'); b.className = 'pal'; b.dataset.type = t; b.appendChild(iconFor(t)); b.appendChild(document.createTextNode(LIB[t].name)); b.onclick = () => setTool('place', t); pal.appendChild(b); }
+    const box = document.createElement('div'); box.className = 'grp'; box.dataset.g = gname;
+    const h = document.createElement('h2'); h.textContent = gname + ' (' + types.length + ')'; h.title = 'Auf- und zuklappen';
+    h.onclick = () => { if(palState.filter) return; palState.closed.has(gname) ? palState.closed.delete(gname) : palState.closed.add(gname); filterPalette(); };
+    box.appendChild(h);
+    for(const t of types){ const b = document.createElement('button'); b.className = 'pal'; b.dataset.type = t; b.dataset.find = (LIB[t].name + ' ' + t + ' ' + (LIB[t].value || '') + ' ' + gname).toLowerCase();
+      b.appendChild(iconFor(t)); b.appendChild(document.createTextNode(LIB[t].name)); b.onclick = () => setTool('place', t); box.appendChild(b); }
+    pal.appendChild(box);
+  }
+  filterPalette();
+}
+function filterPalette(){
+  const q = palState.filter.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  for(const box of document.querySelectorAll('#palette .grp')){
+    let any = false; const shut = !q.length && palState.closed.has(box.dataset.g);
+    for(const b of box.querySelectorAll('.pal')){ const hit = q.every(w => b.dataset.find.includes(w)); b.style.display = (q.length ? hit : !shut) ? '' : 'none'; any = any || hit; }
+    box.style.display = q.length && !any ? 'none' : ''; box.classList.toggle('shut', shut);
   }
 }
 document.getElementById('bSelect').onclick = () => setTool('select');
@@ -712,6 +1048,7 @@ function showProps(focus){
     box.innerHTML = `<div class="row"><span>Bezeichner</span><input id="pRef" value="${esc(c.id)}"></div>
       <div class="row"><span>Wert</span><input id="pVal" value="${esc(c.value)}"></div>
       ${simPropsHTML(c)}
+      ${LOGIC[c.type] && LOGIC[c.type].rom ? memPropsHTML(c) : ''}
       <div class="row"><span>Position</span><span class="muted">${u.x}, ${u.y} · ${u.rot}°${u.mirror?' gespiegelt':''}</span></div>
       ${multi ? '<p class="muted">Jede Einheit lässt sich einzeln verschieben und drehen; Bezeichner und Wert gelten für das ganze Bauteil.</p>' : ''}
       ${def.dynamic ? `<p class="muted">Pins je Seite, eine Zeile pro Pin: <b>Nummer Name</b> (z. B. "8 VCC").</p>
@@ -728,6 +1065,7 @@ function showProps(focus){
     document.getElementById('pMir').onclick = () => { commit(); u.mirror = !u.mirror; render(); showProps(); };
     document.getElementById('pDel').onclick = deleteSelection;
     bindSimProps(c, once);
+    if(LOGIC[c.type] && LOGIC[c.type].rom) bindMemProps(c, once);
     if(def.dynamic) for(const [id, side] of [['icL','left'],['icR','right'],['icT','top'],['icB','bottom']]) document.getElementById(id).oninput = e => { once(); c.ic[side] = e.target.value.split('\n'); render(); };
     if(focus){ const i = document.getElementById('pVal'); i.focus(); i.select(); }
   } else if(sel.kind === 'wire'){
@@ -745,6 +1083,25 @@ function showProps(focus){
     title.textContent = 'Verbindungspunkt'; box.innerHTML = `<p class="muted">Manuell gesetzter Punkt bei ${sel.id}.</p><div class="btns"><button id="pDel">Löschen</button></div>`;
     document.getElementById('pDel').onclick = deleteSelection;
   }
+}
+
+/* Speicherbausteine: Inhalt als Hex bearbeiten, .bin-Datei laden oder speichern */
+function memPropsHTML(c){
+  const size = LOGIC[c.type].rom, used = parseMem(c.rom, size, 0), n = String(c.rom || '').trim() ? 'eigener Inhalt' : (size > 4096 ? 'leer (00)' : 'leer (FF)');
+  return `<div class="row"><span>Inhalt</span><span class="muted">${size} Byte, ${n}</span></div>
+    <textarea id="memTxt" spellcheck="false" placeholder="Hex-Bytes, z. B.&#10;01 02 04 08&#10;100: FF 00   (Adresse:)">${esc(c.rom || '')}</textarea>
+    <div class="btns"><button id="memLoad">.bin laden</button><button id="memSave">.bin speichern</button></div>
+    <p class="muted">Bytes in Hex, „Adresse:“ springt; ; leitet Kommentare ein. Beim Start der Simulation wird der Inhalt geladen${size > 4096 ? ', das RAM kann ihn dann überschreiben' : ''}.</p>`;
+}
+function bindMemProps(c, once){
+  const size = LOGIC[c.type].rom;
+  document.getElementById('memTxt').oninput = e => { once(); c.rom = e.target.value; };
+  document.getElementById('memLoad').onclick = () => { const inp = document.createElement('input'); inp.type = 'file';
+    inp.onchange = async () => { const f = inp.files[0]; if(!f) return; const b = new Uint8Array(await f.arrayBuffer()).slice(0, size); let t = '';
+      for(let i = 0; i < b.length; i += 16) t += hexStr(i, 4) + ': ' + Array.from(b.slice(i, i + 16), v => hexStr(v, 2)).join(' ') + '\n';
+      commit(); c.rom = t; showProps(); };
+    inp.click(); };
+  document.getElementById('memSave').onclick = () => { const m = parseMem(c.rom, size, size > 4096 ? 0 : 0xFF); download(c.id + '.bin', m, 'application/octet-stream'); };
 }
 
 /* ============================================================ Dialog (Netzliste, Stückliste) */
@@ -767,9 +1124,10 @@ function docJSON(){
   const lib = {}; for(const c of S.components) if(!BUILTIN[c.type] && LIB[c.type]) lib[c.type] = LIB[c.type];
   return JSON.stringify({version:1, library:lib, sheet:S.sheet, components:S.components, wires:S.wires, junctions:S.junctions, texts:S.texts, view}, null, 1);
 }
+function resetExSel(){ const s = document.getElementById('exSel'); if(s){ s.value = ''; s.dataset.cur = ''; } }
 function loadDoc(obj){
   if(!obj || !Array.isArray(obj.components)) throw new Error('Keine Schaltungsdatei.');
-  stopSim();
+  stopSim(); resetExSel();
   for(const t in (obj.library||{})) if(!BUILTIN[t]) LIB[t] = obj.library[t];
   S = {version:1, library:{}, sheet:Object.assign(newDoc().sheet, obj.sheet||{}), components:obj.components.filter(c => LIB[c.type]), wires:obj.wires||[], junctions:obj.junctions||[], texts:obj.texts||[]};
   for(const c of S.components) if(LIB[c.type].dynamic && !c.ic) c.ic = {left:[],right:[],top:[],bottom:[]};
@@ -871,7 +1229,7 @@ document.getElementById('bSheet').onclick = () => { const sh = S.sheet; for(cons
 document.getElementById('shOk').onclick = () => { const sh = S.sheet; for(const [id,k] of [['shTitle','title'],['shAuthor','author'],['shRev','rev'],['shDate','date']]) sh[k] = document.getElementById(id).value.trim(); sh.frame = document.getElementById('shFrame').checked; document.getElementById('sheetDlg').close(); document.getElementById('hint').textContent = 'Blattdaten übernommen.'; };
 document.getElementById('shCancel').onclick = () => document.getElementById('sheetDlg').close();
 function docName(){ const t = (S.sheet.title||'').trim().toLowerCase().replace(/[äöüß]/g, m=>({ä:'ae',ö:'oe',ü:'ue',ß:'ss'})[m]).replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''); return t || 'schaltplan'; }
-document.getElementById('bNew').onclick = () => { stopSim(); if(S.components.length || S.wires.length){ if(!confirm('Aktuelle Schaltung verwerfen? Nicht gespeicherte Änderungen gehen verloren.')) return; } S = newDoc(); selection = []; hist.length = 0; redoStack.length = 0; updateUndo(); view = {x:80,y:80,z:1}; setTool('select'); applyView(); render(); showProps(); };
+document.getElementById('bNew').onclick = () => { stopSim(); if(S.components.length || S.wires.length){ if(!confirm('Aktuelle Schaltung verwerfen? Nicht gespeicherte Änderungen gehen verloren.')) return; } S = newDoc(); resetExSel(); selection = []; hist.length = 0; redoStack.length = 0; updateUndo(); view = {x:80,y:80,z:1}; setTool('select'); applyView(); render(); showProps(); };
 document.getElementById('bSave').onclick = () => download(docName() + '.json', docJSON(), 'application/json');
 document.getElementById('bSvg').onclick = exportSVG;
 document.getElementById('bPng').onclick = exportPNG;
@@ -949,10 +1307,11 @@ window.addEventListener('beforeunload', e => { if(S.components.length || S.wires
    Gleichungssystem nach Modified Nodal Analysis, Newton-Raphson
    für Dioden, Transistoren und MOSFETs, Zeitschritte nach dem
    impliziten Euler-Verfahren (stabil, dämpft Schwingkreise leicht).
-   ICs und eigene Symbole werden nicht simuliert.
+   Simuliert werden außerdem NE555, CD4017 und die Logikbausteine
+   der 74er-Reihe (Verhaltensmodelle); andere ICs und eigene Symbole nicht.
    ============================================================ */
 const VT = 0.025852, GMIN = 1e-12, GNODE = 1e-10, RON = 0.01, GOFF = 1e-9;
-const SIM_TYPES = new Set(['battery','vsource','resistor','pot','capacitor','capacitor_pol','inductor','fuse','diode','zener','schottky','led','npn','pnp','nmos','pmos','switch','button_no','button_nc','switch_spdt','relay_spdt','relay_dpdt','lamp','speaker','voltmeter','ammeter','scope']);
+const SIM_TYPES = new Set(['battery','vsource','resistor','pot','capacitor','capacitor_pol','inductor','fuse','diode','zener','schottky','led','npn','pnp','nmos','pmos','switch','button_no','button_nc','switch_spdt','relay_spdt','relay_dpdt','lamp','speaker','voltmeter','ammeter','scope','seg7_cc','seg7_ca']);
 const SPEEDS = [10, 1, 0.1, 0.01, 1e-3, 1e-4, 1e-5];
 const SPEED_LABELS = ['10 s/s (Zeitraffer)', '1 s/s (Echtzeit)', '100 ms/s', '10 ms/s', '1 ms/s', '100 µs/s', '10 µs/s'];
 const CH_COLORS = ['#ffd400', '#3ad1ff', '#ff5ad1', '#7dff5a'];
@@ -1190,6 +1549,7 @@ function buildCircuit(){
   }
   const node = (c, id, u) => nodeOf.get(rootOf(c, id, u));
   const newNode = () => { nodeNames[nn] = ''; return nn++; };
+  let v5 = null; const vcc5 = () => { if(v5 === null){ v5 = newNode(); nodeNames[v5] = 'VCC (intern 5 V)'; els.push(elV(null, v5, -1, () => 5, 0)); vScale = Math.max(vScale, 5); } return v5; };
   const els = [], views = {}, glows = [], relayOn = {}, speakers = [], scopes = [];
   let vScale = 0, fmax = 0, fmin = Infinity;
   const UI = e => `U = ${fmtEng(e.v,'V')}\nI = ${fmtEng(e.i,'A')}\nP = ${fmtEng(e.v*e.i,'W')}`;
@@ -1208,6 +1568,9 @@ function buildCircuit(){
   for(const c of S.components){
     if(isLabelType(c.type)) continue;
     const is555 = c.type === 'ne555' || (c.type === 'ic' && /555/.test(c.value || '') && ['1','2','3','4','5','6','7','8'].every(id => ng.pinKeyOf[c.id + '|main|' + id]));
+    if(LOGIC[c.type]){
+      buildLogic(c, LOGIC[c.type], {n:(id, u) => node(c, id, u), P:(id, u) => [u || 'main', id], els, views, glows, warn, vcc5,
+        free:(id, u) => { const g = groups.get(rootOf(c, id, u)); return !g || (g.pins.length <= 1 && !g.labels.length); }}); continue; }
     if(!SIM_TYPES.has(c.type) && !is555 && c.type !== 'cd4017'){ warn.push(c.id + ' (' + ((LIB[c.type] || {}).name || c.type) + ') wird nicht simuliert, seine Anschlüsse bleiben offen.'); continue; }
     const n = (id, u) => node(c, id, u), P = (id, u) => [u || 'main', id], v = parseValue(c.value);
     const bad = what => err.push(c.id + ': ' + what + ' "' + c.value + '" ist nicht lesbar.');
@@ -1308,6 +1671,15 @@ function buildCircuit(){
           glows.push({kind:'led', c, unit:'main', color:m.color, b:() => Math.min(1, Math.sqrt(Math.max(0, av.i)/0.015))});
         }
         views[c.id] = {I:() => e.i, info:() => `U = ${fmtEng(e.v,'V')}\nI = ${fmtEng(e.i,'A')}\nP = ${fmtEng(e.v*e.i,'W')}` + (e.i > 1e-4 ? '\nleitet' : e.v < 0 ? '\nsperrt' : '')}; break; }
+      case 'seg7_cc': case 'seg7_ca': {
+        const m = ledModel(c.value), ca = c.type === 'seg7_ca', com = n('COM'), segs = [];
+        for(const k of ['a','b','c','d','e','f','g','dp']){
+          const sn = n(k), an = ca ? com : sn, kn = ca ? sn : com, e = elD(c, an, kn, m, ca ? P('COM') : P(k), ca ? P(k) : P('COM'), newNode()), av = {i:0};
+          e.after = cx => { av.i += (e.i - av.i)*Math.min(1, cx.dt/0.02); if(e.i > 0.04) sim.rt.set(c.id + k, c.id + ' Segment ' + k + ': ' + fmtEng(e.i,'A') + ' sind zu viel – Vorwiderstand?'); else sim.rt.delete(c.id + k); };
+          els.push(e, elC(c, an, kn, 30e-12)); segs.push({k, e, av});
+          glows.push({kind:'seg', c, unit:'main', seg:k, color:m.color, b:() => Math.min(1, Math.sqrt(Math.max(0, av.i)/0.01))});
+        }
+        views[c.id] = {info:() => 'leuchtet: ' + (segs.filter(q => q.av.i > 3e-4).map(q => q.k).join(' ') || '–') + '\n' + segs.map(q => q.k + ' ' + fmtEng(q.e.i,'A')).join('  ')}; break; }
       case 'npn': case 'pnp': {
         const m = lookupModel(BJT_MODELS, c.value) || {Is:1e-14, Bf:200, Br:5}; m.Is *= 1 + (Math.random() - 0.5)*2e-3;   // winzige Streuung, damit Kippstufen anschwingen
         const e = elQ(c, n('C'), n('B'), n('E'), m, c.type === 'npn' ? 1 : -1); els.push(e, elC(c, n('B'), n('E'), 12e-12), elC(c, n('B'), n('C'), 4e-12));   // Sperrschichtkapazitäten
@@ -1385,6 +1757,58 @@ function build4017(c, n, P, els, views, glows){
   views[c.id] = {info:() => `Zählerstand ${st.cnt}: Q${st.cnt} ist high\nCO ${st.cnt < 5 ? 'high' : 'low'}\nTakt ${st.clk ? 'high' : 'low'}`};
 }
 
+/* ---------- Logikbausteine 74xx (Verhaltensmodell) ----------
+   Ausgänge sind Gegentaktstufen mit 50 Ω nach VCC bzw. GND (wie 74HC), offene Kollektoren
+   ziehen nur nach GND, Tri-State-Ausgänge sind dann hochohmig. Eingänge haben 10 MΩ nach
+   VCC, offene Eingänge gelten deshalb als high (wie bei TTL). Schaltschwelle ist die halbe
+   Versorgung mit etwas Hysterese, Schmitt-Trigger 36 % / 60 %. Nach jedem Zeitschritt wird
+   die Logik neu ausgewertet – jedes Gatter verzögert also um einen Zeitschritt.
+   Sind VCC und GND nicht angeschlossen, versorgt eine interne 5-V-Quelle den Baustein
+   (wie die verborgenen Versorgungspins in KiCad). */
+function buildLogic(c, L, x){
+  const {n, P, els, views, glows} = x, unitOf = {};
+  for(const u in c.units) for(const p of udef(c, u).pins) unitOf[p.id] = u;
+  const st = {lv:{}, pl:{}, out:{}, s:{}, pw:false, sp:0};
+  const fv = x.free(L.vcc, unitOf[L.vcc]), fg = x.free(L.gnd, unitOf[L.gnd]), hidden = fv && fg;
+  const vdd = fv ? x.vcc5() : n(L.vcc, unitOf[L.vcc]), vss = fg ? -1 : n(L.gnd, unitOf[L.gnd]);
+  const Pv = fv ? null : P(L.vcc, unitOf[L.vcc]), Pg = fg ? null : P(L.gnd, unitOf[L.gnd]);
+  if(fv !== fg) x.warn.push(c.id + ': ' + (fv ? 'VCC' : 'GND') + ' ist nicht angeschlossen' + (fv ? ' – nehme intern 5 V.' : ' – nehme Masse.'));
+  const node = {}, sigs = L.sigs.filter(sg => c.units[sg.unit]);
+  for(const sg of sigs) node[sg.key] = n(sg.id, sg.unit);
+  const RO = 50, RH = L.rh || RO;
+  for(const sg of sigs){
+    const k = sg.key, nd = node[k];
+    if(sg.out){ const pp = P(sg.id, sg.unit);
+      if(!sg.oc) els.push(elG(c, vdd, nd, () => st.out[k] === 1 ? 1/RH : GOFF, Pv, pp));
+      els.push(elG(c, nd, vss, () => st.out[k] === 0 ? 1/RO : GOFF, pp, Pg)); }
+    if(!sg.out || L.bi) els.push(elG(c, vdd, nd, () => 1e-7, null, null));
+  }
+  const E = {rise:k => !st.settle && st.lv[k] === true && st.pl[k] === false, fall:k => !st.settle && st.lv[k] === false && st.pl[k] === true};
+  const A = {v:() => 0, vcc:5, comp:c};
+  const evaluate = (cx, first) => {
+    const V = i => vx(cx.x, i), lo = V(vss), sp = V(vdd) - lo;
+    st.pl = st.lv; st.lv = {}; st.sp = sp;
+    if(!(sp > 2)){ st.pw = false; for(const sg of sigs){ st.lv[sg.key] = false; if(sg.out) st.out[sg.key] = null; } return; }
+    st.pw = true;
+    const hi = L.st ? 0.6 : 0.52, lw = L.st ? 0.36 : 0.48;
+    for(const sg of sigs){ const r = (V(node[sg.key]) - lo)/sp; st.lv[sg.key] = st.pl[sg.key] ? r > lw : r > hi; }
+    A.v = k => V(node[k]) - lo; A.vcc = sp;
+    const o = L.f(st.lv, st.s, E, A);
+    // Gatter schalten mit leicht streuender Verzögerung (1 … 2 Zeitschritte), damit symmetrische
+    // Schaltungen wie ein RS-Flipflop aus zwei NANDs nicht endlos im Gleichtakt kippen
+    for(const k in o){ const v = o[k] === null ? null : o[k] ? 1 : 0; if(L.gate && !first && v !== st.out[k] && Math.random() < 0.3) continue; st.out[k] = v; }
+  };
+  els.push({comp:c, pi:[], logic:true, stamp(){}, accept(){}, settle(cx){ st.settle = true; evaluate(cx, true); st.settle = false; }, init(cx){ evaluate(cx, true); }, after(cx){ evaluate(cx); }});
+  for(const sg of sigs) glows.push({kind:'pin', c, unit:sg.unit, pin:sg.id, color:sg.out ? '#ffd400' : '#6fd0ff', b:() => st.pw && st.lv[sg.key] ? 1 : 0});
+  const lvl = sg => st.out[sg.key] === null && sg.out && !sg.oc ? 'Z' : st.lv[sg.key] ? 'H' : 'L';
+  const multi = new Set(sigs.map(sg => sg.unit)).size > 1;
+  const list = arr => arr.map(sg => (L.gate ? 'Pin ' + sg.id : multi ? sg.key : sg.disp) + '=' + lvl(sg)).join('  ');
+  views[c.id] = {info:() => {
+    if(!st.pw) return 'ohne Versorgung (VCC – GND unter 2 V)';
+    return `Versorgung ${fmtEng(st.sp, 'V')}${hidden ? ' (intern, VCC/GND offen)' : ''}` + (L.info ? '\n' + L.info(st.s) : '') +
+      `\nEingänge: ${list(sigs.filter(sg => !sg.out))}\nAusgänge: ${list(sigs.filter(sg => sg.out))}\n(H = high, L = low, Z = hochohmig)`; }};
+}
+
 /* ---------- Rechnen ---------- */
 function newton(ck, c){
   const n = ck.NM;
@@ -1430,6 +1854,9 @@ function dcOperatingPoint(){
   let ok = newton(ck, c);
   if(!ok && !ck.singular){ c.x = new Float64Array(ck.NM); ok = true; for(let s = 1; s <= 20 && ok; s++){ c.scale = s/20; ok = newton(ck, c); } }
   if(!ok){ for(const e of ck.els){ if('vd' in e) e.vd = 0; if('be' in e){ e.be = 0; e.bc = 0; } if('gs' in e) e.gs = 0; } return false; }
+  // Logikbausteine im Arbeitspunkt einschwingen lassen (ohne Taktflanken), damit der erste Takt saubere Pegel sieht
+  const lg = ck.els.filter(e => e.logic);
+  for(let k = 0; k < 16 && lg.length; k++){ for(const e of lg) e.settle(c); const xo = c.x; if(!newton(ck, c)){ c.x = xo; break; } }
   sim.x = c.x;
   for(const e of ck.els){ if(e.init) e.init(c); }
   return true;
@@ -1536,7 +1963,9 @@ function setupSimLayer(){
       const rg = el('radialGradient', {id:'simGl' + i}, defs);
       el('stop', {offset:'0%', 'stop-color':g.color, 'stop-opacity':0.95}, rg); el('stop', {offset:'45%', 'stop-color':g.color, 'stop-opacity':0.55}, rg); el('stop', {offset:'100%', 'stop-color':g.color, 'stop-opacity':0}, rg);
       g.elm = el('circle', {cx:0, cy:0, r:g.kind === 'led' ? 24 : 30, fill:`url(#simGl${i})`, opacity:0}, gg);
-    } else if(g.kind === 'coil') g.elm = el('rect', {x:-10, y:-20, width:20, height:40, fill:g.color, opacity:0}, gg);
+    } else if(g.kind === 'seg'){ if(g.seg === 'dp') g.elm = el('circle', {cx:28, cy:46, r:5, fill:g.color, opacity:0}, gg);
+      else { const q = SEG7[g.seg]; g.elm = el('line', {x1:q[0], y1:q[1], x2:q[2], y2:q[3], stroke:g.color, 'stroke-width':7, 'stroke-linecap':'round', opacity:0}, gg); } }
+    else if(g.kind === 'coil') g.elm = el('rect', {x:-10, y:-20, width:20, height:40, fill:g.color, opacity:0}, gg);
     else if(g.kind === 'pin'){ const pp = unitPins(g.c, g.unit).find(q => q.id === g.pin); if(pp) g.elm = el('circle', {cx:pp.pos[0], cy:pp.pos[1], r:5, fill:g.color, stroke:'#7a5a00', 'stroke-width':1, opacity:0, 'pointer-events':'none'}, L); }
     else if(g.kind === 'note'){ const pp = unitXf(u, 22, -2); g.elm = el('text', {x:pp[0], y:pp[1], fill:'#0a6e8a', 'font-size':14, 'font-weight':'bold', 'font-family':FONT, 'pointer-events':'none'}, L); }
     else if(g.kind === 'meter'){   // Digitalanzeige an der Stelle des Werts
@@ -2248,6 +2677,171 @@ const EXAMPLES = [
     b.w(b.p(v, '+'), [100, 180], b.p(c, '1')); b.w([160, 180], b.p(v1, '+'));
     b.w(b.p(c, '2'), [590, 180], [590, 250], b.p(osc, 'CH2')); b.w([320, 180], b.p(r, '1')); b.w([420, 180], b.p(v2, '+'));
     b.w([130, 180], [130, 120], [600, 120], [600, 230], b.p(osc, 'CH1')); b.w([540, 180], [540, 160]); b.lbl([540, 160], 'Aus');
+   }},  {title:'Logikgatter: AND, OR und XOR (74HC08, 74HC32, 74HC86)', text:[
+    'Mit S1 und S2 die Eingänge A und B auf high (5 V) oder low (0 V) schalten. R1 und R2 ziehen offene Eingänge auf low.',
+    'Die LEDs zeigen die Ausgänge: AND nur wenn beide high sind, OR wenn mindestens einer, XOR wenn genau einer high ist.',
+    'Die Gatter sind über Netznamen A und B verbunden. VCC und GND der ICs (Einheit E) sind offen – dann versorgt die',
+    'Simulation sie intern mit 5 V, wie die verborgenen Versorgungspins in KiCad. Gelbe Punkte = Ausgang high, blaue = Eingang high.'],
+   build(b){
+    const s1 = b.add('switch', 100, 100), s2 = b.add('switch', 100, 260), r1 = b.add('resistor', 160, 150, {rot:90, value:'10k'}), r2 = b.add('resistor', 160, 310, {rot:90, value:'10k'});
+    b.pwr(b.p(s1, '1'), '+5V'); b.pwr(b.p(s2, '1'), '+5V'); b.gnd(b.p(r1, '2')); b.gnd(b.p(r2, '2'));
+    b.w(b.p(s1, '2'), [160, 100], b.p(r1, '1')); b.w(b.p(s2, '2'), [160, 260], b.p(r2, '1'));
+    b.lbl([160, 100], 'A'); b.lbl([160, 260], 'B');
+    ['ttl7408', 'ttl7432', 'ttl7486'].forEach((t, k) => {
+      const x = 380 + 300*k, u = b.add(t, x, 140), r = b.add('resistor', x + 70, 160, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', x + 130, 190, {rot:90, value:['rot', 'grün', 'gelb'][k]});
+      u.units.p.x = x + 130; u.units.p.y = 320;
+      const i1 = b.p(u, '1', 'a'), i2 = b.p(u, '2', 'a');
+      b.w(i1, [i1[0] - 30, i1[1]]); b.w(i2, [i2[0] - 30, i2[1]]);
+      b.add('netlabel', i1[0] - 30, i1[1], {value:'A', mirror:true}); b.add('netlabel', i2[0] - 30, i2[1], {value:'B', mirror:true});
+      b.w(b.p(u, '3', 'a'), b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.gnd(b.p(d, 'K'));
+    });
+   }},
+  {title:'RS-Flipflop aus zwei NAND-Gattern (74HC00)', text:[
+    'Zwei über Kreuz gekoppelte NAND-Gatter merken sich einen Zustand – das einfachste Speicherelement.',
+    'S1 (Setzen) kurz drücken: Q wird high und bleibt es auch nach dem Loslassen. S2 (Rücksetzen) drücken: Q wird low.',
+    'Die Eingänge sind low-aktiv: R1 und R2 halten sie auf high, der Taster zieht sie auf low. Beide gleichzeitig drücken',
+    'ist der verbotene Zustand – Q und Q̄ sind dann beide high, nach dem Loslassen gewinnt zufällig eines der Gatter.'],
+   build(b){
+    const u = b.add('ttl7400', 400, 180); u.units.p.x = 680; u.units.p.y = 460;
+    const r1 = b.add('resistor', 200, 140, {rot:90, value:'10k'}), s1 = b.add('button_no', 200, 230, {rot:90, value:'Setzen', val:[-46, 4]}), r2 = b.add('resistor', 280, 270, {rot:90, value:'10k'}), s2 = b.add('button_no', 280, 360, {rot:90, value:'Rücksetzen', val:[-58, 4]});
+    b.pwr(b.p(r1, '1'), '+5V'); b.pwr(b.p(r2, '1'), '+5V'); b.gnd(b.p(s1, '2')); b.gnd(b.p(s2, '2'));
+    b.w(b.p(r1, '2'), b.p(s1, '1')); b.w(b.p(r2, '2'), b.p(s2, '1'));
+    b.w([200, 190], b.p(u, '1', 'a')); b.w([280, 310], b.p(u, '5', 'b'));
+    const i2 = b.p(u, '2', 'a'), i4 = b.p(u, '4', 'b');
+    b.w(i2, [330, i2[1]]); b.add('netlabel', 330, i2[1], {value:'Q̄', mirror:true});
+    b.w(i4, [330, i4[1]]); b.add('netlabel', 330, i4[1], {value:'Q', mirror:true});
+    [['3', 'a', 'Q', 'rot'], ['6', 'b', 'Q̄', 'grün']].forEach(([pin, un, name, col]) => {
+      const o = b.p(u, pin, un), r = b.add('resistor', 530, o[1], {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 590, o[1] + 30, {rot:90, value:col});
+      b.w(o, b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.gnd(b.p(d, 'K'));
+      b.w([470, o[1]], [470, o[1] - 30]); b.lbl([470, o[1] - 30], name);
+    });
+   }},
+  {title:'Zähler mit 7-Segment-Anzeige (555, 74LS90, 74LS47)', text:[
+    'Der 555 erzeugt einen Takt von etwa 1 Hz. Der 74LS90 zählt die fallenden Flanken dezimal von 0 bis 9 (QA ist über den',
+    'Netznamen QA mit CKB verbunden), der 74LS47 macht aus der BCD-Zahl die Segmente a … g der Anzeige.',
+    'Der 74LS47 hat Ausgänge mit offenem Kollektor und zieht die Segmente auf low – passend zur Anzeige mit gemeinsamer',
+    'Anode an +5 V. R3 … R9 begrenzen den Strom je Segment auf etwa 8 mA. LT, BI und RBI sind offen und damit high.',
+    'Ausprobieren: R0(1)/R0(2) an +5 V legen setzt auf 0, oder C1 kleiner machen für schnelleres Zählen.'],
+   speed:1,
+   build(b){
+    const u1 = b.add('ne555', 200, 300), r1 = b.add('resistor', 80, 170, {rot:90, value:'1k'}), r2 = b.add('resistor', 80, 250, {rot:90, value:'68k'});
+    const c1 = b.add('capacitor_pol', 80, 370, {value:'10u'}), c2 = b.add('capacitor', 220, 390, {value:'10n'});
+    b.pwr(b.p(u1, '8'), '+5V'); b.pwr(b.p(u1, '4'), '+5V'); b.pwr(b.p(r1, '1'), '+5V'); b.gnd(b.p(u1, '1')); b.gnd(b.p(c1, '-')); b.gnd(b.p(c2, '2'));
+    b.w(b.p(r1, '2'), b.p(r2, '1')); b.w([80, 210], [110, 210], [110, 280], b.p(u1, '7'));
+    b.w(b.p(u1, '6'), [120, 300], [120, 320], b.p(u1, '2')); b.w(b.p(r2, '2'), [80, 310], [120, 310]); b.w([80, 310], b.p(c1, '+'));
+    b.w(b.p(u1, '5'), b.p(c2, '1'));
+    const u2 = b.add('ttl7490', 420, 300); b.pwr(b.p(u2, '5'), '+5V'); b.gnd(b.p(u2, '10'));
+    b.w(b.p(u1, '3'), [280, 300], [280, 250], b.p(u2, '14'));
+    b.w(b.p(u2, '1'), [330, 270]); b.add('netlabel', 330, 270, {value:'QA', mirror:true});
+    b.w(b.p(u2, '2'), [340, 290], [340, 370]); b.w(b.p(u2, '3'), [340, 310]); b.w(b.p(u2, '6'), [340, 330]); b.w(b.p(u2, '7'), [340, 350]); b.gnd([340, 370]);
+    const u3 = b.add('ttl7447', 640, 300); b.pwr(b.p(u3, '16'), '+5V'); b.gnd(b.p(u3, '8'));
+    [['12', '7', 530], ['9', '1', 540], ['8', '2', 550], ['11', '6', 560]].forEach(([q, a, xb]) => { const p = b.p(u2, q), t = b.p(u3, a); b.w(p, [xb, p[1]], [xb, t[1]], t); });
+    b.w([500, 250], [500, 220]); b.lbl([500, 220], 'QA');
+    const ds = b.add('seg7_ca', 920, 310, {value:'rot'});
+    const bend1 = [710, 720, 730, 740, 730, 720, 710], bend2 = [850, 840, 830, 820, 830, 840, 850];
+    ['13', '12', '11', '10', '9', '15', '14'].forEach((pin, k) => {
+      const yr = 190 + 40*k, o = b.p(u3, pin), t = b.p(ds, 'abcdefg'[k]), r = b.add('resistor', 780, yr, {value:'330', ref:[-8, -12], val:[18, -12]});
+      b.w(o, [bend1[k], o[1]], [bend1[k], yr], b.p(r, '1')); b.w(b.p(r, '2'), [bend2[k], yr], [bend2[k], t[1]], t);
+    });
+    b.w(b.p(ds, 'COM'), [920, 440], [970, 440]); b.pwr([970, 440], '+5V');
+   }},
+  {title:'Taktgeber mit 74HC14 und Binärzähler 74HC393', text:[
+    'Ein Schmitt-Trigger-Inverter mit R1 und C1 schwingt von selbst: Der Ausgang lädt und entlädt C1 über R1, bis die',
+    'Eingangsspannung die obere bzw. untere Schaltschwelle erreicht (Hysterese). Periode etwa R · C ≈ 0,7 s.',
+    'Der 74HC393 zählt die fallenden Flanken binär: QA halbiert den Takt, QB viertelt ihn usw. – die LEDs zeigen 0 … 15.',
+    'Tipp: Messspitzen an Pin 1 (Kondensator) und Pin 2 (Takt) legen und den Verlauf im Oszilloskop ansehen.'],
+   speed:1,
+   build(b){
+    const u1 = b.add('ttl7414', 300, 180); u1.units.p.x = 180; u1.units.p.y = 420;
+    const r1 = b.add('resistor', 300, 120, {value:'680k'}), c1 = b.add('capacitor', 240, 250, {value:'1u', ref:[-30, -6], val:[-30, 12]});
+    b.w(b.p(u1, '2', 'a'), [360, 200], [360, 120], b.p(r1, '2')); b.w(b.p(r1, '1'), [240, 120], [240, 200], b.p(u1, '1', 'a'));
+    b.w([240, 200], b.p(c1, '1')); b.gnd(b.p(c1, '2'));
+    const u2 = b.add('ttl74393', 560, 150); u2.units.p.x = 560; u2.units.p.y = 480;
+    b.w([360, 200], [430, 200], [430, 170], b.p(u2, '1', 'a')); b.w(b.p(u2, '2', 'a'), [480, 190], [480, 240]); b.gnd([480, 240]);
+    const xb = [640, 650, 650, 640];
+    ['3', '4', '5', '6'].forEach((pin, k) => {
+      const yr = 140 + 40*k, o = b.p(u2, pin, 'a'), r = b.add('resistor', 700, yr, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 790, yr, {value:['rot', 'gelb', 'grün', 'blau'][k], ref:[-12, -14], val:[78, 5]});
+      b.w(o, [xb[k], o[1]], [xb[k], yr], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [840, yr]);
+    });
+    b.w([840, 140], [840, 280]); b.gnd([840, 280]);
+   }},
+  {title:'Programmzähler und ROM: Lauflicht (74HC161, 28C16)', text:[
+    'Das Herz jedes TTL-Rechners: Ein Programmzähler (74HC161) zählt im Takt des 555 die Adressen 0 … 15 hoch, das',
+    'EEPROM 28C16 gibt das Byte an dieser Adresse auf seinen Datenleitungen D0 … D7 aus. Die LEDs zeigen das Byte.',
+    'Der ROM-Inhalt ist ein Lauflicht. U3 anklicken: Im Feld „Inhalt“ stehen die Bytes in Hex – ändern und neu starten.',
+    'A4 … A10, CE und OE liegen auf GND, WE ist offen und damit high: das ROM wird nur gelesen. Am 161 sind LOAD, CLR,',
+    'ENP und ENT offen (high), er zählt also frei. Mit RCO und einem zweiten 161 wird daraus ein 8-Bit-Zähler.'],
+   speed:1,
+   build(b){
+    const u1 = b.add('ne555', 200, 300), r1 = b.add('resistor', 80, 170, {rot:90, value:'1k'}), r2 = b.add('resistor', 80, 250, {rot:90, value:'33k'});
+    const c1 = b.add('capacitor_pol', 80, 370, {value:'10u'}), c2 = b.add('capacitor', 220, 390, {value:'10n'});
+    b.pwr(b.p(u1, '8'), '+5V'); b.pwr(b.p(u1, '4'), '+5V'); b.pwr(b.p(r1, '1'), '+5V'); b.gnd(b.p(u1, '1')); b.gnd(b.p(c1, '-')); b.gnd(b.p(c2, '2'));
+    b.w(b.p(r1, '2'), b.p(r2, '1')); b.w([80, 210], [110, 210], [110, 280], b.p(u1, '7'));
+    b.w(b.p(u1, '6'), [120, 300], [120, 320], b.p(u1, '2')); b.w(b.p(r2, '2'), [80, 310], [120, 310]); b.w([80, 310], b.p(c1, '+'));
+    b.w(b.p(u1, '5'), b.p(c2, '1'));
+    const pc = b.add('ttl74161', 440, 300); b.pwr(b.p(pc, '16'), '+5V'); b.gnd(b.p(pc, '8'));
+    b.w(b.p(u1, '3'), [320, 300], [320, 380], b.p(pc, '2'));
+    const rom = b.add('ttl28C16', 620, 350); rom.rom = '; Lauflicht hin und zurück\n00: 01 02 04 08 10 20 40 80\n08: 80 40 20 10 08 04 02 01';
+    b.pwr(b.p(rom, '24'), '+5V'); b.gnd(b.p(rom, '12'));
+    [['14', '8'], ['13', '7'], ['12', '6'], ['11', '5']].forEach(([q, a]) => b.w(b.p(pc, q), b.p(rom, a)));
+    const gp = ['4', '3', '2', '1', '23', '22', '19', '18', '20'].map(id => b.p(rom, id)), bx = gp[0][0] - 20, yl = gp[gp.length - 1][1];
+    b.w([bx, gp[0][1]], [bx, yl]); gp.forEach(q => b.w(q, [bx, q[1]])); b.gnd([bx, yl]);
+    ['9', '10', '11', '13', '14', '15', '16', '17'].forEach((id, k) => { const q = b.p(rom, id); b.w(q, [q[0] + 20, q[1]]); b.lbl([q[0] + 20, q[1]], 'D' + k);
+      const y = 200 + 40*k, r = b.add('resistor', 850, y, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 910, y, {value:'rot', ref:[82, 5], val:[118, 5]});
+      b.add('netlabel', 790, y, {value:'D' + k, mirror:true}); b.w([790, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [960, y]); });
+    b.w([960, 200], [960, 480]); b.gnd([960, 480]);
+   }},
+  {title:'Minimalrechner aus 74ern (4 Bit, Programm im EEPROM)', text:[
+    'Ein vollständiger kleiner Rechner: Programmzähler 74HC161 → Programmspeicher 28C16 → Akku 74LS173 mit Addierer 74HC283 und',
+    'Multiplexer 74HC157 → Ausgaberegister 74LS173 mit LEDs. Jeder Takt führt einen Befehl aus, alle Register schalten gemeinsam.',
+    'Befehlsbyte: Bits 3 … 0 = Zahl N, Bit 4 ~LA (0 = Akku laden), Bit 5 SEL (1 = N, 0 = Akku + N), Bit 6 ~LO (0 = Ausgabe), Bit 7 ~J (0 = Sprung).',
+    'Damit gibt es LDI n = En (Akku = n), ADD n = Cn (Akku += n), OUT = B0, JMP n = 7n, NOP = F0 – kein Befehlsdekoder nötig.',
+    'Das Programm zählt: 00: E0 B0 C1 71. U3 (EEPROM) anklicken, Inhalt ändern (z. B. C3 statt C1) und neu starten. Taster S1 = Reset.',
+    'Verdrahtet ist über Netznamen; Akku Q0 … Q3 und Ausgabe O0 … O3 lassen sich als Messspitze anklicken.'],
+   speed:1,
+   build(b){
+    // Netzname an einen Pin: kurze Leitung nach außen, Fahne zeigt vom Baustein weg
+    const L = (c, pin, name) => { const q = b.p(c, pin), left = q[0] < c.units.main.x, e = [q[0] + (left ? -20 : 20), q[1]]; b.w(q, e); b.add('netlabel', e[0], e[1], {value:name, mirror:left}); };
+    // mehrere linke Pins über eine Sammelleitung an GND
+    const G = (c, pins) => { const ps = pins.map(id => b.p(c, id)), bx = ps[0][0] - 20, y1 = ps[ps.length - 1][1]; b.w([bx, ps[0][1]], [bx, y1]); ps.forEach(q => b.w(q, [bx, q[1]])); b.gnd([bx, y1]); };
+    const g1 = (c, pin) => { const q = b.p(c, pin); b.w(q, [q[0] - 20, q[1]]); b.gnd([q[0] - 20, q[1]]); };
+    const pw = c => { const d = LOGIC[c.type]; b.pwr(b.p(c, d.vcc), '+5V'); b.gnd(b.p(c, d.gnd)); };
+    // Takt
+    const u1 = b.add('ne555', 200, 300), r1 = b.add('resistor', 80, 170, {rot:90, value:'1k'}), r2 = b.add('resistor', 80, 250, {rot:90, value:'33k'});
+    const c1 = b.add('capacitor_pol', 80, 370, {value:'10u'}), c2 = b.add('capacitor', 220, 390, {value:'10n'});
+    b.pwr(b.p(u1, '8'), '+5V'); b.pwr(b.p(u1, '4'), '+5V'); b.pwr(b.p(r1, '1'), '+5V'); b.gnd(b.p(u1, '1')); b.gnd(b.p(c1, '-')); b.gnd(b.p(c2, '2'));
+    b.w(b.p(r1, '2'), b.p(r2, '1')); b.w([80, 210], [110, 210], [110, 280], b.p(u1, '7'));
+    b.w(b.p(u1, '6'), [120, 300], [120, 320], b.p(u1, '2')); b.w(b.p(r2, '2'), [80, 310], [120, 310]); b.w([80, 310], b.p(c1, '+'));
+    b.w(b.p(u1, '5'), b.p(c2, '1')); b.w(b.p(u1, '3'), [280, 300]); b.lbl([280, 300], 'CLK');
+    // Reset
+    const rr = b.add('resistor', 200, 580, {rot:90, value:'10k'}), sr = b.add('button_no', 200, 670, {rot:90, value:'Reset', val:[-40, 4]});
+    b.pwr(b.p(rr, '1'), '+5V'); b.gnd(b.p(sr, '2')); b.w(b.p(rr, '2'), b.p(sr, '1')); b.w([200, 620], [230, 620]); b.lbl([230, 620], 'RES');
+    // Programmzähler
+    const pc = b.add('ttl74161', 480, 300); pw(pc);
+    [['3', 'N0'], ['4', 'N1'], ['5', 'N2'], ['6', 'N3'], ['9', 'J'], ['1', 'RES'], ['2', 'CLK']].forEach(([p, n]) => L(pc, p, n));
+    [['14', 'A0'], ['13', 'A1'], ['12', 'A2'], ['11', 'A3']].forEach(([p, n]) => L(pc, p, n));
+    // Programmspeicher
+    const rom = b.add('ttl28C16', 780, 350); pw(rom);
+    rom.rom = '; Bit 7 ~J, 6 ~LO, 5 SEL, 4 ~LA, 3..0 Zahl\n00: E0   ; LDI 0  Akku = 0\n01: B0   ; OUT    Ausgabe = Akku\n02: C1   ; ADD 1  Akku = Akku + 1\n03: 71   ; JMP 1';
+    ['8', '7', '6', '5'].forEach((p, k) => L(rom, p, 'A' + k)); G(rom, ['4', '3', '2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'N0'], ['10', 'N1'], ['11', 'N2'], ['13', 'N3'], ['14', 'LA'], ['15', 'SEL'], ['16', 'LO'], ['17', 'J']].forEach(([p, n]) => L(rom, p, n));
+    // Addierer und Multiplexer
+    const add = b.add('ttl74283', 480, 720); pw(add);
+    [['5', 'Q0'], ['3', 'Q1'], ['14', 'Q2'], ['12', 'Q3'], ['6', 'N0'], ['2', 'N1'], ['15', 'N2'], ['11', 'N3']].forEach(([p, n]) => L(add, p, n)); g1(add, '7');
+    [['4', 'S0'], ['1', 'S1'], ['13', 'S2'], ['10', 'S3']].forEach(([p, n]) => L(add, p, n));
+    const mux = b.add('ttl74157', 780, 780); pw(mux);
+    [['2', 'S0'], ['3', 'N0'], ['5', 'S1'], ['6', 'N1'], ['11', 'S2'], ['10', 'N2'], ['14', 'S3'], ['13', 'N3'], ['1', 'SEL']].forEach(([p, n]) => L(mux, p, n)); g1(mux, '15');
+    [['4', 'M0'], ['7', 'M1'], ['9', 'M2'], ['12', 'M3']].forEach(([p, n]) => L(mux, p, n));
+    // Akku und Ausgaberegister
+    const acc = b.add('ttl74173', 1080, 740), out = b.add('ttl74173', 1080, 330); pw(acc); pw(out);
+    [['14', 'M0'], ['13', 'M1'], ['12', 'M2'], ['11', 'M3'], ['7', 'CLK'], ['9', 'LA']].forEach(([p, n]) => L(acc, p, n)); G(acc, ['10', '15', '1', '2']);
+    [['3', 'Q0'], ['4', 'Q1'], ['5', 'Q2'], ['6', 'Q3']].forEach(([p, n]) => L(acc, p, n));
+    [['14', 'Q0'], ['13', 'Q1'], ['12', 'Q2'], ['11', 'Q3'], ['7', 'CLK'], ['9', 'LO']].forEach(([p, n]) => L(out, p, n)); G(out, ['10', '15', '1', '2']);
+    [['3', 'O0'], ['4', 'O1'], ['5', 'O2'], ['6', 'O3']].forEach(([p, n]) => L(out, p, n));
+    // Anzeige
+    for(let k = 0; k < 4; k++){ const y = 300 + 40*k, r = b.add('resistor', 1340, y, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 1400, y, {value:'grün', ref:[82, 5], val:[124, 5]});
+      b.add('netlabel', 1280, y, {value:'O' + k, mirror:true}); b.w([1280, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [1450, y]); }
+    b.w([1450, 300], [1450, 440]); b.gnd([1450, 440]);
    }},
 ];
 function exampleDoc(ex){
@@ -2266,9 +2860,9 @@ function exampleDoc(ex){
   const sel = document.getElementById('exSel');
   EXAMPLES.forEach((ex, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (i + 1) + '. ' + ex.title; sel.appendChild(o); });
   sel.onchange = () => {
-    const ex = EXAMPLES[+sel.value]; sel.value = ''; if(!ex) return;
+    const i = sel.value, ex = EXAMPLES[+i]; sel.value = sel.dataset.cur || ''; if(!ex) return;
     if((S.components.length || S.wires.length) && !confirm('Aktuelle Schaltung durch das Beispiel „' + ex.title + '“ ersetzen? Nicht gespeicherte Änderungen gehen verloren.')) return;
-    loadDoc(exampleDoc(ex)); document.getElementById('bZoomFit').click();
+    loadDoc(exampleDoc(ex)); sel.value = sel.dataset.cur = i; document.getElementById('bZoomFit').click();
     document.getElementById('hint').textContent = 'Beispiel „' + ex.title + '“ geladen – „Simulation“ starten zum Ausprobieren.';
   };
 })();
