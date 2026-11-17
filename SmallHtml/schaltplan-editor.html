@@ -2843,6 +2843,85 @@ const EXAMPLES = [
       b.add('netlabel', 1280, y, {value:'O' + k, mirror:true}); b.w([1280, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [1450, y]); }
     b.w([1450, 300], [1450, 440]); b.gnd([1450, 440]);
    }},
+  {title:'Universalrechner: Minimalrechner mit RAM und bedingtem Sprung', text:[
+    'Beispiel 32 plus zwei Dinge, die einen Rechner universell machen: ein Datenspeicher (RAM 74LS189, 16 × 4 Bit) und ein bedingter Sprung.',
+    'Das Carry-Flag (74HC74) merkt sich den Übertrag C4 des Addierers. JC n = 5n springt nur bei Carry (SEL = 0 während eines Sprungs),',
+    'JMP n = 7n springt immer: ~LOAD = ~J OR NOR(SEL, CF). ADD F zieht 1 ab und setzt Carry, wenn der Akku vorher nicht 0 war.',
+    'Ein zweites EEPROM (U4) liefert je Befehl zwei Steuerbits: Bit 0 ~MEM (0 = Operand aus RAM[n] statt n), Bit 1 ~WR (0 = Akku → RAM[n]).',
+    'Damit: LDA [n] = En/FE, ADD [n] = Cn/FE, STA [n] = Fn/FD. JC muss direkt nach ADD stehen.',
+    'Der 555 liefert F, U10B teilt durch 2 zu CLK. Geschrieben wird nur, wenn CLK high und F low ist (~WE = ~WR OR ~CLK OR F) – an keiner Flanke dieses Fensters ändert sich die Adresse.',
+    'Das Programm rechnet 3 × 5 durch wiederholtes Addieren und zeigt 3, 6, 9, 12, 15. Mit Zählern im RAM, ±1 und JC ist das eine Minsky-Registermaschine.'],
+   speed:1,
+   build(b){
+    const L = (c, pin, name, un) => { const u = un || 'main', q = b.p(c, pin, u), left = q[0] < c.units[u].x, e = [q[0] + (left ? -20 : 20), q[1]]; b.w(q, e); b.add('netlabel', e[0], e[1], {value:name, mirror:left}); };
+    const G = (c, pins) => { const ps = pins.map(id => b.p(c, id)), bx = ps[0][0] - 20, y1 = ps[ps.length - 1][1]; b.w([bx, ps[0][1]], [bx, y1]); ps.forEach(q => b.w(q, [bx, q[1]])); b.gnd([bx, y1]); };
+    const g1 = (c, pin) => { const q = b.p(c, pin); b.w(q, [q[0] - 20, q[1]]); b.gnd([q[0] - 20, q[1]]); };
+    const pw = c => { const d = LOGIC[c.type]; b.pwr(b.p(c, d.vcc), '+5V'); b.gnd(b.p(c, d.gnd)); };
+    // Takt
+    const u1 = b.add('ne555', 200, 300), r1 = b.add('resistor', 80, 170, {rot:90, value:'1k'}), r2 = b.add('resistor', 80, 250, {rot:90, value:'33k'});
+    const c1 = b.add('capacitor_pol', 80, 370, {value:'4u7'}), c2 = b.add('capacitor', 220, 390, {value:'10n'});
+    b.pwr(b.p(u1, '8'), '+5V'); b.pwr(b.p(u1, '4'), '+5V'); b.pwr(b.p(r1, '1'), '+5V'); b.gnd(b.p(u1, '1')); b.gnd(b.p(c1, '-')); b.gnd(b.p(c2, '2'));
+    b.w(b.p(r1, '2'), b.p(r2, '1')); b.w([80, 210], [110, 210], [110, 280], b.p(u1, '7'));
+    b.w(b.p(u1, '6'), [120, 300], [120, 320], b.p(u1, '2')); b.w(b.p(r2, '2'), [80, 310], [120, 310]); b.w([80, 310], b.p(c1, '+'));
+    b.w(b.p(u1, '5'), b.p(c2, '1')); b.w(b.p(u1, '3'), [280, 300]); b.lbl([280, 300], 'F');
+    // Reset
+    const rr = b.add('resistor', 200, 580, {rot:90, value:'10k'}), sr = b.add('button_no', 200, 670, {rot:90, value:'Reset', val:[-40, 4]});
+    b.pwr(b.p(rr, '1'), '+5V'); b.gnd(b.p(sr, '2')); b.w(b.p(rr, '2'), b.p(sr, '1')); b.w([200, 620], [230, 620]); b.lbl([230, 620], 'RES');
+    // Programmzähler (lädt bei ~LD = 0)
+    const pc = b.add('ttl74161', 480, 300); pw(pc);
+    [['3', 'N0'], ['4', 'N1'], ['5', 'N2'], ['6', 'N3'], ['9', 'LD'], ['1', 'RES'], ['2', 'CLK']].forEach(([p, n]) => L(pc, p, n));
+    [['14', 'A0'], ['13', 'A1'], ['12', 'A2'], ['11', 'A3']].forEach(([p, n]) => L(pc, p, n));
+    // Programmspeicher: Befehlsbyte
+    const rom = b.add('ttl28C16', 780, 350); pw(rom);
+    rom.rom = '; Bit 7 ~J, 6 ~LO, 5 SEL, 4 ~LA, 3..0 Zahl  (Steuerbits in U4)\n00: E3   ; LDI 3\n01: F0   ; STA [0]   a = 3\n02: E5   ; LDI 5\n03: F1   ; STA [1]   b = 5\n04: E0   ; LDI 0\n05: F2   ; STA [2]   p = 0\n06: E1   ; LDA [1]   Schleife\n07: CF   ; ADD F     b - 1, Carry wenn b > 0\n08: 5A   ; JC 0A\n09: 7F   ; JMP F     fertig\n0A: F1   ; STA [1]\n0B: E2   ; LDA [2]\n0C: C0   ; ADD [0]   p = p + a\n0D: B2   ; STA [2] + OUT\n0E: 76   ; JMP 6\n0F: 7F   ; JMP F     Halt';
+    ['8', '7', '6', '5'].forEach((p, k) => L(rom, p, 'A' + k)); G(rom, ['4', '3', '2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'N0'], ['10', 'N1'], ['11', 'N2'], ['13', 'N3'], ['14', 'LA'], ['15', 'SEL'], ['16', 'LO'], ['17', 'J']].forEach(([p, n]) => L(rom, p, n));
+    // Programmspeicher: Steuerbits
+    const rom2 = b.add('ttl28C16', 780, 1180); pw(rom2);
+    rom2.rom = '; Bit 0 ~MEM (0 = Operand aus RAM[n]), Bit 1 ~WR (0 = Akku -> RAM[n]), leer = FF\n01: FD   ; STA [0]\n03: FD   ; STA [1]\n05: FD   ; STA [2]\n06: FE   ; LDA [1]\n0A: FD   ; STA [1]\n0B: FE   ; LDA [2]\n0C: FE   ; ADD [0]\n0D: FD   ; STA [2] + OUT';
+    ['8', '7', '6', '5'].forEach((p, k) => L(rom2, p, 'A' + k)); G(rom2, ['4', '3', '2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'MEM'], ['10', 'WR']].forEach(([p, n]) => L(rom2, p, n));
+    // Addierer und Multiplexer (Akku + OP oder OP)
+    const add = b.add('ttl74283', 480, 720); pw(add);
+    [['5', 'Q0'], ['3', 'Q1'], ['14', 'Q2'], ['12', 'Q3'], ['6', 'OP0'], ['2', 'OP1'], ['15', 'OP2'], ['11', 'OP3']].forEach(([p, n]) => L(add, p, n)); g1(add, '7');
+    [['4', 'S0'], ['1', 'S1'], ['13', 'S2'], ['10', 'S3'], ['9', 'C4']].forEach(([p, n]) => L(add, p, n));
+    const mux = b.add('ttl74157', 780, 780); pw(mux);
+    [['2', 'S0'], ['3', 'OP0'], ['5', 'S1'], ['6', 'OP1'], ['11', 'S2'], ['10', 'OP2'], ['14', 'S3'], ['13', 'OP3'], ['1', 'SEL']].forEach(([p, n]) => L(mux, p, n)); g1(mux, '15');
+    [['4', 'M0'], ['7', 'M1'], ['9', 'M2'], ['12', 'M3']].forEach(([p, n]) => L(mux, p, n));
+    // Operandenwahl: RAM[n] (MEM = 0) oder n (MEM = 1)
+    const mux2 = b.add('ttl74157', 480, 1120); pw(mux2);
+    [['2', 'R0'], ['3', 'N0'], ['5', 'R1'], ['6', 'N1'], ['11', 'R2'], ['10', 'N2'], ['14', 'R3'], ['13', 'N3'], ['1', 'MEM']].forEach(([p, n]) => L(mux2, p, n)); g1(mux2, '15');
+    [['4', 'OP0'], ['7', 'OP1'], ['9', 'OP2'], ['12', 'OP3']].forEach(([p, n]) => L(mux2, p, n));
+    // Datenspeicher
+    const ram = b.add('ttl74189', 1080, 1150); pw(ram);
+    [['1', 'N0'], ['15', 'N1'], ['14', 'N2'], ['13', 'N3'], ['4', 'Q0'], ['6', 'Q1'], ['10', 'Q2'], ['12', 'Q3'], ['3', 'WE']].forEach(([p, n]) => L(ram, p, n)); g1(ram, '2');
+    [['5', 'RN0'], ['7', 'RN1'], ['9', 'RN2'], ['11', 'RN3']].forEach(([p, n]) => L(ram, p, n));
+    // 74189 gibt invertiert aus – 7404 dreht zurück
+    const inv = b.add('ttl7404', 1420, 1000);
+    [['1', '2', 'a'], ['3', '4', 'b'], ['5', '6', 'c'], ['9', '8', 'd']].forEach(([i, o, u], k) => { L(inv, i, 'RN' + k, u); L(inv, o, 'R' + k, u); });
+    // Carry-Flag, Taktteiler und Sprung-/Schreiblogik
+    const ff = b.add('ttl7474', 1720, 330);
+    [['2', 'C4'], ['3', 'CLK'], ['5', 'CF']].forEach(([p, n]) => L(ff, p, n, 'a'));
+    // zweite Hälfte: Taktteiler F / 2 = CLK
+    [['12', 'CLKN'], ['11', 'F'], ['9', 'CLK'], ['8', 'CLKN']].forEach(([p, n]) => L(ff, p, n, 'b'));
+    [['4', 'a'], ['1', 'a'], ['10', 'b'], ['13', 'b']].forEach(([p, u]) => { const q = b.p(ff, p, u); b.w(q, [q[0] - 20, q[1]]); b.pwr([q[0] - 20, q[1]], '+5V'); });
+    const nor = b.add('ttl7402', 1720, 620);
+    [['2', 'SEL'], ['3', 'CF'], ['1', 'JN']].forEach(([p, n]) => L(nor, p, n, 'a'));
+    const or = b.add('ttl7432', 1720, 1160);
+    [['1', 'J'], ['2', 'JN'], ['3', 'LD']].forEach(([p, n]) => L(or, p, n, 'a'));
+    [['4', 'WR'], ['5', 'CLKN'], ['6', 'W1']].forEach(([p, n]) => L(or, p, n, 'b'));
+    [['9', 'W1'], ['10', 'F'], ['8', 'WE']].forEach(([p, n]) => L(or, p, n, 'c'));
+    // Akku und Ausgaberegister
+    const acc = b.add('ttl74173', 1080, 740), out = b.add('ttl74173', 1080, 330); pw(acc); pw(out);
+    [['14', 'M0'], ['13', 'M1'], ['12', 'M2'], ['11', 'M3'], ['7', 'CLK'], ['9', 'LA']].forEach(([p, n]) => L(acc, p, n)); G(acc, ['10', '15', '1', '2']);
+    [['3', 'Q0'], ['4', 'Q1'], ['5', 'Q2'], ['6', 'Q3']].forEach(([p, n]) => L(acc, p, n));
+    [['14', 'Q0'], ['13', 'Q1'], ['12', 'Q2'], ['11', 'Q3'], ['7', 'CLK'], ['9', 'LO']].forEach(([p, n]) => L(out, p, n)); G(out, ['10', '15', '1', '2']);
+    [['3', 'O0'], ['4', 'O1'], ['5', 'O2'], ['6', 'O3']].forEach(([p, n]) => L(out, p, n));
+    // Anzeige
+    for(let k = 0; k < 4; k++){ const y = 300 + 40*k, r = b.add('resistor', 1340, y, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 1400, y, {value:'grün', ref:[82, 5], val:[124, 5]});
+      b.add('netlabel', 1280, y, {value:'O' + k, mirror:true}); b.w([1280, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [1450, y]); }
+    b.w([1450, 300], [1450, 440]); b.gnd([1450, 440]);
+   }},
 ];
 function exampleDoc(ex){
   const comps = [], wires = [], texts = [], cnt = {};
