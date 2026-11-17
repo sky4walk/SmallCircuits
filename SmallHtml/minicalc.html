@@ -225,7 +225,7 @@
   <span>Mittelwert: <b id="stAvg">0</b></span>
   <span style="flex:1"></span>
   <a href="https://itzwieseltal.wordpress.com" target="_blank" rel="noopener" style="color:#3d7a6e;">itzwieseltal.wordpress.com</a>
-  <span style="opacity:.7" title="ods: natives LibreOffice-Format, Formeln + Formatierung bleiben vollständig erhalten. csv: nur Werte. MiniCalc: eigenes Format, nur hier lesbar.">Doppelklick/F2 = bearbeiten · Strg+C/V = kopieren/einfügen · Entf = löschen</span>
+  <span style="opacity:.7" title="ods: natives LibreOffice-Format, Formeln + Formatierung bleiben vollständig erhalten. csv: nur Werte. MiniCalc: eigenes Format, nur hier lesbar.">Doppelklick/F2 = bearbeiten (Pfeile im Feld) · Tippen + Pfeil = übernehmen · Strg+C/V = kopieren/einfügen · Entf = löschen</span>
 </div>
 
 <script>
@@ -1053,6 +1053,7 @@ let domRowHeads=[], domColHeads=[], domColEls=[];
 let active={r:0,c:0};
 let selRange={r1:0,c1:0,r2:0,c2:0};
 let editing=false;
+let editMode='edit'; // 'enter' = per Tippen begonnen (Pfeiltasten übernehmen), 'edit' = F2/Doppelklick (Pfeiltasten bewegen den Cursor)
 let isSelecting=false;
 let selAnchor={r:0,c:0};
 let isPointing=false;    // "Point-Mode": Zellbezüge per Klick in eine Formel einfügen
@@ -1616,7 +1617,8 @@ function onRowHeaderMouseDown(e){
 }
 
 /* ---------- Bearbeiten ---------- */
-function startEdit(r,c,initialText){
+function startEdit(r,c,initialText,mode){
+  editMode=mode||'edit';
   active={r,c}; selRange={r1:r,c1:c,r2:r,c2:c};
   ensureVisible(r,c);
   editing=true;
@@ -1633,7 +1635,7 @@ function placeCursorAtEnd(el){
   const range=document.createRange(); range.selectNodeContents(el); range.collapse(false);
   const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
 }
-function commitEdit(moveDir){
+function commitEdit(moveDir,extend){
   const {r,c}=active;
   const td=domCells[r][c];
   const newRaw=td.textContent;
@@ -1644,7 +1646,7 @@ function commitEdit(moveDir){
   td.classList.remove('editing');
   editing=false;
   recalcAndRender();
-  if(moveDir) moveActive(moveDir,false);
+  if(moveDir) moveActive(moveDir,!!extend);
   focusProxy();
 }
 function cancelEdit(){
@@ -1661,12 +1663,26 @@ function onGridEditKeydown(e){
   if(e.key==='Enter'){ e.preventDefault(); commitEdit(e.shiftKey?'up':'down'); }
   else if(e.key==='Tab'){ e.preventDefault(); commitEdit(e.shiftKey?'left':'right'); }
   else if(e.key==='Escape'){ e.preventDefault(); cancelEdit(); }
+  else if(e.key==='F2'){ e.preventDefault(); editMode = editMode==='enter' ? 'edit' : 'enter'; }
+  else if(['ArrowDown','ArrowUp','ArrowLeft','ArrowRight'].includes(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey){
+    // Wie Excel/LibreOffice Calc: im Eingabemodus übernehmen Pfeiltasten den Inhalt und wechseln die Zelle.
+    // Formeln (beginnen mit '=') und der Bearbeitungsmodus (F2/Doppelklick) behalten die Cursorsteuerung im Feld.
+    const td=domCells[active.r][active.c];
+    const isFormula=td.textContent.trim().startsWith('=');
+    if(editMode==='enter' && !isFormula){
+      e.preventDefault();
+      const dir = e.key==='ArrowDown'?'down':e.key==='ArrowUp'?'up':e.key==='ArrowLeft'?'left':'right';
+      commitEdit(dir, e.shiftKey);
+    }
+  }
 }
 
 /* ---------- Tastatur-Navigation (über clipProxy) ---------- */
 function clampRC(r,c){ return {r:Math.max(0,Math.min(ROWS-1,r)), c:Math.max(0,Math.min(COLS-1,c))}; }
 function moveActive(dir,extend){
-  let {r,c}=active;
+  // Beim Erweitern (Shift+Pfeil) wandert das freie Ende der Auswahl, der Anker bleibt stehen – wie in Excel/Calc
+  let {r,c}= extend ? {r:selRange.r2, c:selRange.c2} : active;
+  if(extend && !selAnchor) selAnchor={r:active.r,c:active.c};
   if(dir==='down') r++; else if(dir==='up') r--; else if(dir==='left') c--; else if(dir==='right') c++;
   const n=clampRC(r,c);
   if(extend) setSelection(selAnchor,n); else { selAnchor=n; setSelection(n,n); }
@@ -1696,7 +1712,7 @@ clipProxy.addEventListener('keydown', (e)=>{
   if((e.ctrlKey||e.metaKey) && !e.altKey && key.toLowerCase()==='y'){ e.preventDefault(); redo(); return; }
   if((e.ctrlKey||e.metaKey) && key.toLowerCase()==='a'){ e.preventDefault(); setSelection({r:0,c:0},{r:ROWS-1,c:COLS-1}); return; }
   if(e.ctrlKey||e.metaKey||e.altKey) return; // Copy/Cut/Paste laufen über native Events unten
-  if(key.length===1){ e.preventDefault(); startEdit(active.r,active.c,key); return; }
+  if(key.length===1){ e.preventDefault(); startEdit(active.r,active.c,key,'enter'); return; }
 });
 
 /* ---------- Zwischenablage ---------- */
