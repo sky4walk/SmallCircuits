@@ -251,7 +251,7 @@ function parseMem(txt, size, fill){
   return m;
 }
 const hexStr = (v, n) => (v | 0).toString(16).toUpperCase().padStart(n, '0');
-const memInfo = s => s.m ? `Adresse ${hexStr(s.a, 4)}: Daten ${hexStr(s.m[s.a | 0], 2)}` : '';
+const memInfo = s => { if(!s.m) return ''; const a = s.a | 0, r = a & ~15; return `Adresse ${hexStr(a, 4)}: Daten ${hexStr(s.m[a], 2)}\nZeile ${hexStr(r, 4)}: ${Array.from(s.m.slice(r, r + 16), v => hexStr(v, 2)).join(' ')}`; };
 const SEG7 = {a:[-8,-44,16,-44], b:[20,-40,20,-4], c:[20,4,20,40], d:[-8,44,16,44], e:[-12,4,-12,40], f:[-12,-40,-12,-4], g:[-8,0,16,0]};
 (function(){
   const r1 = v => Math.round(v*10)/10, LETTERS = 'abcdefgh';
@@ -2921,6 +2921,114 @@ const EXAMPLES = [
     for(let k = 0; k < 4; k++){ const y = 300 + 40*k, r = b.add('resistor', 1340, y, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', 1400, y, {value:'grün', ref:[82, 5], val:[124, 5]});
       b.add('netlabel', 1280, y, {value:'O' + k, mirror:true}); b.w([1280, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [1450, y]); }
     b.w([1450, 300], [1450, 440]); b.gnd([1450, 440]);
+   }},
+  {title:'Universelle Turingmaschine: Universalrechner mit Band und Indexregister', text:[
+    'Beispiel 33 plus Zeiger. Was zur UTM fehlte, ist indirekte Adressierung: Die Adresse kommt nicht mehr aus dem Befehl, sondern aus einem Register.',
+    'Der Kopf ist der Vor-/Rückwärtszähler 74191 (U18). Er adressiert das Band, ein SRAM 62256 (U19) mit 16 Zellen als Ring: links von Zelle 0 liegt Zelle F.',
+    'Das Indexregister X (U16) übernimmt Symbol + 2 · Zustand und adressiert das Regel-EEPROM U17: Seite 0 = Schreibsymbol, Seite 1 = Richtung (0 rechts, 1 links), Seite 2 = Folgezustand (0 = HALT).',
+    'U4 liefert jetzt acht Steuerbits: 0 ~MEM, 1 ~WR, 2 ~EXT (Operand vom Band bzw. aus der Tabelle), 3 ~WT (Akku → Band), 4 ~LX (X laden), 5 ~MV (Kopf bewegen, Richtung = Operand-Bit 0), 6/7 Tabellenseite.',
+    'Das Programm in U3/U4 ist der universelle Teil: 10 Befehle pro Schritt, es kennt keine bestimmte Turingmaschine. Welche läuft, steht nur in U17, die Eingabe steht in U19.',
+    'Geladen ist der Busy Beaver mit zwei Zuständen: Er schreibt vier Einsen und hält nach sechs Schritten. Weitere Maschinen stehen als Kommentar in U17 und U19.',
+    'LEDs: Zustand (0 = HALT), Kopfposition und das Symbol unter dem Kopf. U19 anklicken zeigt das ganze Band. Neustart der Simulation lädt das Band neu, Reset (S1) setzt nur PC und Kopf zurück.'],
+   speed:10,
+   build(b){
+    const L = (c, pin, name, un) => { const u = un || 'main', q = b.p(c, pin, u), left = q[0] < c.units[u].x, e = [q[0] + (left ? -20 : 20), q[1]]; b.w(q, e); b.add('netlabel', e[0], e[1], {value:name, mirror:left}); };
+    const G = (c, pins) => { const ps = pins.map(id => b.p(c, id)), bx = ps[0][0] - 20, y1 = ps[ps.length - 1][1]; b.w([bx, ps[0][1]], [bx, y1]); ps.forEach(q => b.w(q, [bx, q[1]])); b.gnd([bx, y1]); };
+    const GR = (c, pins) => { const ps = pins.map(id => b.p(c, id)), bx = ps[0][0] + 20, y1 = ps[ps.length - 1][1]; b.w([bx, ps[0][1]], [bx, y1]); ps.forEach(q => b.w(q, [bx, q[1]])); b.gnd([bx, y1]); };
+    const g1 = (c, pin) => { const q = b.p(c, pin); b.w(q, [q[0] - 20, q[1]]); b.gnd([q[0] - 20, q[1]]); };
+    const pw = c => { const d = LOGIC[c.type]; b.pwr(b.p(c, d.vcc), '+5V'); b.gnd(b.p(c, d.gnd)); };
+    const led = (x, y, net, col) => { const r = b.add('resistor', x + 60, y, {value:'330', ref:[-8, -12], val:[18, -12]}), d = b.add('led', x + 120, y, {value:col, ref:[82, 5], val:[124, 5]});
+      b.add('netlabel', x, y, {value:net, mirror:true}); b.w([x, y], b.p(r, '1')); b.w(b.p(r, '2'), b.p(d, 'A')); b.w(b.p(d, 'K'), [x + 170, y]); };
+    // Takt (wie Beispiel 33: F vom 555, CLK = F / 2)
+    const u1 = b.add('ne555', 200, 300), r1 = b.add('resistor', 80, 170, {rot:90, value:'1k'}), r2 = b.add('resistor', 80, 250, {rot:90, value:'33k'});
+    const c1 = b.add('capacitor_pol', 80, 370, {value:'10u'}), c2 = b.add('capacitor', 220, 390, {value:'10n'});
+    b.pwr(b.p(u1, '8'), '+5V'); b.pwr(b.p(u1, '4'), '+5V'); b.pwr(b.p(r1, '1'), '+5V'); b.gnd(b.p(u1, '1')); b.gnd(b.p(c1, '-')); b.gnd(b.p(c2, '2'));
+    b.w(b.p(r1, '2'), b.p(r2, '1')); b.w([80, 210], [110, 210], [110, 280], b.p(u1, '7'));
+    b.w(b.p(u1, '6'), [120, 300], [120, 320], b.p(u1, '2')); b.w(b.p(r2, '2'), [80, 310], [120, 310]); b.w([80, 310], b.p(c1, '+'));
+    b.w(b.p(u1, '5'), b.p(c2, '1')); b.w(b.p(u1, '3'), [280, 300]); b.lbl([280, 300], 'F');
+    // Reset: Programmzähler auf 0, Kopf auf Zelle 0
+    const rr = b.add('resistor', 200, 580, {rot:90, value:'10k'}), sr = b.add('button_no', 200, 670, {rot:90, value:'Reset', val:[-40, 4]});
+    b.pwr(b.p(rr, '1'), '+5V'); b.gnd(b.p(sr, '2')); b.w(b.p(rr, '2'), b.p(sr, '1')); b.w([200, 620], [230, 620]); b.lbl([230, 620], 'RES');
+    // Programmzähler (lädt bei ~LD = 0)
+    const pc = b.add('ttl74161', 480, 300); pw(pc);
+    [['3', 'N0'], ['4', 'N1'], ['5', 'N2'], ['6', 'N3'], ['9', 'LD'], ['1', 'RES'], ['2', 'CLK']].forEach(([p, n]) => L(pc, p, n));
+    [['14', 'A0'], ['13', 'A1'], ['12', 'A2'], ['11', 'A3']].forEach(([p, n]) => L(pc, p, n));
+    // Programmspeicher: Befehlsbyte
+    const rom = b.add('ttl28C16', 780, 350); pw(rom);
+    rom.rom = '; UTM-Interpreter. Bit 7 ~J, 6 ~LO, 5 SEL, 4 ~LA, 3..0 Zahl  (Steuerbits in U4)\n00: E1   ; LDI 1\n01: B0   ; STA [0] + OUT   Zustand q = 1\n02: E0   ; LDA T      Schleife: Akku = Symbol s unter dem Kopf\n03: C0   ; ADD [0]    s + q\n04: C0   ; ADD [0] →X X = s + 2q\n05: E0   ; LDA W[X]   Schreibsymbol\n06: F0   ; STA T      aufs Band schreiben\n07: F0   ; MOV D[X]   Kopf bewegen\n08: E0   ; LDA Q[X]   Folgezustand\n09: B0   ; STA [0] + OUT\n0A: CF   ; ADD F      Carry, wenn q > 0\n0B: 52   ; JC 2\n0C: 7C   ; JMP C      HALT';
+    ['8', '7', '6', '5'].forEach((p, k) => L(rom, p, 'A' + k)); G(rom, ['4', '3', '2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'N0'], ['10', 'N1'], ['11', 'N2'], ['13', 'N3'], ['14', 'LA'], ['15', 'SEL'], ['16', 'LO'], ['17', 'J']].forEach(([p, n]) => L(rom, p, n));
+    // Programmspeicher: Steuerbits
+    const rom2 = b.add('ttl28C16', 780, 1180); pw(rom2);
+    rom2.rom = '; Bit 0 ~MEM, 1 ~WR, 2 ~EXT, 3 ~WT, 4 ~LX, 5 ~MV, 7/6 Tabellenseite, leer = FF\n; Operand (~EXT ~MEM): 11 = n, 10 = RAM[n], 01 = Band, 00 = Tabelle[X]\n01: FD   ; STA [0]\n02: FB   ; LDA T\n03: FE   ; ADD [0]\n04: EE   ; ADD [0] →X\n05: 3A   ; LDA W[X]  Seite 0\n06: F7   ; STA T\n07: 5A   ; MOV D[X]  Seite 1\n08: BA   ; LDA Q[X]  Seite 2\n09: FD   ; STA [0]';
+    ['8', '7', '6', '5'].forEach((p, k) => L(rom2, p, 'A' + k)); G(rom2, ['4', '3', '2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'MEM'], ['10', 'WR'], ['11', 'EXT'], ['13', 'WT'], ['14', 'LX'], ['15', 'MV'], ['16', 'P0'], ['17', 'P1']].forEach(([p, n]) => L(rom2, p, n));
+    // Addierer und Multiplexer (Akku + OP oder OP)
+    const add = b.add('ttl74283', 480, 720); pw(add);
+    [['5', 'Q0'], ['3', 'Q1'], ['14', 'Q2'], ['12', 'Q3'], ['6', 'OP0'], ['2', 'OP1'], ['15', 'OP2'], ['11', 'OP3']].forEach(([p, n]) => L(add, p, n)); g1(add, '7');
+    [['4', 'S0'], ['1', 'S1'], ['13', 'S2'], ['10', 'S3'], ['9', 'C4']].forEach(([p, n]) => L(add, p, n));
+    const mux = b.add('ttl74157', 780, 780); pw(mux);
+    [['2', 'S0'], ['3', 'OP0'], ['5', 'S1'], ['6', 'OP1'], ['11', 'S2'], ['10', 'OP2'], ['14', 'S3'], ['13', 'OP3'], ['1', 'SEL']].forEach(([p, n]) => L(mux, p, n)); g1(mux, '15');
+    [['4', 'M0'], ['7', 'M1'], ['9', 'M2'], ['12', 'M3']].forEach(([p, n]) => L(mux, p, n));
+    // Operandenwahl 4 → 1: Tabelle[X], Band, RAM[n], n
+    [[0, 1180], [2, 1580]].forEach(([k, y]) => { const m = b.add('ttl74153', 480, y); pw(m);
+      [['6', 'TB' + k], ['5', 'T' + k], ['4', 'R' + k], ['3', 'N' + k], ['10', 'TB' + (k + 1)], ['11', 'T' + (k + 1)], ['12', 'R' + (k + 1)], ['13', 'N' + (k + 1)], ['14', 'MEM'], ['2', 'EXT']].forEach(([p, n]) => L(m, p, n));
+      L(m, '1', 'EN'); L(m, '15', 'EN'); [['7', 'OP' + k], ['9', 'OP' + (k + 1)]].forEach(([p, n]) => L(m, p, n)); });
+    b.add('netlabel', 300, 1900, {value:'EN'}); b.w([300, 1900], [300, 1920]); b.gnd([300, 1920]);
+    // Registerspeicher (Zustand q in RAM[0])
+    const ram = b.add('ttl74189', 1080, 1150); pw(ram);
+    [['1', 'N0'], ['15', 'N1'], ['14', 'N2'], ['13', 'N3'], ['4', 'Q0'], ['6', 'Q1'], ['10', 'Q2'], ['12', 'Q3'], ['3', 'WE']].forEach(([p, n]) => L(ram, p, n)); g1(ram, '2');
+    [['5', 'RN0'], ['7', 'RN1'], ['9', 'RN2'], ['11', 'RN3']].forEach(([p, n]) => L(ram, p, n));
+    // 74189 gibt invertiert aus – 7404 dreht zurück; U10E schaltet das Band beim Schreiben hochohmig
+    const inv = b.add('ttl7404', 1420, 1000);
+    [['1', '2', 'a'], ['3', '4', 'b'], ['5', '6', 'c'], ['9', '8', 'd']].forEach(([i, o, u], k) => { L(inv, i, 'RN' + k, u); L(inv, o, 'R' + k, u); });
+    L(inv, '11', 'WT', 'e'); L(inv, '10', 'OEN', 'e');
+    // Carry-Flag, Taktteiler und Sprung-/Schreiblogik
+    const ff = b.add('ttl7474', 1720, 330);
+    [['2', 'C4'], ['3', 'CLK'], ['5', 'CF']].forEach(([p, n]) => L(ff, p, n, 'a'));
+    [['12', 'CLKN'], ['11', 'F'], ['9', 'CLK'], ['8', 'CLKN']].forEach(([p, n]) => L(ff, p, n, 'b'));
+    [['4', 'a'], ['1', 'a'], ['10', 'b'], ['13', 'b']].forEach(([p, u]) => { const q = b.p(ff, p, u); b.w(q, [q[0] - 20, q[1]]); b.pwr([q[0] - 20, q[1]], '+5V'); });
+    const nor = b.add('ttl7402', 1720, 620);
+    [['2', 'SEL'], ['3', 'CF'], ['1', 'JN']].forEach(([p, n]) => L(nor, p, n, 'a'));
+    // Schreibfenster: CLK high und F low (W0 = ~CLK OR F); RAM: ~WE = ~WR OR W0, Band: ~WE = ~WT OR W0
+    const or = b.add('ttl7432', 1720, 1160);
+    [['1', 'J'], ['2', 'JN'], ['3', 'LD']].forEach(([p, n]) => L(or, p, n, 'a'));
+    [['4', 'CLKN'], ['5', 'F'], ['6', 'W0']].forEach(([p, n]) => L(or, p, n, 'b'));
+    [['9', 'WR'], ['10', 'W0'], ['8', 'WE']].forEach(([p, n]) => L(or, p, n, 'c'));
+    [['12', 'WT'], ['13', 'W0'], ['11', 'WTE']].forEach(([p, n]) => L(or, p, n, 'd'));
+    // Akku und Ausgaberegister
+    const acc = b.add('ttl74173', 1080, 740), out = b.add('ttl74173', 1080, 330); pw(acc); pw(out);
+    [['14', 'M0'], ['13', 'M1'], ['12', 'M2'], ['11', 'M3'], ['7', 'CLK'], ['9', 'LA']].forEach(([p, n]) => L(acc, p, n)); G(acc, ['10', '15', '1', '2']);
+    [['3', 'Q0'], ['4', 'Q1'], ['5', 'Q2'], ['6', 'Q3']].forEach(([p, n]) => L(acc, p, n));
+    [['14', 'Q0'], ['13', 'Q1'], ['12', 'Q2'], ['11', 'Q3'], ['7', 'CLK'], ['9', 'LO']].forEach(([p, n]) => L(out, p, n)); G(out, ['10', '15', '1', '2']);
+    [['3', 'O0'], ['4', 'O1'], ['5', 'O2'], ['6', 'O3']].forEach(([p, n]) => L(out, p, n));
+    // Indexregister X: übernimmt denselben Wert wie der Akku, wenn ~LX = 0
+    const xr = b.add('ttl74173', 2100, 330); pw(xr);
+    [['14', 'M0'], ['13', 'M1'], ['12', 'M2'], ['11', 'M3'], ['7', 'CLK'], ['9', 'LX']].forEach(([p, n]) => L(xr, p, n)); G(xr, ['10', '15', '1', '2']);
+    [['3', 'X0'], ['4', 'X1'], ['5', 'X2'], ['6', 'X3']].forEach(([p, n]) => L(xr, p, n));
+    // Regel-EEPROM: Adresse = Seite · 16 + X
+    const tab = b.add('ttl28C16', 2100, 800); pw(tab);
+    tab.rom = '; Turingmaschine: Adresse = Seite·16 + Symbol + 2·Zustand (Zustände 1…7, 0 = HALT)\n; Busy Beaver, 2 Zustände: A0→1RB  A1→1LB  B0→1LA  B1→1RH  (A = 1, B = 2)\n;      x0 x1 A0 A1 B0 B1 …\n00: 00 00 01 01 01 01 00 00 00 00 00 00 00 00 00 00   ; Seite 0: Schreibsymbol\n10: 00 00 00 01 01 00 00 00 00 00 00 00 00 00 00 00   ; Seite 1: Richtung, 0 = rechts, 1 = links\n20: 00 00 02 02 01 00 00 00 00 00 00 00 00 00 00 00   ; Seite 2: Folgezustand, 0 = HALT\n;\n; Binär +1 (ein Zustand A: A1→0LA  A0→1RH), Band siehe U19:\n; 00: 00 00 01 00 …\n; 10: 00 00 00 01 …\n; 20: 00 00 00 01 …\n;\n; Busy Beaver, 3 Zustände (14 Schritte, sechs Einsen): A0→1RB A1→1RH B0→0RC B1→1RB C0→1LC C1→1LA\n; 00: 00 00 01 01 00 01 01 01 …\n; 10: 00 00 00 00 00 00 01 01 …\n; 20: 00 00 02 00 03 02 03 01 …';
+    ['8', '7', '6', '5'].forEach((p, k) => L(tab, p, 'X' + k)); L(tab, '4', 'P0'); L(tab, '3', 'P1'); G(tab, ['2', '1', '23', '22', '19', '18', '20']);
+    [['9', 'TB0'], ['10', 'TB1'], ['11', 'TB2'], ['13', 'TB3']].forEach(([p, n]) => L(tab, p, n));
+    // Kopf: Vor-/Rückwärtszähler, zählt bei ~MV = 0, Richtung = Operand-Bit 0 (1 = links)
+    const hd = b.add('ttl74191', 2100, 1300); pw(hd); G(hd, ['15', '1', '10', '9']);
+    [['11', 'RES'], ['4', 'MV'], ['5', 'OP0'], ['14', 'CLK'], ['3', 'H0'], ['2', 'H1'], ['6', 'H2'], ['7', 'H3']].forEach(([p, n]) => L(hd, p, n));
+    // Band: SRAM, Adresse = Kopf; beim Schreiben treibt U20 den Akku auf den Bus
+    const tape = b.add('ttl62256', 2520, 1100); pw(tape);
+    tape.rom = '; Band: 16 Zellen als Ring, der Kopf startet in Zelle 0. Leer = 0.\n; Für Binär +1 (siehe U17): 11 = 1011, niedrigstes Bit in Zelle 0, höhere links davon\n; 00: 01\n; 0D: 01 00 01';
+    ['10', '9', '8', '7'].forEach((p, k) => L(tape, p, 'H' + k)); G(tape, ['6', '5', '4', '3', '25', '24', '21', '23', '2', '26', '1', '20']);
+    L(tape, '22', 'OEN'); L(tape, '27', 'WTE');
+    [['11', 'T0'], ['12', 'T1'], ['13', 'T2'], ['15', 'T3']].forEach(([p, n]) => L(tape, p, n)); GR(tape, ['16', '17', '18', '19']);
+    const buf = b.add('ttl74125', 2520, 330);
+    [['2', '3', '1', 'a'], ['5', '6', '4', 'b'], ['9', '8', '10', 'c'], ['12', '11', '13', 'd']].forEach(([i, o, e, u], k) => { L(buf, i, 'Q' + k, u); L(buf, o, 'T' + k, u);
+      const q = b.p(buf, e, u); b.w(q, [q[0], q[1] - 10], [q[0] - 30, q[1] - 10]); b.add('netlabel', q[0] - 30, q[1] - 10, {value:'WT', mirror:true}); });
+    // Anzeige: Zustand, Kopfposition, Symbol unter dem Kopf
+    for(let k = 0; k < 4; k++) led(1280, 300 + 40*k, 'O' + k, 'grün');
+    b.w([1450, 300], [1450, 440]); b.gnd([1450, 440]);
+    for(let k = 0; k < 4; k++) led(2800, 300 + 40*k, 'H' + k, 'gelb');
+    led(2800, 500, 'T0', 'rot');
+    b.w([2970, 300], [2970, 540]); b.gnd([2970, 540]);
    }},
 ];
 function exampleDoc(ex){
