@@ -222,13 +222,25 @@ dialog pre {
 }
 .cmd .copy { position: absolute; top: 6px; right: 6px; }
 .cmd .cm { color: var(--amber-dim); }
-#lsblkIn {
+#syno h3.sub6 { font: 600 14px var(--sans); color: var(--amber-bright); margin: 18px 0 6px; }
+.finds { list-style: none; padding: 0; margin: 8px 0; }
+.finds li { padding: 4px 0 4px 26px; position: relative; }
+.finds li::before { position: absolute; left: 4px; font-weight: 700; }
+.finds li.ok::before { content: "✓"; color: var(--ok); }
+.finds li.warn::before { content: "!"; color: var(--amber-bright); }
+.finds li.err::before { content: "✗"; color: var(--err); }
+.finds li.info::before { content: "·"; color: var(--muted); }
+.verdict { border: 1px solid var(--line); border-left: 4px solid var(--ok); border-radius: 4px;
+  padding: 8px 12px; margin: 8px 0; background: var(--panel); }
+.verdict.warn { border-left-color: var(--amber); }
+.verdict.err { border-left-color: var(--err); }
+#lsblkIn, #smartIn {
   width: 100%; min-height: 150px; background: #100c07; color: var(--text);
   border: 1px solid var(--line); border-radius: 4px; padding: 10px 12px;
   font: 12px/1.5 var(--mono); resize: vertical;
   white-space: pre; overflow-x: auto;
 }
-#lsblkIn:focus-visible, #keyPw:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
+#lsblkIn:focus-visible, #smartIn:focus-visible, #keyPw:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
 .btnrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 10px 0; }
 table.ana { border-collapse: collapse; margin: 10px 0; font-size: 13px; width: 100%; }
 table.ana th, table.ana td {
@@ -394,23 +406,155 @@ und dann:</p>
 
 <h2><span class="n">6</span> Platte sicher löschen (vor Rücksendung oder Weitergabe)</h2>
 <p>Formatieren reicht nicht – dabei werden nur die Verwaltungsdaten neu angelegt, die Dateien
-bleiben lesbar. Das Skript überschreibt deshalb die <em>ganze</em> Platte einmal mit Nullen. Das genügt bei
-heutigen Platten; mehrere Durchgänge bringen nichts mehr.</p>
+bleiben lesbar. Das Skript überschreibt deshalb die <em>ganze</em> Platte einmal. Das genügt bei
+heutigen Platten (so auch die NIST-Richtlinie SP&nbsp;800-88); mehrere Durchgänge bringen nichts mehr.</p>
+<p>Als Muster nimmt es <strong>Nullen</strong> (Standard) oder mit <code>--zufall</code> einen
+<strong>Zufallsstrom</strong> (AES-256-CTR mit Einmal-Schlüssel). Beides ist gleich sicher. Zufall hat nur den
+Vorteil, dass man der Platte nicht ansieht, dass sie gelöscht wurde. Der Schlüssel steht nur während des
+Löschens in einer Statusdatei (damit Fortsetzen und Prüfen gehen) und wird am Ende gelöscht.</p>
+<h3 class="sub6">Erst prüfen: Ist die Platte wirklich defekt?</h3>
+<p>DSM meldet „Problem mit der Platte“ aus ganz verschiedenen Gründen – nicht jeder heißt, dass die
+Platte kaputt ist. Ob sie zurück in die Garantie, weiterverwendet oder entsorgt wird, entscheidet sich
+an den SMART-Werten. Smartmontools installieren und die Werte auslesen:</p>
+<div class="cmd"><pre>sudo apt install smartmontools
+sudo smartctl -a -d sat /dev/sdX          <span class="cm"># -d sat ist für USB-Gehäuse nötig</span></pre></div>
+<p>Die komplette Ausgabe hier einfügen – die Seite bewertet sie:</p>
+<textarea id="smartIn" spellcheck="false" placeholder="smartctl 7.4 … === START OF INFORMATION SECTION === …"></textarea>
+<div class="btnrow"><button id="smartBtn">SMART auswerten</button></div>
+<div id="smartOut"></div>
+
+<details open><summary>Spickzettel: alle Befehle zur Platten- und Sektoranalyse</summary>
+<p class="note">Für <code>/dev/sdX</code> immer die richtige Platte einsetzen. <code>-d sat</code> braucht man bei USB-Gehäusen;
+bei intern angeschlossenen SATA-Platten kann es entfallen, bei NVMe-SSDs (<code>/dev/nvme0n1</code>) weglassen.
+Nichts in den Abschnitten 1–4 verändert Daten auf der Platte.</p>
+
+<p><strong>1. Platte finden und erkennen</strong></p>
+<div class="cmd"><pre>lsblk -d -o NAME,SIZE,MODEL,SERIAL,TRAN      <span class="cm"># alle Platten: Größe, Modell, Seriennr., Anschluss (usb/sata/nvme)</span>
+sudo dmesg | tail -30                        <span class="cm"># direkt nach dem Anstecken: welcher Name (sdb, sdc …) vergeben wurde</span>
+sudo apt install smartmontools hdparm        <span class="cm"># Werkzeuge einmalig installieren</span></pre></div>
+
+<p><strong>2. SMART-Werte lesen</strong></p>
+<div class="cmd"><pre>sudo smartctl -i -d sat /dev/sdX             <span class="cm"># Kurzinfo: Modell, Seriennr., Firmware, SMART an/aus</span>
+sudo smartctl -H -d sat /dev/sdX             <span class="cm"># nur Gesamturteil PASSED/FAILED</span>
+sudo smartctl -a -d sat /dev/sdX             <span class="cm"># alles Wichtige – diese Ausgabe oben einfügen</span>
+sudo smartctl -x -d sat /dev/sdX             <span class="cm"># noch ausführlicher (Temperaturverlauf, Geräte-Statistik)</span>
+sudo smartctl -A -d sat /dev/sdX | grep -E "^ *(5|9|197|198|199) "
+                                             <span class="cm"># nur die fünf entscheidenden Werte</span>
+sudo smartctl -l error -d sat /dev/sdX       <span class="cm"># Fehlerprotokoll der Platte</span>
+sudo smartctl -l scttemp -d sat /dev/sdX     <span class="cm"># Temperatur und Verlauf</span></pre></div>
+
+<p><strong>3. Selbsttests (laufen in der Platte, der Rechner kann weiterarbeiten)</strong></p>
+<div class="cmd"><pre>sudo smartctl -c -d sat /dev/sdX             <span class="cm"># wie lange die Tests dauern („polling time“)</span>
+sudo smartctl -t short -d sat /dev/sdX       <span class="cm"># kurzer Test, ca. 2 Minuten</span>
+sudo smartctl -t long -d sat /dev/sdX        <span class="cm"># langer Test: liest jeden Sektor, 2 TB ≈ 4–5 Stunden</span>
+sudo smartctl -l selftest -d sat /dev/sdX    <span class="cm"># Ergebnis ansehen (oberste Zeile = neuester Test)</span>
+sudo smartctl -a -d sat /dev/sdX | grep -A1 "Self-test execution"
+                                             <span class="cm"># läuft noch? „xx% of test remaining“</span>
+sudo smartctl -X -d sat /dev/sdX             <span class="cm"># laufenden Test abbrechen</span></pre></div>
+<p class="note">„Completed without error“ = gut. „Completed: read failure“ mit einer Zahl unter
+<code>LBA_of_first_error</code> = an dieser Stelle ist ein Sektor defekt.</p>
+
+<p><strong>4. Oberfläche selbst lesen (findet unlesbare Stellen, nur lesend)</strong></p>
+<div class="cmd"><pre>sudo badblocks -sv -b 4096 /dev/sdX          <span class="cm"># liest jeden Block, zeigt Fortschritt, listet defekte Blöcke</span>
+sudo badblocks -sv -b 4096 -o defekt.txt /dev/sdX
+                                             <span class="cm"># dasselbe, defekte Blöcke in eine Datei schreiben</span>
+sudo dd if=/dev/sdX of=/dev/null bs=1M status=progress
+                                             <span class="cm"># schnellste Leseprobe: bricht an der ersten defekten Stelle ab</span>
+sudo dmesg | grep -iE "I/O error|Medium Error|UNC"
+                                             <span class="cm"># Lesefehler, die der Kernel dabei gemeldet hat</span>
+sudo smartctl -A -d sat /dev/sdX | grep -E "^ *(5|197|198) "
+                                             <span class="cm"># danach: haben sich ausgemusterte/wartende Sektoren verändert?</span></pre></div>
+<p class="note"><code>badblocks</code> ohne Zusatz ist nur lesend. <strong>Niemals</strong> <code>badblocks -w</code> auf einer Platte mit
+Daten verwenden – das überschreibt alles (das ist ein Schreibtest, praktisch ein Löschen).
+Mit <code>-n</code> testet badblocks schreibend, stellt die Daten aber wieder her – dauert sehr lange und darf
+nur auf nicht eingehängten Platten laufen.</p>
+
+<p><strong>5. Secure-Erase-Fähigkeit prüfen (für das Löschen unten)</strong></p>
+<div class="cmd"><pre>sudo hdparm -I /dev/sdX | grep -A8 Security  <span class="cm"># „supported“ + „not frozen“ = ATA Secure Erase möglich</span></pre></div>
+
+<p><strong>Faustregel zum Bewerten</strong></p>
+<ul>
+  <li>ID 197 oder 198 über 0, oder ein Selbsttest mit „read failure“ → Platte ist defekt, Daten runter.</li>
+  <li>ID 5 über 0, aber stabil → Platte hat schon Sektoren getauscht; beobachten (Werte in ein paar Wochen vergleichen).
+  Steigt die Zahl weiter → austauschen.</li>
+  <li>ID 199 steigt → Kabel/Steckplatz prüfen, die Platte selbst ist meist in Ordnung.</li>
+  <li>Alles 0, Selbsttests ohne Fehler → Platte gesund; dann ist ein DSM-Hinweis eher das RAID oder das Alter.</li>
+</ul>
+</details>
+
+<details><summary>Was die wichtigsten SMART-Werte bedeuten</summary>
+<table class="ana">
+  <tr><th>ID</th><th>Wert</th><th>Bedeutung</th></tr>
+  <tr><td class="mono">5</td><td>Reallocated_Sector_Ct</td><td>Ausgemusterte Sektoren. 0 = keine. Steigt der Wert, verschleißt die Oberfläche;
+    an den alten Inhalt dieser Sektoren kommt nur ATA Secure Erase.</td></tr>
+  <tr><td class="mono">197</td><td>Current_Pending_Sector</td><td>Sektoren, die sich gerade nicht lesen lassen und auf Ersatz warten.
+    Über 0 = echtes Warnzeichen.</td></tr>
+  <tr><td class="mono">198</td><td>Offline_Uncorrectable</td><td>Beim Selbsttest unlesbare Sektoren. Über 0 = Warnzeichen.</td></tr>
+  <tr><td class="mono">199</td><td>UDMA_CRC_Error_Count</td><td>Übertragungsfehler zwischen Platte und Rechner – meist Kabel oder
+    Steckplatz, nicht die Platte selbst.</td></tr>
+  <tr><td class="mono">9</td><td>Power_On_Hours</td><td>Betriebsstunden. 8.760 h = ein Jahr Dauerbetrieb. NAS-Platten halten oft
+    5–8 Jahre; danach steigt das Ausfallrisiko.</td></tr>
+  <tr><td class="mono">4 / 12</td><td>Start_Stop / Power_Cycle</td><td>Anlauf- und Einschaltvorgänge – hohe Werte kommen vom Ruhezustand
+    der DiskStation und bedeuten Verschleiß, aber keinen Defekt.</td></tr>
+  <tr><td class="mono">1 / 7</td><td>Raw_Read / Seek_Error_Rate</td><td>Rohwerte sind herstellerspezifisch und oft riesig – nicht
+    beachten. Entscheidend ist nur, ob <em>VALUE</em> auf oder unter <em>THRESH</em> fällt.</td></tr>
+</table>
+<p>Grundregel: Ein Wert ist erst „ausgefallen“, wenn VALUE ≤ THRESH (bei THRESH&nbsp;&gt;&nbsp;0) oder unter
+WHEN_FAILED etwas steht. Im Selbsttest-Protokoll zählt die Lebenszeit nur bis 65.535 Stunden und fängt dann
+wieder bei 0 an – kleine Zahlen dort sind bei alten Platten kein Widerspruch.</p>
+</details>
+<details><summary>Was DSM mit „Problem mit der Platte“ meinen kann</summary>
+<ul>
+  <li><strong>Volume/Speicherpool „beeinträchtigt“ (degraded):</strong> Im RAID fehlt eine Platte. Das betrifft oft gar
+  nicht die Platte, die du in der Hand hast, sondern die <em>andere</em>. Merkmal hier: mdadm meldet
+  „started with 1 drive (out of 2)“.</li>
+  <li><strong>„Fehlerhafte Sektoren“ / Status „Warnung“:</strong> SMART-ID 5 oder 197 über 0.</li>
+  <li><strong>Hohe Betriebsdauer:</strong> Neuere DSM-Versionen warnen bei alten Platten, auch wenn sie fehlerfrei laufen.</li>
+  <li><strong>Verbindungsfehler:</strong> ID 199 steigt – Steckplatz, Kabel oder Netzteil, nicht die Platte.</li>
+</ul>
+</details>
+<details><summary>Langer Selbsttest – die gründlichste Prüfung</summary>
+<p>Die Platte liest dabei jeden Sektor (bei 2&nbsp;TB etwa 4–5 Stunden, die genaue Zeit steht unter
+„Extended self-test routine recommended polling time“). Danach zeigt <code>smartctl -a</code> das Ergebnis
+im Selbsttest-Protokoll – „Completed without error“ ist gut, „read failure“ mit einer LBA ist ein echter Defekt.</p>
+<div class="cmd"><pre>sudo smartctl -t long -d sat /dev/sdX     <span class="cm"># Test starten (läuft in der Platte)</span>
+sudo smartctl -a -d sat /dev/sdX          <span class="cm"># später: Ergebnis ansehen</span></pre></div>
+<p class="note">Manche USB-Gehäuse schicken die Platte nach einigen Minuten in den Ruhezustand und brechen
+den Test damit ab („Aborted by host“). Dann hilft es, nebenher etwas von der Platte zu lesen, z.&nbsp;B.
+<code>sudo dd if=/dev/sdX of=/dev/null bs=1M status=progress</code>.</p>
+</details>
+<details><summary>Garantie, Weiterverwenden oder Entsorgen?</summary>
+<ul>
+  <li><strong>Garantie:</strong> NAS-Platten haben je nach Serie meist 3 Jahre (z.&nbsp;B. WD Red/Red Plus,
+  Seagate IronWolf), Profi-Serien 5 Jahre. Genau prüfen über die Seriennummer beim Hersteller. Der Hersteller
+  will meist einen SMART-Befund sehen – das Löschen ändert die SMART-Werte nicht, er bleibt nachweisbar.</li>
+  <li><strong>Weiterverwenden:</strong> Gesunde, aber alte Platten taugen gut als zusätzliche Sicherungsplatte –
+  nicht als einziger Ort für wichtige Daten.</li>
+  <li><strong>Entsorgen oder verkaufen:</strong> vorher löschen wie unten beschrieben. Bei 0 ausgemusterten
+  Sektoren erfasst das Überschreiben die ganze Platte.</li>
+</ul>
+</details>
+
+<h3 class="sub6">Dann löschen</h3>
 <p><strong>Vorher abhaken:</strong></p>
 <ul>
   <li>Alle Freigaben gesichert (Schritt&nbsp;4) und ein paar Dateien in der Sicherung probeweise geöffnet.</li>
   <li><code>.key</code>-Dateien bzw. Passwörter der Freigaben aufgehoben, falls du die Sicherung noch einmal brauchst.</li>
   <li>Alles ausgehängt: <code>sudo bash synomount.sh stop</code></li>
+  <li>Für die SMART-Anzeige: <code>sudo apt install smartmontools hdparm</code></li>
 </ul>
 <div class="cmd"><pre>lsblk -d -o NAME,SIZE,MODEL,SERIAL,TRAN   <span class="cm"># welche Platte ist es? (TRAN = usb)</span>
 sudo bash synomount.sh wipe               <span class="cm"># löscht die erkannte Synology-Platte</span>
-sudo bash synomount.sh wipe /dev/sdX      <span class="cm"># oder ausdrücklich angeben</span></pre></div>
+sudo bash synomount.sh wipe /dev/sdX      <span class="cm"># oder ausdrücklich angeben</span>
+sudo bash synomount.sh wipe --zufall      <span class="cm"># Zufallsmuster statt Nullen</span></pre></div>
 <p>So schützt dich das Skript vor dem falschen Gerät:</p>
 <ul>
   <li>Es löscht nur ganze Platten, auf denen eine Synology-RAID-Partition liegt – deine System-SSD
   oder eine andere Platte lehnt es ab.</li>
   <li>Es bricht ab, solange auf der Platte etwas eingehängt oder ein RAID/LVM aktiv ist.</li>
-  <li>Es zeigt Modell, Seriennummer, Größe und Anschluss an. Erst wenn du die
+  <li>Es zeigt Modell, Seriennummer, Größe, Anschluss und die SMART-Zahl der bereits
+  <em>ausgemusterten Sektoren</em> an. Steht dort 0, erfasst das Überschreiben die komplette Platte.
+  Erst wenn du die
   <strong>Seriennummer abtippst</strong>, geht es los. Vergleiche sie mit dem Aufkleber der Platte.</li>
 </ul>
 <p>Während des Löschens:</p>
@@ -418,18 +562,25 @@ sudo bash synomount.sh wipe /dev/sdX      <span class="cm"># oder ausdrücklich 
   <li>Eine Anzeige zeigt Fortschritt, Tempo und Restzeit. Bei 2&nbsp;TB über USB dauert das etwa 3–5 Stunden.</li>
   <li>Abbrechen mit <kbd>Strg</kbd>+<kbd>C</kbd> ist erlaubt. Derselbe Befehl setzt später an der Stelle fort.
   Da dann die Synology-Kennung schon gelöscht ist, gib die Platte dabei ausdrücklich an
-  (<code>wipe /dev/sdX</code>) – das Skript erkennt sie an der Seriennummer wieder.</li>
+  (<code>wipe /dev/sdX</code>) – das Skript erkennt sie an der Seriennummer wieder. Es setzt mit dem
+  ursprünglichen Muster fort; gibst du ein anderes an (<code>--zufall</code> bzw. <code>--null</code>), fragt es, ob es
+  fortsetzen oder neu von vorn beginnen soll.</li>
   <li>Defekte Stellen (die SMART-Fehler) überspringt es Stück für Stück, statt abzubrechen, und
   listet sie am Ende auf.</li>
   <li>Zum Schluss liest es Anfang, Ende und 40 zufällige Stellen zurück und prüft, dass dort nur Nullen stehen.</li>
 </ul>
-<details><summary>Was ist mit den „ausgemusterten“ Sektoren?</summary>
-  <p>Eine Platte mit SMART-Fehlern hat oft schon Sektoren stillgelegt und durch Reserve ersetzt. An die
-  alten Sektoren kommt kein Überschreiben mehr heran – dort könnten Bruchstücke stehen (bei
-  verschlüsselten Freigaben nur Datensalat). Gründlicher ist <strong>ATA Secure Erase</strong>: Die Platte löscht
-  sich per Firmware selbst, inklusive dieser Sektoren. Das klappt über USB fast nie. Hängst du die Platte
-  intern per SATA an, bietet das Skript Secure Erase automatisch an, wenn die Platte es kann. Wem selbst
-  dieses Restrisiko zu groß ist, bleibt nur die mechanische Zerstörung – dann allerdings ohne Garantietausch.</p></details>
+<details open><summary>Und die „ausgemusterten“ Sektoren?</summary>
+  <p>Eine Platte mit SMART-Fehlern legt defekte Sektoren still und ersetzt sie durch Reserve. Schreibt man
+  danach an diese Stelle, landet es in der Reserve – der <em>alte</em> Sektor ist für kein Programm mehr
+  erreichbar, weder mit Nullen noch mit Zufall. Dort könnten Bruchstücke stehen (bei verschlüsselten
+  Freigaben nur Datensalat). Wie viele es sind, zeigt das Skript als SMART-Wert „ausgemustert (ID&nbsp;5)“.</p>
+  <p>Löschen kann sie nur die Platte selbst: <strong>ATA Secure Erase</strong>. Das Skript prüft vor dem Überschreiben,
+  ob die Platte das kann, und fragt dann nach – auch über USB, mit Warnung: Manche USB-Gehäuse brechen
+  den langen Befehl ab, dann bleibt die Platte mit dem Passwort <code>synowipe</code> gesperrt; das Skript
+  nennt dir den Entsperrbefehl. Meldet es „nicht verfügbar“, reicht das Gehäuse den Befehl nicht durch –
+  intern per SATA angeschlossen klappt es meist (steht dort „frozen“, hilft oft Abstecken und Neuanstecken
+  im laufenden Betrieb). Wem selbst dieses Restrisiko zu groß ist, bleibt nur die mechanische Zerstörung –
+  dann allerdings ohne Garantietausch.</p></details>
 
 <h2>Wenn es hakt</h2>
 <details><summary>„started with 1 drive (out of 2)“</summary>
@@ -470,9 +621,10 @@ sudo bash synomount.sh wipe /dev/sdX      <span class="cm"># oder ausdrücklich 
 # Aufruf:  sudo bash synomount.sh          einhaengen
 #          sudo bash synomount.sh status   anzeigen, was laeuft
 #          sudo bash synomount.sh stop     alles wieder aushaengen
-#          sudo bash synomount.sh wipe [/dev/sdX]
+#          sudo bash synomount.sh wipe [--zufall] [/dev/sdX]
 #                                          Platte vor der Rueckgabe UNWIDERRUFLICH
-#                                          loeschen (nur Synology-Platten, mit Rueckfrage)
+#                                          loeschen (nur Synology-Platten, mit Rueckfrage;
+#                                          Standard Nullen, --zufall = Zufallsmuster)
 #
 # Beim Einhaengen wird nichts geschrieben: RAID mit --readonly,
 # ext4 mit ro,noload, btrfs mit ro; LVM-Metadaten bleiben unveraendert.
@@ -647,6 +799,9 @@ do_status() {
 # wipe: ganze Platte loeschen (vor Garantie-Ruecksendung)
 # Sicherheitsnetz: nur ganze Platten, nur mit Synology-RAID-Partition (oder
 # angefangenem Loeschvorgang), nichts eingehaengt/aktiv, Seriennummer tippen.
+# Muster: Nullen (Standard) oder --zufall = AES-256-CTR-Strom mit Einmal-
+# Schluessel, der nur waehrend des Loeschens in der Statusdatei steht (damit
+# Fortsetzen und Pruefen gehen) und am Ende geloescht wird.
 # ---------------------------------------------------------------------------
 
 disk_info() { lsblk -dno "$1" "$2" 2>/dev/null | sed 's/^ *//;s/ *$//'; }
@@ -659,20 +814,95 @@ wipe_candidates() {
   done | sort -u
 }
 
-verify_zero() {   # Stichprobe: Anfang, Ende und 40 zufaellige MiB muessen 0 sein
+# Datenstrom fuer Byte-Offset $1, Laenge $2 (Offset durch 16 teilbar)
+wipe_src() {
+  if [ "$WMODE" = "zufall" ]; then
+    head -c "$2" /dev/zero \
+      | openssl enc -aes-256-ctr -K "$WKEY" -iv "$(printf '%016x%016x' 0 $(($1 / 16)))" 2>/dev/null
+  else
+    head -c "$2" /dev/zero
+  fi
+}
+
+verify_wipe() {   # Stichprobe: Anfang, Ende und 40 zufaellige MiB
   local dev="$1" total="$2" bad=0 i k
   for i in $(seq 1 42); do
     case $i in 1) k=0 ;; 2) k=$((total - 1)) ;; *) k=$(( (RANDOM * 32768 + RANDOM) % total )) ;; esac
-    if ! dd if="$dev" bs=1M count=1 skip=$k iflag=direct status=none 2>/dev/null \
-         | cmp -s -n 1048576 - /dev/zero; then
-      bad=$((bad + 1)); warn "MiB $k ist nicht leer oder nicht lesbar"
+    if ! cmp -s <(dd if="$dev" bs=1M count=1 skip=$k iflag=direct status=none 2>/dev/null) \
+                <(wipe_src $((k * 1048576)) 1048576); then
+      bad=$((bad + 1)); warn "MiB $k enthaelt nicht das geschriebene Muster (oder ist nicht lesbar)"
     fi
   done
   return $bad
 }
 
+smart_report() {   # ausgemusterte Sektoren anzeigen
+  local dev="$1" tran="$2" out re pe un
+  if ! command -v smartctl >/dev/null; then
+    warn "smartctl fehlt - fuer die Anzeige ausgemusterter Sektoren: sudo apt install smartmontools"
+    return
+  fi
+  out="$(smartctl -A "$dev" 2>/dev/null)"
+  if ! echo "$out" | grep -q '^ *5 '; then
+    [ "$tran" = "usb" ] && out="$(smartctl -A -d sat "$dev" 2>/dev/null)"
+  fi
+  re="$(echo "$out" | awk '$1==5   {print $10}')"
+  pe="$(echo "$out" | awk '$1==197 {print $10}')"
+  un="$(echo "$out" | awk '$1==198 {print $10}')"
+  if [ -z "$re" ]; then warn "SMART-Werte nicht auslesbar (USB-Gehaeuse reicht sie nicht durch?)"; return; fi
+  echo "  SMART:       ausgemustert (ID 5): $re   wartend (197): ${pe:-?}   unlesbar (198): ${un:-?}"
+  if [ "$re" = "0" ]; then
+    say "Keine ausgemusterten Sektoren - Ueberschreiben erfasst die ganze Platte."
+  else
+    warn "$re Sektoren sind bereits ausgemustert. An deren alten Inhalt kommt Ueberschreiben"
+    warn "nicht heran - nur ATA Secure Erase (Firmware der Platte) loescht auch diese."
+  fi
+}
+
+try_secure_erase() {   # 0 = Platte per Firmware geloescht und geprueft
+  local dev="$1" tran="$2" total="$3" sec answer
+  command -v hdparm >/dev/null || return 1
+  sec="$(hdparm -I "$dev" 2>/dev/null | sed -n '/^Security:/,/^[A-Z]/p' | tr -s ' \t' ' ')"
+  echo "$sec" | grep -qx ' supported' || { say "ATA Secure Erase: nicht verfuegbar (Platte/USB-Gehaeuse)."; return 1; }
+  echo "$sec" | grep -qx ' not frozen' || { say "ATA Secure Erase: Platte ist 'frozen' (Standby/Neuanstecken hilft manchmal)."; return 1; }
+  echo
+  say "Die Platte kann sich per ATA Secure Erase selbst loeschen - inklusive ausgemusterter Sektoren."
+  echo "$sec" | grep -i 'min for' | sed 's/^/     /'
+  if [ "$tran" = "usb" ]; then
+    warn "Ueber USB riskant: Bricht das Gehaeuse den Befehl ab, bleibt die Platte mit dem Passwort"
+    warn "'synowipe' gesperrt. Entsperren dann mit:"
+    warn "  sudo hdparm --user-master u --security-disable synowipe $dev"
+  fi
+  read -r -p "Secure Erase verwenden? [j/N] " answer
+  [ "$answer" = "j" ] || [ "$answer" = "J" ] || return 1
+  say "Secure Erase laeuft - nicht unterbrechen, Platte nicht abziehen ..."
+  if hdparm --user-master u --security-set-pass synowipe "$dev" >/dev/null \
+     && hdparm --user-master u --security-erase synowipe "$dev"; then
+    say "Secure Erase fertig."
+    # Platte schreibt meist Nullen, manche ein anderes Muster -> Stichprobe auf Nullen
+    if WMODE=null verify_wipe "$dev" "$total"; then return 0; fi
+    warn "Stichprobe nicht ganz leer (Platte schreibt ein eigenes Muster) - ueberschreibe zusaetzlich."
+    return 1
+  fi
+  warn "Secure Erase fehlgeschlagen - entsperre und ueberschreibe stattdessen."
+  hdparm --user-master u --security-disable synowipe "$dev" >/dev/null 2>&1
+  return 1
+}
+
+save_state() {
+  ( umask 077; printf 'key=%s\nmode=%s\nseed=%s\nnext=%s\n' "$KEY" "$WMODE" "$WKEY" "$1" > "$STATE" )
+}
+
 do_wipe() {
-  local D="${1:-}"
+  local D="" want_mode="null" explicit="" a
+  for a in "$@"; do
+    case "$a" in
+      --zufall|--random) want_mode="zufall"; explicit=1 ;;
+      --null|--zero)     want_mode="null"; explicit=1 ;;
+      /dev/*)            D="$a" ;;
+      *) fail "Unbekannte Angabe: $a   (Aufruf: sudo bash $0 wipe [--zufall] [/dev/sdX])" ;;
+    esac
+  done
   if [ -z "$D" ]; then
     set -- $(wipe_candidates)
     if [ $# -eq 0 ]; then fail "Keine Synology-Platte gefunden. Aufruf: sudo bash $0 wipe /dev/sdX"; fi
@@ -682,20 +912,40 @@ do_wipe() {
   [ -b "$D" ] || fail "$D gibt es nicht."
   [ "$(disk_info TYPE "$D")" = "disk" ] || fail "$D ist keine ganze Platte (z.B. /dev/sdb angeben, nicht /dev/sdb5)."
 
-  local SERIAL MODEL TRAN SIZE KEY STATE SS start=0
+  local SERIAL MODEL TRAN SIZE SS start=0 answer
   SERIAL="$(disk_info SERIAL "$D")"; MODEL="$(disk_info MODEL "$D")"; TRAN="$(disk_info TRAN "$D")"
   SIZE="$(blockdev --getsize64 "$D")"; SS="$(blockdev --getss "$D")"
   KEY="${SERIAL:-${D##*/}-$SIZE}"
   STATE="/var/tmp/synowipe-${KEY//[^A-Za-z0-9._-]/_}.state"
+  WMODE="$want_mode"; WKEY=""
 
   if [ -f "$STATE" ]; then
     start="$(sed -n 's/^next=//p' "$STATE")"; start="${start:-0}"
-    say "Angefangener Loeschvorgang gefunden (bis GiB $start erledigt)."
+    WMODE="$(sed -n 's/^mode=//p' "$STATE")"; WMODE="${WMODE:-null}"
+    WKEY="$(sed -n 's/^seed=//p' "$STATE")"
+    say "Angefangener Loeschvorgang gefunden (bis GiB $start erledigt, Muster: $WMODE)."
+    if [ -n "$explicit" ] && [ "$want_mode" != "$WMODE" ]; then
+      echo "  Du hast '$want_mode' angegeben, begonnen wurde mit '$WMODE'."
+      echo "  [f] mit '$WMODE' fortsetzen   [n] neu von vorn mit '$want_mode'   [a] abbrechen"
+      read -r -p "Auswahl [f/n/a]: " answer
+      case "$answer" in
+        f|F) say "Setze mit '$WMODE' fort." ;;
+        n|N) start=0; WMODE="$want_mode"; WKEY=""; rm -f "$STATE.fehler"
+             say "Beginne neu von vorn mit '$WMODE'." ;;
+        *)   fail "Abgebrochen - es wurde nichts geschrieben." ;;
+      esac
+    else
+      say "Setze mit '$WMODE' fort (anderes Muster: Befehl mit --zufall bzw. --null geben)."
+    fi
   elif ! lsblk -rno FSTYPE "$D" | grep -qx linux_raid_member; then
     fail "$D enthaelt keine Synology-RAID-Partition. Aus Sicherheitsgruenden loescht dieses Skript nur Synology-Platten."
   fi
   if lsblk -rno MOUNTPOINT "$D" | grep -q . || lsblk -rno TYPE "$D" | grep -qE '^(raid|lvm|crypt|md)'; then
     fail "Auf $D ist noch etwas eingehaengt oder aktiv. Zuerst: sudo bash $0 stop"
+  fi
+  if [ "$WMODE" = "zufall" ]; then
+    command -v openssl >/dev/null || fail "openssl fehlt (sudo apt install openssl) - oder ohne --zufall loeschen."
+    [ -n "$WKEY" ] || WKEY="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   fi
 
   echo
@@ -704,77 +954,66 @@ do_wipe() {
   echo "  Seriennr.:   ${SERIAL:-(nicht auslesbar)}"
   echo "  Groesse:     $((SIZE / 1000000000)) GB"
   echo "  Anschluss:   ${TRAN:-?}"
+  echo "  Muster:      $([ "$WMODE" = zufall ] && echo "Zufall (AES-256-CTR)" || echo "Nullen")"
   lsblk -o NAME,SIZE,FSTYPE,LABEL "$D" | sed 's/^/  /'
+  smart_report "$D" "$TRAN"
   echo
   warn "ALLE DATEN AUF DIESER PLATTE WERDEN UNWIDERRUFLICH GELOESCHT."
-  local want answer
+  local want
   want="${SERIAL:-${D##*/}}"
   read -r -p "Zur Bestaetigung die Seriennummer eintippen [$want]: " answer
   [ "$answer" = "$want" ] || fail "Abgebrochen - es wurde nichts geloescht."
-  printf 'key=%s\nnext=%s\n' "$KEY" "$start" > "$STATE"
+  save_state "$start"
 
   local total=$((SIZE / 1048576)) rest=$((SIZE % 1048576))
   local chunks=$(( (total + 1023) / 1024 ))
 
-  # Firmware-Loeschung (ATA Secure Erase) nur intern (SATA), nicht ueber USB
-  if [ "$start" -eq 0 ] && [ "$TRAN" != "usb" ] && command -v hdparm >/dev/null; then
-    local sec
-    sec="$(hdparm -I "$D" 2>/dev/null | sed -n '/^Security:/,/^[A-Z]/p' | tr -s ' \t' ' ')"
-    if echo "$sec" | grep -qx ' supported' && echo "$sec" | grep -qx ' not frozen'; then
-      echo "$sec" | grep -i 'min for' | sed 's/^/  /'
-      read -r -p "Platte kann sich per ATA Secure Erase selbst loeschen (erfasst auch ausgemusterte Sektoren). Verwenden? [j/N] " answer
-      if [ "$answer" = "j" ] || [ "$answer" = "J" ]; then
-        say "Secure Erase laeuft - das kann Stunden dauern, nicht unterbrechen ..."
-        if hdparm --user-master u --security-set-pass synowipe "$D" >/dev/null \
-           && hdparm --user-master u --security-erase synowipe "$D"; then
-          say "Secure Erase fertig. Pruefe Stichprobe ..."
-          if verify_zero "$D" "$total"; then
-            rm -f "$STATE"; say "Fertig - die Platte ist geloescht."; return 0
-          fi
-          warn "Stichprobe nicht ganz leer - ueberschreibe zusaetzlich mit Nullen."
-        else
-          warn "Secure Erase fehlgeschlagen - entsperre und ueberschreibe stattdessen mit Nullen."
-          hdparm --user-master u --security-disable synowipe "$D" >/dev/null 2>&1
-        fi
-      fi
-    fi
+  if [ "$start" -eq 0 ] && try_secure_erase "$D" "$TRAN" "$total"; then
+    rm -f "$STATE" "$STATE.fehler"
+    say "Fertig - die Platte hat sich per Firmware geloescht und die Stichprobe ist leer."
+    return 0
   fi
 
-  say "Ueberschreibe $D mit Nullen ($chunks GiB) - Abbruch mit Strg+C, spaeter fortsetzen mit: sudo bash $0 wipe $D"
+  say "Ueberschreibe $D ($chunks GiB, Muster: $WMODE) - Abbruch mit Strg+C,"
+  say "fortsetzen spaeter mit: sudo bash $0 wipe $D"
   local c off n m errs=0 t0 el done_mib rate eta
   t0=$(date +%s)
   for ((c = start; c < chunks; c++)); do
     off=$((c * 1024)); n=1024
     [ $((off + n)) -gt "$total" ] && n=$((total - off))
-    if ! dd if=/dev/zero of="$D" bs=1M count=$n seek=$off oflag=direct status=none 2>/dev/null; then
+    if ! wipe_src $((off * 1048576)) $((n * 1048576)) \
+         | dd of="$D" bs=1M seek=$off iflag=fullblock oflag=direct status=none 2>/dev/null; then
       echo; warn "Schreibfehler in GiB $c - schreibe diesen Bereich MiB fuer MiB"
       for ((m = off; m < off + n; m++)); do
-        dd if=/dev/zero of="$D" bs=1M count=1 seek=$m oflag=direct status=none 2>/dev/null \
+        wipe_src $((m * 1048576)) 1048576 \
+          | dd of="$D" bs=1M seek=$m iflag=fullblock oflag=direct status=none 2>/dev/null \
           || { errs=$((errs + 1)); echo "MiB $m" >> "$STATE.fehler"; }
       done
     fi
-    printf 'key=%s\nnext=%s\n' "$KEY" $((c + 1)) > "$STATE"
+    save_state $((c + 1))
     el=$(( $(date +%s) - t0 )); [ "$el" -gt 0 ] || el=1
     done_mib=$(( (c + 1 - start) * 1024 ))
     rate=$(( done_mib / el ))
-    [ "$rate" -gt 0 ] && eta=$(( (total - (c + 1) * 1024) / rate / 60 )) || eta=0
+    if [ "$rate" -gt 0 ]; then eta=$(( (total - (c + 1) * 1024) / rate / 60 )); else eta=0; fi
     [ "$eta" -ge 0 ] || eta=0
     printf '\r  %d von %d GiB (%d%%)  %d MB/s  noch ca. %d min   ' \
       $((c + 1)) "$chunks" $(( (c + 1) * 100 / chunks )) "$rate" "$eta"
   done
   echo
   if [ "$rest" -gt 0 ]; then
-    dd if=/dev/zero of="$D" bs="$SS" count=$((rest / SS)) seek=$((total * 1048576 / SS)) \
-       oflag=direct status=none 2>/dev/null || errs=$((errs + 1))
+    wipe_src $((total * 1048576)) "$rest" \
+      | dd of="$D" bs="$SS" seek=$((total * 1048576 / SS)) iflag=fullblock oflag=direct status=none 2>/dev/null \
+      || errs=$((errs + 1))
   fi
   sync
   [ "$errs" -gt 0 ] && warn "$errs MiB liessen sich nicht beschreiben (Liste: $STATE.fehler)."
   say "Pruefe Stichprobe ..."
-  if verify_zero "$D" "$total"; then
+  if verify_wipe "$D" "$total"; then
     rm -f "$STATE"
-    say "Fertig - die Platte enthaelt nur noch Nullen und kann zurueckgeschickt werden."
+    say "Fertig - die Platte ist vollstaendig ueberschrieben und kann zurueckgeschickt werden."
+    [ "$WMODE" = "zufall" ] && say "Der Zufallsschluessel ist geloescht - das Muster ist nicht mehr nachvollziehbar."
   else
-    warn "Die Stichprobe hat nicht ueberall Nullen gefunden (defekte Stellen?)."
+    warn "Die Stichprobe passt nicht ueberall (defekte Stellen?)."
     warn "Erneut starten mit: sudo bash $0 wipe $D   (rm $STATE fuer kompletten Neustart)"
   fi
 }
@@ -783,8 +1022,8 @@ case "${1:-start}" in
   start)  do_start ;;
   stop)   do_stop ;;
   status) do_status ;;
-  wipe)   do_wipe "${2:-}" ;;
-  *) echo "Aufruf: sudo bash $0 [start|status|stop|wipe [/dev/sdX]]"; exit 1 ;;
+  wipe)   shift; do_wipe "$@" ;;
+  *) echo "Aufruf: sudo bash $0 [start|status|stop|wipe [--zufall] [/dev/sdX]]"; exit 1 ;;
 esac
 </script>
 
@@ -2295,6 +2534,154 @@ $("scriptShow").addEventListener("click", () => {
   addCopy(box);
 });
 updateScript();
+
+/* --------------------------- SMART auswerten --------------------------- */
+
+function parseSmart(text) {
+  const info = {}, attrs = new Map(), tests = [];
+  const field = re => { const m = text.match(re); return m ? m[1].trim() : ""; };
+  info.family = field(/^Model Family:\s*(.+)$/m);
+  info.model = field(/^(?:Device Model|Model Number|Product):\s*(.+)$/m);
+  info.serial = field(/^Serial Number:\s*(.+)$/m);
+  info.capacity = field(/^User Capacity:\s*.*\[(.+)\]/m);
+  info.rotation = field(/^Rotation Rate:\s*(.+)$/m);
+  info.health = field(/self-assessment test result:\s*(\S+)/);
+  const errCount = field(/ATA Error Count:\s*(\d+)/);
+  info.errors = /No Errors Logged/.test(text) ? 0 : (errCount ? +errCount : null);
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*(\d{1,3})\s+(\S+)\s+0x[0-9a-f]{4}\s+(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.+)$/i);
+    if (m) {
+      attrs.set(+m[1], { id: +m[1], name: m[2], value: +m[3], worst: +m[4], thresh: +m[5],
+                         type: m[6], failed: m[8], raw: parseInt(m[9], 10) || 0, rawText: m[9].trim() });
+      continue;
+    }
+    const t = line.match(/^#\s*\d+\s+(Short offline|Extended offline|Conveyance offline|Selective offline|Short captive|Extended captive)\s+(.+?)\s{2,}(\d+)%\s+(\d+)\s+(\S+)/);
+    if (t) tests.push({ kind: t[1], status: t[2].trim(), hours: +t[4], lba: t[5] });
+  }
+  return { info, attrs, tests };
+}
+
+function judgeSmart({ info, attrs, tests }) {
+  const finds = [];
+  const add = (cls, html) => finds.push({ cls, html });
+  const raw = id => attrs.has(id) ? attrs.get(id).raw : null;
+  const n = v => Number(v).toLocaleString("de-DE");
+  let level = 0;                       // 0 gut, 1 Hinweis, 2 defekt
+  const bump = l => { level = Math.max(level, l); };
+
+  if (!attrs.size) {
+    return { level: -1, finds: [{ cls: "err", html: "Keine SMART-Attributtabelle gefunden. Bitte die komplette "
+      + "Ausgabe von <code>sudo smartctl -a -d sat /dev/sdX</code> einfügen." }] };
+  }
+
+  // ausgefallene Attribute
+  const failing = [...attrs.values()].filter(a => (a.thresh > 0 && a.value <= a.thresh) || (a.failed && a.failed !== "-"));
+  for (const a of failing) {
+    bump(2);
+    add("err", `<strong>${esc(a.name)}</strong> (ID ${a.id}) ist ausgefallen: VALUE ${a.value} ≤ THRESH ${a.thresh}`
+      + (a.failed !== "-" ? ` (WHEN_FAILED: ${esc(a.failed)})` : "") + ".");
+  }
+  if (info.health) {
+    if (/PASSED/i.test(info.health)) add("ok", "Gesamtbewertung der Platte: PASSED.");
+    else { bump(2); add("err", `Gesamtbewertung der Platte: ${esc(info.health)}.`); }
+  }
+
+  const re = raw(5), pe = raw(197), un = raw(198), crc = raw(199);
+  if (re !== null) {
+    if (re === 0) add("ok", "Keine ausgemusterten Sektoren (ID 5 = 0) – Überschreiben erfasst die ganze Platte.");
+    else { bump(re > 100 ? 2 : 1); add(re > 100 ? "err" : "warn", `${n(re)} ausgemusterte Sektoren (ID 5). `
+      + "Deren alter Inhalt ist nur per ATA Secure Erase löschbar; steigt der Wert weiter, verschleißt die Platte."); }
+  }
+  if (pe !== null) {
+    if (pe === 0) add("ok", "Keine wartenden Sektoren (ID 197 = 0).");
+    else { bump(2); add("err", `${n(pe)} Sektoren lassen sich gerade nicht lesen (ID 197) – echtes Warnzeichen.`); }
+  }
+  if (un !== null && un > 0) { bump(2); add("err", `${n(un)} beim Selbsttest unlesbare Sektoren (ID 198).`); }
+  else if (un === 0) add("ok", "Keine unlesbaren Sektoren beim Selbsttest (ID 198 = 0).");
+  if (crc !== null) {
+    if (crc === 0) add("ok", "Keine Übertragungsfehler (ID 199 = 0) – Kabel und Steckplatz waren in Ordnung.");
+    else { bump(1); add("warn", `${n(crc)} Übertragungsfehler (ID 199) – meist Kabel oder Steckplatz, nicht die Platte selbst.`); }
+  }
+
+  if (info.errors === 0) add("ok", "Fehlerprotokoll der Platte ist leer.");
+  else if (info.errors > 0) { bump(1); add("warn", `Die Platte hat ${n(info.errors)} Fehler protokolliert (ATA Error Log).`); }
+
+  const failedTests = tests.filter(t => !/Completed without error|in progress|Interrupted|Aborted by host/i.test(t.status));
+  if (tests.length) {
+    const last = tests[0];
+    if (failedTests.length) {
+      bump(2);
+      add("err", `Selbsttest fehlgeschlagen: „${esc(failedTests[0].status)}“`
+        + (failedTests[0].lba !== "-" ? ` bei LBA ${esc(failedTests[0].lba)}` : "") + ".");
+    } else {
+      add("ok", `${tests.length} Selbsttests ohne Fehler, zuletzt: ${esc(last.kind)} – ${esc(last.status)}.`);
+    }
+    if (!tests.some(t => /Extended/i.test(t.kind)))
+      add("info", "Noch kein langer Selbsttest im Protokoll – der prüft jeden Sektor (siehe unten).");
+  } else {
+    add("info", "Kein Selbsttest im Protokoll – ein langer Test ist die gründlichste Prüfung (siehe unten).");
+  }
+
+  const hours = raw(9);
+  let years = null;
+  if (hours !== null) {
+    years = hours / 8760;
+    const txt = `${n(hours)} Betriebsstunden ≈ ${years.toFixed(1).replace(".", ",")} Jahre Dauerbetrieb.`;
+    if (years >= 5) { bump(1); add("warn", txt + " Für eine NAS-Platte ist das alt – das Ausfallrisiko steigt."); }
+    else add("ok", txt);
+    if (hours > 65535 && tests.length)
+      add("info", "Im Selbsttest-Protokoll zählt die Lebenszeit nur bis 65.535 h und beginnt dann wieder bei 0 – "
+        + "kleine Stundenzahlen dort sind kein Fehler.");
+  }
+  const cycles = Math.max(raw(4) || 0, raw(12) || 0);
+  if (cycles > 10000)
+    add("info", `${n(cycles)} Anlauf-/Einschaltvorgänge – typisch für den Ruhezustand der DiskStation, Verschleiß, kein Defekt.`);
+  for (const id of [1, 7]) {
+    const a = attrs.get(id);
+    if (a && a.thresh === 0 && a.value < 50)
+      add("info", `${esc(a.name)} steht bei VALUE ${a.value}, die Schwelle ist aber 0 – kein Ausfallkriterium, eher Altersverschleiß.`);
+  }
+  const temp = raw(194) ?? raw(190);
+  if (temp !== null && temp > 0 && temp < 100) {
+    if (temp > 50) { bump(1); add("warn", `Temperatur ${temp} °C – zu warm.`); }
+    else add("ok", `Temperatur ${temp} °C.`);
+  }
+  return { level, finds, years };
+}
+
+function renderSmart() {
+  const text = $("smartIn").value;
+  if (!text.trim()) { log("Bitte zuerst die smartctl-Ausgabe einfügen.", "err"); return; }
+  const parsed = parseSmart(text);
+  const { level, finds, years } = judgeSmart(parsed);
+  const { info } = parsed;
+  let html = "";
+  if (info.model || info.serial)
+    html += `<p class="note">${esc([info.family, info.model].filter(Boolean).join(" · "))}`
+      + `${info.capacity ? " · " + esc(info.capacity) : ""}${info.serial ? " · Seriennr. " + esc(info.serial) : ""}</p>`;
+  html += `<ul class="finds">${finds.map(f => `<li class="${f.cls}">${f.html}</li>`).join("")}</ul>`;
+  if (level >= 0) {
+    const old = years !== null && years >= 3;
+    const advice = level === 2
+      ? ["err", "Die Platte ist <strong>defekt oder auf dem Weg dahin</strong>. Nicht mehr für Daten verwenden. "
+        + (old ? "Die Garantie (meist 3 Jahre) ist vermutlich abgelaufen – über die Seriennummer beim Hersteller prüfen. "
+               : "Garantie über die Seriennummer beim Hersteller prüfen; die SMART-Werte bleiben nach dem Löschen nachweisbar. ")
+        + "Vor Rückgabe oder Entsorgung löschen."]
+      : level === 1
+      ? ["warn", "Die Platte <strong>funktioniert</strong>, zeigt aber Verschleiß oder Auffälligkeiten. "
+        + "Als zusätzliche Sicherungsplatte noch brauchbar, nicht als einziger Ort für wichtige Daten. "
+        + (old ? "Ein Garantietausch kommt wegen des Alters vermutlich nicht in Frage. " : "")
+        + "Wenn sie weg soll: vorher löschen."]
+      : ["ok", "Die Platte ist <strong>gesund</strong>. Ein Garantiefall liegt nicht vor. "
+        + "Meldete DSM ein Problem, war es eher das RAID (z.&nbsp;B. „beeinträchtigt“ wegen der anderen Platte) "
+        + "als diese Platte. Weiterverwenden ist möglich."];
+    html += `<div class="verdict ${advice[0]}">${advice[1]}</div>`;
+  }
+  $("smartOut").innerHTML = html;
+  log(`SMART ausgewertet: ${["Platte gesund", "Hinweise", "Platte defekt"][Math.max(0, level)]}`
+    + (info.serial ? ` (${info.serial})` : ""), level === 2 ? "err" : "ok");
+}
+$("smartBtn").addEventListener("click", renderSmart);
 
 /* --------------------------- Schluesselbund --------------------------- */
 
