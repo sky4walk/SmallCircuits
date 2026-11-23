@@ -1428,6 +1428,10 @@ class Sid {
       return (Math.floor(ph) >> 16) & 0xFF;
     }
     if (offset === 0x1C) return this.voices[2].env & 0xFF;
+    // POTX/POTY: ohne Paddle/Maus lädt der Kondensator nie → $FF. Mit 0 hielt
+    // Monkey Island (EasyFlash) eine 1351-Maus für angeschlossen und
+    // ignorierte die Joystick-Richtungen.
+    if (offset === 0x19 || offset === 0x1A) return 0xFF;
     return 0;
   }
 
@@ -1763,7 +1767,10 @@ class Memory {
         else if (addr < 0xD800) this.sid.write(addr - 0xD400, val);
         else if (addr < 0xDC00) this.colorRam.write(addr - 0xD800, val);
         else if (addr < 0xDD00) this.cia1.write(addr - 0xDC00, val);
-        else if (addr < 0xDE00) this.cia2.write(addr - 0xDD00, val);
+        else if (addr < 0xDE00) {
+          this.cia2.write(addr - 0xDD00, val);
+          if (this.iecWatch && ((addr & 0x0F) === 0 || (addr & 0x0F) === 2)) this.iecWatch();
+        }
         else if (this.cart !== null) {
           if (addr < 0xDF00) this.cart.io1Write(addr, val);
           else this.cart.io2Write(addr, val);
@@ -2430,10 +2437,9 @@ class CPU {
 
   step() {
     if (this.traps.size && this.traps.has(this.pc)) {
-      if (this.mem.pla.addressSpace(this.pc) === AddressSpace.KERNAL_ROM) {
-        this.traps.get(this.pc)();
+      if (this.mem.pla.addressSpace(this.pc) === AddressSpace.KERNAL_ROM &&
+          this.traps.get(this.pc)() !== false)
         return true;
-      }
     }
     if (this.nmiPending) {
       this.nmiPending = false;
@@ -2477,6 +2483,25 @@ class System {
     this._cia2IecHooks = null;
     this.cart = null;
     this.cycleAccurate = false;
+    // Eigener IEC-Schnelllader ohne echtes Laufwerk: Der Trap-Loader bedient
+    // nur KERNAL-Aufrufe. Taktet ein Programm ATN/CLK/DATA selbst über $DD00
+    // (Pirates!, Silent Service, Ultima IV, Test Drive, Strike Fleet …),
+    // wartet es ewig auf eine Antwort. Viele Pegelwechsel in kurzer Zeit →
+    // wie bei M-E die echte 1541 anfordern (das Frontend schaltet sie ein).
+    this._iecToggles = 0; this._iecWin = 0; this._iecLast = -1;
+    this.mem.iecWatch = () => {
+      if (this.drive !== null || !this._d64 || !(this._d64 instanceof D64Image)) return;
+      // tatsächlich nach Masse gezogene Leitungen (Ausgang UND Bit gesetzt)
+      const c2 = this.mem.cia2;
+      const bits = c2.pra & c2.ddra & 0x38;
+      if (this._iecLast >= 0 && bits !== this._iecLast) {
+        const now = this.cpu.cycles;
+        if (now - this._iecWin > 1000000) { this._iecWin = now; this._iecToggles = 0; }
+        if (++this._iecToggles >= 48 && !this.needsRealDrive)
+          this.needsRealDrive = { addr: this.cpu.pc, how: "IEC-Schnelllader" };
+      }
+      this._iecLast = bits;
+    };
   }
 
   step() {
@@ -2497,12 +2522,20 @@ class System {
     const curNmi = this.cia2.irqLine || (this.cart !== null && this.cart.nmiLine === true);
     if (curNmi && !this.cpu._prevNmi) this.cpu.nmiPending = true;
     this.cpu._prevNmi = curNmi;
-    this.cpu.irqLine = this.cia1.irqLine || this.vic.irqLine;
+    // Der 6502 tastet IRQ im vorletzten Zyklus einer Instruktion ab. Wird die
+    // Leitung erst durch den Schreibzugriff im LETZTEN Zyklus aktiv (STA $D01A
+    // bzw. $DC0D bei schon gesetztem Latch), läuft zuerst noch die nächste
+    // Instruktion — typischerweise das quittierende STA $D019. Ohne diese
+    // Verzögerung entsteht ein IRQ-Sturm (Ultima VI, Rampage-Crack).
+    const irqNow = this.cia1.irqLine || this.vic.irqLine;
+    this.cpu.irqLine = irqNow && !this._irqHold;
+    this._irqHold = false;
     if (this.drive !== null && this.cpu.cycles >= this.drive.idleUntil) {
       this.drive.syncTo(this.cpu.cycles);
       this.iec.poll();
     }
     const ok = this.cpu.step();
+    if (!irqNow && (this.cia1.irqLine || this.vic.irqLine)) this._irqHold = true;
     const elapsed = this.cpu.cycles - before;
     if (elapsed > 0) {
       vic.tick(elapsed);
@@ -3157,6 +3190,11 @@ class Drive {
 // ============================= D64 / T64 / Trap-Loader ====================
 function matchC64Name(name, pattern) {
   // C64-Muster: ? = ein Zeichen, * = Rest beliebig
+  // Mit $A0 (Shift-Space) aufgefüllte Namen — so wie sie im Verzeichnis
+  // stehen — passen auf der 1541 ebenfalls (Pirates! öffnet "FLYERS #1"+$A0…)
+  let plen = pattern.length;
+  while (plen > 0 && pattern[plen - 1] === 0xA0) plen--;
+  if (plen < pattern.length) pattern = pattern.slice(0, plen);
   if (pattern.length === 0) return true;
   let i = 0;
   for (let j = 0; j < pattern.length; j++) {
@@ -3465,6 +3503,19 @@ const KERNAL_TRAPS = {
   0xFFA8: "_trapIecCiout",  0xFFAE: "_trapIecUnlsn",
   0xFFB4: "_trapIecTalk",   0xFF96: "_trapIecTksa",
   0xFFA5: "_trapIecAcptr",  0xFFAB: "_trapIecUntalk",
+  // Interne Einsprünge hinter der Sprungtabelle bzw. den $031A-Vektoren:
+  // Lader wie Silent Service rufen LISTEN/SECOND/CIOUT/TALK/ACPTR direkt
+  // bei $ED0C/$EDB9/… auf (oder $F3D5, das sie intern nutzt). Ohne diese
+  // Traps meldete der Trap-Loader dann DEVICE NOT PRESENT. Wird hier nicht
+  // übernommen, läuft der ROM-Code einfach weiter (siehe _passthroughKernalJmp).
+  0xED09: "_trapIecTalk",   0xED0C: "_trapIecListen",
+  0xEDB9: "_trapIecSecond", 0xEDC7: "_trapIecTksa",
+  0xEDDD: "_trapIecCiout",  0xEE13: "_trapIecAcptr",
+  0xEDEF: "_trapIecUntalk", 0xEDFE: "_trapIecUnlsn",
+  0xF34A: "_trapOpen",      0xF291: "_trapClose",
+  0xF20E: "_trapChkin",     0xF250: "_trapCkout",
+  0xF333: "_trapClrchn",    0xF157: "_trapChrin",
+  0xF1CA: "_trapChrout",    0xF13E: "_trapGetin",
 };
 
 System.AUTOSTART_TIMEOUT_FRAMES = 240 * 50;  // ~4 min (echte 1541-Loads sind langsam)
@@ -3559,8 +3610,10 @@ Object.assign(System.prototype, {
       const hi = mem.readSystemByte((ptr & 0xFF00) | ((ptr + 1) & 0xFF));
       cpu.pc = lo | (hi << 8);
       cpu.cycles += 5;
-    } else {
+    } else if (pc === 0xF4A5) {
       this._doRts();
+    } else {
+      return false;              // interner Einsprung: ROM-Code normal ausführen
     }
   },
 
@@ -4169,6 +4222,18 @@ Object.assign(System.prototype, {
     const payload = fileData.subarray(2);
     // KERNAL-Relokationsregel: SA != 0 -> absolut zur Dateiadresse
     const loadTo = secAddr !== 0 ? fileLoad : loadAddrXY;
+    // Autostart-Tricks über Zeropage/Stack/Vektoren ($0002–$03FF): Der echte
+    // KERNAL ruft während des Ladens nach jedem Byte STOP über $0328 auf, und
+    // seine eigenen Stack-Rahmen werden mitüberschrieben (Test Drive lädt nach
+    // $002B). Das bildet nur die originale ROM-Ladeschleife ab — sie läuft
+    // hier weiter und holt die Bytes über die abgefangenen IEC-Routinen
+    // (LISTEN/SECOND/CIOUT/TALK/ACPTR), also ohne echte Laufwerksemulation.
+    if (!this._isTape && device === 8 && !(filename.length && filename[0] === 0x24) &&
+        loadTo < 0x0400 && loadTo + payload.length > 0x0002) {
+      this._autostartSawBusy = true;
+      if (this.cpu.pc === 0xF4A5) return false;      // ROM-Code ab hier ausführen
+      return this._passthroughKernalJmp();           // $FFD5: JMP $F49E → … → $F4A5
+    }
     const end = (loadTo + payload.length) & 0xFFFF;
     mem.loadRam(loadTo, payload);
     mem.ram[0x90] = 0;
@@ -4196,6 +4261,17 @@ Object.assign(System.prototype, {
     // READY-Rückkehr in EIN Frame fallen — die $CC-Abtastung (einmal pro
     // Frame) sähe dann nie "beschäftigt" und das RUN käme nie.
     this._autostartSawBusy = true;
+    if (mem.ram[0x9D] & 0x80) {
+      // Direktmodus: "SEARCHING FOR …" und "LOADING" wie der echte KERNAL
+      // ausgeben (ROM-Routinen $F5AF/$F5D2, Ausstieg über $F5A9: CLC,
+      // LDX $AE, LDY $AF, RTS). Boot-Programme, die LOAD und RUN auf den
+      // Bildschirm schreiben und RETURN in den Tastaturpuffer legen
+      // (Mailbox Z-BBS), zählen genau mit diesen drei Zeilen.
+      cpu.push(((0xF5A9 - 1) >> 8) & 0xFF); cpu.push((0xF5A9 - 1) & 0xFF);
+      cpu.push(((0xF5D2 - 1) >> 8) & 0xFF); cpu.push((0xF5D2 - 1) & 0xFF);
+      cpu.pc = 0xF5AF;
+      return;
+    }
     this._doRts();
   },
 
@@ -5489,8 +5565,8 @@ Object.assign(CPU.prototype, {
   *_cycInstruction() {
     // KERNAL-Traps wie in step(): nur bei eingeblendetem KERNAL-ROM
     if (this.traps.size && this.traps.has(this.pc) &&
-        this.mem.pla.addressSpace(this.pc) === AddressSpace.KERNAL_ROM) {
-      this.traps.get(this.pc)();
+        this.mem.pla.addressSpace(this.pc) === AddressSpace.KERNAL_ROM &&
+        this.traps.get(this.pc)() !== false) {
       return;
     }
     if (this.nmiPending) {
@@ -5558,7 +5634,11 @@ Object.assign(System.prototype, {
     const curNmi = this.cia2.irqLine || (this.cart !== null && this.cart.nmiLine === true);
     if (curNmi && !this.cpu._prevNmi) this.cpu.nmiPending = true;
     this.cpu._prevNmi = curNmi;
-    this.cpu.irqLine = this.cia1.irqLine || this.vic.irqLine;
+    // IRQ-Abtastung einen Takt verzögert: entscheidend ist der Pegel zum
+    // vorletzten Zyklus der laufenden Instruktion (siehe step()).
+    const irqNow = this.cia1.irqLine || this.vic.irqLine;
+    this.cpu.irqLine = !!this._irqPrevClk;
+    this._irqPrevClk = irqNow;
     this.vic.clock();
     if (this.drive !== null && this.cpu.cycles >= this.drive.idleUntil) {
       this.drive.syncTo(this.cpu.cycles);
